@@ -4,7 +4,7 @@
 
 # Dropjak
 
-Dropjak is a captive-portal network gateway for Linux. It runs as a Docker
+Dropjak is a captive-portal firewall for Linux. It runs as a Docker
 container in host network mode and controls the host's nftables forwarding
 plane. All client traffic is **blocked by default**: a client gets network
 access only after signing in through the portal and choosing an access rule
@@ -104,7 +104,7 @@ docker compose logs -f hatarvedelem
 Open the portal in a browser:
 
 ```
-http://<gateway-lan-ip>:8100/
+http://<lan-ip>:8100/
 ```
 
 HTTP traffic from unauthenticated clients on port 80 is redirected to the
@@ -183,8 +183,8 @@ deletes the volume; without `-v` it is kept.
 - Keep `.env` at mode `0600`; it may contain the admin password. Never commit
   it. `.secret` and state files are excluded by `.gitignore`.
 - `docker compose down` leaves the `inet hatarvedelem` nftables table in place
-  (fail-closed). Remove it explicitly if you want to tear the gateway down:
+  (fail-closed). Remove it explicitly if you want to tear the firewall down:
   `sudo nft delete table inet hatarvedelem`.
 - If `firewalld` or `ufw` is active on the host, verify that it does not
-  conflict with the gateway's forward rules. A dedicated gateway VM is
+  conflict with the firewall's forward rules. A dedicated firewall VM is
   recommended.
