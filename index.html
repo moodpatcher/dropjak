@@ -1674,6 +1674,7 @@ let adminTabName = 'users';
 let adminState = null;
 let adminFlash = null;        // {text, kind}
 let adminEdit = null;         // {kind:'user'|'group'|'rule', id:string|null}
+let adminDraft = null;        // megőrzött űrlapértékek hiba után
 let logRows = [];
 let logTimer = null;
 let logAuto = true;
@@ -2052,6 +2053,7 @@ function endSession(text, ok) {
   modifying = false;
   adminState = null;
   adminEdit = null;
+  adminDraft = null;
   stopTimers();
   setView('login');
   showAccessMsg('');
@@ -2238,6 +2240,7 @@ function resetCaptcha() {
 function adminSetTab(name) {
   adminTabName = name;
   adminEdit = null;
+  adminDraft = null;
   adminFlash = null;
   for (const button of adminNav.querySelectorAll('button')) {
     button.classList.toggle('active', button.dataset.admin === name);
@@ -2342,14 +2345,45 @@ function boolValue(formEl, name) {
   const node = formEl.querySelector(`[name="${name}"]`);
   return !!(node && node.checked);
 }
+/* Hiba esetén a megnyitott admin-űrlap értékeit elmentjük, hogy az
+   újrarenderelés ne törölje a felhasználó által beírt mezőket. */
+function captureAdminDraft() {
+  if (!adminEdit) return;
+  const box = adminPanel.querySelector('form.admin-form');
+  if (!box) return;
+  const values = {};
+  for (const node of box.querySelectorAll('input, select, textarea')) {
+    if (!node.name) continue;
+    values[node.name] = node.type === 'checkbox' ? node.checked : node.value;
+  }
+  adminDraft = { kind: adminEdit.kind, id: adminEdit.id || null, values };
+}
+function adminDraftFor(kind, id) {
+  if (!adminDraft || adminDraft.kind !== kind || adminDraft.id !== (id || null)) return null;
+  return adminDraft.values;
+}
+function draftValue(draft, name, fallback) {
+  return draft && Object.prototype.hasOwnProperty.call(draft, name) ? draft[name] : fallback;
+}
+function draftList(draft, name, fallback) {
+  if (!draft || typeof draft[name] !== 'string') return fallback;
+  try {
+    const value = JSON.parse(draft[name]);
+    return Array.isArray(value) ? value : fallback;
+  } catch (err) {
+    return fallback;
+  }
+}
 async function adminSend(path, payload) {
   try {
     const data = await postJson(path, payload);
     adminState = data;
     adminFlash = { text: tr('Mentve.'), kind: 'ok' };
     adminEdit = null;
+    adminDraft = null;
     renderAdminPanel();
   } catch (err) {
+    captureAdminDraft();
     adminFlash = { text: err.message || 'A művelet nem sikerült.', kind: 'err' };
     renderAdminPanel();
   }
@@ -2365,7 +2399,7 @@ function renderUsers() {
     'Felhasználók',
     `${users.length} fiók · a szabályok közvetlenül vagy csoporton át érvényesek`,
     'Új felhasználó',
-    () => { adminEdit = { kind: 'user', id: null }; adminFlash = null; renderAdminPanel(); }
+    () => { adminEdit = { kind: 'user', id: null }; adminDraft = null; adminFlash = null; renderAdminPanel(); }
   ));
   const notice = adminNotice(); if (notice) adminPanel.append(notice);
   if (adminEdit && adminEdit.kind === 'user') adminPanel.append(renderUserForm(adminEdit.id));
@@ -2395,7 +2429,7 @@ function renderUsers() {
         });
       } }, tr(user.enabled ? 'Letiltás' : 'Aktiválás')),
       el('button', { type: 'button', class: 'ghost small', onclick: () => {
-        adminEdit = { kind: 'user', id: user.name }; adminFlash = null; renderAdminPanel();
+        adminEdit = { kind: 'user', id: user.name }; adminDraft = null; adminFlash = null; renderAdminPanel();
       } }, tr('Szerkesztés')),
       el('button', { type: 'button', class: 'danger small', onclick: () => {
         if (confirm(tr(`Biztosan törlöd: ${user.name}?`))) {
@@ -2432,6 +2466,7 @@ function renderUserForm(name) {
   const rules = ((adminState && adminState.rules) || []).filter(rule => !rule.builtin);
   const user = name ? users.find(item => item.name === name) : null;
   const edit = !!user;
+  const draft = adminDraftFor('user', name);
   const box = el('form', { class: 'admin-form', onsubmit: e => {
     e.preventDefault();
     const payload = {
@@ -2450,32 +2485,32 @@ function renderUserForm(name) {
   const grid = el('div', { class: 'form-grid' });
   grid.append(el('div', { class: 'field' },
     el('label', { text: tr('Felhasználónév') }),
-    el('input', { name: 'name', value: edit ? name : '', disabled: edit, autocomplete: 'off', required: true })
+    el('input', { name: 'name', value: draftValue(draft, 'name', edit ? name : ''), disabled: edit, autocomplete: 'off', required: true })
   ));
   grid.append(el('div', { class: 'field' },
     el('label', { text: tr(edit
       ? 'Új jelszó (üresen hagyva nem változik; a felhasználónak első belépéskor le kell cserélnie)'
       : 'Kezdetleges jelszó (első belépéskor le kell cserélnie)') }),
-    el('input', { name: 'password', type: 'password', autocomplete: 'new-password', required: !edit })
+    el('input', { name: 'password', type: 'password', value: draftValue(draft, 'password', ''), autocomplete: 'new-password', required: !edit })
   ));
   grid.append(el('div', { class: 'field' },
     el('label', { text: tr('Szerepkör') }),
     el('select', { name: 'role' },
-      el('option', { value: 'user', text: tr('felhasználó'), selected: !edit || user.role !== 'admin' }),
-      el('option', { value: 'admin', text: 'admin', selected: edit && user.role === 'admin' })
+      el('option', { value: 'user', text: tr('felhasználó'), selected: draftValue(draft, 'role', edit && user.role === 'admin' ? 'admin' : 'user') !== 'admin' }),
+      el('option', { value: 'admin', text: 'admin', selected: draftValue(draft, 'role', edit && user.role === 'admin' ? 'admin' : 'user') === 'admin' })
     )
   ));
   grid.append(el('div', { class: 'field' },
     el('label', { text: tr('Állapot') }),
     el('label', { style: 'display:flex;gap:7px;align-items:center;margin-top:9px' },
-      el('input', { type: 'checkbox', name: 'enabled', checked: !edit || user.enabled }),
+      el('input', { type: 'checkbox', name: 'enabled', checked: !!draftValue(draft, 'enabled', !edit || user.enabled) }),
       tr('aktív (be tud lépni)')
     )
   ));
   grid.append(el('div', { class: 'field full' },
     el('label', { text: tr('Közvetlen szabályok') }),
     picker(
-      rules, edit ? user.rules : [], 'rules',
+      rules, draftList(draft, 'rules', edit ? user.rules : []), 'rules',
       rule => rule.id,
       rule => `${tr(rule.label)} — ${tr(rule.ports_label || 'nincs port')}`,
       'Keresés a szabályok között…'
@@ -2484,7 +2519,7 @@ function renderUserForm(name) {
   grid.append(el('div', { class: 'field full' },
     el('label', { text: tr('Csoportok') }),
     picker(
-      groups, edit ? user.groups : [], 'groups',
+      groups, draftList(draft, 'groups', edit ? user.groups : []), 'groups',
       group => group.id, group => group.label || group.id,
       'Keresés a csoportok között…'
     )
@@ -2492,7 +2527,7 @@ function renderUserForm(name) {
   box.append(grid);
   const actions = el('div', { class: 'form-actions' });
   actions.append(
-    el('button', { type: 'button', class: 'ghost small', onclick: () => { adminEdit = null; renderAdminPanel(); } }, tr('Mégse')),
+    el('button', { type: 'button', class: 'ghost small', onclick: () => { adminEdit = null; adminDraft = null; renderAdminPanel(); } }, tr('Mégse')),
     el('button', { type: 'submit', class: 'small' }, tr('Mentés'))
   );
   box.append(actions);
@@ -2507,7 +2542,7 @@ function renderGroups() {
     'Csoportok',
     `${groups.length} csoport · a csoport szabályai minden tagra érvényesek`,
     'Új csoport',
-    () => { adminEdit = { kind: 'group', id: null }; adminFlash = null; renderAdminPanel(); }
+    () => { adminEdit = { kind: 'group', id: null }; adminDraft = null; adminFlash = null; renderAdminPanel(); }
   ));
   const notice = adminNotice(); if (notice) adminPanel.append(notice);
   if (adminEdit && adminEdit.kind === 'group') adminPanel.append(renderGroupForm(adminEdit.id));
@@ -2526,7 +2561,7 @@ function renderGroups() {
     const actions = el('td', { class: 'actions' });
     actions.append(
       el('button', { type: 'button', class: 'ghost small', onclick: () => {
-        adminEdit = { kind: 'group', id: group.id }; adminFlash = null; renderAdminPanel();
+        adminEdit = { kind: 'group', id: group.id }; adminDraft = null; adminFlash = null; renderAdminPanel();
       } }, tr('Szerkesztés')),
       el('button', { type: 'button', class: 'danger small', onclick: () => {
         if (confirm(tr(`Biztosan törlöd a csoportot: ${group.label}?`))) {
@@ -2552,6 +2587,7 @@ function renderGroupForm(id) {
   const rules = ((adminState && adminState.rules) || []).filter(rule => !rule.builtin);
   const group = id ? groups.find(item => item.id === id) : null;
   const edit = !!group;
+  const draft = adminDraftFor('group', id);
   const box = el('form', { class: 'admin-form', onsubmit: e => {
     e.preventDefault();
     adminSend('/api/admin/groups', {
@@ -2567,20 +2603,20 @@ function renderGroupForm(id) {
   const grid = el('div', { class: 'form-grid' });
   grid.append(el('div', { class: 'field' },
     el('label', { text: tr('Azonosító (kisbetű, szám, - és _)') }),
-    el('input', { name: 'id', value: edit ? group.id : '', disabled: edit, required: true })
+    el('input', { name: 'id', value: draftValue(draft, 'id', edit ? group.id : ''), disabled: edit, required: true })
   ));
   grid.append(el('div', { class: 'field' },
     el('label', { text: tr('Megjelenő név') }),
-    el('input', { name: 'label', value: edit ? group.label : '', required: true })
+    el('input', { name: 'label', value: draftValue(draft, 'label', edit ? group.label : ''), required: true })
   ));
   grid.append(el('div', { class: 'field full' },
     el('label', { text: tr('Leírás') }),
-    el('input', { name: 'description', value: edit ? group.description : '' })
+    el('input', { name: 'description', value: draftValue(draft, 'description', edit ? group.description : '') })
   ));
   grid.append(el('div', { class: 'field full' },
     el('label', { text: tr('Szabályok') }),
     picker(
-      rules, edit ? group.rules : [], 'rules',
+      rules, draftList(draft, 'rules', edit ? group.rules : []), 'rules',
       rule => rule.id,
       rule => `${tr(rule.label)} — ${tr(rule.ports_label || 'nincs port')}`,
       'Keresés a szabályok között…'
@@ -2589,7 +2625,7 @@ function renderGroupForm(id) {
   grid.append(el('div', { class: 'field full' },
     el('label', { text: tr('Tagok') }),
     picker(
-      users, edit ? group.members : [], 'members',
+      users, draftList(draft, 'members', edit ? group.members : []), 'members',
       user => user.name, user => user.name,
       'Keresés a felhasználók között…'
     )
@@ -2597,7 +2633,7 @@ function renderGroupForm(id) {
   box.append(grid);
   const actions = el('div', { class: 'form-actions' });
   actions.append(
-    el('button', { type: 'button', class: 'ghost small', onclick: () => { adminEdit = null; renderAdminPanel(); } }, tr('Mégse')),
+    el('button', { type: 'button', class: 'ghost small', onclick: () => { adminEdit = null; adminDraft = null; renderAdminPanel(); } }, tr('Mégse')),
     el('button', { type: 'submit', class: 'small' }, tr('Mentés'))
   );
   box.append(actions);
@@ -2612,7 +2648,7 @@ function renderRulesAdmin() {
     'Szabályok',
     `${rules.length} szabály · az admin beépített teljes hozzáférése mindig él`,
     'Új szabály',
-    () => { adminEdit = { kind: 'rule', id: null }; adminFlash = null; renderAdminPanel(); }
+    () => { adminEdit = { kind: 'rule', id: null }; adminDraft = null; adminFlash = null; renderAdminPanel(); }
   ));
   const notice = adminNotice(); if (notice) adminPanel.append(notice);
   if (adminEdit && adminEdit.kind === 'rule') adminPanel.append(renderRuleForm(adminEdit.id));
@@ -2630,7 +2666,7 @@ function renderRulesAdmin() {
     } else {
       actions.append(
         el('button', { type: 'button', class: 'ghost small', onclick: () => {
-          adminEdit = { kind: 'rule', id: rule.id }; adminFlash = null; renderAdminPanel();
+          adminEdit = { kind: 'rule', id: rule.id }; adminDraft = null; adminFlash = null; renderAdminPanel();
         } }, tr('Szerkesztés')),
         el('button', { type: 'button', class: 'danger small', onclick: () => {
           if (confirm(tr(`Biztosan törlöd a szabályt: ${rule.label}?`))) {
@@ -2677,6 +2713,7 @@ function renderRuleForm(id) {
   const rules = (adminState && adminState.rules) || [];
   const rule = id ? rules.find(item => item.id === id) : null;
   const edit = !!rule;
+  const draft = adminDraftFor('rule', id);
   const box = el('form', { class: 'admin-form', onsubmit: e => {
     e.preventDefault();
     const full = boolValue(box, 'full');
@@ -2687,11 +2724,13 @@ function renderRuleForm(id) {
     if (tcp.error) portErrors.push(`TCP: ${tcp.error}`);
     if (udp.error) portErrors.push(`UDP: ${udp.error}`);
     if (portErrors.length) {
+      captureAdminDraft();
       adminFlash = { text: portErrors.join(' · '), kind: 'err' };
       renderAdminPanel();
       return;
     }
     if (full && (tcp.ports.length || udp.ports.length || icmp)) {
+      captureAdminDraft();
       adminFlash = {
         text: 'Teljes hozzáféréshez ne adj meg portot vagy ICMP-t.',
         kind: 'err'
@@ -2700,6 +2739,7 @@ function renderRuleForm(id) {
       return;
     }
     if (!full && !tcp.ports.length && !udp.ports.length && !icmp) {
+      captureAdminDraft();
       adminFlash = {
         text: 'Adj meg legalább egy TCP/UDP portot, ICMP-t vagy teljes hozzáférést.',
         kind: 'err'
@@ -2725,29 +2765,29 @@ function renderRuleForm(id) {
   const grid = el('div', { class: 'form-grid' });
   grid.append(el('div', { class: 'field' },
     el('label', { text: tr('Azonosító (kisbetű, szám, - és _)') }),
-    el('input', { name: 'id', value: edit ? rule.id : '', disabled: edit, required: true })
+    el('input', { name: 'id', value: draftValue(draft, 'id', edit ? rule.id : ''), disabled: edit, required: true })
   ));
   grid.append(el('div', { class: 'field' },
     el('label', { text: tr('Megjelenő név') }),
-    el('input', { name: 'label', value: edit ? rule.label : '', required: true })
+    el('input', { name: 'label', value: draftValue(draft, 'label', edit ? rule.label : ''), required: true })
   ));
   grid.append(el('div', { class: 'field full' },
     el('label', { text: tr('Leírás') }),
-    el('input', { name: 'description', value: edit ? rule.description : '' })
+    el('input', { name: 'description', value: draftValue(draft, 'description', edit ? rule.description : '') })
   ));
   const tcpInput = el('input', {
-    name: 'tcp', value: edit ? (rule.tcp || []).join(', ') : '',
+    name: 'tcp', value: draftValue(draft, 'tcp', edit ? (rule.tcp || []).join(', ') : ''),
     placeholder: tr('pl. 80, 443, 8080')
   });
   const udpInput = el('input', {
-    name: 'udp', value: edit ? (rule.udp || []).join(', ') : '',
+    name: 'udp', value: draftValue(draft, 'udp', edit ? (rule.udp || []).join(', ') : ''),
     placeholder: tr('pl. 53, 443, 51820')
   });
   const icmpBox = el('input', {
-    type: 'checkbox', name: 'icmp', checked: edit && !!rule.icmp
+    type: 'checkbox', name: 'icmp', checked: !!draftValue(draft, 'icmp', edit && !!rule.icmp)
   });
   const fullBox = el('input', {
-    type: 'checkbox', name: 'full', checked: edit && !!rule.full
+    type: 'checkbox', name: 'full', checked: !!draftValue(draft, 'full', edit && !!rule.full)
   });
   const syncFull = () => {
     const full = fullBox.checked;
@@ -2780,18 +2820,18 @@ function renderRuleForm(id) {
   ));
   grid.append(el('div', { class: 'field' },
     el('label', { text: tr('Alapértelmezett idő (perc)') }),
-    el('input', { name: 'default_ttl', type: 'number', min: 1, max: 1440, value: edit ? Math.round(rule.default_ttl / 60) : 60, required: true }),
+    el('input', { name: 'default_ttl', type: 'number', min: 1, max: 1440, value: draftValue(draft, 'default_ttl', edit ? Math.round(rule.default_ttl / 60) : 60), required: true }),
     el('span', { class: 'port-hint', text: tr('1440 perc = 24 óra') })
   ));
   grid.append(el('div', { class: 'field' },
     el('label', { text: tr('Maximális idő (perc)') }),
-    el('input', { name: 'max_ttl', type: 'number', min: 1, max: 1440, value: edit ? Math.round(rule.max_ttl / 60) : 1440, required: true }),
+    el('input', { name: 'max_ttl', type: 'number', min: 1, max: 1440, value: draftValue(draft, 'max_ttl', edit ? Math.round(rule.max_ttl / 60) : 1440), required: true }),
     el('span', { class: 'port-hint', text: tr('1440 perc = 24 óra') })
   ));
   box.append(grid);
   const actions = el('div', { class: 'form-actions' });
   actions.append(
-    el('button', { type: 'button', class: 'ghost small', onclick: () => { adminEdit = null; renderAdminPanel(); } }, tr('Mégse')),
+    el('button', { type: 'button', class: 'ghost small', onclick: () => { adminEdit = null; adminDraft = null; renderAdminPanel(); } }, tr('Mégse')),
     el('button', { type: 'submit', class: 'small' }, tr('Mentés'))
   );
   box.append(actions);
