@@ -21,12 +21,19 @@ The portal is available in Hungarian, English and German.
 - A correct password alone does not grant network access. Sign-in is
   two-phase: authenticate, then explicitly select an access rule and TTL.
 - Grants are implemented with nftables dynamic sets (`allowed_v4`,
-  `allowed_tcp`, `allowed_udp`, `allowed_icmp`, `host_ssh_v4`). Entries expire
-  in the kernel even if the portal stops.
-- Host SSH is also gated: only an IP with an active, authorized portal
-  session can connect to port 22.
+  `allowed_tcp`, `allowed_udp`, `allowed_icmp`, `host_ssh_v4`, `client_mac`).
+  Entries expire in the kernel even if the portal stops.
+- Each grant is bound to the client's IP **and MAC address**. The MAC is read
+  from the host ARP table at authorization time; if it cannot be resolved,
+  access is refused. A client cannot reuse another authorized client's IP.
+- Host SSH is also gated: by default only an IP with an active, authorized
+  **admin** portal session can connect to port 22 (`HV_HOST_SSH=admin`; use
+  `any` or `off` to change the policy).
 - Docker-published containers work too: forward rules match the pre-DNAT
-  destination port, so the grant reaches the container.
+  destination port, so the grant reaches the container. Forwarded packets
+  are marked by the firewall; Docker's `DOCKER-USER` chain accepts only
+  marked packets and drops everything else. If the firewall table disappears,
+  Docker cannot open a bypass.
 - Every restart flushes the dynamic sets; users must sign in again. Persistent
   state (users, groups, rules, audit log) lives in a Docker volume.
 - The container uses `network_mode: host` because the host's `forward` chain
@@ -178,10 +185,23 @@ deletes the volume; without `-v` it is kept.
 - Forwarding is fail-closed. If the portal or Docker fails to start, traffic
   stays blocked.
 - Host SSH is opened only for the source IP of an active, authorized portal
-  session. Always keep an out-of-band console (provider console) available so
-  you can recover if the portal does not start.
-- Keep `.env` at mode `0600`; it may contain the admin password. Never commit
-  it. `.secret` and state files are excluded by `.gitignore`.
+  session, and by default only for admin sessions. Always keep an out-of-band
+  console (provider console) available so you can recover if the portal does
+  not start.
+- The portal speaks plain HTTP. If it is reachable from an untrusted network,
+  terminate TLS in front of it (reverse proxy) and set
+  `HV_COOKIE_SECURE=1`; otherwise restrict `HV_PORTAL_NET` to a trusted
+  management network. HTTP-only exposure allows credentials and session
+  cookies to be sniffed.
+- MAC binding blocks source-IP spoofing and DHCP lease takeover, but an
+  attacker on the same layer-2 segment can still ARP-spoof. Enable DHCP
+  snooping and dynamic ARP inspection on the switches where available.
+- The `breakglass` nftables chain is intentionally not flushed when the rules
+  are reloaded, so an emergency SSH rule survives a restart. Keep it empty;
+  remove the temporary rule as soon as the deployment is reachable.
+- Keep `.env` at mode `0600`; it may contain the admin password. Alternatively
+  use `HV_ADMIN_PASSWORD_FILE` with a read-only file or Docker secret. Never
+  commit `.env`. `.secret` and state files are excluded by `.gitignore`.
 - `docker compose down` leaves the `inet hatarvedelem` nftables table in place
   (fail-closed). Remove it explicitly if you want to tear the firewall down:
   `sudo nft delete table inet hatarvedelem`.

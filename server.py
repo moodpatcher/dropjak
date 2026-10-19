@@ -134,6 +134,13 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, body, ctype, cache=cache)
 
     def _read_json(self) -> dict | None:
+        # Az állapotmódosító végpontok csak JSON-t fogadnak. Ez a böngészők
+        # űrlapos (simple request) CSRF-ját is kizárja, mert az űrlap nem tud
+        # application/json tartalomtípust küldeni.
+        ctype = (self.headers.get("Content-Type") or "").split(";", 1)[0]
+        if ctype.strip().lower() != "application/json":
+            self.close_connection = True
+            return None
         try:
             length = int(self.headers.get("Content-Length") or "0")
         except ValueError:
@@ -186,7 +193,20 @@ class Handler(BaseHTTPRequestHandler):
             self._json(403, {"ok": False, "error": "admin jogosultság szükséges"})
             return None
         record = self.gw.users.record(session.user)
-        if record is not None and record.must_change_password:
+        if record is None or not record.enabled or not record.is_admin:
+            # A munkamenet szerepkörét/aktív állapotát minden admin-kérésnél
+            # a friss felhasználói nyilvántartásból ellenőrizzük, nem a
+            # belépéskori pillanatképből. Elavult munkamenet nem maradhat.
+            self.gw.sessions.terminate(session.sid, reason="revoked")
+            self._audit(
+                "admin_denied",
+                user=session.user,
+                reason="a felhasználó már nem aktív admin",
+                path=urllib.parse.urlsplit(self.path).path,
+            )
+            self._json(403, {"ok": False, "error": "admin jogosultság szükséges"})
+            return None
+        if record.must_change_password:
             self._audit(
                 "admin_denied",
                 user=session.user,
@@ -686,6 +706,14 @@ class Handler(BaseHTTPRequestHandler):
                 400, {"ok": False, "error": "A kapu csak IPv4-címmel érhető el."}
             )
 
+        if not self.gw.access_rate.allow(ip):
+            self._audit("access_denied", reason="túl sok próbálkozás")
+            return self._json(
+                429,
+                {"ok": False, "error": "Túl sok hozzáférés-módosítás. Várj egy percet."},
+                headers={"Retry-After": "60"},
+            )
+
         rule_id = data.get("rule")
         ttl = data.get("ttl")
         if not isinstance(rule_id, str) or isinstance(ttl, bool) or not isinstance(ttl, int):
@@ -1002,6 +1030,13 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _admin_user_update(self, data: dict) -> None:
+        # Az utolsó admin ellenőrzése és a módosítás egy zár alatt fut, hogy
+        # két párhuzamos kérés ne tudja egyszerre lefokozni/letiltani az
+        # utolsó adminokat (TOCTOU).
+        with self.gw.admin_lock:
+            self._admin_user_update_locked(data)
+
+    def _admin_user_update_locked(self, data: dict) -> None:
         name = data.get("name")
         if not isinstance(name, str) or not name.strip():
             raise gateway.UserStoreError("hiányzó felhasználónév")
@@ -1069,6 +1104,10 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _admin_user_delete(self, data: dict) -> None:
+        with self.gw.admin_lock:
+            self._admin_user_delete_locked(data)
+
+    def _admin_user_delete_locked(self, data: dict) -> None:
         name = data.get("name")
         if not isinstance(name, str) or not name.strip():
             raise gateway.UserStoreError("hiányzó felhasználónév")
@@ -1289,6 +1328,14 @@ def _user_cli(argv: list[str]) -> int:
         "--no-must-change", action="store_true",
         help="első belépéskor ne kelljen lecserélni a jelszót",
     )
+    p_add.add_argument(
+        "--role", choices=(gateway.ROLE_USER, gateway.ROLE_ADMIN),
+        default=gateway.ROLE_USER, help="szerepkör (alapértelmezés: user)",
+    )
+    p_add.add_argument(
+        "--rule", action="append", default=[], metavar="ID",
+        help="hozzárendelt szabály-azonosító (többször is megadható)",
+    )
 
     p_pw = sub.add_parser("passwd", help="jelszó csere")
     p_pw.add_argument("name")
@@ -1309,8 +1356,24 @@ def _user_cli(argv: list[str]) -> int:
     try:
         if args.action == "add":
             password = _prompt_password(args.password_stdin)
+            rules = tuple(
+                dict.fromkeys(
+                    value.strip() for value in args.rule if value.strip()
+                )
+            )
+            for rule_id in rules:
+                if not gateway._SERVICE_ID_RE.match(rule_id):
+                    raise gateway.UserStoreError(
+                        f"érvénytelen szabály-azonosító: {rule_id!r}"
+                    )
+                if rule_id == gateway.ADMIN_RULE_ID:
+                    raise gateway.UserStoreError(
+                        "az admin teljes szabály nem rendelhető hozzá kézzel"
+                    )
             store.add(
                 args.name, password,
+                role=args.role,
+                rules=rules,
                 must_change_password=not args.no_must_change,
             )
             print(f"Felhasználó létrehozva: {args.name}")

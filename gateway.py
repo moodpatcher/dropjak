@@ -83,6 +83,16 @@ ROLE_USER = "user"
 ADMIN_ENABLED = _env_bool("HV_ADMIN_ENABLED", False)
 ADMIN_USER = os.environ.get("HV_ADMIN_USER", "").strip()
 ADMIN_PASSWORD = os.environ.get("HV_ADMIN_PASSWORD", "")
+# A jelszó környezeti változó helyett fájlból is jöhet (Docker secret,
+# csak root által olvasható fájl). Ha mindkettő meg van adva, a közvetlen
+# változó az elsődleges.
+ADMIN_PASSWORD_FILE = os.environ.get("HV_ADMIN_PASSWORD_FILE", "").strip()
+if not ADMIN_PASSWORD and ADMIN_PASSWORD_FILE:
+    try:
+        with open(ADMIN_PASSWORD_FILE, "r", encoding="utf-8") as _admin_pw_file:
+            ADMIN_PASSWORD = _admin_pw_file.read().rstrip("\r\n")
+    except (OSError, UnicodeError):
+        ADMIN_PASSWORD = ""
 
 PORT = _env_int("PORT", 8100, 1)
 CHALLENGE_TTL = _env_int("HV_CHALLENGE_TTL", 600, 30)   # másodperc
@@ -125,6 +135,37 @@ CONNTRACK_BIN = os.environ.get("HV_CONNTRACK_BIN", "").strip() or shutil.which("
 DRY_RUN = os.environ.get("HV_DRY_RUN", "0") == "1"
 FLUSH_ON_START = os.environ.get("HV_FLUSH_ON_START", "1") == "1"
 
+# A LAN interfész és hálózat. Ha mindkettő ismert, a portál a kliens
+# engedélyezett IP-jéhez az ARP-táblából származó MAC-címet is rögzíti, és
+# a tűzfal a LAN-on csak ezzel a MAC-címmel engedi át a forgalmat. Ez zárja
+# ki, hogy egy kliens egy másik engedélyezett kliens IP-címét használja.
+HV_LAN_IF = os.environ.get("HV_LAN_IF", "").strip()
+HV_LAN_NET_RAW = os.environ.get("HV_LAN_NET", "").strip()
+
+
+def _parse_lan_network(raw: str):
+    if not raw:
+        return None
+    try:
+        network = ipaddress.ip_network(raw, strict=False)
+    except ValueError:
+        return None
+    return network if network.version == 4 else None
+
+
+LAN_NETWORK = _parse_lan_network(HV_LAN_NET_RAW)
+MAC_BINDING = bool(HV_LAN_IF and LAN_NETWORK is not None)
+ARP_PATH = os.environ.get("HV_ARP_PATH", "").strip() or "/proc/net/arp"
+
+# A host SSH munkamenet-hozzáférése. ``admin``: csak admin szerepkörű
+# portál-munkamenet nyitja meg (ez az alapértelmezés); ``any``: minden
+# engedélyezett munkamenet; ``off``: soha. Az ``any`` visszafelé
+# kompatibilis viselkedés, de a szűkebb szabályú felhasználóknak nem ad
+# rendszergazdai belépést a kapu hostjára.
+HOST_SSH_MODE = os.environ.get("HV_HOST_SSH", "admin").strip().lower()
+if HOST_SSH_MODE not in ("admin", "any", "off"):
+    HOST_SSH_MODE = "admin"
+
 PORTAL_URL = os.environ.get("HV_PORTAL_URL", "").strip()
 COOKIE_NAME = "hv_session"
 COOKIE_SECURE = (
@@ -164,6 +205,44 @@ def is_ipv4(raw: str) -> bool:
         return ipaddress.ip_address(str(raw).strip()).version == 4
     except ValueError:
         return False
+
+
+_MAC_RE = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
+
+
+def arp_mac(ip: str, interface: str = "", path: str = ARP_PATH) -> str | None:
+    """A LAN-kliens MAC-címe az ARP-táblából.
+
+    Csak teljes (``0x2``) bejegyzést fogadunk el, és ha ismert az interfész,
+    csak azon a bejegyzést. Bármilyen hiba esetén ``None``-t adunk, mert a
+    hívó ilyenkor fail-closed módon megtagadja az engedélyt.
+    """
+    try:
+        address = normalize_ip(ip)
+    except ValueError:
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            next(fh, None)
+            for line in fh:
+                fields = line.split()
+                if len(fields) < 6 or fields[0] != address:
+                    continue
+                try:
+                    flags = int(fields[2], 16)
+                except ValueError:
+                    continue
+                if flags & 0x2 == 0:
+                    continue
+                if interface and fields[5] != interface:
+                    continue
+                mac = fields[3].strip().lower()
+                if mac == "00:00:00:00:00:00" or not _MAC_RE.match(mac):
+                    continue
+                return mac
+    except (OSError, UnicodeError):
+        return None
+    return None
 
 
 # --------------------------------------------------------------- szolgáltatások
@@ -1583,6 +1662,9 @@ class Firewall:
         binary: str = NFT_BIN,
         dry_run: bool = DRY_RUN,
         logger=log,
+        lan_if: str = HV_LAN_IF,
+        lan_network=LAN_NETWORK,
+        arp_path: str = ARP_PATH,
     ) -> None:
         for name in (table, set_name):
             if not _NFT_NAME_RE.match(name):
@@ -1593,10 +1675,18 @@ class Firewall:
         self.udp_set = "allowed_udp"
         self.icmp_set = "allowed_icmp"
         self.ssh_set = "host_ssh_v4"
+        self.mac_set = "client_mac"
+        self.lan_if = (lan_if or "").strip()
+        self.lan_network = lan_network
+        self.arp_path = arp_path
+        self.mac_binding = bool(self.lan_if and self.lan_network is not None)
         self.binary = binary
         self.dry_run = dry_run
         self.log = logger
         self._lock = threading.Lock()
+        # IP -> a munkamenet alatt rögzített MAC. A halmaz listázásából is
+        # pótolható, ezért ez csak gyorsítás és pontos törlés.
+        self._macs: dict[str, str] = {}
 
     # -- alacsony szintű hívás -------------------------------------------------
 
@@ -1675,6 +1765,116 @@ class Firewall:
             elements.append((self.icmp_set, address))
         return list(dict.fromkeys(elements))
 
+    # -- MAC-kötés -------------------------------------------------------------
+
+    def binds_mac(self, address: str) -> bool:
+        """Kell-e ehhez az IP-hez MAC-kötés (LAN-kliens esetén igen)."""
+        if not self.mac_binding:
+            return False
+        try:
+            return ipaddress.ip_address(address) in self.lan_network
+        except ValueError:
+            return False
+
+    @staticmethod
+    def parse_mac_json(raw: bytes | str, address: str) -> list[str]:
+        """A ``client_mac`` halmaz JSON-jéből az adott IP-hez tartozó MAC-ek."""
+        if isinstance(raw, bytes):
+            try:
+                raw = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                return []
+        try:
+            payload = json.loads(raw)
+        except ValueError:
+            return []
+        if not isinstance(payload, dict):
+            return []
+        macs: list[str] = []
+        for top in payload.get("nftables", []):
+            if not isinstance(top, dict):
+                continue
+            item = top.get("set")
+            if not isinstance(item, dict):
+                continue
+            raw_elements = item.get("elem") or []
+            if not isinstance(raw_elements, list):
+                continue
+            for raw_element in raw_elements:
+                if not isinstance(raw_element, dict):
+                    continue
+                body = raw_element.get("elem", raw_element)
+                if not isinstance(body, dict):
+                    continue
+                value = body.get("val")
+                if not isinstance(value, dict):
+                    continue
+                concat = value.get("concat")
+                if not isinstance(concat, list) or len(concat) < 2:
+                    continue
+                first, second = concat[0], concat[1]
+                if isinstance(first, dict):
+                    first = first.get("val")
+                if isinstance(second, dict):
+                    second = second.get("val")
+                if first != address or not isinstance(second, str):
+                    continue
+                mac = second.strip().lower()
+                if _MAC_RE.match(mac) and mac not in macs:
+                    macs.append(mac)
+        return macs
+
+    def _mac_values_locked(self, address: str) -> list[str]:
+        """Az adott IP-hez tartozó ``ip . mac`` elemek a kernelből."""
+        values: list[str] = []
+        known = self._macs.get(address)
+        if known:
+            values.append(f"{address} . {known}")
+        result = self._run(
+            ["-j", "list", "set", "inet", self.table, self.mac_set],
+            check=False,
+        )
+        if result.returncode == 0:
+            for mac in self.parse_mac_json(result.stdout, address):
+                value = f"{address} . {mac}"
+                if value not in values:
+                    values.append(value)
+        return values
+
+    def _bind_mac_locked(self, address: str, ttl: int) -> str:
+        """A kliens MAC-címének rögzítése; ha nem tudható, hiba (fail-closed)."""
+        mac = arp_mac(address, self.lan_if, self.arp_path)
+        if mac is None:
+            raise FirewallError(
+                f"a(z) {address} kliens MAC-címe nem állapítható meg az "
+                "ARP-táblából; a hozzáférés biztonsági okból nem engedélyezhető"
+            )
+        # A korábbi, esetleg kézzel vagy összeomlás után maradt bejegyzéseket
+        # is töröljük, hogy egy IP-hez egyszerre csak egy MAC tartozzon.
+        for value in self._mac_values_locked(address):
+            self._delete_quiet(self.mac_set, value)
+        self._run_script(
+            f"add element inet {self.table} {self.mac_set} "
+            f"{{ {address} . {mac} timeout {ttl}s }}\n"
+        )
+        self._macs[address] = mac
+        return mac
+
+    def _unbind_mac_locked(self, address: str) -> None:
+        """Nem LAN-klienshez tartozó, esetleg maradt MAC-bejegyzés törlése."""
+        if not self.binds_mac(address):
+            return
+        for value in self._mac_values_locked(address):
+            self._delete_quiet(self.mac_set, value)
+        self._macs.pop(address, None)
+
+    def _mac_delete_elements(self, address: str) -> list[tuple[str, str]]:
+        if not self.binds_mac(address):
+            return []
+        with self._lock:
+            values = self._mac_values_locked(address)
+        return [(self.mac_set, value) for value in values]
+
     # -- nyilvános műveletek ---------------------------------------------------
 
     def allow(self, ip: str, ttl: int) -> None:
@@ -1690,6 +1890,12 @@ class Firewall:
         if not elements:
             return
         with self._lock:
+            # A MAC-kötés a portok előtt történik: ha a kliens MAC-címe nem
+            # állapítható meg, semmilyen engedély nem kerül a kernelbe.
+            if self.binds_mac(address):
+                self._bind_mac_locked(address, ttl)
+            else:
+                self._unbind_mac_locked(address)
             # Újra hozzáadás előtt töröljük: így a timeout újraindul.
             for set_name, element in elements:
                 self._delete_quiet(set_name, element)
@@ -1703,15 +1909,18 @@ class Firewall:
     def grant_host_ssh(self, ip: str, ttl: int) -> None:
         """A host SSH megnyitása a portál-munkamenet idejére.
 
-        Ez a halmaz szándékosan külön van az allowed_v4-től: a host SSH
-        akkor is jár, ha a felhasználó csak egy szűkebb szolgáltatást
-        választott, de teljes hozzáférést nem.
+        A host SSH külön halmazban van, hogy a szűkebb szolgáltatási
+        szabály is megnyithassa. A MAC-kötés itt is érvényes a LAN-on.
         """
         if not is_ipv4(ip):
             raise FirewallError("csak IPv4-cím engedélyezhető")
         address = normalize_ip(ip)
         ttl = max(1, int(ttl))
         with self._lock:
+            if self.binds_mac(address):
+                self._bind_mac_locked(address, ttl)
+            else:
+                self._unbind_mac_locked(address)
             # Újra hozzáadás előtt töröljük: így a timeout újraindul.
             self._delete_quiet(self.ssh_set, address)
             self._run_script(
@@ -1735,6 +1944,10 @@ class Firewall:
                     self._delete_quiet(set_name, element)
                 except FirewallError as exc:
                     errors.append(str(exc))
+                else:
+                    if set_name == self.mac_set:
+                        address = element.split(" . ", 1)[0]
+                        self._macs.pop(address, None)
         if errors:
             raise FirewallError("; ".join(errors))
 
@@ -1757,6 +1970,7 @@ class Firewall:
         ]
         if ports is not None:
             elements.extend(self._elements(address, ports))
+        elements.extend(self._mac_delete_elements(address))
         self._delete_elements(list(dict.fromkeys(elements)))
 
     def revoke_all(self, ip: str, grants=()) -> None:
@@ -1778,6 +1992,7 @@ class Firewall:
         ]
         for ports in grants:
             elements.extend(self._elements(address, ports))
+        elements.extend(self._mac_delete_elements(address))
         self._delete_elements(list(dict.fromkeys(elements)))
 
     def flush(self) -> None:
@@ -1785,7 +2000,7 @@ class Firewall:
         with self._lock:
             for set_name in (
                 self.set_name, self.tcp_set, self.udp_set, self.icmp_set,
-                self.ssh_set,
+                self.ssh_set, self.mac_set,
             ):
                 result = self._run(
                     ["flush", "set", "inet", self.table, set_name],
@@ -1799,6 +2014,8 @@ class Firewall:
                 errors.append(
                     detail.strip() or f"a(z) {set_name} halmaz ürítése sikertelen"
                 )
+            if not errors:
+                self._macs.clear()
         if errors:
             raise FirewallError("; ".join(errors))
 
@@ -1865,6 +2082,7 @@ class Firewall:
         value = body.get("val")
         address: str | None = None
         port: int | None = None
+        mac: str | None = None
         if isinstance(value, str):
             address = value
         elif isinstance(value, dict):
@@ -1881,6 +2099,10 @@ class Firewall:
                         second = second.get("val")
                     if isinstance(second, int) and not isinstance(second, bool):
                         port = second
+                    elif isinstance(second, str):
+                        candidate = second.strip().lower()
+                        if _MAC_RE.match(candidate):
+                            mac = candidate
         if address is None:
             return None
         try:
@@ -1900,12 +2122,15 @@ class Firewall:
             if isinstance(timeout, (int, float)) and not isinstance(timeout, bool)
             else None
         )
-        return {
+        entry = {
             "address": normalize_ip(address),
             "port": port,
             "expires_in": expires_in,
             "timeout": timeout_value,
         }
+        if mac is not None:
+            entry["mac"] = mac
+        return entry
 
     def snapshot(self) -> dict:
         """A dinamikus halmazok pillanatképe, a hátralévő időkkel.
@@ -1915,7 +2140,7 @@ class Firewall:
         """
         names = (
             self.set_name, self.tcp_set, self.udp_set, self.icmp_set,
-            self.ssh_set,
+            self.ssh_set, self.mac_set,
         )
         sets: dict[str, list[dict]] = {name: [] for name in names}
         errors: list[str] = []
@@ -1956,7 +2181,7 @@ class Firewall:
             with self._lock:
                 for set_name in (
                     self.set_name, self.tcp_set, self.udp_set, self.icmp_set,
-                    self.ssh_set,
+                    self.ssh_set, self.mac_set,
                 ):
                     self._run(["list", "set", "inet", self.table, set_name])
         except FirewallError as exc:
@@ -1964,18 +2189,34 @@ class Firewall:
         return True, "ok"
 
 
-def conntrack_flush(ip: str) -> None:
-    """Megszünteti az adott kliens meglévő kapcsolatait (best effort)."""
+def conntrack_flush(ip: str) -> bool:
+    """Megszünteti az adott kliens meglévő kapcsolatait.
+
+    A visszatérési érték jelzi, hogy a törlés ténylegesen lefutott-e. A
+    hívók ezt naplózzák; a tűzfalhalmazok lejárata ettől függetlenül
+    érvényesül az új kapcsolatokra.
+    """
     if DRY_RUN or not CONNTRACK_BIN or not is_ipv4(ip):
-        return
+        return False
     try:
-        subprocess.run(
+        result = subprocess.run(
             [CONNTRACK_BIN, "-D", "-s", normalize_ip(ip)],
             capture_output=True,
             timeout=10,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         log(f"[tűzfal] conntrack törlés nem sikerült ({ip}): {exc}")
+        return False
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", "replace").strip()
+        # Az 1-es kód a conntrack esetében gyakran "nincs ilyen bejegyzés".
+        if result.returncode != 1 or detail:
+            log(
+                f"[tűzfal] conntrack törlés hibakóddal tért vissza "
+                f"({ip}): {result.returncode} {detail}".strip()
+            )
+        return False
+    return True
 
 
 def _ip_sort_key(ip: str):
@@ -2724,11 +2965,20 @@ class SessionManager:
         ttl: int = SESSION_TTL,
         pending_ttl: int = AUTH_TTL,
         audit: AuditLog | None = None,
+        host_ssh_mode: str = HOST_SSH_MODE,
+        rule_check=None,
     ) -> None:
         self.firewall = firewall
         self.ttl = max(MIN_TTL, min(int(ttl), MAX_TTL))
         self.pending_ttl = max(1, int(pending_ttl))
         self.audit = audit
+        # admin | any | off — a host SSH-t csak a megfelelő munkamenet kapja.
+        mode = str(host_ssh_mode or "").strip().lower()
+        self.host_ssh_mode = mode if mode in ("admin", "any", "off") else "admin"
+        # Visszahívás: a szabály a döntés pillanatában is a felhasználóé-e.
+        # Ezzel zárjuk be azt a versenyhelyzetet, amikor az admin a szabály
+        # törlése után, de a grant előtt érkező kérést engedélyezne.
+        self.rule_check = rule_check
         self._lock = threading.Lock()
         self._sessions: dict[str, Session] = {}
         # IP -> (időbélyeg, ok): a legutóbb lezárult munkamenet magyarázata.
@@ -2791,6 +3041,13 @@ class SessionManager:
             for session in self._sessions.values()
             if session.authorized
         }
+
+    def _host_ssh_wanted(self, session: "Session") -> bool:
+        if self.host_ssh_mode == "off":
+            return False
+        if self.host_ssh_mode == "any":
+            return True
+        return session.role == ROLE_ADMIN
 
     def _revoke_access(self, ip: str, grants=()) -> None:
         try:
@@ -2866,19 +3123,29 @@ class SessionManager:
         except ValueError:
             return None
         now = time.time()
+        revoke: Session | None = None
         with self._lock:
             session = self._sessions.get(token)
             if session is None:
                 return None
             if session.ip != ip:
                 # A cookie másik IP-ről érkezett: a munkamenet IP-hez kötött.
-                self._remember_end_locked(ip, "ip_changed", now)
-                return None
-            if session.expires <= now:
+                # A munkamenetet és a hozzá tartozó tűzfalengedélyt is
+                # megszüntetjük, nem hagyjuk a TTL-ig érvényben.
+                del self._sessions[token]
+                self._remember_end_locked(session.ip, "ip_changed", now)
+                if session.authorized:
+                    revoke = session
+            elif session.expires <= now:
                 del self._sessions[token]
                 self._remember_end_locked(ip, "expired", now)
-                return None
-            return session
+                if session.authorized:
+                    revoke = session
+            else:
+                return session
+        if revoke is not None:
+            self._revoke_access(revoke.ip, (revoke.ports,))
+        return None
 
     def authorize(
         self, token: str, ip: str, rule: Rule, ttl: int
@@ -2903,8 +3170,19 @@ class SessionManager:
                 raise AccessError("érvénytelen vagy lejárt munkamenet")
             if session.expires <= now:
                 del self._sessions[token]
+                self._remember_end_locked(ip, "expired", now)
+                if session.authorized:
+                    # A lejárt munkamenet engedélyét is azonnal vonjuk
+                    # vissza, ne várjunk a takarítószálra.
+                    self._revoke_access(ip, (session.ports,))
                 raise AccessError("lejárt a munkamenet")
 
+            if self.rule_check is not None and not self.rule_check(
+                session.user, rule
+            ):
+                raise AccessError("ez a szabály már nem elérhető")
+
+            want_ssh = self._host_ssh_wanted(session)
             if session.authorized:
                 # Módosításnál előbb töröljük a régi engedélyeket. Ha ez nem
                 # sikerül, a régi hozzáférés marad érvényben, és hibát
@@ -2913,8 +3191,11 @@ class SessionManager:
                 flushed = True
 
             try:
+                if not want_ssh:
+                    self.firewall.revoke_host_ssh(ip)
                 self.firewall.grant(ip, ports, ttl)
-                self.firewall.grant_host_ssh(ip, ttl)
+                if want_ssh:
+                    self.firewall.grant_host_ssh(ip, ttl)
             except FirewallError:
                 # Részleges engedély ne maradjon.
                 try:
@@ -3096,6 +3377,25 @@ class SessionManager:
             self._thread.join(timeout=5)
             self._thread = None
 
+    def shutdown(self, reason: str = "service_stop") -> int:
+        """Minden munkamenet és tűzfalengedély azonnali visszavonása.
+
+        Leállítás előtt hívjuk, hogy a leállás ne hagyja a TTL-ig nyitva a
+        hozzáféréseket. Összeomlás esetén a kerneloldali timeout véd.
+        """
+        with self._lock:
+            sessions = list(self._sessions.values())
+            self._sessions.clear()
+            for session in sessions:
+                self._remember_end_locked(session.ip, reason)
+        grants: dict[str, list[Ports]] = {}
+        for session in sessions:
+            if session.authorized:
+                grants.setdefault(session.ip, []).append(session.ports)
+        for ip, ports in grants.items():
+            self._revoke_access(ip, ports)
+        return len(sessions)
+
     def count(self, authorized_only: bool = False) -> int:
         with self._lock:
             if authorized_only:
@@ -3265,6 +3565,8 @@ class Gateway:
                 ttl=DEFAULT_TTL,
                 pending_ttl=AUTH_TTL,
                 audit=self.audit,
+                host_ssh_mode=HOST_SSH_MODE,
+                rule_check=self._rule_available,
             )
         )
         if self.sessions.audit is None:
@@ -3275,6 +3577,11 @@ class Gateway:
         # Külön korlát a jelszóváltásnak, hogy a belépési próbákat ne
         # fogyassza, és fordítva.
         self.password_rate = RateLimiter(window=300, maximum=10)
+        # A hozzáférés-módosítás nft-tranzakciókat indít; a sűrű váltogatás
+        # ne terhelhesse a tűzfalat és ne fogyassza a belépési keretet.
+        self.access_rate = RateLimiter(window=60, maximum=20)
+        # Az admin-módosítások (utolsó admin ellenőrzése + írás) sorosítása.
+        self.admin_lock = threading.Lock()
 
     def effective_rules(self, user_name: str):
         record = self.users.record(user_name)
@@ -3283,6 +3590,19 @@ class Gateway:
         return self.rules.effective_for(
             record, self.groups.groups_for(user_name)
         )
+
+    def _rule_available(self, user_name: str, rule: Rule) -> bool:
+        """A szabály a döntés pillanatában is a felhasználóhoz tartozik-e."""
+        record = self.users.record(user_name)
+        if record is None or not record.enabled:
+            return False
+        try:
+            current = self.rules.resolve_for(
+                record, self.groups.groups_for(user_name), rule.id
+            )
+        except (AccessError, KeyError, ValueError):
+            return False
+        return current.ports == rule.ports
 
     def user_public(self, name: str) -> dict | None:
         record = self.users.record(name)
@@ -3313,14 +3633,21 @@ class Gateway:
                 self.firewall.flush()
                 log("[tűzfal] a korábbi engedélyek törölve (tiszta indulás)")
             except FirewallError as exc:
-                log(f"[tűzfal] FIGYELEM: a halmazok kiürítése nem sikerült: {exc}")
+                # Egy sikertelen induláskori ürítés azt jelentheti, hogy a
+                # korábbi folyamat engedélyei tovább élnének. Ilyenkor nem
+                # indulunk el: a fail-closed elv fontosabb az elérhetőségnél.
+                log(
+                    "[tűzfal] HIBA: a korábbi engedélyek törlése nem "
+                    f"sikerült, az indulás leáll: {exc}"
+                )
+                raise
         ok, why = self.firewall.healthy()
         if ok:
             log(
                 f"[tűzfal] rendben: inet {self.firewall.table} "
                 f"/ {self.firewall.set_name}, {self.firewall.tcp_set}, "
                 f"{self.firewall.udp_set}, {self.firewall.icmp_set}, "
-                f"{self.firewall.ssh_set}"
+                f"{self.firewall.ssh_set}, {self.firewall.mac_set}"
             )
         else:
             log(
@@ -3334,4 +3661,14 @@ class Gateway:
 
     def stop(self) -> None:
         self.sessions.stop_reaper()
-        self.audit.write("service_stop", reason="portál folyamat leállt")
+        # Leállításkor ne maradjon nyitva egyetlen engedély sem a TTL-ig.
+        try:
+            revoked = self.sessions.shutdown()
+        except Exception as exc:  # a leállás ne akadjon el a takarításon
+            log(f"[tűzfal] leálláskori visszavonás nem sikerült: {exc}")
+            revoked = 0
+        self.audit.write(
+            "service_stop",
+            reason="portál folyamat leállt",
+            sessions_revoked=revoked,
+        )

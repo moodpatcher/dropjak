@@ -55,6 +55,9 @@ services:
       HV_ADMIN_ENABLED: ${HV_ADMIN_ENABLED:-0}
       HV_ADMIN_USER: ${HV_ADMIN_USER:-}
       HV_ADMIN_PASSWORD: ${HV_ADMIN_PASSWORD:-}
+      # Biztonságosabb alternatíva: csak olvasható fájl (Docker secret).
+      # Ha a fájl meg van adva, a HV_ADMIN_PASSWORD helyett ezt használja.
+      HV_ADMIN_PASSWORD_FILE: ${HV_ADMIN_PASSWORD_FILE:-}
       PORT: ${PORT:-8100}
       HV_PORTAL_URL: ${HV_PORTAL_URL:-}
       HV_SERVICES_FILE: ${HV_SERVICES_FILE:-/opt/hatarvedelem/services.json}
@@ -77,6 +80,9 @@ services:
       HV_RATE_WINDOW: ${HV_RATE_WINDOW:-60}
       HV_RATE_MAX: ${HV_RATE_MAX:-10}
       HV_FLUSH_ON_START: ${HV_FLUSH_ON_START:-1}
+      # Host SSH: admin (csak admin munkamenet), any (bármely engedélyezett
+      # munkamenet) vagy off (soha).
+      HV_HOST_SSH: ${HV_HOST_SSH:-admin}
       HV_COOKIE_SECURE: ${HV_COOKIE_SECURE:-0}
       HV_DRY_RUN: ${HV_DRY_RUN:-0}
       HV_SKIP_FIREWALL: ${HV_SKIP_FIREWALL:-0}

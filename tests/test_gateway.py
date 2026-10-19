@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import http.client
+import ipaddress
 import json
 import os
 import stat
@@ -551,6 +552,109 @@ class FirewallTests(unittest.TestCase):
         self.assertEqual(grouped["counts"]["mismatched"], 0)
 
 
+    # -- MAC-kötés -----------------------------------------------------------
+
+    def _mac_firewall(self, arp_text: str):
+        arp_path = os.path.join(self.tmp.name, "arp")
+        with open(arp_path, "w", encoding="utf-8") as fh:
+            fh.write(arp_text)
+        return gateway.Firewall(
+            table="hatarvedelem", set_name="allowed_v4",
+            binary=str(self.tools.nft), dry_run=False,
+            logger=lambda *_: None,
+            lan_if="hv-lan",
+            lan_network=ipaddress.ip_network("192.168.10.0/24"),
+            arp_path=arp_path,
+        )
+
+    @staticmethod
+    def _arp(ip: str, mac: str, flags: str = "0x2", device: str = "hv-lan") -> str:
+        return (
+            "IP address       HW type     Flags       HW address            "
+            "Mask     Device\n"
+            f"{ip:<16} 0x1         {flags:<11} {mac:<21} *        {device}\n"
+        )
+
+    def test_grant_binds_client_mac(self) -> None:
+        fw = self._mac_firewall(self._arp("192.168.10.2", "aa:bb:cc:dd:ee:ff"))
+        fw.grant("192.168.10.2", ports_for("web"), 60)
+        self.assertIn(
+            "add element inet hatarvedelem client_mac "
+            "{ 192.168.10.2 . aa:bb:cc:dd:ee:ff timeout 60s }",
+            self.tools.script(),
+        )
+        self.assertIn(
+            "add element inet hatarvedelem allowed_tcp "
+            "{ 192.168.10.2 . 80 timeout 60s }",
+            self.tools.script(),
+        )
+
+    def test_grant_fails_closed_without_arp_entry(self) -> None:
+        fw = self._mac_firewall(self._arp("192.168.10.9", "aa:bb:cc:dd:ee:ff"))
+        with self.assertRaises(gateway.FirewallError):
+            fw.grant("192.168.10.2", ports_for("web"), 60)
+        self.assertFalse(
+            any("allowed_tcp" in line for line in self.tools.script()),
+            self.tools.script(),
+        )
+
+    def test_incomplete_arp_entry_is_rejected(self) -> None:
+        fw = self._mac_firewall(
+            self._arp("192.168.10.2", "aa:bb:cc:dd:ee:ff", flags="0x0")
+        )
+        with self.assertRaises(gateway.FirewallError):
+            fw.grant("192.168.10.2", ports_for("web"), 60)
+
+    def test_arp_entry_on_other_interface_is_rejected(self) -> None:
+        fw = self._mac_firewall(
+            self._arp("192.168.10.2", "aa:bb:cc:dd:ee:ff", device="eth0")
+        )
+        with self.assertRaises(gateway.FirewallError):
+            fw.grant("192.168.10.2", ports_for("web"), 60)
+
+    def test_non_lan_client_needs_no_mac(self) -> None:
+        fw = self._mac_firewall("")
+        fw.grant("203.0.113.5", ports_for("web"), 60)
+        self.assertFalse(
+            any("client_mac" in line for line in self.tools.lines()),
+            self.tools.lines(),
+        )
+
+    def test_revoke_all_removes_mac_binding(self) -> None:
+        fw = self._mac_firewall(self._arp("192.168.10.2", "aa:bb:cc:dd:ee:ff"))
+        fw.grant("192.168.10.2", ports_for("web"), 60)
+        self.tools.clear()
+        fw.revoke_all("192.168.10.2", (ports_for("web"),))
+        self.assertIn(
+            "nft delete element inet hatarvedelem client_mac "
+            "{ 192.168.10.2 . aa:bb:cc:dd:ee:ff }",
+            self.tools.deletes(),
+        )
+
+    def test_parse_mac_json(self) -> None:
+        raw = json.dumps({"nftables": [{"set": {"name": "client_mac", "elem": [
+            {"elem": {"val": {"concat": [
+                "192.168.10.2", "aa:bb:cc:dd:ee:ff"
+            ]}}},
+            {"elem": {"val": {"concat": [
+                "192.168.10.3", "11:22:33:44:55:66"
+            ]}}},
+        ]}}]})
+        self.assertEqual(
+            gateway.Firewall.parse_mac_json(raw, "192.168.10.2"),
+            ["aa:bb:cc:dd:ee:ff"],
+        )
+        self.assertEqual(gateway.Firewall.parse_mac_json("{nem json", "x"), [])
+
+    def test_arp_mac_rejects_all_zero_and_bad_mac(self) -> None:
+        path = os.path.join(self.tmp.name, "arp-zero")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(self._arp("192.168.10.2", "00:00:00:00:00:00"))
+        self.assertIsNone(
+            gateway.arp_mac("192.168.10.2", "hv-lan", path)
+        )
+
+
 # ------------------------------------------------------------------ felhasználók
 
 class UserStoreTests(unittest.TestCase):
@@ -724,7 +828,7 @@ class SessionTests(unittest.TestCase):
             binary=str(self.tools.nft), logger=lambda *_: None
         )
         self.sessions = gateway.SessionManager(
-            self.fw, ttl=3600, pending_ttl=600
+            self.fw, ttl=3600, pending_ttl=600, host_ssh_mode="any"
         )
         self.web_rule = make_rule("web-only", ("web",))
         self.icmp_rule = make_rule("icmp-only", ("icmp",))
@@ -743,9 +847,11 @@ class SessionTests(unittest.TestCase):
         self.assertFalse(session.authorized)
         self.assertEqual(session.ports, gateway.Ports())
         self.assertIsNotNone(self.sessions.validate(session.token, "192.168.50.23"))
+        # Az IP-hez kötött munkamenet más IP-ről érkező ellenőrzésre
+        # megszűnik (és a hozzá tartozó engedély is visszavonódik).
         self.assertIsNone(self.sessions.validate(session.token, "192.168.50.24"))
         self.assertIsNone(self.sessions.validate("hamis", "192.168.50.23"))
-        self.assertEqual(self.sessions.count(), 1)
+        self.assertEqual(self.sessions.count(), 0)
         self.assertEqual(self.sessions.count(authorized_only=True), 0)
         self.assertEqual(self.tools.lines(), [])
 
@@ -1021,6 +1127,109 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(self.sessions.last_end("192.168.50.23")["reason"], "logout")
         self.assertEqual(self.sessions.active_sessions(), [])
 
+    # -- host SSH házirend --------------------------------------------------
+
+    def _host_ssh_script(self, manager: gateway.SessionManager, role: str) -> list[str]:
+        session = manager.login("user", "192.168.50.23", role=role)
+        manager.authorize(session.token, "192.168.50.23", self.web_rule, 60)
+        return [
+            line for line in self.tools.script()
+            if "host_ssh_v4" in line
+        ]
+
+    def test_host_ssh_default_admin_only(self) -> None:
+        manager = gateway.SessionManager(
+            self.fw, ttl=3600, pending_ttl=600, host_ssh_mode="admin"
+        )
+        self.assertEqual(
+            self._host_ssh_script(manager, gateway.ROLE_USER), []
+        )
+        self.tools.clear()
+        self.assertEqual(
+            len(self._host_ssh_script(manager, gateway.ROLE_ADMIN)), 1
+        )
+
+    def test_host_ssh_off_grants_nothing(self) -> None:
+        manager = gateway.SessionManager(
+            self.fw, ttl=3600, pending_ttl=600, host_ssh_mode="off"
+        )
+        self.assertEqual(
+            self._host_ssh_script(manager, gateway.ROLE_ADMIN), []
+        )
+
+    def test_host_ssh_any_grants_every_session(self) -> None:
+        manager = gateway.SessionManager(
+            self.fw, ttl=3600, pending_ttl=600, host_ssh_mode="any"
+        )
+        self.assertEqual(
+            len(self._host_ssh_script(manager, gateway.ROLE_USER)), 1
+        )
+
+    def test_unknown_host_ssh_mode_falls_back_to_admin(self) -> None:
+        manager = gateway.SessionManager(
+            self.fw, ttl=3600, pending_ttl=600, host_ssh_mode="bogus"
+        )
+        self.assertEqual(manager.host_ssh_mode, "admin")
+
+    # -- versenyhelyzetek és leállás ---------------------------------------
+
+    def test_rule_check_rejects_removed_rule(self) -> None:
+        manager = gateway.SessionManager(
+            self.fw, ttl=3600, pending_ttl=600, host_ssh_mode="any",
+            rule_check=lambda user, rule: False,
+        )
+        session = manager.login("alice", "192.168.50.23")
+        with self.assertRaises(gateway.AccessError):
+            manager.authorize(
+                session.token, "192.168.50.23", self.web_rule, 60
+            )
+        self.assertFalse(
+            any("allowed_tcp" in line for line in self.tools.script())
+        )
+
+    def test_shutdown_revokes_active_grants(self) -> None:
+        session = self.sessions.login("alice", "192.168.50.23")
+        self.sessions.authorize(
+            session.token, "192.168.50.23", self.web_rule, 60
+        )
+        self.tools.clear()
+        self.assertEqual(self.sessions.shutdown(), 1)
+        deletes = self.tools.deletes()
+        self.assertIn(
+            "nft delete element inet hatarvedelem allowed_tcp "
+            "{ 192.168.50.23 . 80 }",
+            deletes,
+        )
+        self.assertIn(
+            "nft delete element inet hatarvedelem host_ssh_v4 "
+            "{ 192.168.50.23 }",
+            deletes,
+        )
+        self.assertEqual(self.sessions.count(), 0)
+        self.assertGreaterEqual(len(self.conntrack_lines()), 1)
+
+    def test_expiry_revokes_socket_and_firewall(self) -> None:
+        session = self.sessions.login("alice", "192.168.50.23")
+        self.sessions.authorize(
+            session.token, "192.168.50.23", self.web_rule, 60
+        )
+        # A munkamenet lejártát szimuláljuk: a válasznak hibának kell lennie,
+        # és a tűzfalengedélynek azonnal törlődnie kell.
+        with self.sessions._lock:
+            self.sessions._sessions[session.token] = gateway.replace(
+                self.sessions._sessions[session.token], expires=time.time() - 1
+            )
+        self.tools.clear()
+        with self.assertRaises(gateway.AccessError):
+            self.sessions.authorize(
+                session.token, "192.168.50.23", self.web_rule, 60
+            )
+        self.assertIn(
+            "nft delete element inet hatarvedelem allowed_tcp "
+            "{ 192.168.50.23 . 80 }",
+            self.tools.deletes(),
+        )
+
 
 # ------------------------------------------------------------------ egyéb mag
 
@@ -1082,9 +1291,13 @@ class HttpTests(unittest.TestCase):
         cls._old_conntrack = gateway.CONNTRACK_BIN
         cls._old_difficulty = gateway.POW_DIFFICULTY
         cls._old_portal_url = gateway.PORTAL_URL
+        cls._old_host_ssh_mode = gateway.HOST_SSH_MODE
         gateway.CONNTRACK_BIN = str(cls.tools.conntrack)
         gateway.POW_DIFFICULTY = 2
         gateway.PORTAL_URL = ""
+        # A HTTP-tesztek a visszafelé kompatibilis "any" módot vizsgálják;
+        # a szűkebb alapértelmezést külön tesztek fedik le.
+        gateway.HOST_SSH_MODE = "any"
 
         users_path = os.path.join(cls.tmp.name, "users.json")
         rules_path = os.path.join(cls.tmp.name, "rules.json")
@@ -1130,6 +1343,7 @@ class HttpTests(unittest.TestCase):
         gateway.CONNTRACK_BIN = cls._old_conntrack
         gateway.POW_DIFFICULTY = cls._old_difficulty
         gateway.PORTAL_URL = cls._old_portal_url
+        gateway.HOST_SSH_MODE = cls._old_host_ssh_mode
         cls.tmp.cleanup()
 
     def setUp(self) -> None:
@@ -1342,6 +1556,14 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(status, 400, body)
         self.assertFalse(json.loads(body)["ok"])
 
+        # A más IP-ről érkező kérés a munkamenetet is megszünteti, ezért a
+        # eredeti IP-ről sem használható tovább a régi cookie.
+        status, _, body = self.access(cookie, "web-only", 60)
+        self.assertEqual(status, 400, body)
+
+        # Új belépéssel viszont működik.
+        _, headers, _ = self.login("alice", "hosszu-jelszo-1")
+        cookie = self.cookie_from(headers)
         status, _, body = self.access(cookie, "web-only", 60)
         self.assertEqual(status, 200, body)
         self.assertTrue(json.loads(body)["authorized"])
@@ -1713,9 +1935,13 @@ class AdminHttpTests(unittest.TestCase):
         cls._old_conntrack = gateway.CONNTRACK_BIN
         cls._old_difficulty = gateway.POW_DIFFICULTY
         cls._old_portal_url = gateway.PORTAL_URL
+        cls._old_host_ssh_mode = gateway.HOST_SSH_MODE
         gateway.CONNTRACK_BIN = str(cls.tools.conntrack)
         gateway.POW_DIFFICULTY = 2
         gateway.PORTAL_URL = ""
+        # A HTTP-tesztek a visszafelé kompatibilis "any" módot vizsgálják;
+        # a szűkebb alapértelmezést külön tesztek fedik le.
+        gateway.HOST_SSH_MODE = "any"
 
         cls.users = gateway.UserStore(
             os.path.join(cls.tmp.name, "users.json"), iterations=10_000
@@ -1759,6 +1985,7 @@ class AdminHttpTests(unittest.TestCase):
         gateway.CONNTRACK_BIN = cls._old_conntrack
         gateway.POW_DIFFICULTY = cls._old_difficulty
         gateway.PORTAL_URL = cls._old_portal_url
+        gateway.HOST_SSH_MODE = cls._old_host_ssh_mode
         cls.tmp.cleanup()
 
     def setUp(self) -> None:

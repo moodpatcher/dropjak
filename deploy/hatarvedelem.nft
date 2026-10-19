@@ -64,9 +64,30 @@ add set inet hatarvedelem host_ssh_v4 {
     size 4096
 }
 
-add chain inet hatarvedelem forward {
-    type filter hook forward priority filter; policy drop;
+# Klienshez kötött MAC-cím. A forrás-IP önmagában hamisítható a LAN-on
+# (más kliens engedélyezett IP-jének felvételével), ezért az engedélyezett
+# IP-hez a portál a kliens ARP-bejegyzéséből származó MAC-címet is rögzíti.
+# A kapcsolódó drop-szabályok csak a LAN-interfészen érvényesek.
+add set inet hatarvedelem client_mac {
+    type ipv4_addr . ether_addr
+    flags timeout
+    size 4096
 }
+
+# A forward láncot lentebb, a szabályokkal egy tranzakcióban hozzuk létre,
+# -10-es prioritással. Így az a Docker ip filter FORWARD lánca ELŐTT fut, és
+# a Docker DOCKER-USER lánca csak az általa megjelölt csomagokat engedi át.
+# A csupasz add chain idempotens: létező láncot nem módosít.
+add chain inet hatarvedelem forward
+
+# Vészhelyzeti (break-glass) lánc. A sablon betöltése NEM üríti, ezért egy
+# ide ideiglenesen felvett SSH-engedély túléli a szabályok újratöltését és
+# a portál újraindítását. Alapból üres; a normál forgalomra nincs hatással.
+# Használat (majd használat után azonnal törölni kell):
+#   nft add rule inet hatarvedelem breakglass \
+#       ip saddr 203.0.113.10 tcp dport 22 accept
+#   nft delete rule inet hatarvedelem breakglass handle <handle>
+add chain inet hatarvedelem breakglass
 
 add chain inet hatarvedelem input {
     type filter hook input priority filter; policy drop;
@@ -83,13 +104,43 @@ add chain inet hatarvedelem postrouting {
 # A láncok szabályainak cseréje. A flush és az új szabályok ugyanabban az
 # nft-tranzakcióban futnak, ezért nincs nyitott időablak. A halmazhoz nem
 # nyúlunk: az újratöltés nem jelentkezteti ki a klienseket.
+#
+# A forward láncot újra létrehozzuk, hogy a prioritása régi telepítésen is
+# -10 legyen. A törlés és az újralétrehozás ugyanabban a tranzakcióban
+# történik, tehát nincs olyan pillanat, amikor ne lenne forward-lánc.
 flush chain inet hatarvedelem forward
+delete chain inet hatarvedelem forward
+add chain inet hatarvedelem forward {
+    type filter hook forward priority -10; policy drop;
+}
 flush chain inet hatarvedelem input
 flush chain inet hatarvedelem prerouting
 flush chain inet hatarvedelem postrouting
 
 table inet hatarvedelem {
     chain forward {
+        # IPv6-t nem továbbítunk. Az ip_forward sysctl csak az IPv4-re
+        # vonatkozik; ez a szabály akkor is zár, ha az IPv6 forwarding
+        # valamilyen okból bekapcsolódna.
+        meta nfproto ipv6 drop
+
+        # Forrás-IP hamisítás tiltása. A LAN-interfészen csak a LAN
+        # hálózatához tartozó forrás jöhet be; a WAN felől pedig tilos a
+        # LAN címét felvenni. Ez zárja ki, hogy egy kliens egy másik,
+        # engedélyezett kliens IP-jével (vagy LAN-forrással a WAN felől)
+        # használja a forward-szabályokat.
+        iifname "__LAN_IF__" ip saddr != __LAN_NET__ drop
+        iifname "__WAN_IF__" ip saddr __LAN_NET__ drop
+
+        # MAC-kötés: aki engedélyezett IP-t használ, annak a munkamenet
+        # alatt rögzített MAC-címmel kell küldenie. Ez a DHCP-lejárat
+        # után más géphez kerülő IP és a LAN-on belüli IP-hamisítás
+        # ellen véd. A MAC-t a portál az ARP-táblából rögzíti.
+        iifname "__LAN_IF__" ip saddr @allowed_v4 ip saddr . ether saddr != @client_mac drop
+        iifname "__LAN_IF__" meta l4proto tcp ct original ip saddr . ct original proto-dst @allowed_tcp ip saddr . ether saddr != @client_mac drop
+        iifname "__LAN_IF__" meta l4proto udp ct original ip saddr . ct original proto-dst @allowed_udp ip saddr . ether saddr != @client_mac drop
+        iifname "__LAN_IF__" ip saddr @allowed_icmp ip saddr . ether saddr != @client_mac drop
+
         # Portra korlátozott hozzáférés. A ct original proto-dst a DNAT
         # ELŐTTI célportot jelenti, ezért a Docker által publikált
         # konténerportoknál a host portjával kell a szabályban szerepelni.
@@ -99,17 +150,31 @@ table inet hatarvedelem {
         # törlése ezt azonnal érvényesíti a meglévő kapcsolatokra is.
         # A meta l4proto előtag kötelező: nélküle a ct original proto-dst
         # mérete nem ismert a concat kifejezésben (nft 1.0.6).
-        meta l4proto tcp ct original ip saddr . ct original proto-dst @allowed_tcp accept
-        meta l4proto udp ct original ip saddr . ct original proto-dst @allowed_udp accept
-        ip saddr @allowed_icmp ip protocol icmp accept
+        #
+        # Minden engedélyező szabály megjelöli a csomagot. A Docker
+        # DOCKER-USER láncában csak ezt a jelölést engedjük át; így ha ez a
+        # tábla bármiért eltűnne, a Docker saját FORWARD-szabályai (például
+        # a publikált konténerportok) sem nyitnak utat, mert nincs jelölés.
+        meta l4proto tcp ct original ip saddr . ct original proto-dst @allowed_tcp meta mark set __FWD_MARK__ accept
+        meta l4proto udp ct original ip saddr . ct original proto-dst @allowed_udp meta mark set __FWD_MARK__ accept
+        ip saddr @allowed_icmp ip protocol icmp meta mark set __FWD_MARK__ accept
 
         # Teljes hozzáférés.
-        ip saddr @allowed_v4 accept
+        ip saddr @allowed_v4 meta mark set __FWD_MARK__ accept
 
         # A teljes hozzáférés és az ICMP válasziránya. A portos szabályok
         # válaszát a fenti ct original szabályok fedik le.
-        ct state established,related ip daddr @allowed_icmp ip protocol icmp accept
-        ct state established,related ip daddr @allowed_v4 accept
+        ct state established,related ip daddr @allowed_icmp ip protocol icmp meta mark set __FWD_MARK__ accept
+        ct state established,related ip daddr @allowed_v4 meta mark set __FWD_MARK__ accept
+
+        # A WAN felől ne lehessen a konténer forrásával csomagot küldeni:
+        # a konténer kimenő engedélyei csak a Docker-híd felől érvényesek.
+        iifname "__WAN_IF__" ip saddr 172.30.0.2 drop
+
+        # A konténer ne indíthasson új kapcsolatot a belső LAN felé. A
+        # kliens -> konténer kapcsolatok válaszai established állapotúak,
+        # ezért azokat ez a szabály nem érinti.
+        ip saddr 172.30.0.2 ip daddr __LAN_NET__ ct state new drop
 
         # A Minecraft konténer kimenő forgalma. A konténer saját, dedikált
         # Docker-hálózaton fut (172.30.0.0/24, statikus 172.30.0.2 cím),
@@ -117,17 +182,63 @@ table inet hatarvedelem {
         # kell neki. A válaszok established/related állapotban jönnek.
         # Ez nem nyitja meg a kliensforgalmat: a LAN felől továbbra is
         # csak a portál-szabály által engedélyezett portok mennek át.
-        ip saddr 172.30.0.2 udp dport 53 accept
-        ip saddr 172.30.0.2 tcp dport { 53, 80, 443 } accept
-        ip daddr 172.30.0.2 ct state established,related accept
+        ip saddr 172.30.0.2 udp dport 53 meta mark set __FWD_MARK__ accept
+        ip saddr 172.30.0.2 tcp dport { 53, 80, 443 } meta mark set __FWD_MARK__ accept
+        # Csak a konténer által INDÍTOTT kapcsolatok válaszai. A korábbi
+        # szabály minden, a konténerhez tartozó established forgalmat
+        # átengedett, így a kliens->konténer kapcsolat a portengedély
+        # lejárta után is életben maradt (a conntrack törlése nélkül).
+        ip daddr 172.30.0.2 ct state established,related ct original ip saddr 172.30.0.2 meta mark set __FWD_MARK__ accept
     }
 
     chain input {
         iif lo accept
+
+        # Vészhelyzeti lánc a legelső helyen: a benne lévő ideiglenes
+        # accept túléli a sablon újratöltését. Alapból üres.
+        jump breakglass
+        # A portál és az SSH IPv4-only; IPv6-on semmilyen bejövő forgalmat
+        # nem fogadunk (a loopback kivételével).
+        meta nfproto ipv6 drop
+
+        # DHCP-kérés a címkiosztás előtt 0.0.0.0 forrással érkezik, ezért
+        # ezt a forrás-ellenőrzés előtt engedjük át. Csak a szabványos
+        # kliensportról (68) a szerverportra (67), és csak 0.0.0.0 forrással.
+        iifname "__LAN_IF__" ip saddr 0.0.0.0 udp sport 68 udp dport 67 accept
+
+        # Forrás-IP hamisítás tiltása a host felé is. A WAN felől tilos a
+        # LAN címét felvenni; a LAN felől csak a LAN hálózata jöhet.
+        iifname "__LAN_IF__" ip saddr != __LAN_NET__ drop
+        iifname "__WAN_IF__" ip saddr __LAN_NET__ drop
+
+        # A host felé irányuló engedélyezett forgalom (SSH, DNS, ICMP) is
+        # csak a munkamenet alatt rögzített MAC-csel jöhet a LAN-on. A portál
+        # forgalmát ez nem érinti, mert a portál IP-je nincs a dinamikus
+        # halmazokban.
+        iifname "__LAN_IF__" ip saddr @host_ssh_v4 ip saddr . ether saddr != @client_mac drop
+        iifname "__LAN_IF__" ip saddr @allowed_v4 ip saddr . ether saddr != @client_mac drop
+        iifname "__LAN_IF__" ip saddr @allowed_icmp ip saddr . ether saddr != @client_mac drop
+        iifname "__LAN_IF__" udp dport 53 ip saddr . ether saddr != @client_mac drop
+        iifname "__LAN_IF__" tcp dport 53 ip saddr . ether saddr != @client_mac drop
+
+        # A meglévő TCP DNS-kapcsolat se maradjon életben a jogosultság
+        # lejárta után. (Az UDP DNS minden kérése külön csomag, ezért azt a
+        # lenti engedélyező szabályok zárják le.)
+        iifname "__LAN_IF__" tcp dport 53 ct state established,related \
+            ip saddr != @allowed_v4 ip saddr . tcp dport != @allowed_tcp drop
+
+        # Meglévő SSH-kapcsolat se maradjon életben, ha az IP kikerült a
+        # host_ssh_v4 halmazból (lejárat, kilépés, összeomlás után is).
+        # Ez a szabály a lenti általános established-accept elé kerül.
+        tcp dport 22 ct state established,related ip saddr != @host_ssh_v4 drop
+
         ct state established,related accept
 
-        # Diagnosztika a belső hálózatról.
-        iifname "__LAN_IF__" ip protocol icmp accept
+        # ICMP a host felé csak engedélyezett kliensnek, és csak ping.
+        # A kapcsolódó ICMP-hibák a fenti established,related szabályon
+        # mennek át; a belépés előtti ping nem hozzáférési útvonal.
+        iifname "__LAN_IF__" ip saddr @allowed_v4 icmp type echo-request accept
+        iifname "__LAN_IF__" ip saddr @allowed_icmp icmp type echo-request accept
 
         # A belépőoldal mindenki számára elérhető. A LAN felől mindig; a
         # __PORTAL_NET__ a portál forrás-hálózata, 0.0.0.0/0 értékkel
@@ -144,9 +255,16 @@ table inet hatarvedelem {
         #   ip saddr 203.0.113.10 tcp dport 22 accept
         ip saddr @host_ssh_v4 tcp dport 22 accept
 
-        # DHCP és DNS a kaputól (dnsmasq esetén). Csak a LAN felől.
-        iifname "__LAN_IF__" udp dport { 53, 67 } accept
-        iifname "__LAN_IF__" tcp dport 53 accept
+        # DHCP a LAN felől (a cím megtartásához belépés előtt is kell).
+        iifname "__LAN_IF__" udp sport 68 udp dport 67 accept
+
+        # A host DNS-szolgáltatása (dnsmasq) csak a kiválasztott szabály
+        # alapján érhető el. Enélkül a portál előtt is nyitva lenne egy
+        # DNS-alagút a hoston keresztül, ami megkerülné a forward-szabályokat.
+        iifname "__LAN_IF__" ip saddr @allowed_v4 udp dport 53 accept
+        iifname "__LAN_IF__" ip saddr . udp dport @allowed_udp udp dport 53 accept
+        iifname "__LAN_IF__" ip saddr @allowed_v4 tcp dport 53 accept
+        iifname "__LAN_IF__" ip saddr . tcp dport @allowed_tcp tcp dport 53 accept
     }
 
     chain prerouting {

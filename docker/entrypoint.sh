@@ -104,6 +104,7 @@ render_ruleset() {
     HV_MGMT_NET=${HV_MGMT_NET:-}
     HV_PORTAL_NET=${HV_PORTAL_NET:-$HV_MGMT_NET}
     PORT=${PORT:-8100}
+    HV_FWD_MARK=${HV_FWD_MARK:-0x44524a4b}
 
     require_env HV_LAN_IF
     require_env HV_WAN_IF
@@ -117,6 +118,12 @@ render_ruleset() {
     valid_network 4 "$HV_PORTAL_NET" \
         || die "érvénytelen HV_PORTAL_NET (IPv4 CIDR kell, pl. 0.0.0.0/0): $HV_PORTAL_NET"
     valid_port "$PORT" || die "érvénytelen PORT: $PORT"
+    case "$HV_FWD_MARK" in
+        0x[0-9A-Fa-f]*) ;;
+        *) die "érvénytelen HV_FWD_MARK (0x kezdetű hex szám kell): $HV_FWD_MARK" ;;
+    esac
+    [ "${#HV_FWD_MARK}" -le 10 ] \
+        || die "érvénytelen HV_FWD_MARK (32 bites hex szám lehet): $HV_FWD_MARK"
     [ "$HV_LAN_IF" != "$HV_WAN_IF" ] \
         || die "a HV_LAN_IF és a HV_WAN_IF nem lehet ugyanaz"
 
@@ -133,6 +140,7 @@ render_ruleset() {
         -e "s|__LAN_NET__|$HV_LAN_NET|g" \
         -e "s|__PORTAL_NET__|$HV_PORTAL_NET|g" \
         -e "s|__PORT__|$PORT|g" \
+        -e "s|__FWD_MARK__|$HV_FWD_MARK|g" \
         "$TEMPLATE" >"$RENDERED" || die "a szabálysablon nem tölthető ki"
 
     chmod 0600 "$RENDERED" || true
@@ -142,41 +150,85 @@ render_ruleset() {
     log "szabályfájl elkészült: $RENDERED"
 }
 
-docker_forward_bypass() {
-    # A Docker a saját ip filter FORWARD láncán policy drop-ot használ. Ez a
-    # mi inet táblánktól függetlenül is eldobja a továbbított csomagokat,
-    # ezért a LAN-forwardot a Docker hivatalos kiterjesztési pontján, a
-    # DOCKER-USER láncon engedjük át. A tényleges szűrést továbbra is az
-    # inet hatarvedelem forward lánca végzi: mindkét lánc ugyanazt a
-    # csomagot látja, és a drop bármelyikben érvényesül.
+docker_forward_guard() {
+    # A Docker ip filter FORWARD lánca a saját szabályaival (például a
+    # publikált konténerportokkal) akkor is átengedné a forgalmat, ha a mi
+    # inet táblánk eltűnne. A hivatalos DOCKER-USER láncon ezért MINDEN
+    # forwardolt csomagot eldobunk, kivéve azt, amelyiket az inet
+    # hatarvedelem forward lánca megjelölt. A jelölés csak akkor kerül a
+    # csomagra, ha a mi szabályaink tényleg lefutottak és engedélyeztek.
     DOCKER_USER=$("$NFT_BIN" list chain ip filter DOCKER-USER 2>/dev/null || true)
     if [ -z "$DOCKER_USER" ]; then
-        log "Docker DOCKER-USER lánc nincs; nincs szükség forward-áthidalásra"
+        log "Docker DOCKER-USER lánc nincs; nincs szükség Docker-forward-védelemre"
         return 0
     fi
-    # A korábbi áthidaló szabályokat eldobjuk, hogy interfészváltás után ne
-    # maradjon stale accept a régi interfészre. A törlés és az új szabályok
-    # közötti rövid időben a Docker policy drop-ja érvényesül (fail-closed).
+    # A régi szabályok listája még a beszúrás előtt készül; a handle-ök a
+    # beszúrás után is érvényesek maradnak.
     OLD_RULES=$("$NFT_BIN" -a list chain ip filter DOCKER-USER 2>/dev/null || true)
+
+    # A guard a lehető leghamarabb kerül a láncra: a régi széles acceptek
+    # utána már csak a megjelölt csomagokra illeszkedhetnek.
+    if ! "$NFT_BIN" insert rule ip filter DOCKER-USER \
+            meta mark != "$HV_FWD_MARK" drop \
+            comment '"hv-docker-fwd-guard"'; then
+        log "HIBA: a Docker forward-védelme nem állítható be (DOCKER-USER drop)"
+        return 1
+    fi
+    if ! "$NFT_BIN" insert rule ip filter DOCKER-USER \
+            meta mark "$HV_FWD_MARK" accept \
+            comment '"hv-docker-fwd-mark"'; then
+        log "HIBA: a Docker forward-engedélye nem állítható be (DOCKER-USER accept)"
+        return 1
+    fi
+
+    # A korábbi (széles) áthidaló szabályokat most már biztonságosan
+    # eldobhatjuk.
     while IFS= read -r line; do
         case "$line" in
             *hv-docker-fwd-*)
                 handle=${line##*# handle }
+                [ "$handle" != "$line" ] || continue
                 "$NFT_BIN" delete rule ip filter DOCKER-USER handle "$handle" || true
                 ;;
         esac
     done <<EOF
 $OLD_RULES
 EOF
-
-    if "$NFT_BIN" insert rule ip filter DOCKER-USER \
-            oifname "$HV_LAN_IF" accept comment '"hv-docker-fwd-out"' \
-        && "$NFT_BIN" insert rule ip filter DOCKER-USER \
-            iifname "$HV_LAN_IF" accept comment '"hv-docker-fwd-in"'; then
-        log "Docker forward-áthidalás beállítva (DOCKER-USER)"
-    else
-        log "FIGYELEM: a Docker forward-áthidalását nem sikerült beállítani"
+    # A policy drop a második védvonal arra az esetre, ha a DOCKER-USER
+    # lánc valamilyen okból kimaradna a forgalom útjából.
+    if ! "$NFT_BIN" add chain ip filter FORWARD '{ policy drop; }'; then
+        log "FIGYELEM: a Docker FORWARD lánc policy drop beállítása nem sikerült"
     fi
+    log "Docker forward-védelem beállítva (csak jelölt csomag mehet át)"
+    return 0
+}
+
+start_firewall_watchdog() {
+    [ "${HV_FIREWALL_WATCHDOG:-1}" = "1" ] || return 0
+    (
+        while :; do
+            sleep 5
+            forward=$("$NFT_BIN" list chain inet hatarvedelem forward 2>/dev/null || true)
+            case "$forward" in
+                *"policy drop"*) ;;
+                *) forward="" ;;
+            esac
+            if [ -z "$forward" ] || ! printf '%s' "$forward" | grep -q '@client_mac'; then
+                log "FIGYELEM: a hatarvedelem forward lánc hiányos; újratöltés"
+                if "$NFT_BIN" -c -f "$RENDERED" && "$NFT_BIN" -f "$RENDERED"; then
+                    log "a tűzfal újratöltve"
+                else
+                    log "HIBA: a tűzfal újratöltése nem sikerült"
+                fi
+                docker_forward_guard || true
+            elif ! "$NFT_BIN" list chain ip filter DOCKER-USER 2>/dev/null \
+                    | grep -q 'hv-docker-fwd-guard'; then
+                log "FIGYELEM: a Docker forward-védelme hiányzik; újra beállítás"
+                docker_forward_guard || true
+            fi
+        done
+    ) &
+    log "tűzfal-figyelő elindítva (5 másodperc)"
 }
 
 load_firewall() {
@@ -203,9 +255,10 @@ load_firewall() {
     # a boot-védelem eltávolítása után. A portál is kiüríti a halmazt, de
     # így a rövid átadási időben sem marad nyitva senki.
     if [ "${HV_FLUSH_ON_START:-1}" = "1" ]; then
-        for hv_set in allowed_v4 allowed_tcp allowed_udp allowed_icmp host_ssh_v4; do
+        for hv_set in allowed_v4 allowed_tcp allowed_udp allowed_icmp \
+                host_ssh_v4 client_mac; do
             "$NFT_BIN" flush set inet hatarvedelem "$hv_set" \
-                || log "FIGYELEM: a(z) $hv_set halmaz ürítése nem sikerült"
+                || die "a(z) $hv_set halmaz ürítése nem sikerült"
         done
         log "a dinamikus halmazok kiürítve (HV_FLUSH_ON_START=1)"
     fi
@@ -217,7 +270,8 @@ load_firewall() {
         log "a korai boot-védelem átadta a helyét a végleges szabályoknak"
     fi
 
-    docker_forward_bypass
+    docker_forward_guard \
+        || die "a Docker forward-védelme nélkül a tűzfal kikerülhető; indulás leállítva"
 
     if [ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo 0)" != "1" ]; then
         if (echo 1 >/proc/sys/net/ipv4/ip_forward) 2>/dev/null; then
@@ -243,6 +297,7 @@ if [ "${HV_SKIP_FIREWALL:-0}" = "1" ]; then
     log "FIGYELEM: a tűzfalszabályok betöltése kihagyva (HV_SKIP_FIREWALL=1)"
 else
     load_firewall
+    start_firewall_watchdog
 fi
 
 if [ -z "${HV_CONNTRACK_BIN:-}" ]; then

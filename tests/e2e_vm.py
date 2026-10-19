@@ -38,7 +38,8 @@ COOKIE = "/root/e2e_cookies.txt"
 USER = os.environ.get("E2E_USER", "claudetest")
 PASS_ENV = "E2E_PASS"
 NEW_PASS_ENV = "E2E_NEW_PASS"
-NFT_SETS = ("allowed_v4", "allowed_tcp", "allowed_udp", "allowed_icmp", "host_ssh_v4")
+NFT_SETS = ("allowed_v4", "allowed_tcp", "allowed_udp", "allowed_icmp",
+            "host_ssh_v4", "client_mac")
 CLIENT_IP = "192.168.10.2"
 
 failures: list[str] = []
@@ -315,6 +316,17 @@ def set_is_empty(table_dump: str, set_name: str) -> bool:
     return not set_has(table_dump, set_name, CLIENT_IP)
 
 
+def client_mac() -> str:
+    """A hvclient MAC-címe a host ARP-táblájából (a portál is innen olvas)."""
+    proc = subprocess.run(
+        ["ip", "neigh", "show", CLIENT_IP], capture_output=True, text=True,
+    )
+    for token in proc.stdout.split():
+        if token.count(":") == 5:
+            return token.lower()
+    return ""
+
+
 def nft_json_entries(set_name: str) -> list[dict]:
     """A valódi nft -j kimenet feldolgozása a gyártási parserrel."""
     proc = subprocess.run(
@@ -334,6 +346,7 @@ def nft_state(label: str) -> dict:
         "udp": set_has(snap["text"], "allowed_udp", CLIENT_IP),
         "icmp": set_has(snap["text"], "allowed_icmp", CLIENT_IP),
         "host_ssh": set_has(snap["text"], "host_ssh_v4", CLIENT_IP),
+        "mac": set_has(snap["text"], "client_mac", CLIENT_IP),
     }
     print(f"    nft {label}: {json.dumps(state)}", flush=True)
     return state
@@ -352,7 +365,13 @@ def main() -> int:
     new_password = password + "-v2"
 
     user_cli("del", USER)  # esetleges maradék eltakarítása
-    created = user_cli("add", USER, "--password-stdin", stdin=password + "\n")
+    # A tesztfelhasználó admin, hogy a host SSH házirend admin-ágát is
+    # vizsgálja; a szabályokat explicit módon rendeljük hozzá (a CLI már
+    # nem ad öröklődő "minden szabály" hozzáférést).
+    created = user_cli(
+        "add", USER, "--role", "admin", "--rule", "browse", "--rule", "full",
+        "--password-stdin", stdin=password + "\n",
+    )
     if created.returncode != 0:
         print(f"HIBA: a tesztfelhasználó létrehozása nem sikerült: {created.stderr.strip()}")
         return 2
@@ -410,6 +429,7 @@ def main() -> int:
         check("bejelentkezés előtt: host SSH tiltva", blocked.get("host_ssh") is False)
         state = nft_state("bejelentkezés előtt")
         check("nft: host SSH halmaz üres", not state["host_ssh"])
+        check("nft: MAC-kötés nincs", not state["mac"])
 
         print("== 1. Böngészés szabály 60 másodpercre ==", flush=True)
         access = client_json("access", "browse", "60")
@@ -435,6 +455,20 @@ def main() -> int:
         check("nft: allowed_v4 nem tartalmazza a klienst", not state["v4"])
         check("nft: allowed_icmp nem tartalmazza a klienst", not state["icmp"])
         check("nft: host SSH halmaz tartalmazza a klienst", state["host_ssh"])
+        check("nft: MAC-kötés rögzítve", state["mac"])
+        expected_mac = client_mac()
+        mac_entries = nft_json_entries("client_mac")
+        bound = [
+            entry.get("mac") for entry in mac_entries
+            if entry.get("address") == CLIENT_IP
+        ]
+        check("nft JSON: a MAC-kötés olvasható",
+              bool(bound) and all(mac and len(mac) == 17 for mac in bound),
+              json.dumps(mac_entries))
+        if expected_mac:
+            check("nft JSON: a MAC az ARP-ból származik",
+                  bound and bound[0] == expected_mac,
+                  f"várt={expected_mac} kapott={bound}")
         tcp_entries = nft_json_entries("allowed_tcp")
         client_ports = {
             entry["port"] for entry in tcp_entries
