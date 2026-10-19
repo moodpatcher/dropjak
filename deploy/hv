@@ -1,0 +1,159 @@
+#!/bin/bash
+# Dropjak — helyi kezelőparancs a VM-en.
+set -euo pipefail
+
+APP=/root/hatarvedelem
+BACKUPS=/root/hatarvedelem-backups
+STATE_VOLUME=/var/lib/docker/volumes/hatarvedelem_hatarvedelem-state/_data
+
+cd "$APP"
+
+usage() {
+    cat <<'EOF'
+Használat: hv <parancs>
+
+  status            konténer, portál és nft halmazok állapota
+  logs              naplók követése (Ctrl+C kilép)
+  restart           újraindítás a .env újraolvasásával
+  rebuild           újraépítés és indítás (kód / kezdő szabályokat adó services.json után)
+  edit              a .env szerkesztése
+  services          a services.json szerkesztése (kezdő szabályok/migráció; utána hv rebuild)
+  users             felhasználók listája
+  add <név> [--no-must-change]   új felhasználó (jelszót interaktívan kér)
+  passwd <név> [--no-must-change] jelszócsere (interaktívan)
+  del <név>         felhasználó törlése
+  backup            mentés a /root/hatarvedelem-backups könyvtárba
+  test              helyi unit- és HTTP-tesztek
+  e2e               teljes teszt a hvclient névtérből (kb. 2 perc)
+  where             a fontos fájlok és helyek listája
+EOF
+}
+
+need_name() {
+    local command=$1
+    shift
+    if [ "$#" -ne 1 ]; then
+        echo "Használat: hv $command <név>" >&2
+        exit 2
+    fi
+}
+
+portal_port() {
+    local value
+    value=$(sed -n 's/^PORT=//p' "$APP/.env" 2>/dev/null | tail -n1)
+    echo "${value:-8100}"
+}
+
+server_cli() {
+    docker compose exec -T --user hatarvedelem hatarvedelem \
+        python3 /opt/hatarvedelem/server.py "$@"
+}
+
+case "${1:-}" in
+    status)
+        docker compose ps
+        echo
+        port=$(portal_port)
+        if curl -sS -m 5 -o /dev/null "http://127.0.0.1:${port}/api/status"; then
+            echo "portál: HTTP 200 (${port})"
+        else
+            echo "portál: NEM VÁLASZOL (${port})" >&2
+        fi
+        echo
+        echo "nftables halmazok:"
+        nft list sets inet hatarvedelem 2>/dev/null \
+            | grep -E '^[[:space:]]*set |elements' || true
+        ;;
+    logs)
+        docker compose logs -f --tail=100
+        ;;
+    restart)
+        docker compose up -d
+        ;;
+    rebuild)
+        docker compose up -d --build
+        ;;
+    edit)
+        editor=${EDITOR:-}
+        if [ -z "$editor" ]; then
+            if command -v nano >/dev/null 2>&1; then editor=nano; else editor=vi; fi
+        fi
+        "$editor" "$APP/.env"
+        echo "Módosítás után: hv restart"
+        ;;
+    services)
+        editor=${EDITOR:-}
+        if [ -z "$editor" ]; then
+            if command -v nano >/dev/null 2>&1; then editor=nano; else editor=vi; fi
+        fi
+        "$editor" "$APP/services.json"
+        echo "Módosítás után: hv rebuild"
+        ;;
+    users)
+        server_cli user list
+        ;;
+    add)
+        shift
+        if [ "$#" -lt 1 ]; then
+            echo "Használat: hv add <név> [--no-must-change]" >&2
+            exit 2
+        fi
+        docker compose exec --user hatarvedelem hatarvedelem \
+            python3 /opt/hatarvedelem/server.py user add "$@"
+        ;;
+    passwd)
+        shift
+        if [ "$#" -lt 1 ]; then
+            echo "Használat: hv passwd <név> [--no-must-change]" >&2
+            exit 2
+        fi
+        docker compose exec --user hatarvedelem hatarvedelem \
+            python3 /opt/hatarvedelem/server.py user passwd "$@"
+        ;;
+    del)
+        shift
+        need_name del "$@"
+        server_cli user del "$1"
+        ;;
+    backup)
+        mkdir -p "$BACKUPS"
+        chmod 700 "$BACKUPS"
+        ts=$(date +%Y%m%d-%H%M%S)
+        tar -czf "$BACKUPS/hatarvedelem-$ts.tar.gz" -C /root hatarvedelem
+        # A teljes állapot: users.json, rules.json, groups.json, auditnapló
+        # és a rotált naplófájlok. A .lock fájlok is bekerülhetnek; ezek
+        # visszaállításkor ártalmatlanok.
+        if [ -d "$STATE_VOLUME" ]; then
+            tar -czf "$BACKUPS/hatarvedelem-state-$ts.tar.gz" -C "$STATE_VOLUME" .
+            state_backup="$BACKUPS/hatarvedelem-state-$ts.tar.gz"
+        else
+            echo "FIGYELEM: az állapotkötet nem található: $STATE_VOLUME" >&2
+            state_backup=""
+        fi
+        chmod 600 "$BACKUPS/hatarvedelem-$ts.tar.gz"
+        echo "Mentés kész:"
+        echo "  $BACKUPS/hatarvedelem-$ts.tar.gz"
+        if [ -n "$state_backup" ]; then
+            chmod 600 "$state_backup"
+            echo "  $state_backup"
+        fi
+        ;;
+    test)
+        python3 -m unittest discover -s "$APP/tests"
+        ;;
+    e2e)
+        python3 "$APP/tests/e2e_vm.py"
+        ;;
+    where)
+        cat "$APP/HELYI-UTMUTATO.md"
+        ;;
+    ""|help|-h|--help)
+        usage
+        ;;
+    *)
+        echo "Ismeretlen parancs: $1" >&2
+        echo >&2
+        usage >&2
+        exit 2
+        ;;
+esac

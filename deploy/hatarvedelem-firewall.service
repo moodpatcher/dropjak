@@ -1,0 +1,32 @@
+[Unit]
+Description=Dropjak — nftables tűzfalszabályok
+Documentation=file:///opt/hatarvedelem/README.md
+# A disztribúció saját nftables.service-e (ha van) előbb töltse be a maga
+# szabályait; utána miénk következik, így egyik sem írja felül a másikat
+# véletlen sorrendben. Ha nincs ilyen unit, az After= hatástalan.
+After=nftables.service
+# A szabályok a hálózat beindulása előtt kerüljenek a kernelbe. Az
+# iifname/oifname miatt ehhez nem kell, hogy az interfészek már létezzenek.
+DefaultDependencies=no
+Wants=network-pre.target
+Before=network-pre.target shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Az nft -f idempotens: a szabályok cserélődnek, a dinamikus halmaz
+# elemei (a belépett kliensek) megmaradnak.
+ExecStart=__NFT_BIN__ -f /etc/nftables/hatarvedelem.nft
+ExecReload=__NFT_BIN__ -f /etc/nftables/hatarvedelem.nft
+# Szándékosan nincs ExecStop: a szolgáltatás leállítása ne nyissa meg a
+# hálózatot. A szabályok eltávolítása külön, tudatos művelet:
+#   nft delete table inet hatarvedelem
+
+# Az nft rootként fut, de csak a hálózati szabályokhoz szükséges
+# képességgel. A fájl root tulajdonú és 0600, ezért olvasható.
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_NET_ADMIN
+
+[Install]
+WantedBy=sysinit.target

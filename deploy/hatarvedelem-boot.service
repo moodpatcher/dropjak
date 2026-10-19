@@ -1,0 +1,26 @@
+[Unit]
+Description=Dropjak — korai forward-tiltás (Docker előtt)
+Documentation=file:///opt/hatarvedelem/README.md
+# A Docker előtt töltjük be, hogy a konténer indulásáig se menjen át
+# szabályozatlanul forgalom. A végleges szabályok betöltése után a
+# konténer törli ezt a táblát.
+DefaultDependencies=no
+Wants=network-pre.target
+Before=network-pre.target docker.service shutdown.target
+After=nftables.service
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=__NFT_BIN__ -f /etc/nftables/hatarvedelem-boot.nft
+ExecReload=__NFT_BIN__ -f /etc/nftables/hatarvedelem-boot.nft
+# Szándékosan nincs ExecStop: leállításkor ne nyíljon meg a forward-lánc.
+# Az eltávolítás tudatos művelet:
+#   nft delete table inet hatarvedelem_boot
+
+NoNewPrivileges=yes
+CapabilityBoundingSet=CAP_NET_ADMIN
+
+[Install]
+WantedBy=sysinit.target

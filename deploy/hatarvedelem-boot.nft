@@ -1,0 +1,40 @@
+#!/usr/sbin/nft -f
+#
+# Dropjak — korai boot-védelem Dockeres telepítéshez
+#
+# A Docker daemon csak a rendszer indítása után áll fel. A konténer addig
+# nem tudja betölteni a végleges szabályokat, ezért ebben az időablakban
+# szabályozatlan forgalom mehetne át, és az SSH is nyitva lehetne. Ezt a
+# szűk táblát a hoston egy korai systemd unit tölti be
+# (hatarvedelem-boot.service), a konténer belépési pontja pedig a végleges
+# szabályok betöltése után törli.
+#
+# A forward-lánc mellett az input 22-es portját is eldobja: a host SSH a
+# portál indulása előtt nem lehet elérhető. A portál a végleges szabályok
+# betöltése után veszi át a helyét. A tábla IDEMPOTENS módon tölthető újra.
+#
+# Kézi betöltés:  nft -f /etc/nftables/hatarvedelem-boot.nft
+# Eltávolítás:    nft delete table inet hatarvedelem_boot
+
+add table inet hatarvedelem_boot
+
+add chain inet hatarvedelem_boot forward {
+    type filter hook forward priority filter; policy drop;
+}
+
+add chain inet hatarvedelem_boot input {
+    type filter hook input priority filter; policy accept;
+}
+
+flush chain inet hatarvedelem_boot forward
+flush chain inet hatarvedelem_boot input
+
+# A portál még nem fut, ezért a host SSH-t a végleges szabályok
+# betöltéséig mindenhonnan eldobjuk. A loopback kivétel, hogy a helyi
+# adminisztráció ne akadjon el.
+table inet hatarvedelem_boot {
+    chain input {
+        iifname "lo" accept
+        tcp dport 22 drop
+    }
+}

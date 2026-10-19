@@ -1,0 +1,170 @@
+#!/usr/sbin/nft -f
+#
+# Dropjak — nftables szabályok
+#
+# Ezt a fájlt az install.sh generálja a helyőrzők helyettesítésével.
+# Kézi szerkesztés után: nft -c -f /etc/nftables/hatarvedelem.nft
+#
+# A fájl IDEMPOTENS: többszöri betöltés után sem duplázódnak a szabályok,
+# és az allowed_v4 halmaz elemei megmaradnak. Ezt használja a
+# hatarvedelem-firewall.service ExecReload-ja is.
+#
+# Alapelv:
+#   - forward: minden tiltva; a belépett kliens csak a választott szabály
+#     TCP/UDP célportjaira mehet (allowed_tcp/allowed_udp), ICMP-re az
+#     allowed_icmp révén; teljes hozzáférésnél az allowed_v4 halmaz tagjaként
+#   - input:   a portál mindenki számára elérhető; a host SSH csak aktív,
+#     engedélyezett portál-munkamenettel; a DNS/DHCP a LAN felől
+#   - a nem engedélyezett kliensek HTTP-je a belépőoldalra kerül
+#
+# Az iifname/oifname használatának oka, hogy a szabályok betöltése ne
+# függjön attól, hogy az adott interfész (VLAN, bridge, bond) a boot során
+# mikor jön létre. Ha az interfész nem létezik, a szabály nem illeszkedik,
+# tehát a forgalom tiltva marad (fail-closed).
+
+# A tábla, a halmaz és a láncok létrehozása. Ha már léteznek, ezek a
+# parancsok nem változtatnak rajtuk.
+add table inet hatarvedelem
+
+# Ide kerülnek a teljes hozzáférést választó kliensek IPv4 címei,
+# kerneloldali lejárattal.
+add set inet hatarvedelem allowed_v4 {
+    type ipv4_addr
+    flags timeout
+    size 4096
+}
+
+# Portra korlátozott hozzáférés: kliens IP + célport párok.
+# A portok a kliens által választott szabályból jönnek (rules.json).
+add set inet hatarvedelem allowed_tcp {
+    type ipv4_addr . inet_service
+    flags timeout
+    size 16384
+}
+
+add set inet hatarvedelem allowed_udp {
+    type ipv4_addr . inet_service
+    flags timeout
+    size 16384
+}
+
+# ICMP (ping) engedély a kliens IP-hez.
+add set inet hatarvedelem allowed_icmp {
+    type ipv4_addr
+    flags timeout
+    size 4096
+}
+
+# Azon kliensek IPv4 címei, akiknek a portálon engedélyezett munkamenetük
+# van. A host SSH-t ez a halmaz nyitja meg. Az elem a munkamenet TTL-jével
+# jár le; kilépéskor a portál azonnal törli.
+add set inet hatarvedelem host_ssh_v4 {
+    type ipv4_addr
+    flags timeout
+    size 4096
+}
+
+add chain inet hatarvedelem forward {
+    type filter hook forward priority filter; policy drop;
+}
+
+add chain inet hatarvedelem input {
+    type filter hook input priority filter; policy drop;
+}
+
+add chain inet hatarvedelem prerouting {
+    type nat hook prerouting priority dstnat; policy accept;
+}
+
+add chain inet hatarvedelem postrouting {
+    type nat hook postrouting priority srcnat; policy accept;
+}
+
+# A láncok szabályainak cseréje. A flush és az új szabályok ugyanabban az
+# nft-tranzakcióban futnak, ezért nincs nyitott időablak. A halmazhoz nem
+# nyúlunk: az újratöltés nem jelentkezteti ki a klienseket.
+flush chain inet hatarvedelem forward
+flush chain inet hatarvedelem input
+flush chain inet hatarvedelem prerouting
+flush chain inet hatarvedelem postrouting
+
+table inet hatarvedelem {
+    chain forward {
+        # Portra korlátozott hozzáférés. A ct original proto-dst a DNAT
+        # ELŐTTI célportot jelenti, ezért a Docker által publikált
+        # konténerportoknál a host portjával kell a szabályban szerepelni.
+        # Ugyanez a pár a válaszirányban is illeszkedik (a conntrack
+        # original tuple a kliensforgalomé), ezért külön válaszszabály nem
+        # kell. Ha az elem lejár, a válaszok is elakadnak; a conntrack
+        # törlése ezt azonnal érvényesíti a meglévő kapcsolatokra is.
+        # A meta l4proto előtag kötelező: nélküle a ct original proto-dst
+        # mérete nem ismert a concat kifejezésben (nft 1.0.6).
+        meta l4proto tcp ct original ip saddr . ct original proto-dst @allowed_tcp accept
+        meta l4proto udp ct original ip saddr . ct original proto-dst @allowed_udp accept
+        ip saddr @allowed_icmp ip protocol icmp accept
+
+        # Teljes hozzáférés.
+        ip saddr @allowed_v4 accept
+
+        # A teljes hozzáférés és az ICMP válasziránya. A portos szabályok
+        # válaszát a fenti ct original szabályok fedik le.
+        ct state established,related ip daddr @allowed_icmp ip protocol icmp accept
+        ct state established,related ip daddr @allowed_v4 accept
+
+        # A Minecraft konténer kimenő forgalma. A konténer saját, dedikált
+        # Docker-hálózaton fut (172.30.0.0/24, statikus 172.30.0.2 cím),
+        # és a Mojang letöltéshez/bejelentkezéshez DNS, HTTP és HTTPS
+        # kell neki. A válaszok established/related állapotban jönnek.
+        # Ez nem nyitja meg a kliensforgalmat: a LAN felől továbbra is
+        # csak a portál-szabály által engedélyezett portok mennek át.
+        ip saddr 172.30.0.2 udp dport 53 accept
+        ip saddr 172.30.0.2 tcp dport { 53, 80, 443 } accept
+        ip daddr 172.30.0.2 ct state established,related accept
+    }
+
+    chain input {
+        iif lo accept
+        ct state established,related accept
+
+        # Diagnosztika a belső hálózatról.
+        iifname "__LAN_IF__" ip protocol icmp accept
+
+        # A belépőoldal mindenki számára elérhető. A LAN felől mindig; a
+        # __PORTAL_NET__ a portál forrás-hálózata, 0.0.0.0/0 értékkel
+        # nyilvánosan is.
+        iifname "__LAN_IF__" tcp dport __PORT__ accept
+        ip saddr __PORTAL_NET__ tcp dport __PORT__ accept
+
+        # SSH a hostra kizárólag aktív, engedélyezett portál-munkamenettel.
+        # A portál a szabály és a TTL kiválasztása után teszi be az IP-t;
+        # a jelszó önmagában nem. Kilépéskor azonnal, lejáratkor a
+        # kernel-timeouttal törlődik.
+        # Vészhelyzeti közvetlen hozzáféréshez ideiglenesen ide vehető fel
+        # egy cím, de ez megkerüli a portált:
+        #   ip saddr 203.0.113.10 tcp dport 22 accept
+        ip saddr @host_ssh_v4 tcp dport 22 accept
+
+        # DHCP és DNS a kaputól (dnsmasq esetén). Csak a LAN felől.
+        iifname "__LAN_IF__" udp dport { 53, 67 } accept
+        iifname "__LAN_IF__" tcp dport 53 accept
+    }
+
+    chain prerouting {
+        # Aki még nincs engedélyezve, HTTP-n (80) a belépőoldalra kerül.
+        # A teljes és a portokra korlátozott hozzáférés is megkerüli a
+        # redirectet, különben a TCP 80 engedély ellenére is a portálra
+        # terelődne a forgalom.
+        iifname "__LAN_IF__" ip saddr @allowed_v4 return
+        # A Docker DNAT-je ugyanebben a prerouting szakaszban futhat, ezért
+        # itt is a DNAT előtti portot kell nézni, különben a publikált
+        # konténerport forgalma tévesen a portálra terelődne. A meta
+        # l4proto előtag itt is a concat típusához kell.
+        iifname "__LAN_IF__" meta l4proto tcp ip saddr . ct original proto-dst @allowed_tcp return
+        iifname "__LAN_IF__" meta l4proto udp ip saddr . ct original proto-dst @allowed_udp return
+        iifname "__LAN_IF__" meta l4proto tcp ct original proto-dst 80 redirect to :__PORT__
+    }
+
+    chain postrouting {
+        oifname "__WAN_IF__" ip saddr __LAN_NET__ masquerade
+    }
+}

@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Helyi állapot / titkok
+users.json
+users.json.lock
+rules.json
+rules.json.lock
+groups.json
+groups.json.lock
+audit.jsonl
+audit.jsonl.*
+.secret
+
+# Teszt- és eszközmaradványok
+.pytest_cache/
+.coverage
+htmlcov/
+_shot*.png
+
+# Docker
+.env

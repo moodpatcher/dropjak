@@ -1,0 +1,115 @@
+# Dropjak — Docker Compose
+#
+# A .env fájlt a .env.example alapján kell létrehozni. A kötelező értékeket
+# (HV_LAN_IF, HV_WAN_IF, HV_LAN_NET, HV_PORTAL_NET) a belépési pont
+# ellenőrzi, hiányzó beállításnál a konténer nem indul el.
+#
+# Fontos: a konténer network_mode: host módban fut, mert a VM forward-láncát
+# kell szabályoznia. Emiatt nincs ports: leképezés, és a portál a host PORT
+# portján (alapból 8100) hallgat.
+services:
+  hatarvedelem:
+    build:
+      context: .
+    image: hatarvedelem:2
+    restart: unless-stopped
+    network_mode: host
+    # Szándékosan nincs init: true. A tini rootként futna, de CAP_KILL nélkül
+    # nem tudná továbbítani a SIGTERM-et a 999-es UID-n futó portálnak. A
+    # belépési pont exec-elve a portált teszi PID 1-gyé, és az kezeli a
+    # SIGTERM-et, így a docker stop tisztán lezárja a folyamatot.
+    read_only: true
+
+    # A konténer csak a szükséges képességeket kapja. A CHOWN/DAC_OVERRIDE/
+    # FOWNER/SETUID/SETGID kizárólag a belépési pontnak kell: a kötet
+    # jogosultságának rendezéséhez és a setpriv-vel történő felhasználóváltáshoz.
+    # A portál folyamata már csak NET_ADMIN és NET_BIND_SERVICE képességgel fut.
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN
+      - NET_BIND_SERVICE
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETUID
+      - SETGID
+
+    # Az ip_forward a HOSTON kell bekapcsolva lennie. A compose sysctls
+    # beállítást szándékosan nem használunk: host-hálózat mellett a runc
+    # elutasítja a net.* sysctl-eket. A docker/setup-host.sh tartósan
+    # rögzíti a /etc/sysctl.d/90-hatarvedelem.conf fájlban.
+
+    environment:
+      HV_LAN_IF: ${HV_LAN_IF:-}
+      HV_WAN_IF: ${HV_WAN_IF:-}
+      HV_LAN_NET: ${HV_LAN_NET:-}
+      # Csak visszafelé kompatibilis alapérték a HV_PORTAL_NET-hez; SSH-t
+      # önmagában már nem engedélyez.
+      HV_MGMT_NET: ${HV_MGMT_NET:-}
+      # A portál forrás-hálózata. Üresen a HV_MGMT_NET értékét használja.
+      # Nyilvános portálhoz: HV_PORTAL_NET=0.0.0.0/0.
+      HV_PORTAL_NET: ${HV_PORTAL_NET:-}
+      # Induláskori admin fiók. HV_ADMIN_ENABLED=1 esetén a konténer
+      # létrehozza a felhasználót, vagy a megadott jelszóra frissíti.
+      HV_ADMIN_ENABLED: ${HV_ADMIN_ENABLED:-0}
+      HV_ADMIN_USER: ${HV_ADMIN_USER:-}
+      HV_ADMIN_PASSWORD: ${HV_ADMIN_PASSWORD:-}
+      PORT: ${PORT:-8100}
+      HV_PORTAL_URL: ${HV_PORTAL_URL:-}
+      HV_SERVICES_FILE: ${HV_SERVICES_FILE:-/opt/hatarvedelem/services.json}
+      # Állapotfájlok a köteten. A szabályokat, csoportokat és a hozzájuk
+      # tartozó hozzárendeléseket az admin felület kezeli.
+      HV_RULES: ${HV_RULES:-/var/lib/hatarvedelem/rules.json}
+      HV_GROUPS: ${HV_GROUPS:-/var/lib/hatarvedelem/groups.json}
+      HV_AUDIT_LOG: ${HV_AUDIT_LOG:-/var/lib/hatarvedelem/audit.jsonl}
+      HV_AUDIT_MAX_BYTES: ${HV_AUDIT_MAX_BYTES:-10485760}
+      HV_AUDIT_KEEP: ${HV_AUDIT_KEEP:-5}
+      # Alapértelmezett hozzáférési idő; a felhasználó 1 perc és 24 óra
+      # között választhat. A MIN/MAX csak szűkítheti a tartományt.
+      HV_SESSION_TTL: ${HV_SESSION_TTL:-3600}
+      HV_MIN_TTL: ${HV_MIN_TTL:-60}
+      HV_MAX_TTL: ${HV_MAX_TTL:-86400}
+      HV_AUTH_TTL: ${HV_AUTH_TTL:-600}
+      HV_CHALLENGE_TTL: ${HV_CHALLENGE_TTL:-600}
+      HV_POW_DIFFICULTY: ${HV_POW_DIFFICULTY:-4}
+      HV_PBKDF2_ITERATIONS: ${HV_PBKDF2_ITERATIONS:-600000}
+      HV_RATE_WINDOW: ${HV_RATE_WINDOW:-60}
+      HV_RATE_MAX: ${HV_RATE_MAX:-10}
+      HV_FLUSH_ON_START: ${HV_FLUSH_ON_START:-1}
+      HV_COOKIE_SECURE: ${HV_COOKIE_SECURE:-0}
+      HV_DRY_RUN: ${HV_DRY_RUN:-0}
+      HV_SKIP_FIREWALL: ${HV_SKIP_FIREWALL:-0}
+      HV_RUN_AS_ROOT: ${HV_RUN_AS_ROOT:-0}
+      TURNSTILE_SITEKEY: ${TURNSTILE_SITEKEY:-}
+      TURNSTILE_SECRET: ${TURNSTILE_SECRET:-}
+      HV_STATE_DIR: /var/lib/hatarvedelem
+      HV_NFT_TABLE: hatarvedelem
+      HV_NFT_SET: allowed_v4
+
+    volumes:
+      - hatarvedelem-state:/var/lib/hatarvedelem
+
+    # A gyökérfájlrendszer csak olvasható; a sablon ideiglenes fájlja a
+    # /run tmpfs-en jön létre.
+    tmpfs:
+      - /run:size=1m,mode=0755
+      - /tmp:size=16m,mode=1777
+
+    security_opt:
+      - no-new-privileges:true
+
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import os,urllib.request,sys; p=os.environ.get('PORT','8100'); sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:%s/api/status' % p, timeout=3).status == 200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+    logging:
+      driver: journald
+      options:
+        tag: hatarvedelem
+
+volumes:
+  hatarvedelem-state:

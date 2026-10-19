@@ -1,0 +1,21 @@
+# Verziókezelés és helyi fájlok
+.git
+.gitignore
+.env
+.secret
+__pycache__
+*.py[cod]
+.pytest_cache
+.coverage
+htmlcov
+tests
+README.md
+_shot*.png
+users.json
+users.json.lock
+rules.json
+rules.json.lock
+groups.json
+groups.json.lock
+audit.jsonl
+audit.jsonl.*
