@@ -1,10 +1,10 @@
 <p align="center">
-  <img src="icon.png" alt="Dropjak" width="180">
+  <img src="icon.png" alt="dropjak" width="180">
 </p>
 
-# Dropjak
+# dropjak
 
-Dropjak is a captive-portal firewall for Linux. It runs as a Docker
+dropjak is a captive-portal firewall for Linux. It runs as a Docker
 container in host network mode and controls the host's nftables forwarding
 plane. All client traffic is **blocked by default**: a client gets network
 access only after signing in through the portal and choosing an access rule
