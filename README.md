@@ -25,7 +25,8 @@ The portal is available in Hungarian, English and German.
   Entries expire in the kernel even if the portal stops.
 - Each grant is bound to the client's IP **and MAC address**. The MAC is read
   from the host ARP table at authorization time; if it cannot be resolved,
-  access is refused. A client cannot reuse another authorized client's IP.
+  access is refused. Source-IP spoofing and DHCP lease takeover alone do not
+  inherit an existing grant.
 - Host SSH is also gated: by default only an IP with an active, authorized
   **admin** portal session can connect to port 22 (`HV_HOST_SSH=admin`; use
   `any` or `off` to change the policy).
@@ -193,9 +194,11 @@ deletes the volume; without `-v` it is kept.
   `HV_COOKIE_SECURE=1`; otherwise restrict `HV_PORTAL_NET` to a trusted
   management network. HTTP-only exposure allows credentials and session
   cookies to be sniffed.
-- MAC binding blocks source-IP spoofing and DHCP lease takeover, but an
-  attacker on the same layer-2 segment can still ARP-spoof. Enable DHCP
-  snooping and dynamic ARP inspection on the switches where available.
+- MAC binding blocks source-IP spoofing and DHCP lease takeover, but MAC
+  addresses are not authenticated. An attacker on the same layer-2 segment
+  can clone an authorized client's IP and MAC, or ARP-spoof the gateway.
+  Enable 802.1X, port security, DHCP snooping and dynamic ARP inspection on
+  the switches where available.
 - The `breakglass` nftables chain is intentionally not flushed when the rules
   are reloaded, so an emergency SSH rule survives a restart. Keep it empty;
   remove the temporary rule as soon as the deployment is reachable.
