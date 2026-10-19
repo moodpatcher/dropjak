@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="icon.png" alt="Dropjak" width="180">
+</p>
+
 # Dropjak — hálózati belépőkapu
 
 Egy Linux VM, amely routerként működik a kliensei és az internet között, de
