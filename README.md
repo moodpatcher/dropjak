@@ -193,10 +193,13 @@ counted per source IP; after the configured number of attempts within the
 window, the IP is banned for the configured duration. The tab shows the
 status, the active bans with a live countdown, and the pending attempts. Any
 IP can also be banned or unbanned manually, and a ban can be lifted before it
-expires. The threshold, window and ban duration are editable at runtime; the
-`HV_FAIL2BAN*` variables only provide the initial defaults. Bans are written
-to `fail2ban.json` (mode `0600`) and restored on start, and every ban is also
-recorded in the drop log with reason `fail2ban`.
+expires. While a ban is active, the portal replaces the sign-in screen for
+that IP with a ban notice and a live countdown; the normal screen returns
+when the ban expires or is lifted. The threshold, window and ban duration
+are editable at runtime; the `HV_FAIL2BAN*` variables only provide the
+initial defaults. Bans are written to `fail2ban.json` (mode `0600`) and
+restored on start, and every ban is also recorded in the drop log with
+reason `fail2ban`.
 
 If the admin UI is unreachable, the ban list can be managed from the CLI:
 

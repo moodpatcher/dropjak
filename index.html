@@ -110,6 +110,47 @@
     color:var(--muted);
     text-align:center;
   }
+  /* fail2ban tiltás: a belépőfelület helyén jelenik meg */
+  .ban-art{
+    display:block;
+    width:100%;
+    max-width:290px;
+    height:auto;
+    margin:0 auto 10px;
+  }
+  .ban-view .subtitle{margin-bottom:14px}
+  .ban-count{
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    gap:2px;
+    margin:0 0 16px;
+    padding:10px 12px;
+    background:var(--red-bg);
+    border:1px solid var(--red-line);
+    border-radius:9px;
+  }
+  .ban-label{
+    font-size:10.5px;
+    font-weight:700;
+    letter-spacing:.05em;
+    text-transform:uppercase;
+    color:var(--red);
+  }
+  .ban-timer{
+    font-size:26px;
+    line-height:1.15;
+    font-variant-numeric:tabular-nums;
+    letter-spacing:.03em;
+    color:var(--red);
+  }
+  .ban-hint{
+    margin:12px 0 0;
+    font-size:11.5px;
+    line-height:1.45;
+    color:var(--muted);
+    text-align:center;
+  }
   /* nyelvválasztó: legördülő, zászlókkal — bal alsó sarok */
   .card-foot{
     display:flex;
@@ -765,6 +806,19 @@
     </form>
   </div>
 
+  <!-- ------------------------------------------------ fail2ban tiltás -->
+  <div class="view ban-view" id="ban-view">
+    <img class="ban-art" src="blocked.png" alt="" width="1140" height="1380" decoding="async">
+    <h1 data-i18n="IP-cím letiltva">IP-cím letiltva</h1>
+    <p class="subtitle" data-i18n="Ez az IP-cím fail2ban tiltás alatt áll a túl sok sikertelen belépés miatt. Próbáld újra később.">Ez az IP-cím fail2ban tiltás alatt áll a túl sok sikertelen belépés miatt. Próbáld újra később.</p>
+    <div class="ban-count">
+      <span class="ban-label" data-i18n="Hátralévő tiltás">Hátralévő tiltás</span>
+      <b class="ban-timer" id="ban-timer" role="timer">--:--</b>
+    </div>
+    <button type="button" class="block" id="ban-retry"><span class="btn-ico" data-icon="refresh" aria-hidden="true"></span><span data-i18n="Újrapróbálás">Újrapróbálás</span></button>
+    <p class="ban-hint" data-i18n="A tiltás automatikusan lejár, utána ismét beléphetsz.">A tiltás automatikusan lejár, utána ismét beléphetsz.</p>
+  </div>
+
   <!-- ------------------------------------------------ belépett fejléc -->
   <header class="topbar" id="topbar" hidden>
     <div class="brand">
@@ -950,6 +1004,7 @@ const ICON_SVGS = {
   logs: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>`,
   settings: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`,
   login: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="3" y1="12" x2="15" y2="12"/></svg>`,
+  refresh: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/><path d="M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>`,
   plus: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`,
   sun: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32 1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>`,
   moon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>`,
@@ -1489,6 +1544,11 @@ const I18N = {
     'lejárat': 'expires',
     'fail2ban': 'fail2ban ban',
     'Ez az IP-cím fail2ban tiltás alatt áll a túl sok sikertelen belépés miatt. Próbáld újra később.': 'This IP address is banned by fail2ban because of too many failed sign-ins. Try again later.',
+    'IP-cím letiltva': 'IP address blocked',
+    'Hátralévő tiltás': 'Ban expires in',
+    'Újrapróbálás': 'Try again',
+    'A tiltás automatikusan lejár, utána ismét beléphetsz.': 'The ban lifts automatically; you can sign in again afterwards.',
+    'A tiltás megszűnt. Beléphetsz.': 'The ban has been lifted. You can sign in now.',
     'Túl sok sikertelen belépés: az IP-címedet a tűzfal letiltotta. Próbáld újra később.': 'Too many failed sign-ins: the firewall has banned your IP address. Try again later.',
     'A fail2ban beállításai mentve.': 'Fail2ban settings saved.',
     'hiányzó IP-cím': 'missing IP address',
@@ -1994,6 +2054,11 @@ const I18N = {
     'lejárat': 'Ablauf',
     'fail2ban': 'Fail2ban-Sperre',
     'Ez az IP-cím fail2ban tiltás alatt áll a túl sok sikertelen belépés miatt. Próbáld újra később.': 'Diese IP-Adresse ist wegen zu vieler fehlgeschlagener Anmeldungen durch Fail2ban gesperrt. Versuche es später erneut.',
+    'IP-cím letiltva': 'IP-Adresse gesperrt',
+    'Hátralévő tiltás': 'Sperre endet in',
+    'Újrapróbálás': 'Erneut versuchen',
+    'A tiltás automatikusan lejár, utána ismét beléphetsz.': 'Die Sperre läuft automatisch ab; danach kannst du dich wieder anmelden.',
+    'A tiltás megszűnt. Beléphetsz.': 'Die Sperre wurde aufgehoben. Du kannst dich jetzt anmelden.',
     'Túl sok sikertelen belépés: az IP-címedet a tűzfal letiltotta. Próbáld újra később.': 'Zu viele fehlgeschlagene Anmeldungen: Die Firewall hat deine IP-Adresse gesperrt. Versuche es später erneut.',
     'A fail2ban beállításai mentve.': 'Fail2ban-Einstellungen gespeichert.',
     'hiányzó IP-cím': 'fehlende IP-Adresse',
@@ -2505,6 +2570,9 @@ const btn         = document.getElementById('submit');
 const msg         = document.getElementById('msg');
 const slot        = document.getElementById('captcha-slot');
 const loginView   = document.getElementById('login-view');
+const banView     = document.getElementById('ban-view');
+const banTimerEl  = document.getElementById('ban-timer');
+const banRetry    = document.getElementById('ban-retry');
 const topbar      = document.getElementById('topbar');
 const accessView  = document.getElementById('access-view');
 const sessionView = document.getElementById('session-view');
@@ -2555,6 +2623,9 @@ let modifying = false;
 let activeView = 'login';
 let tickTimer = null;
 let pollTimer = null;
+let banUntil = 0;             // a tiltás lejárata (ms), 0 = ismeretlen
+let banTickTimer = null;      // visszaszámláló a tiltott IP képernyőn
+let banPollTimer = null;      // a tiltás feloldásának figyelése
 let adminTabName = 'users';
 let adminState = null;
 let adminFlash = null;        // {text, kind}
@@ -2623,6 +2694,42 @@ function show(text, ok) {
   msg.classList.toggle('show', !!text);
   msg.classList.toggle('ok', !!ok);
 }
+function stopBanTimers() {
+  clearInterval(banTickTimer);
+  clearInterval(banPollTimer);
+  banTickTimer = null;
+  banPollTimer = null;
+}
+function updateBanCountdown() {
+  if (!banTimerEl) return;
+  if (!banUntil) {
+    banTimerEl.textContent = '—';
+    return;
+  }
+  banTimerEl.textContent = fmtRemaining((banUntil - Date.now()) / 1000);
+}
+/* A tiltott IP-cím a normál belépőfelület helyett ezt a képernyőt látja.
+   Amíg tart a tiltás, a visszaszámláló ketyeg, és a felület figyeli, hogy
+   a tiltás lejárt-e vagy egy adminisztrátor feloldotta-e. */
+function showBan(data) {
+  const until = Number(data && data.ban_until);
+  if (Number.isFinite(until) && until > 0) banUntil = until * 1000;
+  if (activeView !== 'ban') setView('ban');
+  show('');
+  showAccessMsg('');
+  showSessionMsg('');
+  showPasswordMsg('');
+  updateBanCountdown();
+  if (!banTickTimer) banTickTimer = setInterval(updateBanCountdown, 1000);
+  if (!banPollTimer) banPollTimer = setInterval(refreshStatus, 10000);
+}
+function leaveBan() {
+  stopBanTimers();
+  banUntil = 0;
+  setView('login');
+  resetCaptcha();
+  show('A tiltás megszűnt. Beléphetsz.', true);
+}
 function showSessionMsg(text) {
   smsg.textContent = text ? tr(text) : '';
   smsg.classList.toggle('show', !!text);
@@ -2663,6 +2770,7 @@ async function postJson(path, payload) {
   if (!res.ok || data.ok === false) {
     const error = new Error(apiError(data, `HTTP ${res.status}`));
     error.status = res.status;
+    error.data = data;
     throw error;
   }
   return data;
@@ -2673,11 +2781,13 @@ async function postJson(path, payload) {
 function setView(name) {
   activeView = name;
   loginView.classList.toggle('active', name === 'login');
+  banView.classList.toggle('active', name === 'ban');
   accessView.classList.toggle('active', name === 'access');
   sessionView.classList.toggle('active', name === 'session');
   passwordView.classList.toggle('active', name === 'password');
   adminView.classList.toggle('active', name === 'admin');
-  const app = name !== 'login';
+  if (name !== 'ban') stopBanTimers();
+  const app = name !== 'login' && name !== 'ban';
   topbar.hidden = !app;
   mainTabs.hidden = name === 'password';
   card.classList.toggle('app', app);
@@ -3000,6 +3110,15 @@ async function refreshStatus() {
     const res = await fetch('/api/status', { cache: 'no-store' });
     const data = await res.json();
     if (!data.authenticated) {
+      if (data.banned) {
+        showBan(data);
+        return;
+      }
+      if (activeView === 'ban') {
+        // A tiltás lejárt vagy egy adminisztrátor feloldotta.
+        leaveBan();
+        return;
+      }
       let text = 'A munkamenet megszűnt. Lépj be újra.';
       const end = data.last_end;
       // Csak friss eseményt magyarázunk; egy órák előtti kilépés nem zavar.
@@ -6023,8 +6142,12 @@ form.addEventListener('submit', async e => {
       showAccessMsg(data.message || '', true);
     }
   } catch (err) {
-    show(err.message || 'A belépés nem sikerült.');
-    resetCaptcha();
+    if (err.data && err.data.banned) {
+      showBan(err.data);
+    } else {
+      show(err.message || 'A belépés nem sikerült.');
+      resetCaptcha();
+    }
   } finally {
     setBusy(false);
   }
@@ -6154,6 +6277,14 @@ logoutBtn.addEventListener('click', doLogout);
 accessLogout.addEventListener('click', doLogout);
 topLogout.addEventListener('click', doLogout);
 pwLogout.addEventListener('click', doLogout);
+banRetry.addEventListener('click', async () => {
+  banRetry.disabled = true;
+  try {
+    await refreshStatus();
+  } finally {
+    banRetry.disabled = false;
+  }
+});
 
 /* ============================================================ inicializálás */
 

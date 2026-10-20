@@ -36,6 +36,7 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 STATIC_FILES = {
     "index.html": ("text/html; charset=utf-8", "no-store"),
     "icon.png": ("image/png", "public, max-age=3600"),
+    "blocked.png": ("image/png", "public, max-age=3600"),
 }
 
 CONTENT_SECURITY_POLICY = (
@@ -361,7 +362,9 @@ class Handler(BaseHTTPRequestHandler):
                 headers={"Location": gateway.PORTAL_URL},
             )
 
-        if path in ("/", "/index.html") or path not in ("/icon.png", "/favicon.ico"):
+        if path in ("/", "/index.html") or path not in (
+            "/icon.png", "/favicon.ico", "/blocked.png"
+        ):
             if self.command == "GET":
                 session = self._session()
                 self._audit(
@@ -376,6 +379,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._static("index.html")
         if path == "/icon.png" or path == "/favicon.ico":
             return self._static("icon.png")
+        if path == "/blocked.png":
+            return self._static("blocked.png")
         # Bármely más útvonalra a belépőoldalt adjuk (captive viselkedés).
         return self._static("index.html")
 
@@ -397,6 +402,21 @@ class Handler(BaseHTTPRequestHandler):
     def _rule_payload(self, rule) -> dict:
         return rule.public()
 
+    def _ban_fields(self) -> dict:
+        """A kliens IP-címének fail2ban tiltása, ha van ilyen.
+
+        A belépőoldal ebből tudja a normál felület helyére tenni a tiltott
+        IP-címre figyelmeztető képernyőt.
+        """
+        banned = self.gw.fail2ban.banned(self._client_ip())
+        if banned is None:
+            return {}
+        return {
+            "banned": True,
+            "ban_until": banned.get("until", 0),
+            "remaining": int(banned.get("remaining", 0)),
+        }
+
     def _status(self) -> None:
         session = self._session()
         if session is None:
@@ -406,6 +426,7 @@ class Handler(BaseHTTPRequestHandler):
             payload = {"ok": True, "authenticated": False}
             if last_end is not None:
                 payload["last_end"] = last_end
+            payload.update(self._ban_fields())
             self._json(200, payload)
             return
         record = self.gw.users.record(session.user)
@@ -418,6 +439,7 @@ class Handler(BaseHTTPRequestHandler):
             payload = {"ok": True, "authenticated": False}
             if last_end is not None:
                 payload["last_end"] = last_end
+            payload.update(self._ban_fields())
             self._json(200, payload)
             return
         rules = self.gw.effective_rules(session.user)

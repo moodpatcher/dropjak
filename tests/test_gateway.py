@@ -1568,6 +1568,10 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(headers["Content-Type"], "image/png")
         self.assertTrue(body.startswith(b"\x89PNG"))
+        status, headers, body = self.get("/blocked.png")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "image/png")
+        self.assertTrue(body.startswith(b"\x89PNG"))
 
     def test_unknown_api_is_404(self) -> None:
         status, _, body = self.get("/api/nincs")
@@ -3073,6 +3077,15 @@ class AdminHttpTests(unittest.TestCase):
         self.assertEqual(events[0]["user"], "alice")
         self.assertFalse(events[0]["manual"])
 
+        # A belépőoldal a nyilvános állapotból tudja, hogy a kliens tiltva van.
+        status, _, body = self.get("/api/status", source=source)
+        self.assertEqual(status, 200, body)
+        status_data = json.loads(body)
+        self.assertFalse(status_data["authenticated"])
+        self.assertTrue(status_data["banned"])
+        self.assertTrue(595 <= status_data["remaining"] <= 600)
+        self.assertGreater(status_data["ban_until"], 0)
+
         # A tiltott IP a helyes jelszóval is elutasításra kerül.
         _, _, challenge_body = self.get("/api/challenge", source=source)
         status, headers, body = self.post(
@@ -3096,6 +3109,10 @@ class AdminHttpTests(unittest.TestCase):
             cookie=cookie, source="127.0.0.5",
         )
         self.assertEqual(status, 200, body)
+
+        status, _, body = self.get("/api/status", source=source)
+        self.assertEqual(status, 200, body)
+        self.assertNotIn("banned", json.loads(body))
 
         _, _, challenge_body = self.get("/api/challenge", source=source)
         status, _, body = self.post(
