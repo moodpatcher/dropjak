@@ -303,6 +303,10 @@ class CatalogTests(unittest.TestCase):
     def test_validate_ttl_bounds(self) -> None:
         self.assertEqual(gateway.validate_ttl(gateway.MIN_TTL), gateway.MIN_TTL)
         self.assertEqual(gateway.validate_ttl(gateway.MAX_TTL), gateway.MAX_TTL)
+        # Az egy hét is választható legyen, ne álljon meg 24 óránál.
+        one_week = 7 * 24 * 60 * 60
+        self.assertGreaterEqual(gateway.MAX_TTL, one_week)
+        self.assertEqual(gateway.validate_ttl(one_week), one_week)
         for bad in (
             gateway.MIN_TTL - 1,
             gateway.MAX_TTL + 1,
@@ -6797,6 +6801,23 @@ class StaticUiTests(unittest.TestCase):
             "Elutasítás",
         ):
             self.assertIn(text, self.source, text)
+
+    def test_access_ttl_defaults_to_hours_and_allows_long_grants(self) -> None:
+        # A hozzáférési szabály kiválasztásakor az óra az alapértelmezett.
+        self.assertIn('<option value="hour" selected', self.source)
+        self.assertIn("let ttlUnit = 'hour'", self.source)
+        self.assertGreaterEqual(self.source.count("setTtlUnit('hour')"), 2)
+        # A régi 1440 perces (24 órás) felső korlát eltűnt; az admin űrlap
+        # a szerveroldali limitet követi, így egy hét is beállítható.
+        self.assertNotIn('max="1440"', self.source)
+        self.assertNotIn("1440 perc = 24 óra", self.source)
+        self.assertIn("max_ttl: 2592000", self.source)
+        self.assertIn("max: maxTtlMinutes", self.source)
+        # Az óra egész számú: nincs törtszámos lépés, és a beküldés is ellenőrzi.
+        self.assertIn("ttlEl.step = '1'", self.source)
+        self.assertIn("ttlEl.inputMode = 'numeric'", self.source)
+        self.assertIn("!Number.isInteger(rawTtl)", self.source)
+        self.assertIn("Az időtartam csak egész óra lehet.", self.source)
 
     def test_qr_markup_and_inline_library_present(self) -> None:
         for token in (

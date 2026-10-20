@@ -1088,13 +1088,13 @@
         <div class="ttl-box">
           <label for="ttl" data-i18n="Hozzáférés hossza">Hozzáférés hossza</label>
           <div class="ttl-row">
-            <input id="ttl" type="number" inputmode="numeric" min="1" max="1440" step="1" value="60" required>
+            <input id="ttl" type="number" inputmode="numeric" min="1" max="720" step="1" value="1" required>
             <select id="ttl-unit" class="ttl-unit" aria-label="Az időtartam mértékegysége" data-i18n-aria-label="Az időtartam mértékegysége">
-              <option value="min" selected data-i18n="perc">perc</option>
-              <option value="hour" data-i18n="óra">óra</option>
+              <option value="min" data-i18n="perc">perc</option>
+              <option value="hour" selected data-i18n="óra">óra</option>
             </select>
           </div>
-          <span class="ttl-hint" id="ttl-hint" data-i18n="1–1440 perc">1–1440 perc</span>
+          <span class="ttl-hint" id="ttl-hint" data-i18n="Beállítható időtartam">Beállítható időtartam</span>
         </div>
         <div class="foot-actions">
           <button id="access-back" class="ghost" type="button" hidden data-i18n="Vissza">Vissza</button>
@@ -2147,7 +2147,7 @@ const I18N = {
     'Az időtartam mértékegysége': 'Duration unit',
     'perc': 'min',
     'óra': 'hour',
-    '1–1440 perc': '1–1440 min',
+    'Beállítható időtartam': 'Selectable duration',
     'Vissza': 'Back',
     'Engedélyezés': 'Grant access',
     'Hálózat engedélyezve': 'Network access granted',
@@ -2271,7 +2271,6 @@ const I18N = {
     'Docker által publikált konténerhez a host portját add meg (a szabály a DNAT előtti célportra illeszkedik).': 'For a Docker-published container, enter the host port (the rule matches the pre-DNAT destination port).',
     'Alapértelmezett idő (perc)': 'Default duration (min)',
     'Maximális idő (perc)': 'Maximum duration (min)',
-    '1440 perc = 24 óra': '1440 min = 24 hours',
     'legfeljebb 256 port adható meg': 'at most 256 ports may be specified',
     'Teljes hozzáféréshez ne adj meg portot vagy ICMP-t.': 'Do not specify ports or ICMP for full access.',
     'Adj meg legalább egy TCP/UDP portot, ICMP-t vagy teljes hozzáférést.': 'Specify at least one TCP/UDP port, ICMP, or full access.',
@@ -2769,7 +2768,7 @@ const I18N = {
     'Az időtartam mértékegysége': 'Zeiteinheit',
     'perc': 'Min.',
     'óra': 'Std.',
-    '1–1440 perc': '1–1440 Min.',
+    'Beállítható időtartam': 'Wählbare Dauer',
     'Vissza': 'Zurück',
     'Engedélyezés': 'Zugriff gewähren',
     'Hálózat engedélyezve': 'Netzwerkzugriff gewährt',
@@ -2893,7 +2892,6 @@ const I18N = {
     'Docker által publikált konténerhez a host portját add meg (a szabály a DNAT előtti célportra illeszkedik).': 'Bei einem von Docker veröffentlichten Container den Host-Port angeben (die Regel greift auf den Zielport vor dem DNAT).',
     'Alapértelmezett idő (perc)': 'Standarddauer (Min.)',
     'Maximális idő (perc)': 'Maximaldauer (Min.)',
-    '1440 perc = 24 óra': '1440 Min. = 24 Stunden',
     'legfeljebb 256 port adható meg': 'höchstens 256 Ports dürfen angegeben werden',
     'Teljes hozzáféréshez ne adj meg portot vagy ICMP-t.': 'Gib für den Vollzugriff keine Ports oder ICMP an.',
     'Adj meg legalább egy TCP/UDP portot, ICMP-t vagy teljes hozzáférést.': 'Gib mindestens einen TCP/UDP-Port, ICMP oder Vollzugriff an.',
@@ -3412,6 +3410,7 @@ const I18N_PATTERNS = {
     [/^(\d+) eltérés$/, m => countLabel(m[1], 'mismatch', 'mismatches')],
     [/^(\d+) perc$/, m => `${m[1]} min`],
     [/^Az időtartam ([0-9.]+)–([0-9.]+) (óra|perc) között lehet\.$/, m => `Duration must be between ${m[1]} and ${m[2]} ${m[3] === 'óra' ? 'hours' : 'min'}.`],
+    [/^Az időtartam csak egész (óra|perc) lehet\.$/, m => `The duration must be a whole number of ${m[1] === 'óra' ? 'hours' : 'minutes'}.`],
     [/^Hozzáférés engedélyezve (\d+) percre \((.*)\)\.$/, m => `Access granted for ${m[1]} min (${tr(m[2])}).`],
     [/^(.+) munkamenete lezárva\.$/, m => `${m[1]}'s session was terminated.`],
     [/^(.+) munkamenetének lezárása \((.+)\)\? A hozzáférése azonnal megszűnik\.$/, m => `Terminate ${m[1]}'s session (${m[2]})? Their access ends immediately.`],
@@ -3528,6 +3527,7 @@ const I18N_PATTERNS = {
     [/^(\d+) eltérés$/, m => countLabel(m[1], 'Abweichung', 'Abweichungen')],
     [/^(\d+) perc$/, m => `${m[1]} Min.`],
     [/^Az időtartam ([0-9.]+)–([0-9.]+) (óra|perc) között lehet\.$/, m => `Die Dauer muss zwischen ${m[1]} und ${m[2]} ${m[3] === 'óra' ? 'Stunden' : 'Min.'} liegen.`],
+    [/^Az időtartam csak egész (óra|perc) lehet\.$/, m => `Die Dauer muss eine ganze Zahl ${m[1] === 'óra' ? 'Stunden' : 'Minuten'} sein.`],
     [/^Hozzáférés engedélyezve (\d+) percre \((.*)\)\.$/, m => `Zugriff für ${m[1]} Min. gewährt (${tr(m[2])}).`],
     [/^(.+) munkamenete lezárva\.$/, m => `Sitzung von ${m[1]} beendet.`],
     [/^(.+) munkamenetének lezárása \((.+)\)\? A hozzáférése azonnal megszűnik\.$/, m => `Sitzung von ${m[1]} (${m[2]}) beenden? Der Zugriff endet sofort.`],
@@ -4043,7 +4043,7 @@ let firewallRulesError = '';
 let firewallRulesLoading = false;
 let firewallPollTimer = null;
 
-const DEFAULT_LIMITS = { min_ttl: 60, max_ttl: 86400, default_ttl: 3600 };
+const DEFAULT_LIMITS = { min_ttl: 60, max_ttl: 2592000, default_ttl: 3600 };
 
 /* ============================================================ apró segédek */
 
@@ -4555,7 +4555,7 @@ function currentRule() {
   if (!auth || !Array.isArray(auth.rules)) return null;
   return auth.rules.find(rule => rule.id === selectedRuleId) || null;
 }
-let ttlUnit = 'min';
+let ttlUnit = 'hour';
 function ttlUnitFactor() {
   return ttlUnit === 'hour' ? 3600 : 60;
 }
@@ -4563,7 +4563,7 @@ function ttlBounds() {
   const global = (auth && auth.limits) || DEFAULT_LIMITS;
   const rule = currentRule();
   const minSec = Math.max(60, Number(global.min_ttl) || 60);
-  let maxSec = Math.max(minSec, Number(global.max_ttl) || 86400);
+  let maxSec = Math.max(minSec, Number(global.max_ttl) || DEFAULT_LIMITS.max_ttl);
   if (rule) {
     maxSec = Math.max(
       minSec, Math.min(maxSec, Number(rule.max_ttl) || maxSec)
@@ -4574,38 +4574,36 @@ function ttlBounds() {
 function ttlDisplayBounds() {
   const { minSec, maxSec } = ttlBounds();
   if (ttlUnit === 'hour') {
-    return {
-      min: Math.ceil((minSec / 3600) * 100) / 100,
-      max: Math.floor((maxSec / 3600) * 100) / 100
-    };
+    // Csak egész óra választható, ezért felfelé/lefelé kerekítünk.
+    return { min: Math.ceil(minSec / 3600), max: Math.floor(maxSec / 3600) };
   }
   return { min: Math.ceil(minSec / 60), max: Math.floor(maxSec / 60) };
 }
 function setTtlUnit(unit) {
-  ttlUnit = unit === 'hour' ? 'hour' : 'min';
+  const wanted = unit === 'hour' ? 'hour' : 'min';
+  // Ha a szabály kevesebb mint egy órát enged, órában nincs érvényes érték.
+  ttlUnit = wanted === 'hour' && ttlBounds().maxSec < 3600 ? 'min' : wanted;
   ttlUnitEl.value = ttlUnit;
 }
 function setTtlSeconds(seconds) {
   const factor = ttlUnitFactor();
   const raw = Math.max(0, Number(seconds) || 0) / factor;
-  ttlEl.value = ttlUnit === 'hour'
-    ? String(Math.round(raw * 100) / 100)
-    : String(Math.round(raw));
+  ttlEl.value = String(Math.round(raw));
   updateTtlBounds();
 }
 function updateTtlBounds() {
+  // Ha a szabály (például frissítés után) nem enged egész órát, váltsunk percre.
+  if (ttlUnit === 'hour' && ttlBounds().maxSec < 3600) setTtlUnit('min');
   const factor = ttlUnitFactor();
   const current = Math.max(0, Number(ttlEl.value) || 0) * factor;
   const { min, max } = ttlDisplayBounds();
   ttlEl.min = String(min);
   ttlEl.max = String(max);
-  ttlEl.step = ttlUnit === 'hour' ? 'any' : '1';
-  ttlEl.inputMode = ttlUnit === 'hour' ? 'decimal' : 'numeric';
+  ttlEl.step = '1';
+  ttlEl.inputMode = 'numeric';
   let value = current > 0 ? current / factor : min;
   value = Math.min(max, Math.max(min, value));
-  ttlEl.value = ttlUnit === 'hour'
-    ? String(Math.round(value * 100) / 100)
-    : String(Math.round(value));
+  ttlEl.value = String(Math.round(value));
   let text = tr(ttlUnit === 'hour'
     ? `Beállítható: ${min}–${max} óra`
     : `Beállítható: ${min}–${max} perc`);
@@ -4620,7 +4618,8 @@ function selectRule(ruleId, resetTtl) {
   }
   const rule = currentRule();
   if (rule && resetTtl) {
-    setTtlUnit(Number(rule.default_ttl) >= 7200 ? 'hour' : 'min');
+    // Új szabály választásakor alapból órában adjuk meg az időtartamot.
+    setTtlUnit('hour');
     setTtlSeconds(rule.default_ttl);
   } else {
     updateTtlBounds();
@@ -4630,9 +4629,7 @@ ttlUnitEl.addEventListener('change', () => {
   const seconds = Math.max(0, Number(ttlEl.value) || 0) * ttlUnitFactor();
   setTtlUnit(ttlUnitEl.value);
   if (seconds > 0) ttlEl.value = String(
-    ttlUnit === 'hour'
-      ? Math.round((seconds / 3600) * 100) / 100
-      : Math.round(seconds / 60)
+    ttlUnit === 'hour' ? Math.round(seconds / 3600) : Math.round(seconds / 60)
   );
   updateTtlBounds();
 });
@@ -4667,7 +4664,9 @@ function showAccess(data) {
     const seconds = wasAuthorized && data.rule === rule.id && data.expires_in
       ? data.expires_in
       : rule.default_ttl;
-    setTtlUnit(Number(seconds) >= 7200 ? 'hour' : 'min');
+    // A hozzáférési szabály kiválasztásakor az óra az alapértelmezett
+    // mértékegység, a felhasználó utána válthat percre.
+    setTtlUnit('hour');
     setTtlSeconds(seconds);
   } else {
     updateTtlBounds();
@@ -5792,6 +5791,14 @@ function renderRuleForm(id) {
   const rule = id ? rules.find(item => item.id === id) : null;
   const edit = !!rule;
   const draft = adminDraftFor('rule', id);
+  // Az admin űrlap felső korlátja a szerveroldali globális limit, hogy a
+  // hosszabb (akár egy hetes) időtartam is beállítható legyen.
+  const maxTtlSeconds = Math.max(
+    60,
+    Number(adminState && adminState.limits && adminState.limits.max_ttl)
+      || DEFAULT_LIMITS.max_ttl
+  );
+  const maxTtlMinutes = Math.max(1, Math.round(maxTtlSeconds / 60));
   // Gyűjtő tagja csak nem beépített, egyedi, nem teljes hozzáférésű szabály
   // lehet; a szerkesztett szabályt önmagaként nem kínáljuk fel.
   const memberChoices = rules.filter(item =>
@@ -5955,13 +5962,13 @@ function renderRuleForm(id) {
   syncMode();
   grid.append(el('div', { class: 'field' },
     el('label', { text: tr('Alapértelmezett idő (perc)') }),
-    el('input', { name: 'default_ttl', type: 'number', min: 1, max: 1440, value: draftValue(draft, 'default_ttl', edit ? Math.round(rule.default_ttl / 60) : 60), required: true }),
-    el('span', { class: 'port-hint', text: tr('1440 perc = 24 óra') })
+    el('input', { name: 'default_ttl', type: 'number', min: 1, max: maxTtlMinutes, value: draftValue(draft, 'default_ttl', edit ? Math.round(rule.default_ttl / 60) : 60), required: true }),
+    el('span', { class: 'port-hint', text: tr(`Legfeljebb ${maxTtlMinutes} perc`) })
   ));
   grid.append(el('div', { class: 'field' },
     el('label', { text: tr('Maximális idő (perc)') }),
-    el('input', { name: 'max_ttl', type: 'number', min: 1, max: 1440, value: draftValue(draft, 'max_ttl', edit ? Math.round(rule.max_ttl / 60) : 1440), required: true }),
-    el('span', { class: 'port-hint', text: tr('1440 perc = 24 óra') })
+    el('input', { name: 'max_ttl', type: 'number', min: 1, max: maxTtlMinutes, value: draftValue(draft, 'max_ttl', edit ? Math.round(rule.max_ttl / 60) : maxTtlMinutes), required: true }),
+    el('span', { class: 'port-hint', text: tr(`Legfeljebb ${maxTtlMinutes} perc`) })
   ));
   box.append(grid);
   const actions = el('div', { class: 'form-actions' });
@@ -8547,7 +8554,13 @@ accessForm.addEventListener('submit', async e => {
   showAccessMsg('');
   const rule = currentRule();
   if (!rule) return showAccessMsg('Nincs kiválasztható szabály.');
-  const seconds = Math.round(Number(ttlEl.value) * ttlUnitFactor());
+  const rawTtl = Number(ttlEl.value);
+  if (!Number.isFinite(rawTtl) || !Number.isInteger(rawTtl)) {
+    return showAccessMsg(ttlUnit === 'hour'
+      ? 'Az időtartam csak egész óra lehet.'
+      : 'Az időtartam csak egész perc lehet.');
+  }
+  const seconds = Math.round(rawTtl * ttlUnitFactor());
   const { minSec, maxSec } = ttlBounds();
   if (!Number.isFinite(seconds) || seconds < minSec || seconds > maxSec) {
     const { min, max } = ttlDisplayBounds();

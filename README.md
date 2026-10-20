@@ -8,7 +8,7 @@ dropjak is a captive-portal firewall for Linux. It runs as a Docker
 container in host network mode and controls the host's nftables forwarding
 plane. All client traffic is **blocked by default**: a client gets network
 access only after signing in through the portal and choosing an access rule
-and a TTL (1 minute to 24 hours). Only the ports and services allowed by that
+and a TTL (1 minute to 30 days). Only the ports and services allowed by that
 rule are opened for the client's IP address. Logout or expiry revokes access
 immediately.
 

@@ -419,8 +419,8 @@ def main() -> int:
         check("status: szabályok és limitek megvannak",
               "rules" in status.get("body", {}) and "limits" in status.get("body", {}))
         limits = status.get("body", {}).get("limits", {})
-        check("limitek: 60–86400 másodperc",
-              limits.get("min_ttl") == 60 and limits.get("max_ttl") == 86400,
+        check("limitek: 60–2592000 másodperc",
+              limits.get("min_ttl") == 60 and limits.get("max_ttl") == 2592000,
               json.dumps(limits))
 
         blocked = client_json("check")

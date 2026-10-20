@@ -68,11 +68,11 @@ services:
       HV_AUDIT_LOG: ${HV_AUDIT_LOG:-/var/lib/hatarvedelem/audit.jsonl}
       HV_AUDIT_MAX_BYTES: ${HV_AUDIT_MAX_BYTES:-10485760}
       HV_AUDIT_KEEP: ${HV_AUDIT_KEEP:-5}
-      # Alapértelmezett hozzáférési idő; a felhasználó 1 perc és 24 óra
+      # Alapértelmezett hozzáférési idő; a felhasználó 1 perc és 30 nap
       # között választhat. A MIN/MAX csak szűkítheti a tartományt.
       HV_SESSION_TTL: ${HV_SESSION_TTL:-3600}
       HV_MIN_TTL: ${HV_MIN_TTL:-60}
-      HV_MAX_TTL: ${HV_MAX_TTL:-86400}
+      HV_MAX_TTL: ${HV_MAX_TTL:-2592000}
       HV_AUTH_TTL: ${HV_AUTH_TTL:-600}
       # A TOTP 2FA otpauth:// URI issuer/címkéje (alapból Dropjak).
       HV_TOTP_ISSUER: ${HV_TOTP_ISSUER:-Dropjak}

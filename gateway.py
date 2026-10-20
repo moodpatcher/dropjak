@@ -103,9 +103,9 @@ PORT = _env_int("PORT", 8100, 1)
 CHALLENGE_TTL = _env_int("HV_CHALLENGE_TTL", 600, 30)   # másodperc
 
 # A belépés után a felhasználó választja ki a hozzáférés hosszát. A termék
-# szintű korlát 1 perc – 24 óra; a HV_MIN_TTL/HV_MAX_TTL csak szűkítheti.
+# szintű korlát 1 perc – 30 nap; a HV_MIN_TTL/HV_MAX_TTL csak szűkítheti.
 ABSOLUTE_MIN_TTL = 60
-ABSOLUTE_MAX_TTL = 24 * 60 * 60
+ABSOLUTE_MAX_TTL = 30 * 24 * 60 * 60
 MIN_TTL = max(
     ABSOLUTE_MIN_TTL,
     min(_env_int("HV_MIN_TTL", ABSOLUTE_MIN_TTL, 1), ABSOLUTE_MAX_TTL),
