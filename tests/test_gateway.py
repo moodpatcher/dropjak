@@ -2809,7 +2809,7 @@ class RateLimitHttpTests(unittest.TestCase):
 def _nl_attr(attr_type: int, payload: bytes) -> bytes:
     length = 4 + len(payload)
     return (
-        struct.pack("!HH", length, attr_type)
+        struct.pack("=HH", length, attr_type)
         + payload
         + b"\x00" * ((4 - length % 4) % 4)
     )
@@ -2947,13 +2947,35 @@ class DropLogParserTests(unittest.TestCase):
         msg_type = (dl.NFNL_SUBSYS_ULOG << 8) | dl.NFULNL_MSG_PACKET
         packet = _ipv4_packet("10.0.0.5", "203.0.113.9", 6, 1000, 80)
         data = dl._nlmsg(msg_type, 0, 1, _packet_body(packet=packet))
-        data += dl._nlmsg(dl.NLMSG_ERROR, 0, 2, struct.pack("!i", 0))
+        data += dl._nlmsg(dl.NLMSG_ERROR, 0, 2, struct.pack("=i", 0))
         data += dl._nlmsg(dl.NLMSG_NOOP, 0, 3, b"")
         items = dl.parse_netlink_buffer(data, now=time.time())
         self.assertEqual([item["kind"] for item in items], ["packet", "ack"])
         self.assertEqual(items[1]["error"], 0)
         self.assertEqual(items[0]["record"]["dport"], 80)
         self.assertEqual(dl.parse_netlink_buffer(b"\x00\x00"), [])
+
+    def test_netlink_wire_format_is_native_endian(self) -> None:
+        """A netlink fejléc/attribútum natív, a csoport-azonosító viszont BE."""
+        dl = gateway.droplog
+        raw = dl._nlmsg(0x0401, 0x0405, 7, b"\x00" * 4)
+        self.assertEqual(raw[:4], struct.pack("=I", len(raw)))
+        self.assertEqual(raw[4:6], struct.pack("=H", 0x0401))
+        self.assertEqual(raw[6:8], struct.pack("=H", 0x0405))
+        self.assertEqual(raw[8:12], struct.pack("=I", 7))
+        attr = dl._nla(1, b"\x01")
+        self.assertEqual(attr[:2], struct.pack("=H", 5))
+        self.assertEqual(attr[2:4], struct.pack("=H", 1))
+        self.assertEqual(attr[4:], b"\x01\x00\x00\x00")
+        bind = dl._config_message(dl.NFULNL_CFG_CMD_BIND, 5, 123)
+        self.assertEqual(bind[:4], struct.pack("=I", len(bind)))
+        # nfgenmsg: family, version, majd a csoport __be16-ként.
+        self.assertEqual(bind[16:20], b"\x00\x00\x00\x05")
+        # A mód üzenet copy_range mezője szintén __be32.
+        mode = dl._mode_message(5, 124)
+        self.assertEqual(mode[20:22], struct.pack("=H", 10))
+        self.assertEqual(mode[22:24], struct.pack("=H", dl.NFULA_CFG_MODE))
+        self.assertEqual(mode[24:28], struct.pack("!I", 65535))
 
 
 class DropLogStoreTests(unittest.TestCase):

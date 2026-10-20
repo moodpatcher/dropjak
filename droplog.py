@@ -151,17 +151,23 @@ def _align(value: int, alignment: int) -> int:
 
 def _nlmsg(msg_type: int, flags: int, seq: int, payload: bytes) -> bytes:
     length = _NLMSG_HDRLEN + len(payload)
-    header = struct.pack("!IHHII", length, msg_type, flags, seq, 0)
+    # A netlink fejléc és az attribútum-fejlécek natív bájtsorrendűek
+    # (__u32/__u16), NEM hálózatiak. A "!" használata x86-on némán
+    # eldobott üzeneteket okoz: a kernel a hossz-mezőt fordítva olvassa.
+    header = struct.pack("=IHHII", length, msg_type, flags, seq, 0)
     return header + payload
 
 
 def _nfgenmsg(family: int, res_id: int) -> bytes:
-    return struct.pack("!BBH", family, NFNETLINK_V0, res_id & 0xFFFF)
+    # A struct nfgenmsg res_id mezője __be16 (hálózati bájtsorrendű).
+    return struct.pack("=BB", family, NFNETLINK_V0) + struct.pack(
+        "!H", res_id & 0xFFFF
+    )
 
 
 def _nla(attr_type: int, payload: bytes) -> bytes:
     length = _NLA_HDRLEN + len(payload)
-    raw = struct.pack("!HH", length, attr_type) + payload
+    raw = struct.pack("=HH", length, attr_type) + payload
     return raw + b"\x00" * (_align(length, _NLA_ALIGNTO) - length)
 
 
@@ -215,7 +221,7 @@ def _parse_ipv4(packet: bytes) -> dict:
 def _parse_attrs(payload: bytes, offset: int) -> dict[int, bytes]:
     attrs: dict[int, bytes] = {}
     while offset + _NLA_HDRLEN <= len(payload):
-        length, attr_type = struct.unpack_from("!HH", payload, offset)
+        length, attr_type = struct.unpack_from("=HH", payload, offset)
         if length < _NLA_HDRLEN or offset + length > len(payload):
             break
         attrs.setdefault(attr_type, payload[offset + _NLA_HDRLEN:offset + length])
@@ -314,7 +320,7 @@ def parse_netlink_buffer(data: bytes, now: float | None = None) -> list[dict]:
     offset = 0
     while offset + _NLMSG_HDRLEN <= len(data):
         length, msg_type, flags, seq, pid = struct.unpack_from(
-            "!IHHII", data, offset
+            "=IHHII", data, offset
         )
         if length < _NLMSG_HDRLEN or offset + length > len(data):
             break
@@ -322,7 +328,7 @@ def parse_netlink_buffer(data: bytes, now: float | None = None) -> list[dict]:
         if msg_type == NLMSG_ERROR:
             error = 0
             if len(body) >= 4:
-                error = struct.unpack_from("!i", body, 0)[0]
+                error = struct.unpack_from("=i", body, 0)[0]
             items.append({"kind": "ack", "error": error, "seq": seq})
         elif msg_type == (NFNL_SUBSYS_ULOG << 8) | NFULNL_MSG_PACKET:
             record = parse_packet_message(body, now=now)
@@ -346,13 +352,22 @@ def _config_message(
     return _nlmsg(msg_type, NLM_F_REQUEST | NLM_F_ACK, seq, payload)
 
 
-def _mode_message(group: int, seq: int, copy_range: int = 65535) -> bytes:
+def _mode_message(
+    group: int,
+    seq: int,
+    copy_range: int = 65535,
+    qthreshold: int = 1,
+    timeout: int = 100,
+) -> bytes:
     msg_type = (NFNL_SUBSYS_ULOG << 8) | NFULNL_MSG_CONFIG
     mode = struct.pack("!IBB", copy_range, NFULNL_COPY_PACKET, 0)
+    # A qthreshold=1 minden csomagot azonnal továbbít, így a napló valós
+    # időben látszik; a timeout (1/100 mp) csak biztonsági háló.
     payload = (
         _nfgenmsg(0, group)
         + _nla(NFULA_CFG_MODE, mode)
-        + _nla(NFULA_CFG_TIMEOUT, struct.pack("!I", 1000))
+        + _nla(NFULA_CFG_TIMEOUT, struct.pack("!I", timeout))
+        + _nla(NFULA_CFG_QTHRESH, struct.pack("!I", qthreshold))
     )
     return _nlmsg(msg_type, NLM_F_REQUEST | NLM_F_ACK, seq, payload)
 
@@ -626,7 +641,11 @@ class DropLogListener:
                 socket.AF_NETLINK, socket.SOCK_RAW, NETLINK_NETFILTER
             )
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
-            sock.bind((os.getpid(), 0))
+            # A nl_pid=0 a kernelre bízza az egyedi port-azonosítót. A
+            # getpid() nem használható: host-hálózatnézetben a konténer
+            # PID 1-je ütközhet a host systemd ugyanilyen azonosítójú
+            # netlink socketjeivel (EADDRINUSE).
+            sock.bind((0, 0))
             sock.settimeout(1.0)
             self._send_config(sock)
         except OSError as exc:
