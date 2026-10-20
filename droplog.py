@@ -82,6 +82,12 @@ def _default_log(message: str) -> None:
 _REASON_RE = re.compile(r"reason=([A-Za-z0-9_.:-]+)")
 _MAX_STRING = 256
 
+# A fail2ban tiltás tényét a portál egyetlen eseményként írja a naplóba
+# (reason=fail2ban, event=ban). A tiltás alatt eldobott csomagok régi,
+# csomagszintű bejegyzéseit a felület ne jelenítse meg külön soronként.
+BAN_EVENT_REASON = "fail2ban"
+BAN_EVENT_KIND = "ban"
+
 
 # --------------------------------------------------------------- NFLOG állandók
 
@@ -490,6 +496,16 @@ class DropLog:
                         except ValueError:
                             continue
                         if not isinstance(item, dict):
+                            continue
+                        if (
+                            str(item.get("reason", "")).strip().lower()
+                            == BAN_EVENT_REASON
+                            and str(item.get("event", "")).strip().lower()
+                            != BAN_EVENT_KIND
+                        ):
+                            # Régi szabály vagy külső naplóző által hagyott
+                            # csomagszintű fail2ban bejegyzés: a tiltásról
+                            # szóló egyetlen eseményt tartjuk meg.
                             continue
                         if before is not None:
                             try:

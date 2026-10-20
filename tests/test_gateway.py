@@ -3439,6 +3439,36 @@ class DropLogStoreTests(unittest.TestCase):
         self.assertIn("ts", record)
         self.assertLessEqual(len(record["src"]), 256)
 
+    def test_fail2ban_packet_drops_collapse_to_single_ban_event(self) -> None:
+        now = time.time()
+        # Régi, csomagszintű fail2ban bejegyzések (a tiltás alatti dropok).
+        for index in range(20):
+            self.store.write({
+                "ts": now + index,
+                "src": "192.0.2.9",
+                "proto": "tcp",
+                "dport": 1000 + index,
+                "reason": "fail2ban",
+            })
+        ban = self.store.write({
+            "ts": now + 30,
+            "src": "192.0.2.9",
+            "reason": "fail2ban",
+            "event": "ban",
+            "attempts": 12,
+        })
+        rows = self.store.read(reason="fail2ban")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["event"], "ban")
+        self.assertEqual(rows[0]["ts"], ban["ts"])
+        # Más okú bejegyzéseket a szűrés nem érint.
+        self.store.write({
+            "ts": now + 31,
+            "src": "192.0.2.10",
+            "reason": "no-grant",
+        })
+        self.assertEqual(len(self.store.read()), 2)
+
     def test_rotation_keeps_old_entries(self) -> None:
         self.store.max_bytes = 200
         for index in range(8):
@@ -3631,6 +3661,15 @@ class FirewallCustomTests(unittest.TestCase):
                     "ports": [80, 443]}],
         )
         script = "\n".join(self.tools.script())
+        preauth_lines = [
+            line for line in self.tools.script()
+            if "inet hatarvedelem preauth " in line
+        ]
+        self.assertEqual(
+            preauth_lines[0],
+            "add rule inet hatarvedelem preauth "
+            "ip saddr @banned_v4 drop",
+        )
         log = (
             'limit rate 30/minute burst 60 packets log prefix '
             '"dropjak-drop reason=block " group 5'
@@ -3749,11 +3788,16 @@ class FirewallCustomTests(unittest.TestCase):
             preauth=[{"dst": "192.168.50.10", "proto": "tcp",
                       "ports": [80], "enabled": False}]
         )
-        self.assertFalse(
-            any(
-                "inet hatarvedelem preauth " in line
-                for line in self.tools.script()
-            )
+        preauth_lines = [
+            line for line in self.tools.script()
+            if "inet hatarvedelem preauth " in line
+        ]
+        # A kikapcsolt pre-auth bejegyzés nem kerül be; csak a tiltott
+        # forrásokat mindenképp kizáró védőszabály marad.
+        self.assertEqual(
+            preauth_lines,
+            ["add rule inet hatarvedelem preauth "
+             "ip saddr @banned_v4 drop"],
         )
 
     def test_preauth_requires_lan_interface(self) -> None:
@@ -3775,6 +3819,36 @@ class FirewallCustomTests(unittest.TestCase):
                 block=[{"dst": "10.0.0.0/24", "proto": "icmp",
                         "ports": [1]}]
             )
+
+
+class RulesetTemplateTests(unittest.TestCase):
+    """A telepített nftables sablon biztonsági sorrendje."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "deploy",
+            "hatarvedelem.nft",
+        )
+        with open(path, encoding="utf-8") as fh:
+            cls.text = fh.read()
+        cls.forward = cls.text.split("chain forward {", 1)[1].split(
+            "chain input {", 1
+        )[0]
+
+    def test_banned_sources_are_dropped_before_preauth(self) -> None:
+        self.assertIn("ip saddr @banned_v4 drop", self.forward)
+        self.assertLess(
+            self.forward.index("ip saddr @banned_v4 drop"),
+            self.forward.index("jump preauth"),
+        )
+
+    def test_banned_packets_are_not_logged_per_packet(self) -> None:
+        # A tiltásról a portál egyetlen eseményt ír; a tiltás alatti
+        # csomagok NFLOG-naplózása elárasztaná a drop logot.
+        self.assertNotIn("reason=fail2ban ", self.text)
+        self.assertNotIn("banned_v4 limit", self.text)
 
 
 class FakeBanFirewall:

@@ -1532,7 +1532,7 @@ const I18N = {
     'Sikertelen belépés a tiltásig': 'Failed sign-ins before ban',
     'Időablak (perc)': 'Window (minutes)',
     'Tiltás hossza (perc)': 'Ban duration (minutes)',
-    'A küszöb elérésekor a forrás IP bekerül a banned_v4 halmazba, és a tűzfal eldobja a csomagjait. A portál és a DHCP kivétel, hogy a kliens lássa a tiltás okát, és ne veszítse el az IP-címét. A tiltás a megadott idő után automatikusan lejár; a kézi tiltások megmaradnak, ha az automatikus tiltást kikapcsolod.': 'When the threshold is reached, the source IP is added to the banned_v4 set and the firewall drops its packets. The portal and DHCP are exempt so the client can see why it was banned and does not lose its IP address. The ban expires automatically after the given time; manual bans remain when you disable automatic banning.',
+    'A küszöb elérésekor a forrás IP bekerül a banned_v4 halmazba, és a tűzfal eldobja a csomagjait. A portál és a DHCP kivétel, hogy a kliens lássa a tiltás okát, és ne veszítse el az IP-címét. A tiltás a megadott idő után automatikusan lejár; a kézi tiltások megmaradnak, ha az automatikus tiltást kikapcsolod. A tiltásról a drop log egyetlen eseményt rögzít, a tiltás alatti csomagokat nem naplózza külön, és a tiltás a pre-auth szabályokat is felülírja.': 'When the threshold is reached, the source IP is added to the banned_v4 set and the firewall drops its packets. The portal and DHCP are exempt so the client can see why it was banned and does not lose its IP address. The ban expires automatically after the given time; manual bans remain when you disable automatic banning. The drop log records a single ban event; packets dropped while the ban is active are not logged individually, and the ban overrides pre-auth rules.',
     'Adj meg érvényes számokat a küszöbhöz és az időtartamokhoz.': 'Enter valid numbers for the threshold and durations.',
     'IP-cím kézi tiltása': 'Manually ban an IP address',
     'Add meg a letiltandó IP-címet.': 'Enter the IP address to ban.',
@@ -2064,7 +2064,7 @@ const I18N = {
     'Sikertelen belépés a tiltásig': 'Fehlgeschlagene Anmeldungen bis zur Sperre',
     'Időablak (perc)': 'Zeitfenster (Minuten)',
     'Tiltás hossza (perc)': 'Sperrdauer (Minuten)',
-    'A küszöb elérésekor a forrás IP bekerül a banned_v4 halmazba, és a tűzfal eldobja a csomagjait. A portál és a DHCP kivétel, hogy a kliens lássa a tiltás okát, és ne veszítse el az IP-címét. A tiltás a megadott idő után automatikusan lejár; a kézi tiltások megmaradnak, ha az automatikus tiltást kikapcsolod.': 'Beim Erreichen der Schwelle wird die Quell-IP in die Menge banned_v4 aufgenommen und die Firewall verwirft ihre Pakete. Portal und DHCP sind ausgenommen, damit der Client den Grund der Sperre sieht und seine IP-Adresse nicht verliert. Die Sperre läuft nach der angegebenen Zeit automatisch ab; manuelle Sperren bleiben bestehen, wenn du die automatische Sperre deaktivierst.',
+    'A küszöb elérésekor a forrás IP bekerül a banned_v4 halmazba, és a tűzfal eldobja a csomagjait. A portál és a DHCP kivétel, hogy a kliens lássa a tiltás okát, és ne veszítse el az IP-címét. A tiltás a megadott idő után automatikusan lejár; a kézi tiltások megmaradnak, ha az automatikus tiltást kikapcsolod. A tiltásról a drop log egyetlen eseményt rögzít, a tiltás alatti csomagokat nem naplózza külön, és a tiltás a pre-auth szabályokat is felülírja.': 'Beim Erreichen der Schwelle wird die Quell-IP in die Menge banned_v4 aufgenommen und die Firewall verwirft ihre Pakete. Portal und DHCP sind ausgenommen, damit der Client den Grund der Sperre sieht und seine IP-Adresse nicht verliert. Die Sperre läuft nach der angegebenen Zeit automatisch ab; manuelle Sperren bleiben bestehen, wenn du die automatische Sperre deaktivierst. Der Drop-Log zeichnet ein einziges Sperrereignis auf; während der Sperre verworfene Pakete werden nicht einzeln protokolliert, und die Sperre übersteuert Pre-Auth-Regeln.',
     'Adj meg érvényes számokat a küszöbhöz és az időtartamokhoz.': 'Gib gültige Zahlen für Schwelle und Zeiträume ein.',
     'IP-cím kézi tiltása': 'IP-Adresse manuell sperren',
     'Add meg a letiltandó IP-címet.': 'Gib die zu sperrende IP-Adresse ein.',
@@ -5315,7 +5315,7 @@ function fail2banConfigForm(fb) {
   box.append(grid);
   box.append(el('p', {
     class: 'port-hint',
-    text: tr('A küszöb elérésekor a forrás IP bekerül a banned_v4 halmazba, és a tűzfal eldobja a csomagjait. A portál és a DHCP kivétel, hogy a kliens lássa a tiltás okát, és ne veszítse el az IP-címét. A tiltás a megadott idő után automatikusan lejár; a kézi tiltások megmaradnak, ha az automatikus tiltást kikapcsolod.')
+    text: tr('A küszöb elérésekor a forrás IP bekerül a banned_v4 halmazba, és a tűzfal eldobja a csomagjait. A portál és a DHCP kivétel, hogy a kliens lássa a tiltás okát, és ne veszítse el az IP-címét. A tiltás a megadott idő után automatikusan lejár; a kézi tiltások megmaradnak, ha az automatikus tiltást kikapcsolod. A tiltásról a drop log egyetlen eseményt rögzít, a tiltás alatti csomagokat nem naplózza külön, és a tiltás a pre-auth szabályokat is felülírja.')
   }));
   box.append(el('p', {
     class: 'port-hint',

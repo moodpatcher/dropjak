@@ -1852,6 +1852,16 @@ class Firewall:
                 "pre-auth szabály csak ismert LAN interfésszel alkalmazható"
             )
         lines: list[str] = []
+        # A tiltott forrás a pre-auth lánc első szabályaként is eldobódik.
+        # A base forward láncban a banned_v4 drop már a pre-auth ugrás előtt
+        # fut; ez a szabály akkor is véd, ha a láncok sorrendje később
+        # megváltozik, vagy egy pre-auth bejegyzés established kapcsolatra
+        # illeszkedne. A tiltás ezzel minden engedélyezett/pre-auth portot
+        # felülír; csak a portál és a DHCP marad elérhető.
+        lines.append(
+            f"add rule inet {self.table} preauth "
+            f"ip saddr @{self.ban_set} drop"
+        )
         for entry in block:
             dst = str(entry.get("dst", "")).strip()
             proto = str(entry.get("proto", "")).strip().lower()
@@ -4091,11 +4101,11 @@ class Gateway:
         try:
             self.drops.store.write(
                 {
-                    "reason": "fail2ban",
+                    "reason": droplog.BAN_EVENT_REASON,
                     "src": ip,
                     "dst": "",
                     "proto": "",
-                    "event": "ban",
+                    "event": droplog.BAN_EVENT_KIND,
                     "attempts": attempts,
                     "user": user,
                     "ban_until": until,

@@ -202,8 +202,10 @@ the sign-in screen for that IP with a ban notice and a live countdown; the
 normal screen returns when the ban expires or is lifted. The threshold,
 window and ban duration are editable at runtime; the `HV_FAIL2BAN*`
 variables only provide the initial defaults. Bans are written to
-`fail2ban.json` (mode `0600`) and restored on start, and every ban is also
-recorded in the drop log with reason `fail2ban`.
+`fail2ban.json` (mode `0600`) and restored on start. Every ban is recorded
+in the drop log exactly once, as a `fail2ban` event with `event=ban`; the
+packets dropped while the ban is active are not logged individually, so the
+log is not flooded by a banned scanner.
 
 Drop-based banning covers clients that never attempt a sign-in. The portal
 consumes the NFLOG drop events and counts unauthorized TCP traffic per source
@@ -242,7 +244,10 @@ The **Settings** admin tab manages three things:
   means any destination. For a published Docker port, use the pre-DNAT
   address (the VM IP), not the container's internal address. Every client
   can use them, so only deliberately public services belong here. Port 80
-  entries also skip the captive-portal redirect.
+  entries also skip the captive-portal redirect. A fail2ban ban always
+  overrides pre-auth: banned sources are dropped before the pre-auth chain,
+  and an explicit ban drop is also the first rule inside that chain. Only
+  the portal and DHCP remain reachable for a banned client.
 - **Block rules** — destination/ports that are always dropped. The block is
   evaluated before pre-auth, so it overrides a pre-auth entry.
 - **Host SSH policy** — `admin`, `any` or `off`, applied immediately.
