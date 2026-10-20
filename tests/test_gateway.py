@@ -644,7 +644,7 @@ class FirewallTests(unittest.TestCase):
         self.assertFalse(alice["in_sync"])
         self.assertEqual(alice["ports_label"], "TCP 80")
         self.assertIn("hiányzó TCP 443", alice["mismatch"])
-        self.assertIn("hiányzó host SSH", alice["mismatch"])
+        self.assertFalse(alice["host_ssh"])
         self.assertEqual(alice["expires_in"], 100)
         self.assertEqual(alice["users"], ["alice"])
 
@@ -690,6 +690,41 @@ class FirewallTests(unittest.TestCase):
         self.assertEqual(row["ports_label"], "Minden port")
         self.assertEqual(grouped["counts"]["mismatched"], 0)
 
+    def test_group_snapshot_host_ssh_only_expected_for_admin_full(self) -> None:
+        # Egyedi teljes hozzáférésű szabály nem nyit SSH-t, ezért a hiányzó
+        # host SSH nem hiba nála; a beépített admin-fullnál viszont igen.
+        base_sets = {
+            "allowed_v4": [{"address": "10.0.0.9", "expires_in": 60,
+                            "timeout": 60}],
+            "allowed_icmp": [{"address": "10.0.0.9", "expires_in": 60,
+                              "timeout": 60}],
+            "host_ssh_v4": [],
+            "allowed_tcp": [],
+            "allowed_udp": [],
+        }
+
+        def session(rule: str) -> dict:
+            return {
+                "user": "root", "ip": "10.0.0.9", "authorized": True,
+                "tcp": [], "udp": [], "icmp": True, "full": True,
+                "rule": rule, "rule_label": "Teljes",
+                "ports_label": "Minden port", "expires_in": 60, "logged_in": 1,
+            }
+
+        custom = gateway.group_firewall_snapshot(
+            {"sets": base_sets, "errors": []}, [session("custom-full")]
+        )
+        custom_row = custom["ips"][0]
+        self.assertTrue(custom_row["in_sync"], custom_row)
+        self.assertNotIn("hiányzó host SSH", custom_row["mismatch"])
+
+        builtin = gateway.group_firewall_snapshot(
+            {"sets": base_sets, "errors": []}, [session(gateway.ADMIN_RULE_ID)]
+        )
+        builtin_row = builtin["ips"][0]
+        self.assertFalse(builtin_row["in_sync"])
+        self.assertIn("hiányzó host SSH", builtin_row["mismatch"])
+
 
     # -- MAC-kötés -----------------------------------------------------------
 
@@ -725,6 +760,20 @@ class FirewallTests(unittest.TestCase):
         self.assertIn(
             "add element inet hatarvedelem allowed_tcp "
             "{ 192.168.10.2 . 80 timeout 60s }",
+            self.tools.script(),
+        )
+
+    def test_grant_host_ssh_binds_client_mac_and_ttl(self) -> None:
+        fw = self._mac_firewall(self._arp("192.168.10.2", "aa:bb:cc:dd:ee:ff"))
+        fw.grant_host_ssh("192.168.10.2", 120)
+        self.assertIn(
+            "add element inet hatarvedelem client_mac "
+            "{ 192.168.10.2 . aa:bb:cc:dd:ee:ff timeout 120s }",
+            self.tools.script(),
+        )
+        self.assertIn(
+            "add element inet hatarvedelem host_ssh_v4 "
+            "{ 192.168.10.2 timeout 120s }",
             self.tools.script(),
         )
 
@@ -1570,10 +1619,11 @@ class SessionTests(unittest.TestCase):
             binary=str(self.tools.nft), logger=lambda *_: None
         )
         self.sessions = gateway.SessionManager(
-            self.fw, ttl=3600, pending_ttl=600, host_ssh_mode="any"
+            self.fw, ttl=3600, pending_ttl=600
         )
         self.web_rule = make_rule("web-only", ("web",))
         self.icmp_rule = make_rule("icmp-only", ("icmp",))
+        self.admin_rule = make_rule(gateway.ADMIN_RULE_ID, ("all",))
 
     def tearDown(self) -> None:
         gateway.CONNTRACK_BIN = self._old_conntrack
@@ -1619,9 +1669,9 @@ class SessionTests(unittest.TestCase):
             "add element inet hatarvedelem allowed_tcp { 192.168.50.23 . 853 timeout 90s }",
             "add element inet hatarvedelem allowed_udp { 192.168.50.23 . 53 timeout 90s }",
             "add element inet hatarvedelem allowed_udp { 192.168.50.23 . 853 timeout 90s }",
-            "add element inet hatarvedelem host_ssh_v4 { 192.168.50.23 timeout 90s }",
         ):
             self.assertIn(line, script)
+        self.assertFalse(any("host_ssh_v4" in line for line in script), script)
         self.assertFalse(any("allowed_v4" in line for line in script), script)
         # Előző engedély hiányában nincs conntrack-takarítás.
         self.assertEqual(self.conntrack_lines(), [])
@@ -1717,10 +1767,7 @@ class SessionTests(unittest.TestCase):
             "add element inet hatarvedelem allowed_icmp { 192.168.50.23 timeout 60s }",
             script,
         )
-        self.assertIn(
-            "add element inet hatarvedelem host_ssh_v4 { 192.168.50.23 timeout 60s }",
-            script,
-        )
+        self.assertFalse(any("host_ssh_v4" in line for line in script), script)
         self.assertTrue(
             any(line.startswith("conntrack -D -s 192.168.50.23") for line in self.tools.lines())
         )
@@ -1869,55 +1916,69 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(self.sessions.last_end("192.168.50.23")["reason"], "logout")
         self.assertEqual(self.sessions.active_sessions(), [])
 
-    # -- host SSH házirend --------------------------------------------------
+    # -- host SSH: csak a beépített admin-full nyitja ----------------------
 
-    def _host_ssh_script(self, manager: gateway.SessionManager, role: str) -> list[str]:
-        session = manager.login("user", "192.168.50.23", role=role)
-        manager.authorize(session.token, "192.168.50.23", self.web_rule, 60)
+    def _host_ssh_script(
+        self, manager: gateway.SessionManager, rule: gateway.Rule
+    ) -> list[str]:
+        session = manager.login("user", "192.168.50.23")
+        manager.authorize(session.token, "192.168.50.23", rule, 60)
         return [
             line for line in self.tools.script()
             if "host_ssh_v4" in line
         ]
 
-    def test_host_ssh_default_admin_only(self) -> None:
+    def test_host_ssh_opens_only_for_builtin_admin_full(self) -> None:
         manager = gateway.SessionManager(
-            self.fw, ttl=3600, pending_ttl=600, host_ssh_mode="admin"
+            self.fw, ttl=3600, pending_ttl=600
         )
-        self.assertEqual(
-            self._host_ssh_script(manager, gateway.ROLE_USER), []
-        )
+        # Szűk szolgáltatási szabály nem nyit SSH-t.
+        self.assertEqual(self._host_ssh_script(manager, self.web_rule), [])
+        # Egyedi teljes hozzáférésű szabály sem nyit SSH-t.
+        self.tools.clear()
+        custom_full = make_rule("custom-full", ("all",))
+        self.assertTrue(custom_full.full)
+        self.assertEqual(self._host_ssh_script(manager, custom_full), [])
+        # A beépített admin-full viszont megnyitja, a TTL-jével.
         self.tools.clear()
         self.assertEqual(
-            len(self._host_ssh_script(manager, gateway.ROLE_ADMIN)), 1
+            self._host_ssh_script(manager, self.admin_rule),
+            [
+                "add element inet hatarvedelem host_ssh_v4 "
+                "{ 192.168.50.23 timeout 60s }"
+            ],
         )
 
-    def test_host_ssh_off_grants_nothing(self) -> None:
-        manager = gateway.SessionManager(
-            self.fw, ttl=3600, pending_ttl=600, host_ssh_mode="off"
+    def test_switching_away_from_admin_full_revokes_ssh(self) -> None:
+        session = self.sessions.login("alice", "192.168.50.23")
+        self.sessions.authorize(
+            session.token, "192.168.50.23", self.admin_rule, 300
         )
-        self.assertEqual(
-            self._host_ssh_script(manager, gateway.ROLE_ADMIN), []
+        self.assertIn(
+            "add element inet hatarvedelem host_ssh_v4 "
+            "{ 192.168.50.23 timeout 300s }",
+            self.tools.script(),
         )
+        self.tools.clear()
 
-    def test_host_ssh_any_grants_every_session(self) -> None:
-        manager = gateway.SessionManager(
-            self.fw, ttl=3600, pending_ttl=600, host_ssh_mode="any"
+        self.sessions.authorize(
+            session.token, "192.168.50.23", self.web_rule, 60
         )
-        self.assertEqual(
-            len(self._host_ssh_script(manager, gateway.ROLE_USER)), 1
+        self.assertIn(
+            "nft delete element inet hatarvedelem host_ssh_v4 "
+            "{ 192.168.50.23 }",
+            self.tools.deletes(),
         )
-
-    def test_unknown_host_ssh_mode_falls_back_to_admin(self) -> None:
-        manager = gateway.SessionManager(
-            self.fw, ttl=3600, pending_ttl=600, host_ssh_mode="bogus"
+        self.assertFalse(
+            any("host_ssh_v4" in line for line in self.tools.script()),
+            self.tools.script(),
         )
-        self.assertEqual(manager.host_ssh_mode, "admin")
 
     # -- versenyhelyzetek és leállás ---------------------------------------
 
     def test_rule_check_rejects_removed_rule(self) -> None:
         manager = gateway.SessionManager(
-            self.fw, ttl=3600, pending_ttl=600, host_ssh_mode="any",
+            self.fw, ttl=3600, pending_ttl=600,
             rule_check=lambda user, rule: False,
         )
         session = manager.login("alice", "192.168.50.23")
@@ -1971,43 +2032,6 @@ class SessionTests(unittest.TestCase):
             "{ 192.168.50.23 . 80 }",
             self.tools.deletes(),
         )
-
-    def test_set_host_ssh_mode_narrowing_revokes_ssh(self) -> None:
-        alice = self.sessions.login("alice", "192.168.50.23")
-        root = self.sessions.login(
-            "root", "192.168.50.24", role=gateway.ROLE_ADMIN
-        )
-        self.sessions.authorize(
-            alice.token, "192.168.50.23", self.web_rule, 60
-        )
-        self.sessions.authorize(
-            root.token, "192.168.50.24", self.web_rule, 60
-        )
-        ssh_delete = (
-            "nft delete element inet hatarvedelem host_ssh_v4 "
-            "{ %s }"
-        )
-        self.tools.clear()
-        self.assertEqual(self.sessions.set_host_ssh_mode("admin"), [])
-        deletes = self.tools.deletes()
-        self.assertIn(ssh_delete % "192.168.50.23", deletes)
-        self.assertNotIn(ssh_delete % "192.168.50.24", deletes)
-
-        self.tools.clear()
-        self.assertEqual(self.sessions.set_host_ssh_mode("off"), [])
-        deletes = self.tools.deletes()
-        self.assertIn(ssh_delete % "192.168.50.23", deletes)
-        self.assertIn(ssh_delete % "192.168.50.24", deletes)
-
-        # Bővítéskor a meglévő munkamenetek nem kapnak utólag SSH-t.
-        self.tools.clear()
-        self.assertEqual(self.sessions.set_host_ssh_mode("any"), [])
-        self.assertEqual(self.tools.deletes(), [])
-
-    def test_set_host_ssh_mode_rejects_invalid(self) -> None:
-        with self.assertRaises(ValueError):
-            self.sessions.set_host_ssh_mode("sometimes")
-        self.assertEqual(self.sessions.host_ssh_mode, "any")
 
 
 # ------------------------------------------------------------------ egyéb mag
@@ -2070,13 +2094,9 @@ class HttpTests(unittest.TestCase):
         cls._old_conntrack = gateway.CONNTRACK_BIN
         cls._old_difficulty = gateway.POW_DIFFICULTY
         cls._old_portal_url = gateway.PORTAL_URL
-        cls._old_host_ssh_mode = gateway.HOST_SSH_MODE
         gateway.CONNTRACK_BIN = str(cls.tools.conntrack)
         gateway.POW_DIFFICULTY = 2
         gateway.PORTAL_URL = ""
-        # A HTTP-tesztek a visszafelé kompatibilis "any" módot vizsgálják;
-        # a szűkebb alapértelmezést külön tesztek fedik le.
-        gateway.HOST_SSH_MODE = "any"
 
         users_path = os.path.join(cls.tmp.name, "users.json")
         rules_path = os.path.join(cls.tmp.name, "rules.json")
@@ -2130,7 +2150,6 @@ class HttpTests(unittest.TestCase):
         gateway.CONNTRACK_BIN = cls._old_conntrack
         gateway.POW_DIFFICULTY = cls._old_difficulty
         gateway.PORTAL_URL = cls._old_portal_url
-        gateway.HOST_SSH_MODE = cls._old_host_ssh_mode
         cls.tmp.cleanup()
 
     def setUp(self) -> None:
@@ -2328,9 +2347,10 @@ class HttpTests(unittest.TestCase):
             "add element inet hatarvedelem allowed_tcp { 127.0.0.1 . 80 timeout 60s }",
             "add element inet hatarvedelem allowed_tcp { 127.0.0.1 . 443 timeout 60s }",
             "add element inet hatarvedelem allowed_udp { 127.0.0.1 . 443 timeout 60s }",
-            "add element inet hatarvedelem host_ssh_v4 { 127.0.0.1 timeout 60s }",
         ):
             self.assertIn(line, script)
+        # Az egyedi web szabály nem nyit host SSH-t.
+        self.assertFalse(any("host_ssh_v4" in line for line in script), script)
         self.assertFalse(
             any(". 53 " in line or ". 853 " in line for line in script), script
         )
@@ -3045,12 +3065,10 @@ class RegistrationHttpTests(unittest.TestCase):
             ("CONNTRACK_BIN", gateway.CONNTRACK_BIN),
             ("POW_DIFFICULTY", gateway.POW_DIFFICULTY),
             ("PORTAL_URL", gateway.PORTAL_URL),
-            ("HOST_SSH_MODE", gateway.HOST_SSH_MODE),
         )
         gateway.CONNTRACK_BIN = str(self.tools.conntrack)
         gateway.POW_DIFFICULTY = 2
         gateway.PORTAL_URL = ""
-        gateway.HOST_SSH_MODE = "off"
 
         self.users = gateway.UserStore(
             os.path.join(self.tmp.name, "users.json"), iterations=10_000
@@ -3073,7 +3091,7 @@ class RegistrationHttpTests(unittest.TestCase):
         )
         self.settings = gateway.settings_store.SettingsStore(
             os.path.join(self.tmp.name, "firewall-settings.json"),
-            logger=lambda *_: None, default_host_ssh="off",
+            logger=lambda *_: None,
         )
         self.fw = gateway.Firewall(
             binary=str(self.tools.nft), logger=lambda *_: None
@@ -3627,6 +3645,408 @@ class RuleGroupStoreTests(unittest.TestCase):
         self.groups.remove_rule_everywhere("dns-only")
         self.assertEqual(self.groups.get("staff").rules, ())
 
+    def test_collection_union_resolution_and_persistence(self) -> None:
+        web = self.rules.create("col-web", {
+            "label": "Web", "tcp": [80, 443], "udp": [443],
+            "default_ttl": 120, "max_ttl": 600,
+        })
+        dns = self.rules.create("col-dns", {
+            "label": "DNS", "tcp": [53, 853], "udp": [53], "icmp": True,
+            "default_ttl": 60, "max_ttl": 300,
+        })
+        combo = self.rules.create("col-combo", {
+            "label": "Web + DNS", "description": "gyűjtő",
+            "collection": True, "members": ["col-web", "col-dns"],
+            "default_ttl": 120, "max_ttl": 600,
+        })
+        self.assertTrue(combo.collection)
+        self.assertEqual(combo.members, ("col-web", "col-dns"))
+        self.assertEqual(combo.tcp, (53, 80, 443, 853))
+        self.assertEqual(combo.udp, (53, 443))
+        self.assertTrue(combo.icmp)
+        self.assertFalse(combo.full)
+        self.assertEqual(
+            combo.public()["ports_label"], "TCP 53, 80, 443, 853 · UDP 53, 443 · ICMP"
+        )
+        self.assertIn("members", combo.public())
+        self.assertTrue(combo.public()["collection"])
+
+        with open(self.rules.path, encoding="utf-8") as fh:
+            stored = json.load(fh)["rules"]["col-combo"]
+        self.assertEqual(
+            set(stored),
+            {"label", "description", "members", "default_ttl", "max_ttl", "created"},
+        )
+        self.assertEqual(stored["members"], ["col-web", "col-dns"])
+        for forbidden in ("tcp", "udp", "icmp", "full"):
+            self.assertNotIn(forbidden, stored)
+
+        reloaded = gateway.RuleStore(
+            self.rules.path, catalog=CATALOG, logger=lambda *_: None
+        )
+        loaded = reloaded.get("col-combo")
+        self.assertIsNotNone(loaded)
+        self.assertEqual(loaded.members, ("col-web", "col-dns"))
+        self.assertEqual(loaded.tcp, (53, 80, 443, 853))
+        self.assertEqual(loaded.udp, (53, 443))
+        self.assertTrue(loaded.icmp)
+        self.assertFalse(loaded.full)
+
+    def test_collection_validation_rejects_bad_members(self) -> None:
+        self.rules.create("member-a", {"label": "A", "tcp": [80]})
+        self.rules.create("member-b", {"label": "B", "udp": [53]})
+        self.rules.create("member-full", {"label": "Full", "full": True})
+        self.rules.create("nested", {
+            "label": "Nested", "collection": True,
+            "members": ["member-a", "member-b"],
+        })
+        invalid = {
+            "one member": (
+                {"label": "X", "collection": True, "members": ["member-a"]},
+                "legalább 2 és legfeljebb 64",
+            ),
+            "unknown member": (
+                {"label": "X", "members": ["member-a", "missing"]},
+                "ismeretlen szabály a gyűjtőszabályban: missing",
+            ),
+            "full member": (
+                {"label": "X", "members": ["member-a", "member-full"]},
+                "teljes hozzáférésű szabályt: member-full",
+            ),
+            "nested collection": (
+                {"label": "X", "members": ["member-a", "nested"]},
+                "másik gyűjtőszabályt: nested",
+            ),
+            "duplicate members": (
+                {"label": "X", "members": ["member-a", "member-a"]},
+                "ismétlődő szabály-azonosító",
+            ),
+            "empty members": (
+                {"label": "X", "collection": True},
+                "2–64 szabály-azonosítóból álló lista kell",
+            ),
+            "ports with collection": (
+                {
+                    "label": "X", "collection": True,
+                    "members": ["member-a", "member-b"], "tcp": [80],
+                },
+                "nem adható meg port",
+            ),
+            "too many members": (
+                {
+                    "label": "X", "collection": True,
+                    "members": [f"r{index}" for index in range(65)],
+                },
+                "legfeljebb 64",
+            ),
+            "self reference": (
+                {
+                    "label": "X", "collection": True,
+                    "members": ["member-a", "selfref"],
+                },
+                "nem tartalmazhatja önmagát",
+            ),
+        }
+        for name, (payload, expected) in invalid.items():
+            with self.subTest(name=name):
+                with self.assertRaises(gateway.RuleStoreError) as caught:
+                    self.rules.create("selfref", payload)
+                self.assertIn(expected, str(caught.exception))
+        self.assertIsNone(self.rules.get("selfref"))
+
+    def test_collection_assignment_and_authorization(self) -> None:
+        self.rules.create("col-web", {
+            "label": "Web", "tcp": [80, 443], "udp": [443],
+        })
+        self.rules.create("col-dns", {
+            "label": "DNS", "tcp": [53, 853], "udp": [53], "icmp": True,
+        })
+        combo = self.rules.create("col-combo", {
+            "label": "Combo", "collection": True,
+            "members": ["col-web", "col-dns"],
+            "default_ttl": 120, "max_ttl": 300,
+        })
+        self.users.add("alice", "hosszu-jelszo-1", rules=("col-combo",))
+        self.users.add("bob", "hosszu-jelszo-2", rules=())
+        group = self.groups.create("col-staff", {
+            "label": "Staff", "rules": ["col-combo"], "members": ["bob"],
+        })
+        alice = self.users.record("alice")
+        bob = self.users.record("bob")
+        alice_effective = self.rules.effective_for(alice, [])
+        bob_effective = self.rules.effective_for(bob, [group])
+        self.assertEqual([item.id for item in alice_effective], ["col-combo"])
+        self.assertEqual([item.id for item in bob_effective], ["col-combo"])
+        for current in (alice_effective[0], bob_effective[0]):
+            self.assertEqual(current.tcp, (53, 80, 443, 853))
+            self.assertEqual(current.udp, (53, 443))
+            self.assertTrue(current.icmp)
+            self.assertFalse(current.full)
+        resolved = self.rules.resolve_for(alice, [], "col-combo")
+        self.assertEqual(resolved.ports, combo.ports)
+        self.assertEqual(resolved.default_ttl, 120)
+        self.assertEqual(resolved.max_ttl, 300)
+
+        class _FakeFirewall:
+            def __init__(self) -> None:
+                self.granted = []
+
+            def revoke_host_ssh(self, ip: str) -> None:
+                pass
+
+            def revoke_all(self, ip: str, grants=()) -> None:
+                pass
+
+            def grant(self, ip, ports, ttl) -> None:
+                self.granted.append((ip, ports, ttl))
+
+        firewall = _FakeFirewall()
+        manager = gateway.SessionManager(
+            firewall, ttl=3600, pending_ttl=600
+        )
+        session = manager.login("alice", "192.168.50.10")
+        with self.assertRaises(gateway.AccessError):
+            manager.authorize(
+                session.token, "192.168.50.10", resolved, resolved.max_ttl + 1
+            )
+        authorized = manager.authorize(
+            session.token, "192.168.50.10", resolved, resolved.max_ttl
+        )
+        self.assertEqual(authorized.rule, "col-combo")
+        self.assertEqual(authorized.ports, resolved.ports)
+        self.assertEqual(
+            firewall.granted[-1],
+            ("192.168.50.10", resolved.ports, resolved.max_ttl),
+        )
+
+    def test_delete_blocks_collection_member_and_collections_containing(self) -> None:
+        self.rules.create("member-a", {"label": "A", "tcp": [80]})
+        self.rules.create("member-b", {"label": "B", "udp": [53]})
+        self.rules.create("col-a", {
+            "label": "Combo A", "collection": True,
+            "members": ["member-a", "member-b"],
+        })
+        self.rules.create("col-b", {
+            "label": "Combo B", "collection": True,
+            "members": ["member-a", "member-b"],
+        })
+        self.assertEqual(
+            sorted(self.rules.collections_containing("member-a")),
+            ["col-a", "col-b"],
+        )
+        self.assertEqual(self.rules.collections_containing("col-a"), [])
+        with self.assertRaises(gateway.RuleStoreError) as caught:
+            self.rules.delete("member-a")
+        message = str(caught.exception)
+        self.assertIn("col-a", message)
+        self.assertIn("col-b", message)
+        self.assertIn("gyűjtőszabály", message)
+        # A gyűjtő törlése csak a gyűjtőt törli, a tagokat nem.
+        self.rules.delete("col-a")
+        self.assertIsNotNone(self.rules.get("member-a"))
+        self.assertIsNotNone(self.rules.get("member-b"))
+        self.assertEqual(self.rules.collections_containing("member-a"), ["col-b"])
+        self.rules.delete("col-b")
+        self.rules.delete("member-a")
+        self.assertIsNone(self.rules.get("member-a"))
+
+    def test_collection_member_cannot_become_full_or_collection(self) -> None:
+        """Egy tag nem válhat teljes hozzáférésűvé vagy gyűjtővé."""
+        self.rules.create("guard-a", {"label": "A", "tcp": [80]})
+        self.rules.create("guard-b", {"label": "B", "udp": [53]})
+        self.rules.create("guard-c", {"label": "C", "tcp": [8080]})
+        self.rules.create("guard-col", {
+            "label": "Guard", "collection": True,
+            "members": ["guard-a", "guard-b"],
+            "default_ttl": 120, "max_ttl": 600,
+        })
+        with self.assertRaises(gateway.RuleStoreError) as caught:
+            self.rules.update("guard-a", {
+                "label": "A", "full": True, "collection": False,
+            })
+        self.assertIn("guard-col", str(caught.exception))
+        member = self.rules.get("guard-a")
+        self.assertIsNotNone(member)
+        self.assertEqual(member.tcp, (80,))
+        self.assertFalse(member.full)
+
+        with self.assertRaises(gateway.RuleStoreError) as caught:
+            self.rules.update("guard-a", {
+                "label": "A", "collection": True,
+                "members": ["guard-b", "guard-c"],
+            })
+        self.assertIn("guard-col", str(caught.exception))
+        self.assertIsNotNone(self.rules.get("guard-a"))
+        self.assertFalse(self.rules.get("guard-a").collection)
+
+        # A tag portjának módosítása engedélyezett, és az unió követi.
+        self.rules.update("guard-a", {
+            "label": "A", "tcp": [8080], "collection": False,
+        })
+        collection = self.rules.get("guard-col")
+        self.assertEqual(collection.tcp, (8080,))
+        self.assertEqual(collection.udp, (53,))
+        self.assertFalse(collection.full)
+
+    def test_duplicate_individual_and_collection(self) -> None:
+        original = self.rules.create("dupe-web", {
+            "label": "Dupe web", "description": "leírás",
+            "tcp": [80, 443], "udp": [443],
+            "default_ttl": 120, "max_ttl": 600,
+        })
+        copied = self.rules.duplicate("dupe-web")
+        self.assertEqual(copied.id, "dupe-web-copy")
+        self.assertEqual(copied.label, "Dupe web (copy)")
+        self.assertEqual(copied.description, original.description)
+        self.assertEqual(copied.tcp, original.tcp)
+        self.assertEqual(copied.udp, original.udp)
+        self.assertEqual(copied.default_ttl, original.default_ttl)
+        self.assertEqual(copied.max_ttl, original.max_ttl)
+        self.assertFalse(copied.builtin)
+        second = self.rules.duplicate("dupe-web")
+        self.assertEqual(second.id, "dupe-web-2")
+        explicit = self.rules.duplicate(
+            "dupe-web", new_id="dupe-explicit", label="Saját másolat"
+        )
+        self.assertEqual(explicit.id, "dupe-explicit")
+        self.assertEqual(explicit.label, "Saját másolat")
+        with self.assertRaises(gateway.RuleStoreError):
+            self.rules.duplicate("dupe-web", new_id="dupe-web-copy")
+        with self.assertRaises(gateway.RuleStoreError):
+            self.rules.duplicate(gateway.ADMIN_RULE_ID)
+        with self.assertRaises(gateway.RuleStoreError):
+            self.rules.duplicate("nincs-ilyen")
+
+        long_id = "a" * 32
+        self.rules.create(long_id, {"label": "Hosszú", "tcp": [8080]})
+        long_copy = self.rules.duplicate(long_id)
+        self.assertLessEqual(len(long_copy.id), 32)
+        self.assertTrue(long_copy.id.endswith("-copy"))
+
+        self.rules.create("col-member", {"label": "Member", "tcp": [22]})
+        collection = self.rules.create("dupe-collection", {
+            "label": "Collection", "collection": True,
+            "members": ["dupe-web", "col-member"],
+            "default_ttl": 60, "max_ttl": 300,
+        })
+        collection_copy = self.rules.duplicate("dupe-collection")
+        self.assertEqual(collection_copy.id, "dupe-collection-copy")
+        self.assertEqual(collection_copy.members, collection.members)
+        self.assertEqual(collection_copy.tcp, collection.tcp)
+        self.assertTrue(collection_copy.collection)
+        with open(self.rules.path, encoding="utf-8") as fh:
+            stored = json.load(fh)["rules"]["dupe-collection-copy"]
+        self.assertEqual(
+            set(stored),
+            {"label", "description", "members", "default_ttl", "max_ttl", "created"},
+        )
+        self.assertNotIn("tcp", stored)
+
+    def test_load_drops_invalid_persisted_collections(self) -> None:
+        """Hibás perzisztált gyűjtők ne jelenjenek meg és ne adjanak jogot."""
+        path = os.path.join(self.tmp.name, "invalid-collections.json")
+        base = {"default_ttl": 60, "max_ttl": 600, "created": 1}
+
+        def rule(label: str, **extra) -> dict:
+            return {"label": label, **base, **extra}
+
+        raw = {
+            "ok-a": rule("A", tcp=[80]),
+            "ok-b": rule("B", udp=[53]),
+            "ok-full": rule("Full", full=True),
+            "ok-nested": rule("Nested", members=["ok-a", "ok-b"]),
+            "valid-col": rule("Valid", members=["ok-a", "ok-b"]),
+            "bad-missing": rule("Missing", members=["ok-a", "ghost"]),
+            "bad-full": rule("Bad full", members=["ok-a", "ok-full"]),
+            "bad-nested": rule("Bad nested", members=["ok-a", "ok-nested"]),
+            "bad-self": rule("Self", members=["ok-a", "bad-self"]),
+        }
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"rules": raw}, fh)
+
+        logs: list[str] = []
+        store = gateway.RuleStore(path, catalog=CATALOG, logger=logs.append)
+        invalid = ("bad-missing", "bad-full", "bad-nested", "bad-self")
+        for rule_id in invalid:
+            with self.subTest(rule_id=rule_id):
+                self.assertIsNone(store.get(rule_id))
+                self.assertNotIn(
+                    rule_id,
+                    [item.id for item in store.persisted_rules()],
+                )
+                self.assertNotIn(
+                    rule_id, [item.id for item in store.all_rules()]
+                )
+        self.assertIsNotNone(store.get("valid-col"))
+        self.assertEqual(store.get("valid-col").tcp, (80,))
+        self.assertEqual(store.get("valid-col").udp, (53,))
+        self.assertTrue(
+            any("kihagyott hibás gyűjtőszabály" in line for line in logs),
+            logs,
+        )
+
+        # Közvetlen és csoporton keresztüli kiosztás sem ad hozzáférést.
+        self.users.add(
+            "invalid-direct", "hosszu-jelszo-1",
+            rules=("bad-missing",),
+        )
+        self.users.add("invalid-group", "hosszu-jelszo-1", rules=())
+        group = self.groups.create("invalid-grant", {
+            "label": "Invalid", "rules": ["bad-nested"],
+            "members": ["invalid-group"],
+        })
+        direct = self.users.record("invalid-direct")
+        grouped = self.users.record("invalid-group")
+        self.assertEqual(store.effective_for(direct, []), [])
+        self.assertEqual(store.effective_for(grouped, [group]), [])
+        with self.assertRaises(gateway.AccessError) as caught:
+            store.resolve_for(direct, [], "bad-missing")
+        self.assertIn("nem tartozik hozzád", str(caught.exception))
+
+    def test_unassigned_collection_cannot_be_authorized(self) -> None:
+        self.rules.create("neg-a", {"label": "A", "tcp": [80]})
+        self.rules.create("neg-b", {"label": "B", "udp": [53]})
+        self.rules.create("neg-col", {
+            "label": "Negative", "collection": True,
+            "members": ["neg-a", "neg-b"],
+        })
+        self.users.add(
+            "outsider", "hosszu-jelszo-1", rules=("neg-a",)
+        )
+        outsider = self.users.record("outsider")
+        self.assertEqual(
+            [item.id for item in self.rules.effective_for(outsider, [])],
+            ["neg-a"],
+        )
+        with self.assertRaises(gateway.AccessError) as caught:
+            self.rules.resolve_for(outsider, [], "neg-col")
+        self.assertIn("nem tartozik hozzád", str(caught.exception))
+
+        # Egy nem hozzá tartozó csoport szabálya sem nyitja meg.
+        other_group = self.groups.create("neg-group", {
+            "label": "Other", "rules": ["neg-col"], "members": [],
+        })
+        with self.assertRaises(gateway.AccessError):
+            self.rules.resolve_for(outsider, [other_group], "neg-col")
+
+    def test_duplicate_keeps_suffix_for_long_label(self) -> None:
+        """80 karakteres név másolata is megkülönböztethető maradjon."""
+        label = "H" * 80
+        self.rules.create(
+            "long-label", {"label": label, "tcp": [8080]}
+        )
+        copied = self.rules.duplicate("long-label")
+        self.assertLessEqual(len(copied.label), 80)
+        self.assertNotEqual(copied.label, label)
+        self.assertTrue(copied.label.endswith("(copy)"))
+        self.assertEqual(
+            copied.label.count("H"), 80 - len(" (copy)")
+        )
+        reloaded = gateway.RuleStore(
+            self.rules.path, catalog=CATALOG, logger=lambda *_: None
+        )
+        self.assertEqual(reloaded.get(copied.id).label, copied.label)
+
     def test_user_metadata_and_last_admin_helpers(self) -> None:
         self.users.add("root", "hosszu-jelszo-1", role=gateway.ROLE_ADMIN)
         self.users.add("alice", "hosszu-jelszo-1")
@@ -3649,6 +4069,165 @@ class RuleGroupStoreTests(unittest.TestCase):
         self.assertTrue(self.users.verify("alice", "masik-jelszo-1"))
 
 
+class RuleStoreConcurrencyTests(unittest.TestCase):
+    """A szabálytár zárolási versenyhelyzetei."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _store(self, name: str = "rules.json"):
+        class RacingStore(gateway.RuleStore):
+            race_hook = None
+
+            def _validate_payload(inner, data, rule_id):
+                rule = gateway.RuleStore._validate_payload(
+                    inner, data, rule_id
+                )
+                hook, inner.race_hook = inner.race_hook, None
+                if hook is not None:
+                    hook()
+                return rule
+
+        return RacingStore(
+            os.path.join(self.tmp.name, name), catalog=CATALOG,
+            logger=lambda *_: None,
+        )
+
+    def test_nested_locked_and_create_do_not_deadlock(self) -> None:
+        """A _locked() újrabeléphető: a beágyazott create() nem akad meg."""
+        store = self._store("nested-lock.json")
+        done = threading.Event()
+        errors = []
+
+        def work() -> None:
+            try:
+                with store._locked():
+                    with store._locked():
+                        store.create(
+                            "nested-lock-rule",
+                            {"label": "Nested", "tcp": [80]},
+                        )
+            except BaseException as exc:  # a teszt szálából látható legyen
+                errors.append(exc)
+            finally:
+                done.set()
+
+        thread = threading.Thread(target=work, daemon=True)
+        thread.start()
+        self.assertTrue(
+            done.wait(5), "a beágyazott _locked() holtpontot okozott"
+        )
+        thread.join(1)
+        self.assertFalse(errors, errors)
+        self.assertIsNotNone(store.get("nested-lock-rule"))
+
+    def test_create_validates_member_change_under_one_lock(self) -> None:
+        """A tag módosítása nem csúszhat a validálás és a commit közé.
+
+        A régi kód a validálást a záron kívül végezte, ezért egy párhuzamos
+        delete()/update() érvénytelen (hiányzó, teljes vagy beágyazott tagú)
+        gyűjtőt hagyhatott a fájlban. A javított kódnak vagy meg kell
+        hiúsítania a létrehozást, vagy érvényes gyűjtőt szabad committálnia.
+        """
+        for action in ("delete", "full", "nested"):
+            with self.subTest(action=action):
+                store = self._store(f"race-{action}.json")
+                store.create("race-a", {"label": "A", "tcp": [80]})
+                store.create("race-b", {"label": "B", "udp": [53]})
+                if action == "nested":
+                    store.create("race-c", {"label": "C", "tcp": [8080]})
+
+                finished = threading.Event()
+                errors: list[str] = []
+                threads: list[threading.Thread] = []
+
+                def mutate() -> None:
+                    try:
+                        if action == "delete":
+                            store.delete("race-b")
+                        elif action == "full":
+                            store.update("race-b", {
+                                "label": "B", "full": True,
+                                "collection": False,
+                            })
+                        else:
+                            store.update("race-b", {
+                                "label": "B", "collection": True,
+                                "members": ["race-a", "race-c"],
+                            })
+                    except gateway.RuleStoreError as exc:
+                        errors.append(str(exc))
+                    finally:
+                        finished.set()
+
+                def hook() -> None:
+                    thread = threading.Thread(
+                        target=mutate, daemon=True
+                    )
+                    thread.start()
+                    threads.append(thread)
+                    # A javított kód zárat tart, ezért a szál legfeljebb a
+                    # záron várakozhat; a régi kódnál itt befejeződik.
+                    finished.wait(0.5)
+
+                store.race_hook = hook
+                created = None
+                try:
+                    created = store.create("race-col", {
+                        "label": "Race", "collection": True,
+                        "members": ["race-a", "race-b"],
+                    })
+                except gateway.RuleStoreError:
+                    pass
+
+                for thread in threads:
+                    thread.join(5)
+                    self.assertFalse(
+                        thread.is_alive(),
+                        "a versenyző szál nem fejeződött be",
+                    )
+
+                # A fájlban maradt gyűjtő minden tagja létező, egyedi,
+                # nem teljes és nem gyűjtő szabály legyen.
+                with open(store.path, encoding="utf-8") as fh:
+                    raw = json.load(fh)["rules"]
+                for rule_id, item in raw.items():
+                    for member_id in item.get("members", []):
+                        self.assertIn(
+                            member_id, raw,
+                            f"{rule_id} hiányzó tagra hivatkozik",
+                        )
+                        self.assertNotIn(
+                            "members", raw[member_id],
+                            f"{rule_id} beágyazott gyűjtőt tartalmaz",
+                        )
+                        self.assertFalse(
+                            raw[member_id].get("full", False),
+                            f"{rule_id} teljes hozzáférésű tagot tartalmaz",
+                        )
+
+                fresh = gateway.RuleStore(
+                    store.path, catalog=CATALOG, logger=lambda *_: None
+                )
+                if created is not None:
+                    loaded = fresh.get("race-col")
+                    self.assertIsNotNone(loaded)
+                    self.assertEqual(
+                        loaded.members, ("race-a", "race-b")
+                    )
+                    self.assertFalse(loaded.full)
+                    self.assertTrue(
+                        errors,
+                        "a versenyző műveletnek a szülővédő miatt kell "
+                        "meghiúsulnia",
+                    )
+                else:
+                    self.assertIsNone(fresh.get("race-col"))
+
+
 class AdminHttpTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -3657,13 +4236,9 @@ class AdminHttpTests(unittest.TestCase):
         cls._old_conntrack = gateway.CONNTRACK_BIN
         cls._old_difficulty = gateway.POW_DIFFICULTY
         cls._old_portal_url = gateway.PORTAL_URL
-        cls._old_host_ssh_mode = gateway.HOST_SSH_MODE
         gateway.CONNTRACK_BIN = str(cls.tools.conntrack)
         gateway.POW_DIFFICULTY = 2
         gateway.PORTAL_URL = ""
-        # A HTTP-tesztek a visszafelé kompatibilis "any" módot vizsgálják;
-        # a szűkebb alapértelmezést külön tesztek fedik le.
-        gateway.HOST_SSH_MODE = "any"
 
         cls.users = gateway.UserStore(
             os.path.join(cls.tmp.name, "users.json"), iterations=10_000
@@ -3692,7 +4267,7 @@ class AdminHttpTests(unittest.TestCase):
         )
         cls.settings = gateway.settings_store.SettingsStore(
             os.path.join(cls.tmp.name, "firewall-settings.json"),
-            logger=lambda *_: None, default_host_ssh="any",
+            logger=lambda *_: None,
         )
         cls.drops = gateway.droplog.DropLogService(
             os.path.join(cls.tmp.name, "drops.jsonl"),
@@ -3725,7 +4300,6 @@ class AdminHttpTests(unittest.TestCase):
         gateway.CONNTRACK_BIN = cls._old_conntrack
         gateway.POW_DIFFICULTY = cls._old_difficulty
         gateway.PORTAL_URL = cls._old_portal_url
-        gateway.HOST_SSH_MODE = cls._old_host_ssh_mode
         cls.tmp.cleanup()
 
     def setUp(self) -> None:
@@ -3736,9 +4310,8 @@ class AdminHttpTests(unittest.TestCase):
         # A beállítások és a drop napló közös a tesztek között; minden teszt
         # ismert, üres állapotból induljon.
         self.gw.settings.commit(
-            {"host_ssh": "any", "preauth": [], "block": []}
+            {"preauth": [], "block": []}
         )
-        self.gw.sessions.host_ssh_mode = "any"
         base = self.drops.store.path
         for suffix in ("", ".1", ".2", ".3", ".4", ".5"):
             try:
@@ -3916,9 +4489,6 @@ class AdminHttpTests(unittest.TestCase):
             {"val": {"concat": ["127.0.0.2", 443]},
              "timeout": 120, "expires": 100},
         ])
-        self.tools.set_json("host_ssh_v4", [
-            {"val": "127.0.0.2", "timeout": 120, "expires": 100},
-        ])
 
         status, _, body = self.get(
             "/api/admin/firewall", cookie=cookie, source="127.0.0.5"
@@ -3927,7 +4497,7 @@ class AdminHttpTests(unittest.TestCase):
         data = json.loads(body)
         self.assertTrue(data["ok"])
         self.assertEqual(data["counts"]["ips"], 1)
-        self.assertEqual(data["counts"]["entries"], 4)
+        self.assertEqual(data["counts"]["entries"], 3)
         self.assertEqual(data["counts"]["orphans"], 0)
         row = data["ips"][0]
         self.assertEqual(row["ip"], "127.0.0.2")
@@ -3935,7 +4505,8 @@ class AdminHttpTests(unittest.TestCase):
         self.assertEqual(row["ports_label"], "TCP 80, 443 · UDP 443")
         self.assertEqual([entry["port"] for entry in row["tcp"]], [80, 443])
         self.assertEqual([entry["port"] for entry in row["udp"]], [443])
-        self.assertIsNotNone(row["host_ssh"])
+        # Az egyedi web szabály nem vár host SSH-t, és a kernelben sincs.
+        self.assertIsNone(row["host_ssh"])
         self.assertTrue(row["in_sync"], row)
         self.assertEqual(row["rules"][0]["label"], "Csak web")
         self.assertEqual(row["sessions"][0]["user"], "alice")
@@ -4376,6 +4947,498 @@ class AdminHttpTests(unittest.TestCase):
         ):
             self.assertIn(event, events)
 
+    def test_collection_admin_api_assignment_and_access(self) -> None:
+        cookie = self.admin_cookie()
+        source = "127.0.0.5"
+
+        def admin_post(payload: dict):
+            return self.post(
+                "/api/admin/rules", payload, cookie=cookie, source=source
+            )
+
+        def cleanup() -> None:
+            self.post(
+                "/api/admin/users",
+                {"action": "update", "name": "alice", "rules": ["web-only"]},
+                cookie=cookie, source=source,
+            )
+            for rule_id in ("col-combo", "col-web", "col-dns"):
+                self.post(
+                    "/api/admin/rules",
+                    {"action": "delete", "id": rule_id},
+                    cookie=cookie, source=source,
+                )
+            for user_name in ("groupie",):
+                self.post(
+                    "/api/admin/users",
+                    {"action": "delete", "name": user_name},
+                    cookie=cookie, source=source,
+                )
+            self.post(
+                "/api/admin/groups",
+                {"action": "delete", "id": "col-staff"},
+                cookie=cookie, source=source,
+            )
+
+        self.addCleanup(cleanup)
+        for payload in (
+            {"action": "create", "id": "col-web", "label": "Web",
+             "tcp": [80, 443], "udp": [443],
+             "default_ttl": 120, "max_ttl": 600},
+            {"action": "create", "id": "col-dns", "label": "DNS",
+             "tcp": [53, 853], "udp": [53], "icmp": True,
+             "default_ttl": 60, "max_ttl": 300},
+            {"action": "create", "id": "col-combo", "label": "Web + DNS",
+             "collection": True, "members": ["col-web", "col-dns"],
+             "default_ttl": 120, "max_ttl": 300},
+        ):
+            status, _, body = admin_post(payload)
+            self.assertEqual(status, 200, body)
+
+        status, _, body = self.get(
+            "/api/admin/state", cookie=cookie, source=source
+        )
+        self.assertEqual(status, 200, body)
+        state = json.loads(body)
+        combo = next(rule for rule in state["rules"] if rule["id"] == "col-combo")
+        self.assertTrue(combo["collection"])
+        self.assertEqual(combo["members"], ["col-web", "col-dns"])
+        self.assertEqual(combo["tcp"], [53, 80, 443, 853])
+        self.assertEqual(combo["udp"], [53, 443])
+        self.assertTrue(combo["icmp"])
+        self.assertFalse(combo["full"])
+        self.assertEqual(
+            combo["ports_label"], "TCP 53, 80, 443, 853 · UDP 53, 443 · ICMP"
+        )
+
+        # Közvetlen felhasználói kiosztás.
+        status, _, body = self.post(
+            "/api/admin/users",
+            {"action": "update", "name": "alice", "rules": ["col-combo"]},
+            cookie=cookie, source=source,
+        )
+        self.assertEqual(status, 200, body)
+        # Csoporton keresztüli kiosztás (a csoport szabályai a tagra élnek).
+        status, _, body = self.post(
+            "/api/admin/users",
+            {"action": "create", "name": "groupie",
+             "password": "groupie-jelszo-1", "role": "user",
+             "enabled": True, "rules": [], "groups": []},
+            cookie=cookie, source=source,
+        )
+        self.assertEqual(status, 200, body)
+        status, _, body = self.post(
+            "/api/admin/groups",
+            {"action": "create", "id": "col-staff", "label": "Staff",
+             "rules": ["col-combo"], "members": ["groupie"]},
+            cookie=cookie, source=source,
+        )
+        self.assertEqual(status, 200, body)
+
+        alice_cookie, _ = self.login("alice", "alice-jelszo-1")
+        status, _, body = self.get("/api/status", cookie=alice_cookie)
+        self.assertEqual(status, 200, body)
+        status_data = json.loads(body)
+        exposed = next(
+            rule for rule in status_data["rules"] if rule["id"] == "col-combo"
+        )
+        self.assertTrue(exposed["collection"])
+        self.assertEqual(exposed["members"], ["col-web", "col-dns"])
+        self.assertEqual(exposed["tcp"], [53, 80, 443, 853])
+        self.assertEqual(exposed["udp"], [53, 443])
+        self.assertTrue(exposed["icmp"])
+
+        status, _, body = self.post(
+            "/api/access", {"rule": "col-combo", "ttl": 301},
+            cookie=alice_cookie,
+        )
+        self.assertEqual(status, 400, body)
+        self.assertIn("legfeljebb", json.loads(body)["error"])
+        status, _, body = self.post(
+            "/api/access", {"rule": "col-combo", "ttl": 300},
+            cookie=alice_cookie,
+        )
+        self.assertEqual(status, 200, body)
+        granted = json.loads(body)
+        self.assertEqual(granted["rule"], "col-combo")
+        self.assertEqual(granted["grant"]["tcp"], [53, 80, 443, 853])
+        self.assertEqual(granted["grant"]["udp"], [53, 443])
+        self.assertTrue(granted["grant"]["icmp"])
+        self.assertFalse(granted["grant"]["full"])
+        # A gyűjtő uniója pontosan a tagok TCP/UDP portjait és az ICMP-t
+        # engedélyezze, a kért 300 másodperces TTL-lel.
+        added = {
+            line for line in self.tools.script()
+            if line.startswith("add element inet hatarvedelem allowed_")
+        }
+        expected = {
+            "add element inet hatarvedelem allowed_tcp "
+            "{ 127.0.0.1 . 53 timeout 300s }",
+            "add element inet hatarvedelem allowed_tcp "
+            "{ 127.0.0.1 . 80 timeout 300s }",
+            "add element inet hatarvedelem allowed_tcp "
+            "{ 127.0.0.1 . 443 timeout 300s }",
+            "add element inet hatarvedelem allowed_tcp "
+            "{ 127.0.0.1 . 853 timeout 300s }",
+            "add element inet hatarvedelem allowed_udp "
+            "{ 127.0.0.1 . 53 timeout 300s }",
+            "add element inet hatarvedelem allowed_udp "
+            "{ 127.0.0.1 . 443 timeout 300s }",
+            "add element inet hatarvedelem allowed_icmp "
+            "{ 127.0.0.1 timeout 300s }",
+        }
+        self.assertEqual(added, expected)
+
+        groupie_cookie, _ = self.login("groupie", "groupie-jelszo-1")
+        status, _, body = self.get("/api/status", cookie=groupie_cookie)
+        self.assertEqual(status, 200, body)
+        groupie_rules = json.loads(body)["rules"]
+        self.assertIn("col-combo", [rule["id"] for rule in groupie_rules])
+        self.assertTrue(next(
+            rule for rule in groupie_rules if rule["id"] == "col-combo"
+        )["collection"])
+
+    def test_update_member_revokes_dependent_collection_sessions(self) -> None:
+        cookie = self.admin_cookie()
+        source = "127.0.0.5"
+
+        def admin_post(payload: dict):
+            return self.post(
+                "/api/admin/rules", payload, cookie=cookie, source=source
+            )
+
+        def cleanup() -> None:
+            self.post(
+                "/api/admin/users",
+                {"action": "update", "name": "alice", "rules": ["web-only"]},
+                cookie=cookie, source=source,
+            )
+            for rule_id in ("col-combo", "col-web", "col-dns"):
+                self.post(
+                    "/api/admin/rules",
+                    {"action": "delete", "id": rule_id},
+                    cookie=cookie, source=source,
+                )
+
+        self.addCleanup(cleanup)
+        for payload in (
+            {"action": "create", "id": "col-web", "label": "Web",
+             "tcp": [80], "default_ttl": 60, "max_ttl": 600},
+            {"action": "create", "id": "col-dns", "label": "DNS",
+             "udp": [53], "default_ttl": 60, "max_ttl": 600},
+            {"action": "create", "id": "col-combo", "label": "Combo",
+             "collection": True, "members": ["col-web", "col-dns"],
+             "default_ttl": 60, "max_ttl": 600},
+        ):
+            status, _, body = admin_post(payload)
+            self.assertEqual(status, 200, body)
+        status, _, body = self.post(
+            "/api/admin/users",
+            {"action": "update", "name": "alice", "rules": ["col-combo"]},
+            cookie=cookie, source=source,
+        )
+        self.assertEqual(status, 200, body)
+
+        alice_cookie, _ = self.login("alice", "alice-jelszo-1")
+        status, _, body = self.post(
+            "/api/access", {"rule": "col-combo", "ttl": 60},
+            cookie=alice_cookie,
+        )
+        self.assertEqual(status, 200, body)
+        self.assertTrue(any(
+            row["user"] == "alice" and row["authorized"]
+            for row in self.gw.sessions.active_sessions()
+        ))
+
+        status, _, body = admin_post({
+            "action": "update", "id": "col-web", "label": "Web módosítva",
+            "tcp": [80, 8080], "default_ttl": 60, "max_ttl": 600,
+        })
+        self.assertEqual(status, 200, body)
+        self.assertFalse(any(
+            row["user"] == "alice" and row["authorized"]
+            for row in self.gw.sessions.active_sessions()
+        ))
+
+        status, _, body = self.get(
+            "/api/admin/logs?limit=200&event=admin_rule_updated",
+            cookie=cookie, source=source,
+        )
+        self.assertEqual(status, 200, body)
+        entries = [
+            entry for entry in json.loads(body)["logs"]
+            if entry.get("target") == "col-web"
+        ]
+        self.assertTrue(entries)
+        latest = entries[-1]
+        self.assertIn("col-combo", latest.get("collections_affected", ""))
+        self.assertGreaterEqual(int(latest.get("sessions_revoked", 0)), 1)
+
+    def test_collection_update_and_delete_revoke_its_sessions(self) -> None:
+        cookie = self.admin_cookie()
+        source = "127.0.0.5"
+
+        def admin_post(payload: dict):
+            return self.post(
+                "/api/admin/rules", payload, cookie=cookie, source=source
+            )
+
+        def cleanup() -> None:
+            self.gw.sessions.revoke_user("colrev")
+            self.gw.users.remove("colrev")
+            for rule_id in ("sess-col", "sess-web", "sess-dns"):
+                try:
+                    self.gw.rules.delete(rule_id)
+                except gateway.RuleStoreError:
+                    pass
+
+        self.addCleanup(cleanup)
+        for payload in (
+            {"action": "create", "id": "sess-web", "label": "Web",
+             "tcp": [80], "default_ttl": 60, "max_ttl": 600},
+            {"action": "create", "id": "sess-dns", "label": "DNS",
+             "udp": [53], "default_ttl": 60, "max_ttl": 600},
+            {"action": "create", "id": "sess-col", "label": "Combo",
+             "collection": True, "members": ["sess-web", "sess-dns"],
+             "default_ttl": 60, "max_ttl": 600},
+        ):
+            status, _, body = admin_post(payload)
+            self.assertEqual(status, 200, body)
+        self.users.add(
+            "colrev", "colrev-jelszo-1", rules=("sess-col",)
+        )
+
+        def authorize() -> None:
+            alice_cookie, _ = self.login(
+                "colrev", "colrev-jelszo-1", source="127.0.0.9"
+            )
+            status, _, body = self.post(
+                "/api/access", {"rule": "sess-col", "ttl": 120},
+                cookie=alice_cookie, source="127.0.0.9",
+            )
+            self.assertEqual(status, 200, body)
+            self.assertTrue(any(
+                row["user"] == "colrev" and row["authorized"]
+                and row["rule"] == "sess-col"
+                for row in self.gw.sessions.active_sessions()
+            ))
+
+        authorize()
+        status, _, body = admin_post({
+            "action": "update", "id": "sess-col", "label": "Combo updated",
+            "collection": True, "members": ["sess-web", "sess-dns"],
+            "default_ttl": 60, "max_ttl": 600,
+        })
+        self.assertEqual(status, 200, body)
+        self.assertFalse(any(
+            row["user"] == "colrev" and row["authorized"]
+            and row["rule"] == "sess-col"
+            for row in self.gw.sessions.active_sessions()
+        ))
+
+        authorize()
+        status, _, body = admin_post({
+            "action": "delete", "id": "sess-col",
+        })
+        self.assertEqual(status, 200, body)
+        self.assertFalse(any(
+            row["user"] == "colrev" and row["authorized"]
+            and row["rule"] == "sess-col"
+            for row in self.gw.sessions.active_sessions()
+        ))
+
+    def test_update_revokes_collection_created_at_commit_point(self) -> None:
+        """A commit pontján létrejövő függő gyűjtő se maradjon engedélyezve.
+
+        A régi szerver a függőlistát a módosítás előtt, külön zárral
+        olvasta. A hook a snapshot után hozza létre a gyűjtőt és engedélyezi
+        a munkamenetét, utánozva a versenyhelyzetet; a javított kód egy
+        záron belül látja a commit pontján létező gyűjtőt.
+        """
+        cookie = self.admin_cookie()
+        source = "127.0.0.5"
+        store = self.gw.rules
+
+        def admin_post(payload: dict):
+            return self.post(
+                "/api/admin/rules", payload, cookie=cookie, source=source
+            )
+
+        fired: list[bool] = []
+        authorized_before: list[bool] = []
+        tokens: dict[str, str] = {}
+
+        def fire() -> None:
+            if fired:
+                return
+            fired.append(True)
+            store.create("late-col", {
+                "label": "Late", "collection": True,
+                "members": ["late-web", "late-dns"],
+                "default_ttl": 60, "max_ttl": 600,
+            })
+            record = self.gw.users.record("lateuser")
+            rule = store.resolve_for(
+                record, self.gw.groups.groups_for("lateuser"), "late-col"
+            )
+            self.gw.sessions.authorize(
+                tokens["value"], "127.0.0.7", rule, 60
+            )
+            authorized_before.append(True)
+
+        def cleanup() -> None:
+            store.__dict__.pop("collections_containing", None)
+            store.__dict__.pop("update_with_dependents", None)
+            self.gw.sessions.revoke_user("lateuser")
+            self.gw.users.remove("lateuser")
+            for rule_id in ("late-col", "late-web", "late-dns"):
+                try:
+                    store.delete(rule_id)
+                except gateway.RuleStoreError:
+                    pass
+
+        self.addCleanup(cleanup)
+        for payload in (
+            {"action": "create", "id": "late-web", "label": "Web",
+             "tcp": [80, 443], "default_ttl": 60, "max_ttl": 600},
+            {"action": "create", "id": "late-dns", "label": "DNS",
+             "udp": [53], "default_ttl": 60, "max_ttl": 600},
+        ):
+            status, _, body = admin_post(payload)
+            self.assertEqual(status, 200, body)
+        self.users.add(
+            "lateuser", "lateuser-jelszo-1", rules=("late-col",)
+        )
+        late_cookie, _ = self.login(
+            "lateuser", "lateuser-jelszo-1", source="127.0.0.7"
+        )
+        tokens["value"] = late_cookie.split("=", 1)[1]
+
+        original_snapshot = store.collections_containing
+        original_atomic = getattr(store, "update_with_dependents", None)
+
+        def hooked_snapshot(rule_id: str) -> list[str]:
+            # A régi kód itt már elkészítette a (hiányos) pillanatképet.
+            result = original_snapshot(rule_id)
+            if rule_id == "late-web":
+                fire()
+            return result
+
+        def hooked_atomic(rule_id: str, data: dict):
+            # Az új kód a zár megszerzése előtt hívja; a létrehozott
+            # gyűjtő így már a commit pontján létezik.
+            if rule_id == "late-web":
+                fire()
+            return original_atomic(rule_id, data)
+
+        store.collections_containing = hooked_snapshot
+        if original_atomic is not None:
+            store.update_with_dependents = hooked_atomic
+        try:
+            status, _, body = admin_post({
+                "action": "update", "id": "late-web", "label": "Web",
+                "tcp": [8080], "default_ttl": 60, "max_ttl": 600,
+            })
+        finally:
+            store.__dict__.pop("collections_containing", None)
+            if original_atomic is not None:
+                store.__dict__.pop("update_with_dependents", None)
+        self.assertEqual(status, 200, body)
+        self.assertTrue(fired, "a versenyző gyűjtő nem jött létre")
+        self.assertTrue(authorized_before)
+        self.assertFalse(any(
+            row["user"] == "lateuser" and row["authorized"]
+            and row["rule"] == "late-col"
+            for row in self.gw.sessions.active_sessions()
+        ), "a közben létrehozott gyűjtő munkamenete a régi portokkal élt")
+
+    def test_duplicate_action_and_delete_guard(self) -> None:
+        cookie = self.admin_cookie()
+        source = "127.0.0.5"
+
+        def admin_post(payload: dict):
+            return self.post(
+                "/api/admin/rules", payload, cookie=cookie, source=source
+            )
+
+        def cleanup() -> None:
+            for rule_id in (
+                "dup-collection-copy", "dup-collection",
+                "dup-web-copy", "dup-web", "dup-dns",
+            ):
+                self.post(
+                    "/api/admin/rules",
+                    {"action": "delete", "id": rule_id},
+                    cookie=cookie, source=source,
+                )
+
+        self.addCleanup(cleanup)
+        for payload in (
+            {"action": "create", "id": "dup-web", "label": "Web",
+             "tcp": [80, 443], "default_ttl": 60, "max_ttl": 600},
+            {"action": "create", "id": "dup-dns", "label": "DNS",
+             "udp": [53], "default_ttl": 60, "max_ttl": 600},
+            {"action": "create", "id": "dup-collection", "label": "Combo",
+             "collection": True, "members": ["dup-web", "dup-dns"],
+             "default_ttl": 60, "max_ttl": 600},
+        ):
+            status, _, body = admin_post(payload)
+            self.assertEqual(status, 200, body)
+
+        status, _, body = admin_post({
+            "action": "duplicate", "id": "dup-web", "label": "Web — másolat",
+        })
+        self.assertEqual(status, 200, body)
+        result = json.loads(body)
+        self.assertEqual(result["message"], "Szabály duplikálva.")
+        copy = next(rule for rule in result["rules"] if rule["id"] == "dup-web-copy")
+        self.assertEqual(copy["label"], "Web — másolat")
+        self.assertEqual(copy["tcp"], [80, 443])
+        self.assertFalse(copy["collection"])
+
+        status, _, body = admin_post({
+            "action": "duplicate", "id": "dup-collection",
+        })
+        self.assertEqual(status, 200, body)
+        state = json.loads(body)
+        collection_copy = next(
+            rule for rule in state["rules"]
+            if rule["id"] == "dup-collection-copy"
+        )
+        self.assertTrue(collection_copy["collection"])
+        self.assertEqual(collection_copy["members"], ["dup-web", "dup-dns"])
+        self.assertEqual(collection_copy["tcp"], [80, 443])
+        self.assertEqual(collection_copy["udp"], [53])
+
+        status, _, body = admin_post({
+            "action": "delete", "id": "dup-web",
+        })
+        self.assertEqual(status, 400, body)
+        error = json.loads(body)["error"]
+        self.assertIn("dup-collection", error)
+        self.assertIn("dup-collection-copy", error)
+        self.assertIn("gyűjtőszabály", error)
+
+        # A gyűjtő (és másolata) törölhető; a tagok megmaradnak.
+        status, _, body = admin_post({
+            "action": "delete", "id": "dup-collection-copy",
+        })
+        self.assertEqual(status, 200, body)
+        self.assertIn(
+            "dup-web", [rule["id"] for rule in json.loads(body)["rules"]]
+        )
+        status, _, body = admin_post({
+            "action": "delete", "id": "dup-collection",
+        })
+        self.assertEqual(status, 200, body)
+        status, _, body = admin_post({
+            "action": "delete", "id": "dup-web",
+        })
+        self.assertEqual(status, 200, body)
+        self.assertNotIn(
+            "dup-web", [rule["id"] for rule in json.loads(body)["rules"]]
+        )
+
     def test_last_admin_cannot_be_removed(self) -> None:
         cookie = self.admin_cookie()
         status, _, body = self.post(
@@ -4446,7 +5509,7 @@ class AdminHttpTests(unittest.TestCase):
             status, _, body = self.get(path, cookie=cookie)
             self.assertEqual(status, 403, body)
 
-    def test_admin_settings_crud_and_host_ssh(self) -> None:
+    def test_admin_settings_crud(self) -> None:
         cookie = self.admin_cookie()
 
         status, _, body = self.get(
@@ -4455,7 +5518,7 @@ class AdminHttpTests(unittest.TestCase):
         self.assertEqual(status, 200, body)
         data = json.loads(body)
         self.assertTrue(data["ok"])
-        self.assertEqual(data["settings"]["host_ssh"], "any")
+        self.assertNotIn("host_ssh", data["settings"])
         self.assertEqual(data["settings"]["preauth"], [])
         self.assertIn("drop_log", data)
 
@@ -4504,15 +5567,6 @@ class AdminHttpTests(unittest.TestCase):
 
         status, _, body = self.post(
             "/api/admin/settings",
-            {"action": "host_ssh", "host_ssh": "off"},
-            cookie=cookie, source="127.0.0.5",
-        )
-        self.assertEqual(status, 200, body)
-        self.assertEqual(json.loads(body)["settings"]["host_ssh"], "off")
-        self.assertEqual(self.gw.sessions.host_ssh_mode, "off")
-
-        status, _, body = self.post(
-            "/api/admin/settings",
             {"action": "delete", "kind": "preauth", "id": entry_id},
             cookie=cookie, source="127.0.0.5",
         )
@@ -4521,7 +5575,18 @@ class AdminHttpTests(unittest.TestCase):
 
         # A mentett állapot újratöltve is megmarad.
         self.gw.settings.load()
-        self.assertEqual(self.gw.settings.snapshot()["host_ssh"], "off")
+        self.assertEqual(self.gw.settings.snapshot()["preauth"], [])
+
+    def test_admin_host_ssh_settings_action_is_rejected(self) -> None:
+        cookie = self.admin_cookie()
+        status, _, body = self.post(
+            "/api/admin/settings",
+            {"action": "host_ssh", "host_ssh": "off"},
+            cookie=cookie, source="127.0.0.5",
+        )
+        self.assertEqual(status, 400, body)
+        self.assertFalse(json.loads(body)["ok"])
+        self.assertNotIn("host_ssh", self.gw.settings.snapshot())
 
     def test_admin_settings_invalid_is_400(self) -> None:
         cookie = self.admin_cookie()
@@ -4536,7 +5601,6 @@ class AdminHttpTests(unittest.TestCase):
              "entry": {"label": "Rossz port", "dst": "192.168.50.10",
                        "proto": "tcp", "ports": [70000]}},
             {"action": "ismeretlen", "kind": "preauth"},
-            {"action": "host_ssh", "host_ssh": "mindig"},
         ]
         for payload in cases:
             status, _, body = self.post(
@@ -4568,13 +5632,12 @@ class AdminHttpTests(unittest.TestCase):
         self.assertIn("text/html", headers["Content-Type"])
         page = body.decode("utf-8")
         # A beállítások oldal csak a pre-auth szakaszt rendereli; a blokk
-        # felület eltűnt, a Host SSH szakasz és a pre-auth figyelmeztetés marad.
+        # felület eltűnt, és a Host SSH szakasz már nem létezik.
         self.assertNotIn("renderSettingSection('block'", page)
         self.assertIn("renderSettingSection('preauth'", page)
-        self.assertIn(
-            "sshSection.append(el('h3', { text: tr('Host SSH') }))", page
-        )
-        self.assertIn("Host SSH szabály", page)
+        self.assertNotIn("Host SSH", page)
+        self.assertNotIn("sshSection", page)
+        self.assertNotIn("host_ssh", page)
         self.assertIn(
             "A pre-auth szabályok megkerülik a portált: a megadott cél és port "
             "a bejelentkezés előtt is elérhető minden LAN-kliensnek. Csak olyan "
@@ -5198,7 +6261,7 @@ class AdminHttpTests(unittest.TestCase):
         )
         snapshot = reloaded.snapshot()
         self.assertIs(snapshot["registration_enabled"], True)
-        self.assertEqual(snapshot["host_ssh"], "any")
+        self.assertNotIn("host_ssh", snapshot)
         self.assertEqual(snapshot["preauth"], [])
         self.assertEqual(snapshot["block"], [])
 
@@ -5658,7 +6721,7 @@ class TotpCliTests(unittest.TestCase):
         )
         settings = gateway.settings_store.SettingsStore(
             os.path.join(self.tmp.name, "firewall-settings.json"),
-            logger=lambda *_: None, default_host_ssh="any",
+            logger=lambda *_: None,
         )
         drops = gateway.droplog.DropLogService(
             os.path.join(self.tmp.name, "drops.jsonl"),
@@ -5807,6 +6870,210 @@ class StaticUiTests(unittest.TestCase):
         for section in (pen, pde):
             self.assertIn("függő kérelem", section)
             self.assertIn("Elutasítod:", section)
+
+
+    def test_admin_password_generator_markup_and_translations(self) -> None:
+        """Az admin felhasználóűrlap jelszó-generátora és a hozzá tartozó UI."""
+        for token in (
+            "function secureRandomIndex(max)",
+            "function generatePassword()",
+            "crypto.getRandomValues(buffer)",
+            "new Uint32Array(1)",
+            "while (chars.length < 20)",
+            "setPasswordVisible",
+            "aria-pressed",
+            "'aria-live': 'polite'",
+            "navigator.clipboard",
+            "document.execCommand('copy')",
+            "class: 'password-field'",
+            "Jelszó a vágólapra másolva.",
+            "A vágólapra másolás nem sikerült.",
+            "A mentéssel a felhasználó jelszava megváltozik.",
+        ):
+            self.assertIn(token, self.source, token)
+        self.assertRegex(self.source, r"name:\s*['\"]password['\"]")
+        self.assertNotIn("Math.random", self.source)
+        match = re.search(
+            r"const lower = '([^']+)';\s*"
+            r"const upper = '([^']+)';\s*"
+            r"const digits = '([^']+)';\s*"
+            r"const symbols = '([^']+)';",
+            self.source,
+        )
+        self.assertIsNotNone(match)
+        lower, upper, digits, symbols = match.groups()
+        self.assertEqual((len(lower), len(upper), len(digits), len(symbols)),
+                         (25, 24, 8, 14))
+        for alphabet in match.groups():
+            for char in "O0Il1":
+                self.assertNotIn(char, alphabet, alphabet)
+        en, de, _, _ = self._i18n_sections()
+        for text in (
+            "Jelszó generálása",
+            "Mutat",
+            "Elrejtés",
+            "Másolás",
+            "Jelszó a vágólapra másolva.",
+            "A vágólapra másolás nem sikerült.",
+            "A mentéssel a felhasználó jelszava megváltozik.",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(f"'{text}':", en, f"hiányzó angol fordítás: {text}")
+                self.assertIn(f"'{text}':", de, f"hiányzó német fordítás: {text}")
+
+
+    def test_rule_collection_and_duplicate_markup(self) -> None:
+        for token in (
+            "name: 'collection'",
+            "pickedValues(box, 'members')",
+            "collection: true, members",
+            "collection: false",
+            "tcpField.hidden = collection",
+            "udpField.hidden = collection",
+            "accessField.hidden = collection",
+            "membersField.hidden = !collection",
+            "action: 'duplicate'",
+            "Duplikálás",
+            "Tartalmazott szabályok",
+            "Legalább két egyedi szabályt válassz a gyűjtőszabályhoz.",
+            "rule.collection ?",
+            "tr('gyűjtő')",
+            "tr('másolat')",
+        ):
+            self.assertIn(token, self.source, token)
+        en, de, pen, pde = self._i18n_sections()
+        sources = (
+            "Gyűjtőszabály",
+            "Tartalmazott szabályok",
+            "Duplikálás",
+            "másolat",
+            "gyűjtő",
+            "Legalább két egyedi szabályt válassz a gyűjtőszabályhoz.",
+            "A gyűjtőszabály portjai a tagok uniója. Teljes hozzáférésű és "
+            "gyűjtő szabály nem választható tagként.",
+            "Szabály duplikálva.",
+            "gyűjtőszabályhoz nem adható meg port, ICMP vagy teljes hozzáférés",
+            "a gyűjtőszabály nem tartalmazhatja önmagát",
+            "a beépített admin szabály nem lehet gyűjtőszabály tagja",
+            "a beépített admin szabály nem duplikálható",
+            "members: ismétlődő szabály-azonosító",
+            "members: legalább 2 és legfeljebb 64 egyedi szabály kell",
+            "collection: logikai érték kell",
+        )
+        for text in sources:
+            with self.subTest(text=text):
+                self.assertIn(text, en, f"hiányzó angol fordítás: {text}")
+                self.assertIn(text, de, f"hiányzó német fordítás: {text}")
+        for section in (pen, pde):
+            self.assertIn("gyűjtőszabályban", section)
+            self.assertIn("nem törölhető", section)
+            self.assertIn("gyűjtőszabályoknak", section)
+
+
+    @staticmethod
+    def _js_function(name: str, source: str) -> str:
+        match = re.search(
+            rf"function {re.escape(name)}\([^)]*\) \{{.*?\n\}}",
+            source, re.S,
+        )
+        if match is None:
+            raise AssertionError(f"hiányzó JS függvény: {name}")
+        return match.group(0)
+
+    def test_duplicate_label_localization_and_suffix(self) -> None:
+        """A másolat utótagja nyelvfüggetlenül tárolva, megjelenítéskor fordul."""
+        for token in (
+            "function ruleDisplayLabel(label)",
+            "function duplicateLabel(label)",
+            "const COPY_LABEL_SUFFIX = ' — másolat';",
+            "ruleDisplayLabel(rule.label)",
+            "ruleDisplayLabel(data.rule_label",
+            "ruleDisplayLabel(row.rule_label",
+            "Biztosan törlöd a szabályt: ${ruleDisplayLabel(rule.label)}?",
+            "label: duplicateLabel(rule.label)",
+        ):
+            self.assertIn(token, self.source, token)
+        # A kliens már nem a mindenkori nyelvű utótagot küldi el.
+        self.assertNotIn(
+            "rule.label + ' — ' + tr('másolat')", self.source
+        )
+        en, de, pen, pde = self._i18n_sections()
+        for section in (pen, pde):
+            self.assertIn("/^members: érvénytelen elem$/", section)
+            self.assertIn("/^members: érvénytelen elem: (.+)$/", section)
+
+        suffix_match = re.search(
+            r"const COPY_LABEL_SUFFIX = '([^']*)';", self.source
+        )
+        self.assertIsNotNone(suffix_match)
+        suffix = suffix_match.group(1)
+        display = self._js_function("ruleDisplayLabel", self.source)
+        duplicate = self._js_function("duplicateLabel", self.source)
+        script = (
+            "const tr = text => ({'Böngészés': 'Browse', "
+            "'másolat': 'copy', 'Kopie': 'copy'}[text] ?? text);\n"
+            + suffix_match.group(0) + "\n"
+            + display + "\n" + duplicate + "\n"
+            + "const out = {\n"
+            + "  known: ruleDisplayLabel('Böngészés — másolat'),\n"
+            + "  custom: ruleDisplayLabel('Saját szabály — másolat'),\n"
+            + "  legacy: ruleDisplayLabel('Web — copy'),\n"
+            + "  server: ruleDisplayLabel('Web (copy)'),\n"
+            + "  plain: ruleDisplayLabel('Web'),\n"
+            + "  long: duplicateLabel('x'.repeat(80)),\n"
+            + "  short: duplicateLabel('Rövid'),\n"
+            + "};\n"
+            + "process.stdout.write(JSON.stringify(out));"
+        )
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node nem érhető el a JS-helper teszthez")
+        result = subprocess.run(
+            [node, "-e", script],
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data["known"], "Browse — copy")
+        self.assertEqual(data["custom"], "Saját szabály — copy")
+        self.assertEqual(data["legacy"], "Web — copy")
+        self.assertEqual(data["server"], "Web — copy")
+        self.assertEqual(data["plain"], "Web")
+        self.assertEqual(data["short"], "Rövid" + suffix)
+        self.assertEqual(len(data["long"]), 80)
+        self.assertTrue(data["long"].endswith(suffix))
+        self.assertEqual(
+            data["long"].count("x"),
+            80 - len(suffix),
+        )
+
+    def test_password_copy_is_guarded_when_empty(self) -> None:
+        for token in (
+            "disabled: !passwordInput.value",
+            "const text = passwordInput.value;",
+            "if (!text) {",
+            "setPasswordStatus('Nincs jelszó a vágólapra másoláshoz.', false);",
+            "passwordCopy.disabled = !passwordInput.value;",
+        ):
+            self.assertIn(token, self.source, token)
+        en, de, _, _ = self._i18n_sections()
+        text = "Nincs jelszó a vágólapra másoláshoz."
+        for section in (en, de):
+            self.assertIn(f"'{text}':", section)
+
+    def test_duplicate_button_ignores_double_click(self) -> None:
+        start = self.source.index("action: 'duplicate'")
+        window = self.source[max(0, start - 700):start + 900]
+        for token in (
+            "const button = event.currentTarget;",
+            "if (button.disabled) return;",
+            "button.disabled = true;",
+            "await adminSend('/api/admin/rules'",
+            "label: duplicateLabel(rule.label)",
+            "finally {",
+            "button.disabled = false;",
+        ):
+            self.assertIn(token, window, token)
 
 
 class TotpQrCodegenTests(unittest.TestCase):
@@ -6212,7 +7479,7 @@ class SettingsStoreTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.path = os.path.join(self.tmp.name, "firewall-settings.json")
         self.store = gateway.settings_store.SettingsStore(
-            self.path, logger=lambda *_: None, default_host_ssh="off"
+            self.path, logger=lambda *_: None
         )
 
     def tearDown(self) -> None:
@@ -6220,7 +7487,7 @@ class SettingsStoreTests(unittest.TestCase):
 
     def test_crud_and_atomic_commit(self) -> None:
         before = self.store.snapshot()
-        self.assertEqual(before["host_ssh"], "off")
+        self.assertNotIn("host_ssh", before)
         self.assertEqual(before["preauth"], [])
         self.assertEqual(before["error"], "")
 
@@ -6307,7 +7574,7 @@ class SettingsStoreTests(unittest.TestCase):
                        "proto": "icmp", "ports": [80]},
             )
         with self.assertRaises(gateway.settings_store.SettingsError):
-            self.store.prepare("host_ssh", host_ssh="mindig")
+            self.store.prepare("host_ssh")
         with self.assertRaises(gateway.settings_store.SettingsError):
             self.store.prepare("ismeretlen")
         with self.assertRaises(gateway.settings_store.SettingsError):
@@ -6334,21 +7601,53 @@ class SettingsStoreTests(unittest.TestCase):
         with open(self.path, "w", encoding="utf-8") as fh:
             fh.write("{nem json")
         store = gateway.settings_store.SettingsStore(
-            self.path, logger=lambda *_: None, default_host_ssh="any"
+            self.path, logger=lambda *_: None
         )
         snapshot = store.snapshot()
         self.assertEqual(snapshot["preauth"], [])
         self.assertEqual(snapshot["block"], [])
-        self.assertEqual(snapshot["host_ssh"], "any")
+        self.assertNotIn("host_ssh", snapshot)
         self.assertTrue(snapshot["error"])
 
         # Egy sikeres mentés törli a hibát és felülírja a sérült fájlt.
-        store.commit(store.prepare("host_ssh", host_ssh="admin"))
+        store.commit(store.prepare(
+            "create", "preauth",
+            entry={"label": "Kiosk", "dst": "192.168.50.10",
+                   "proto": "tcp", "ports": [443]},
+        ))
         self.assertEqual(store.snapshot()["error"], "")
         fresh = gateway.settings_store.SettingsStore(
             self.path, logger=lambda *_: None
         )
-        self.assertEqual(fresh.snapshot()["host_ssh"], "admin")
+        self.assertEqual(len(fresh.snapshot()["preauth"]), 1)
+
+    def test_legacy_host_ssh_key_is_ignored_on_load(self) -> None:
+        # A régi beállításfájl host_ssh kulcsa ismeretlen mező lett: betöltéskor
+        # csendben eldobjuk, hibát nem okoz, és a következő mentésből kimarad.
+        self.store.commit(self.store.prepare(
+            "create", "preauth",
+            entry={"label": "Kiosk", "dst": "192.168.50.10",
+                   "proto": "tcp", "ports": [443]},
+        ))
+        raw = json.loads(Path(self.path).read_text(encoding="utf-8"))
+        for legacy in ("any", "off", "bogus"):
+            with self.subTest(value=legacy):
+                raw["host_ssh"] = legacy
+                Path(self.path).write_text(
+                    json.dumps(raw), encoding="utf-8"
+                )
+                legacy_store = gateway.settings_store.SettingsStore(
+                    self.path, logger=lambda *_: None
+                )
+                snapshot = legacy_store.snapshot()
+                self.assertEqual(snapshot["error"], "")
+                self.assertNotIn("host_ssh", snapshot)
+                self.assertEqual(len(snapshot["preauth"]), 1)
+
+        legacy_store.set_registration_enabled(True)
+        saved = json.loads(Path(self.path).read_text(encoding="utf-8"))
+        self.assertNotIn("host_ssh", saved)
+        self.assertIs(saved["registration_enabled"], True)
 
     def test_registration_enabled_default_and_validation(self) -> None:
         self.assertIs(self.store.snapshot()["registration_enabled"], False)
@@ -6382,7 +7681,7 @@ class SettingsStoreTests(unittest.TestCase):
         self.store.commit(blocked)
         self.store.commit(preauth)
         before = self.store.snapshot()
-        self.assertEqual(before["host_ssh"], "off")
+        self.assertNotIn("host_ssh", before)
         self.assertIs(before["registration_enabled"], False)
 
         result = self.store.set_registration_enabled(True)
@@ -6399,7 +7698,7 @@ class SettingsStoreTests(unittest.TestCase):
         )
         after = reloaded.snapshot()
         self.assertIs(after["registration_enabled"], True)
-        self.assertEqual(after["host_ssh"], before["host_ssh"])
+        self.assertNotIn("host_ssh", after)
         self.assertEqual(after["preauth"], before["preauth"])
         self.assertEqual(after["block"], before["block"])
         self.assertEqual(after["error"], "")
@@ -6417,6 +7716,62 @@ class SettingsStoreTests(unittest.TestCase):
                 with self.assertRaises(gateway.settings_store.SettingsError):
                     self.store.set_registration_enabled(value)
         self.assertIs(self.store.snapshot()["registration_enabled"], False)
+
+
+class HostSshPolicyRemovedTests(unittest.TestCase):
+    """A régi, állítható host SSH politika eltűnt, a tűzfal-plumbing maradt."""
+
+    def _text(self, name: str) -> str:
+        return (ROOT / name).read_text(encoding="utf-8")
+
+    def test_policy_switch_is_gone(self) -> None:
+        # A szimbólumneveket darabolva adjuk meg, hogy a forráskódban maradt
+        # előfordulásokra kereső ellenőrzés ne találjon hamis találatot.
+        env_switch = "HV_" + "HOST_SSH"
+        mode_symbol = "host_ssh" + "_mode"
+        removed_symbols = (
+            env_switch,
+            "HOST_SSH" + "_MODE",
+            "HOST_SSH" + "_MODES",
+            "DEFAULT_" + "HOST_SSH",
+            mode_symbol,
+            "_host_ssh" + "_wanted",
+            "set_" + mode_symbol,
+            "host_ssh" + "_policy_applied",
+        )
+        for name in (".env.example", "docker-compose.yml"):
+            with self.subTest(file=name):
+                self.assertNotIn(env_switch, self._text(name))
+
+        for name in ("gateway.py", "settings_store.py", "server.py"):
+            with self.subTest(file=name):
+                text = self._text(name)
+                for symbol in removed_symbols:
+                    self.assertNotIn(symbol, text)
+
+        for name in ("settings_store.py", "server.py"):
+            with self.subTest(file=name):
+                self.assertNotIn("host_ssh", self._text(name))
+
+        page = self._text("index.html")
+        self.assertNotIn("host_ssh", page)
+        self.assertNotIn("Host SSH", page)
+
+    def test_firewall_plumbing_remains(self) -> None:
+        source = self._text("gateway.py")
+        self.assertIn('self.ssh_set = "host_ssh_v4"', source)
+        self.assertIn("def grant_host_ssh(", source)
+        self.assertIn("def revoke_host_ssh(", source)
+        self.assertIn('add_simple("host_ssh_v4", "host_ssh")', source)
+
+        nft = self._text("deploy/hatarvedelem.nft")
+        self.assertIn("add set inet hatarvedelem host_ssh_v4 {", nft)
+        self.assertIn("ip saddr @host_ssh_v4 tcp dport 22 accept", nft)
+        self.assertIn(
+            "tcp dport 22 ct state established,related "
+            "ip saddr != @host_ssh_v4 drop",
+            nft,
+        )
 
 
 class FirewallCustomTests(unittest.TestCase):

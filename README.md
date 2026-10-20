@@ -29,6 +29,10 @@ bottom-right corner.
   access; an admin approves or rejects it in **Admin → Users**. The email is
   stored as contact data only and is never sent or logged.
   See [docs/account-requests.md](docs/account-requests.md).
+- Admins can duplicate any non-built-in rule and combine existing individual
+  rules into a **collection rule** whose TCP/UDP/ICMP permissions are the
+  union of its members. Collections can be assigned to users and groups like
+  any other rule. See [docs/rule-collections.md](docs/rule-collections.md).
 - Grants are implemented with nftables dynamic sets (`allowed_v4`,
   `allowed_tcp`, `allowed_udp`, `allowed_icmp`, `host_ssh_v4`, `client_mac`).
   Entries expire in the kernel even if the portal stops.
@@ -36,9 +40,10 @@ bottom-right corner.
   from the host ARP table at authorization time; if it cannot be resolved,
   access is refused. Source-IP spoofing and DHCP lease takeover alone do not
   inherit an existing grant.
-- Host SSH is also gated: by default only an IP with an active, authorized
-  **admin** portal session can connect to port 22 (`HV_HOST_SSH=admin`; use
-  `any` or `off` to change the policy).
+- Host SSH is also gated: only the source IP of an active, authorized portal
+  session that selected the built-in **admin-full** rule can connect to port
+  22. Custom full-access rules and collection rules do not open SSH, and
+  there is no environment switch for the host SSH policy.
 - Docker-published containers work too: forward rules match the pre-DNAT
   destination port, so the grant reaches the container. Forwarded packets
   are marked by the firewall; Docker's `DOCKER-USER` chain accepts only
@@ -293,7 +298,7 @@ a few seconds without a restart.
 
 ### Firewall customization
 
-The **Settings** admin tab manages three things:
+The **Settings** admin tab manages two things:
 
 - **Pre-auth rules** — destination (IP/CIDR, optional) and ports that are
   reachable from the LAN *before* portal sign-in. From the WAN side they
@@ -307,9 +312,6 @@ The **Settings** admin tab manages three things:
   the portal and DHCP remain reachable for a banned client.
 - **Block rules** — destination/ports that are always dropped. The block is
   evaluated before pre-auth, so it overrides a pre-auth entry.
-- **Host SSH policy** — `admin`, `any` or `off`, applied immediately.
-  Narrowing the policy revokes SSH access for sessions that no longer
-  qualify.
 
 Changes are validated, applied to nftables, and only then written atomically
 to `firewall-settings.json`; if the nftables update fails, the previous rules
@@ -337,7 +339,8 @@ deletes the volume; without `-v` it is kept.
 - Forwarding is fail-closed. If the portal or Docker fails to start, traffic
   stays blocked.
 - Host SSH is opened only for the source IP of an active, authorized portal
-  session, and by default only for admin sessions. Always keep an out-of-band
+  session that selected the built-in **admin-full** rule. Custom full-access
+  rules and collection rules do not open SSH. Always keep an out-of-band
   console (provider console) available so you can recover if the portal does
   not start.
 - The portal speaks plain HTTP. If it is reachable from an untrusted network,

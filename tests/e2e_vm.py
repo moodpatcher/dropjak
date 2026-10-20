@@ -365,9 +365,10 @@ def main() -> int:
     new_password = password + "-v2"
 
     user_cli("del", USER)  # esetleges maradék eltakarítása
-    # A tesztfelhasználó admin, hogy a host SSH házirend admin-ágát is
-    # vizsgálja; a szabályokat explicit módon rendeljük hozzá (a CLI már
-    # nem ad öröklődő "minden szabály" hozzáférést).
+    # A tesztfelhasználó admin, hogy a beépített admin-full szabályt is
+    # választhassa (ez az egyetlen szabály, amely host SSH-t nyit); a többi
+    # szabályt explicit módon rendeljük hozzá (a CLI már nem ad öröklődő
+    # "minden szabály" hozzáférést).
     created = user_cli(
         "add", USER, "--role", "admin", "--rule", "browse", "--rule", "full",
         "--password-stdin", stdin=password + "\n",
@@ -397,7 +398,9 @@ def main() -> int:
         check("login: első belépésnél kötelező jelszócsere",
               login.get("body", {}).get("must_change_password") is True)
         rule_ids = [rule.get("id") for rule in login.get("body", {}).get("rules", [])]
-        check("login: a felhasználó szabályai megvannak", "browse" in rule_ids and "full" in rule_ids,
+        check("login: a felhasználó szabályai megvannak",
+              "browse" in rule_ids and "full" in rule_ids
+              and "admin-full" in rule_ids,
               json.dumps(rule_ids))
 
         before_change = client_json("access", "browse", "60")
@@ -448,13 +451,13 @@ def main() -> int:
         check("browse: HTTPS kimegy", web.get("https") is True)
         check("browse: DNS engedélyezett", web.get("dns") is True, json.dumps(web))
         check("browse: ping nem engedélyezett", web.get("ping") is False)
-        check("browse: host SSH megnyílt", web.get("host_ssh") is True, json.dumps(web))
+        check("browse: host SSH nem nyílt meg", web.get("host_ssh") is False, json.dumps(web))
         state = nft_state("browse után")
         check("nft: allowed_tcp tartalmazza a klienst", state["tcp"])
         check("nft: allowed_udp tartalmazza a klienst", state["udp"])
         check("nft: allowed_v4 nem tartalmazza a klienst", not state["v4"])
         check("nft: allowed_icmp nem tartalmazza a klienst", not state["icmp"])
-        check("nft: host SSH halmaz tartalmazza a klienst", state["host_ssh"])
+        check("nft: host SSH halmaz üres", not state["host_ssh"])
         check("nft: MAC-kötés rögzítve", state["mac"])
         expected_mac = client_mac()
         mac_entries = nft_json_entries("client_mac")
@@ -484,8 +487,9 @@ def main() -> int:
               ),
               json.dumps(tcp_entries))
         ssh_entries = nft_json_entries("host_ssh_v4")
-        check("nft JSON: a host SSH engedély olvasható",
-              any(entry.get("address") == CLIENT_IP for entry in ssh_entries))
+        check("nft JSON: browse nem nyit host SSH-t",
+              not any(entry.get("address") == CLIENT_IP for entry in ssh_entries),
+              json.dumps(ssh_entries))
 
         print("== 2. TTL-határok ==", flush=True)
         low = client_json("access", "browse", "59")
@@ -511,7 +515,8 @@ def main() -> int:
         check("full: HTTPS kimegy", full.get("https") is True)
         check("full: DNS kimegy", full.get("dns") is True)
         check("full: ping kimegy", full.get("ping") is True)
-        check("full: host SSH megnyílt", full.get("host_ssh") is True)
+        check("full: host SSH nem nyílt meg", full.get("host_ssh") is False,
+              json.dumps(full))
         snap = snapshot()["text"]
         check("nft: allowed_v4 tartalmazza a klienst", set_has(snap, "allowed_v4", CLIENT_IP))
         # A teljes hozzáférésű szabály az allowed_v4-en keresztül ICMP-t is
@@ -523,16 +528,43 @@ def main() -> int:
             or set_has(snap, "allowed_icmp", CLIENT_IP),
         )
 
+        print("== 3b. Beépített admin-full szabály ==", flush=True)
+        access = client_json("access", "admin-full", "60")
+        check("access admin-full: 200", bool(access.get("ok")),
+              json.dumps(access.get("body")))
+        check("access admin-full: teljes hozzáférés a grantben",
+              access.get("body", {}).get("grant", {}).get("full") is True,
+              json.dumps(access.get("body", {}).get("grant")))
+        admin = client_json("check")
+        check("admin-full: host SSH megnyílt", admin.get("host_ssh") is True,
+              json.dumps(admin))
+        state = nft_state("admin-full után")
+        check("nft: host SSH halmaz tartalmazza a klienst", state["host_ssh"])
+        ssh_entries = nft_json_entries("host_ssh_v4")
+        client_ssh = [
+            entry for entry in ssh_entries
+            if entry.get("address") == CLIENT_IP
+        ]
+        check("nft JSON: a host SSH engedély olvasható", bool(client_ssh),
+              json.dumps(ssh_entries))
+        check("nft JSON: a host SSH engedély TTL-je olvasható",
+              all(isinstance(entry.get("timeout"), int) and entry["timeout"] > 0
+                  for entry in client_ssh),
+              json.dumps(client_ssh))
+
         print("== 4. Visszaváltás böngészésre ==", flush=True)
         access = client_json("access", "browse", "60")
         check("access browse újra: 200", bool(access.get("ok")), json.dumps(access.get("body")))
         back = client_json("check")
         check("browse: ping visszavonva", back.get("ping") is False, json.dumps(back))
+        check("browse: host SSH visszavonva", back.get("host_ssh") is False,
+              json.dumps(back))
         check("browse: HTTP továbbra is kimegy", back.get("http_external") is True)
         check("browse: DNS továbbra is működik", back.get("dns") is True)
         snap = snapshot()["text"]
         check("nft: allowed_v4 kiürült", not set_has(snap, "allowed_v4", CLIENT_IP))
         check("nft: allowed_icmp kiürült", not set_has(snap, "allowed_icmp", CLIENT_IP))
+        check("nft: host SSH kiürült", not set_has(snap, "host_ssh_v4", CLIENT_IP))
 
         print("== 5. Kilépés ==", flush=True)
         out = client_json("logout")
@@ -550,14 +582,16 @@ def main() -> int:
         print("== 6. Természetes lejárat ==", flush=True)
         login = client_json("login", password=new_password)
         check("lejárat: új belépés", bool(login.get("ok")))
-        access = client_json("access", "browse", "60")
-        check("lejárat: böngészés engedélyezve 60 másodpercre", bool(access.get("ok")),
+        access = client_json("access", "admin-full", "60")
+        check("lejárat: admin-full engedélyezve 60 másodpercre", bool(access.get("ok")),
               json.dumps(access.get("body", {}).get("error")))
         before = client_json("check")
         check("lejárat előtt: HTTP kimegy", before.get("http_external") is True, json.dumps(before))
         check("lejárat előtt: DNS működik", before.get("dns") is True, json.dumps(before))
         check("lejárat előtt: host SSH működik", before.get("host_ssh") is True, json.dumps(before))
-        check("lejárat előtt: ping tiltva", before.get("ping") is False)
+        check("lejárat előtt: ping engedélyezett", before.get("ping") is True)
+        state = nft_state("lejárat előtt")
+        check("nft: host SSH halmaz tartalmazza a klienst", state["host_ssh"])
         print("    várakozás a lejáratig (65 s)...", flush=True)
         time.sleep(65)
         expired = client_json("check")

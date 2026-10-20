@@ -25,7 +25,7 @@ A felvetés: egy domain vagy subdomain forwardolása egy portra, automatikus SSL
 
 1. A `forward` lánc továbbra is fail-closed marad; a publikus proxy csak a kifejezetten engedélyezett 80/443-at nyitja.
 2. Egy fail2ban ban a publikus 80/443-at is lezárja; csak a portál és a DHCP marad elérhető.
-3. A host SSH továbbra is csak aktív, engedélyezett portál-munkamenettel érhető el.
+3. A host SSH továbbra is csak aktív, engedélyezett portál-munkamenettel érhető el, és csak akkor, ha a munkamenet a beépített `admin-full` szabályt választotta; egyedi teljes hozzáférésű és gyűjtőszabályok nem nyitják meg.
 4. Ha a portál vagy a Caddy nem indul el, semmilyen új hozzáférés nem nyílik ki.
 5. A proxy konfigurációja admin-only, és nem vezethető be a portál state-jébe vagy a Caddy admin API-ba illetéktelenül.
 
@@ -57,7 +57,7 @@ A felvetés: egy domain vagy subdomain forwardolása egy portra, automatikus SSL
 ### 2.3. Jelenlegi UI és state
 
 - Az admin navigáció a Users/Groups/Rules/Sessions/Firewall/Drops/Fail2ban/Logs/Settings füleket tartalmazza (`index.html:934-942`).
-- A Settings fül három szekciót kezel: pre-auth, block és host SSH (`README.md:246-266`); a UI a `settingsData()`, `renderSettingForm()`, `renderSettingSection()` és `renderSettings()` függvényekre épül (`index.html:4773-5004`).
+- A Settings fül két szekciót kezel: pre-auth és block (`README.md:246-266`); a UI a `settingsData()`, `renderSettingForm()`, `renderSettingSection()` és `renderSettings()` függvényekre épül (`index.html:4773-5004`). A host SSH nem beállítás, csak a beépített `admin-full` szabály engedélyezése nyitja meg.
 - A tab-dispatch `index.html:6314-6321`, a HU/EN/DE i18n táblák ugyanabban a fájlban vannak; a raw firewall nézet lánccímkéi `index.html:5596-5599`.
 - A `settings_store.py` validálja és atomikusan írja a `firewall-settings.json`-t (`:126-196`, `:199-366`); korrupt fájl esetén üres pre-auth/block listára esik vissza (fail-closed).
 - A state volume tartalma: `users.json`, `groups.json`, `rules.json`, `audit.jsonl`, `drops.jsonl`, `fail2ban.json`, `firewall-settings.json` (`README.md:268-282`).
@@ -65,7 +65,7 @@ A felvetés: egy domain vagy subdomain forwardolása egy portra, automatikus SSL
 
 ### 2.4. Korlátok
 
-- A host SSH portal-gated; a proxy integráció nem nyithat management hozzáférést.
+- A host SSH portal-gated, és csak a beépített `admin-full` szabállyal nyílik meg; egyedi teljes hozzáférésű vagy gyűjtőszabály nem nyitja meg. A proxy integráció nem nyithat management hozzáférést.
 - A fail-closed modell nem lazítható; a proxy csak külön, kifejezetten engedélyezett publikus portokat nyithat.
 - A kutatás read-only volt; a jelen dokumentum is terv, nem implementáció.
 - A `docs/` könyvtár a dokumentummal jött létre; más fájl nem változott.

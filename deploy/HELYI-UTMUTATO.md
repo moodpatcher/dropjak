@@ -47,8 +47,9 @@ szabályt a portál **Admin** paneljén kezeld.
 ## SSH a hostra
 
 A host SSH (22-es port) **csak akkor** nyílik meg, ha a portálon
-ugyanarról az IP-címről beléptél, és a portálon engedélyezted a
-hozzáférést (bármely szabályt kiválasztva, a TTL megadásával). A jelszó
+ugyanarról az IP-címről beléptél, és a portálon a beépített
+**admin-full** szabályt engedélyezted (a TTL megadásával). Egyedi teljes
+hozzáférésű vagy gyűjtőszabály nem nyitja meg. A jelszó
 megadása önmagában még nem nyitja meg. Kilépéskor azonnal,
 lejáratkor a kernel-timeouttal zárul. A böngésző és az SSH ugyanarról a
 hálózatról induljon (VPN-nél ugyanaz az exit IP).

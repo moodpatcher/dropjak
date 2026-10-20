@@ -82,9 +82,6 @@ services:
       HV_RATE_WINDOW: ${HV_RATE_WINDOW:-60}
       HV_RATE_MAX: ${HV_RATE_MAX:-10}
       HV_FLUSH_ON_START: ${HV_FLUSH_ON_START:-1}
-      # Host SSH: admin (csak admin munkamenet), any (bármely engedélyezett
-      # munkamenet) vagy off (soha).
-      HV_HOST_SSH: ${HV_HOST_SSH:-admin}
       # Drop log: az nftables által eldobott csomagok NFLOG-csoportja és a
       # JSONL-napló a state-köteten. HV_DROP_LOG=0 esetén a portál nem
       # figyeli a csoportot (az nft-szabályok naplózása megmarad).
@@ -93,7 +90,7 @@ services:
       HV_DROP_LOG_PATH: ${HV_DROP_LOG_PATH:-/var/lib/hatarvedelem/drops.jsonl}
       HV_DROP_LOG_MAX_BYTES: ${HV_DROP_LOG_MAX_BYTES:-10485760}
       HV_DROP_LOG_KEEP: ${HV_DROP_LOG_KEEP:-5}
-      # A felületen beállított pre-auth/blokk szabályok és host SSH mód.
+      # A felületen beállított pre-auth/blokk szabályok.
       HV_SETTINGS: ${HV_SETTINGS:-/var/lib/hatarvedelem/firewall-settings.json}
       # Fail2ban: a sikertelen belépések számlálása és a forrás-IP tiltása.
       # A küszöb, az időablak és a tiltás hossza a felületen is állítható;

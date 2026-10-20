@@ -72,7 +72,8 @@ Használat: sudo ./install.sh [opciók]
   --portal-net CIDR    ahonnan a portál elérhető (alap: az SSH forrása vagy
                        a LAN hálózat). Nyilvános portálhoz: 0.0.0.0/0.
                        A host SSH-t nem ez szabályozza: az csak aktív portál-
-                       munkamenettel nyílik meg.
+                       munkamenettel és a beépített admin-full szabállyal
+                       nyílik meg.
   --port PORT          a portál portja (alap: 80)
   --portal-url URL     a portál kanonikus címe (alap: http://<gateway-ip>)
   --yes                nem kérdez; a hiányzó csomagokat is telepíti, és a
@@ -546,8 +547,9 @@ fi
 
 note "Tűzfal betöltése"
 warn "A host SSH ezután csak akkor nyílik meg, ha ugyanarról az IP-ről"
-warn "belépsz a portálra, és engedélyezed a hozzáférést. A jelenlegi SSH-"
-warn "kapcsolatod a conntrack miatt életben marad; az újhoz portál-belépés kell."
+warn "belépsz a portálra, és a beépített admin-full szabályt engedélyezed."
+warn "A jelenlegi SSH-kapcsolatod a conntrack miatt életben marad; az újhoz"
+warn "portál-belépés kell."
 confirm "Betöltöm a tűzfalszabályokat?" || die "megszakítva"
 # A fájl idempotens: többszöri futtatás nem duplázza a szabályokat, és a
 # belépett kliensek halmazelemei megmaradnak.

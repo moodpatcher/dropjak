@@ -947,14 +947,13 @@ class Handler(BaseHTTPRequestHandler):
                     kind=kind,
                     entry_id=entry_id.strip(),
                     entry=data.get("entry"),
-                    host_ssh=data.get("host_ssh", ""),
                 )
             except (settings_store.SettingsError, ValueError) as exc:
                 self._admin_action_error(f"settings_{action}", exc)
                 self._json(400, {"ok": False, "error": str(exc)})
                 return
             try:
-                warnings = self.gw.apply_settings(new_data)
+                self.gw.apply_settings(new_data)
             except (gateway.FirewallError, settings_store.SettingsError,
                     OSError) as exc:
                 self._admin_action_error(f"settings_{action}", exc)
@@ -968,23 +967,17 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
             target = entry_id.strip()
-            if action == "host_ssh":
-                target = new_data.get("host_ssh", "")
             self._audit(
                 "admin_settings_changed",
                 user=session.user,
                 action=action or "ismeretlen",
                 kind=kind,
                 target=target,
-                host_ssh=new_data.get("host_ssh", ""),
                 preauth_count=len(new_data.get("preauth", [])),
                 block_count=len(new_data.get("block", [])),
-                warnings=len(warnings),
             )
         payload = self._admin_state()
         payload["message"] = "A tűzfalbeállítások mentve."
-        if warnings:
-            payload["warnings"] = warnings
         self._json(200, payload)
 
     def _admin_fail2ban_api(self) -> None:
@@ -2499,6 +2492,7 @@ class Handler(BaseHTTPRequestHandler):
         if self._admin_guard() is None:
             return
         action = str(data.get("action", "")).strip()
+        message = ""
         try:
             if action == "create":
                 self._admin_rule_create(data)
@@ -2506,12 +2500,18 @@ class Handler(BaseHTTPRequestHandler):
                 self._admin_rule_update(data)
             elif action == "delete":
                 self._admin_rule_delete(data)
+            elif action == "duplicate":
+                self._admin_rule_duplicate(data)
+                message = "Szabály duplikálva."
             else:
                 raise gateway.RuleStoreError("ismeretlen művelet")
         except (gateway.RuleStoreError, ValueError) as exc:
             self._admin_action_error(f"rule_{action}", exc)
             return self._json(400, {"ok": False, "error": str(exc)})
-        self._json(200, self._admin_state())
+        payload = self._admin_state()
+        if message:
+            payload["message"] = message
+        self._json(200, payload)
 
     def _admin_rule_create(self, data: dict) -> None:
         rule_id = data.get("id")
@@ -2525,14 +2525,25 @@ class Handler(BaseHTTPRequestHandler):
             ports=rule.ports.label(),
             default_ttl=rule.default_ttl,
             max_ttl=rule.max_ttl,
+            collection=rule.collection,
+            members=len(rule.members),
         )
 
     def _admin_rule_update(self, data: dict) -> None:
         rule_id = data.get("id")
         if not isinstance(rule_id, str):
             raise gateway.RuleStoreError("hiányzó szabály-azonosító")
-        rule = self.gw.rules.update(rule_id.strip(), data)
-        revoked = self.gw.sessions.revoke_rule(rule.id)
+        # A függő gyűjtők listáját a szabálytár a módosítással egy záron
+        # belül, a commit pontján adja vissza: a közben létrehozott gyűjtő
+        # is belekerül, így nem maradhat engedélyezett munkamenet a régi
+        # portokkal, nem csak a szabály sajátjait kell bontani.
+        rule, dependents = self.gw.rules.update_with_dependents(
+            rule_id.strip(), data
+        )
+        revoked = sum(
+            self.gw.sessions.revoke_rule(target)
+            for target in (rule.id, *dependents)
+        )
         self._audit(
             "admin_rule_updated",
             target=rule.id,
@@ -2540,7 +2551,33 @@ class Handler(BaseHTTPRequestHandler):
             ports=rule.ports.label(),
             default_ttl=rule.default_ttl,
             max_ttl=rule.max_ttl,
+            collection=rule.collection,
+            members=len(rule.members),
+            collections_affected=",".join(dependents),
             sessions_revoked=revoked,
+        )
+
+    def _admin_rule_duplicate(self, data: dict) -> None:
+        rule_id = data.get("id")
+        if not isinstance(rule_id, str):
+            raise gateway.RuleStoreError("hiányzó szabály-azonosító")
+        label = data.get("label")
+        if label is not None and not isinstance(label, str):
+            raise gateway.RuleStoreError("label: szöveg kell")
+        new_id = data.get("new_id")
+        if new_id is not None and not isinstance(new_id, str):
+            raise gateway.RuleStoreError("new_id: szöveg kell")
+        rule = self.gw.rules.duplicate(
+            rule_id.strip(), new_id=new_id, label=label
+        )
+        self._audit(
+            "admin_rule_duplicated",
+            target=rule.id,
+            source=rule_id.strip(),
+            user=self._session().user if self._session() else "",
+            ports=rule.ports.label(),
+            collection=rule.collection,
+            members=len(rule.members),
         )
 
     def _admin_rule_delete(self, data: dict) -> None:

@@ -14,7 +14,8 @@
 #     TCP/UDP célportjaira mehet (allowed_tcp/allowed_udp), ICMP-re az
 #     allowed_icmp révén; teljes hozzáférésnél az allowed_v4 halmaz tagjaként
 #   - input:   a portál mindenki számára elérhető; a host SSH csak aktív,
-#     engedélyezett portál-munkamenettel; a DNS/DHCP a LAN felől
+#     engedélyezett portál-munkamenettel, és csak a beépített admin-full
+#     szabály választásakor; a DNS/DHCP a LAN felől
 #   - a nem engedélyezett kliensek HTTP-je a belépőoldalra kerül
 #
 # Az iifname/oifname használatának oka, hogy a szabályok betöltése ne
@@ -56,8 +57,10 @@ add set inet hatarvedelem allowed_icmp {
 }
 
 # Azon kliensek IPv4 címei, akiknek a portálon engedélyezett munkamenetük
-# van. A host SSH-t ez a halmaz nyitja meg. Az elem a munkamenet TTL-jével
-# jár le; kilépéskor a portál azonnal törli.
+# van, és a beépített admin-full szabályt választották. A host SSH-t ez a
+# halmaz nyitja meg; egyedi teljes hozzáférésű és gyűjtőszabály nem kerül
+# ide. Az elem a munkamenet TTL-jével jár le; kilépéskor a portál azonnal
+# törli.
 add set inet hatarvedelem host_ssh_v4 {
     type ipv4_addr
     flags timeout
@@ -324,7 +327,8 @@ table inet hatarvedelem {
         iifname "__LAN_IF__" tcp dport __PORT__ accept
         ip saddr __PORTAL_NET__ tcp dport __PORT__ accept
 
-        # SSH a hostra kizárólag aktív, engedélyezett portál-munkamenettel.
+        # SSH a hostra kizárólag aktív, engedélyezett portál-munkamenettel,
+        # és csak ha a munkamenet a beépített admin-full szabályt választotta.
         # A portál a szabály és a TTL kiválasztása után teszi be az IP-t;
         # a jelszó önmagában nem. Kilépéskor azonnal, lejáratkor a
         # kernel-timeouttal törlődik.

@@ -484,6 +484,13 @@
   .admin-form label{font-size:12px;margin-bottom:4px}
   .admin-form input,.admin-form select,.admin-form textarea{margin:0;padding:8px 9px;font-size:13.5px}
   .admin-form input[type=checkbox],.log-tools input[type=checkbox]{width:16px;height:16px;padding:0;margin:0;flex:0 0 auto}
+  .password-field{display:flex;flex-wrap:wrap;gap:6px;align-items:center;min-width:0;margin-top:2px}
+  .password-field input{flex:1 1 170px;width:auto;min-width:0}
+  .password-field button{flex:0 0 auto}
+  .password-hint,.password-status{display:block;margin-top:5px;font-size:11.5px;line-height:1.45;color:var(--muted)}
+  .password-status{min-height:1.45em}
+  .password-status.ok{color:var(--green)}
+  .password-status.err{color:var(--red)}
   .picker{margin:2px 0 0;background:#fff;border:1px solid var(--line-strong);border-radius:8px;overflow:hidden}
   .picker-search{display:block;width:100%;margin:0;padding:8px 9px;font-size:12.5px;border:0;border-bottom:1px solid var(--line);border-radius:0}
   .picker-search:focus{background:#fafaf8}
@@ -2210,6 +2217,12 @@ const I18N = {
     'aktív': 'active',
     'letiltva': 'disabled',
     'első belépésnél jelszócsere': 'password change on first sign-in',
+    'Jelszó generálása': 'Generate password',
+    'Mutat': 'Show',
+    'Elrejtés': 'Hide',
+    'Jelszó a vágólapra másolva.': 'Password copied to the clipboard.',
+    'Nincs jelszó a vágólapra másoláshoz.': 'There is no password to copy to the clipboard.',
+    'A mentéssel a felhasználó jelszava megváltozik.': "Saving will change the user's password.",
     'Új jelszó (üresen hagyva nem változik; a felhasználónak első belépéskor le kell cserélnie)': 'New password (leave blank to keep current; the user must change it on first sign-in)',
     'Kezdetleges jelszó (első belépéskor le kell cserélnie)': 'Initial password (must be changed on first sign-in)',
     'Szerepkör': 'Role',
@@ -2231,6 +2244,23 @@ const I18N = {
     'Alap TTL': 'Default TTL',
     'Max TTL': 'Max TTL',
     'beépített': 'built-in',
+    'a beépített admin szabály nem duplikálható': 'the built-in admin rule cannot be duplicated',
+    'Gyűjtőszabály': 'Collection rule',
+    'Tartalmazott szabályok': 'Included rules',
+    'Duplikálás': 'Duplicate',
+    'másolat': 'copy',
+    'gyűjtő': 'collection',
+    'Legalább két egyedi szabályt válassz a gyűjtőszabályhoz.': 'Choose at least two individual rules for the collection.',
+    'A gyűjtőszabály portjai a tagok uniója. Teljes hozzáférésű és gyűjtő szabály nem választható tagként.': 'A collection rule grants the union of its members’ ports. Full-access and collection rules cannot be members.',
+    'Keresés az egyedi szabályok között…': 'Search individual rules…',
+    'Szabály duplikálva.': 'Rule duplicated.',
+    'gyűjtőszabályhoz nem adható meg port, ICMP vagy teljes hozzáférés': 'a collection rule cannot have ports, ICMP or full access',
+    'a gyűjtőszabály nem tartalmazhatja önmagát': 'a collection rule cannot contain itself',
+    'a beépített admin szabály nem lehet gyűjtőszabály tagja': 'the built-in admin rule cannot be a collection member',
+    'members: 2–64 szabály-azonosítóból álló lista kell': 'members: a list of 2–64 rule IDs is required',
+    'members: ismétlődő szabály-azonosító': 'members: duplicate rule ID',
+    'members: legalább 2 és legfeljebb 64 egyedi szabály kell': 'members: at least 2 and at most 64 distinct rules are required',
+    'collection: logikai érték kell': 'collection: a boolean is required',
     'TCP portok': 'TCP ports',
     'UDP portok': 'UDP ports',
     'pl. 80, 443, 8080': 'e.g. 80, 443, 8080',
@@ -2557,15 +2587,9 @@ const I18N = {
     'pl. 1.1.1.1': 'e.g. 1.1.1.1',
     // -- firewall settings --------------------------------------------
     'Tűzfal testreszabása': 'Firewall customization',
-    'Bejelentkezés előtt nyitva lévő célok és a host SSH szabály.': 'Destinations open before sign-in and the host SSH policy.',
+    'Bejelentkezés előtt nyitva lévő és blokkolt célok.': 'Destinations open before sign-in and blocked targets.',
     'A beállításfájl hibás, a pre-auth lista üres:': 'The settings file is invalid; the pre-auth list is empty:',
     'A pre-auth szabályok megkerülik a portált: a megadott cél és port a bejelentkezés előtt is elérhető minden LAN-kliensnek. Csak olyan szolgáltatást adj hozzá, amelynek nyilvánosnak kell lennie.': 'Pre-auth rules bypass the portal: the given destination and port are reachable by every LAN client before sign-in. Only add a service that must be public.',
-    'Host SSH': 'Host SSH',
-    'admin: csak admin munkamenet kap SSH-t; any: bármely engedélyezett munkamenet; off: soha.': 'admin: only an admin session gets SSH; any: any authorized session; off: never.',
-    'admin (csak admin)': 'admin (admin only)',
-    'any (bármely munkamenet)': 'any (any session)',
-    'off (soha)': 'off (never)',
-    'Host SSH szabály': 'Host SSH policy',
     'Pre-auth szabályok': 'Pre-auth rules',
     'Pre-auth: bejelentkezés előtt is elérhető célok. A blokk felülbírálja.': 'Pre-auth: destinations reachable before sign-in. The block list overrides it.',
     'Új pre-auth szabály': 'New pre-auth rule',
@@ -2815,6 +2839,12 @@ const I18N = {
     'aktív': 'aktiv',
     'letiltva': 'deaktiviert',
     'első belépésnél jelszócsere': 'Passwortänderung bei der ersten Anmeldung',
+    'Jelszó generálása': 'Passwort generieren',
+    'Mutat': 'Anzeigen',
+    'Elrejtés': 'Ausblenden',
+    'Jelszó a vágólapra másolva.': 'Das Passwort wurde in die Zwischenablage kopiert.',
+    'Nincs jelszó a vágólapra másoláshoz.': 'Es gibt kein Passwort zum Kopieren in die Zwischenablage.',
+    'A mentéssel a felhasználó jelszava megváltozik.': 'Beim Speichern wird das Passwort des Benutzers geändert.',
     'Új jelszó (üresen hagyva nem változik; a felhasználónak első belépéskor le kell cserélnie)': 'Neues Passwort (leer lassen = unverändert; der Benutzer muss es bei der ersten Anmeldung ändern)',
     'Kezdetleges jelszó (első belépéskor le kell cserélnie)': 'Anfangspasswort (muss bei der ersten Anmeldung geändert werden)',
     'Szerepkör': 'Rolle',
@@ -2836,6 +2866,23 @@ const I18N = {
     'Alap TTL': 'Standard-TTL',
     'Max TTL': 'Max. TTL',
     'beépített': 'integriert',
+    'a beépített admin szabály nem duplikálható': 'die integrierte Admin-Regel darf nicht dupliziert werden',
+    'Gyűjtőszabály': 'Sammlungsregel',
+    'Tartalmazott szabályok': 'Enthaltene Regeln',
+    'Duplikálás': 'Duplizieren',
+    'másolat': 'Kopie',
+    'gyűjtő': 'Sammlung',
+    'Legalább két egyedi szabályt válassz a gyűjtőszabályhoz.': 'Wähle mindestens zwei einzelne Regeln für die Sammlungsregel.',
+    'A gyűjtőszabály portjai a tagok uniója. Teljes hozzáférésű és gyűjtő szabály nem választható tagként.': 'Eine Sammlungsregel gewährt die Vereinigung der Ports ihrer Mitglieder. Vollzugriffs- und Sammlungsregeln können nicht Mitglied sein.',
+    'Keresés az egyedi szabályok között…': 'Einzelne Regeln durchsuchen…',
+    'Szabály duplikálva.': 'Regel dupliziert.',
+    'gyűjtőszabályhoz nem adható meg port, ICMP vagy teljes hozzáférés': 'eine Sammlungsregel darf keine Ports, ICMP oder Vollzugriff haben',
+    'a gyűjtőszabály nem tartalmazhatja önmagát': 'eine Sammlungsregel darf sich nicht selbst enthalten',
+    'a beépített admin szabály nem lehet gyűjtőszabály tagja': 'die integrierte Admin-Regel darf kein Mitglied einer Sammlungsregel sein',
+    'members: 2–64 szabály-azonosítóból álló lista kell': 'members: eine Liste mit 2–64 Regel-IDs ist erforderlich',
+    'members: ismétlődő szabály-azonosító': 'members: doppelte Regel-ID',
+    'members: legalább 2 és legfeljebb 64 egyedi szabály kell': 'members: mindestens 2 und höchstens 64 verschiedene Regeln sind erforderlich',
+    'collection: logikai érték kell': 'collection: ein boolescher Wert ist erforderlich',
     'TCP portok': 'TCP-Ports',
     'UDP portok': 'UDP-Ports',
     'pl. 80, 443, 8080': 'z. B. 80, 443, 8080',
@@ -3162,15 +3209,9 @@ const I18N = {
     'pl. 1.1.1.1': 'z. B. 1.1.1.1',
     // -- Firewall-Einstellungen ---------------------------------------
     'Tűzfal testreszabása': 'Firewall anpassen',
-    'Bejelentkezés előtt nyitva lévő célok és a host SSH szabály.': 'Vor der Anmeldung offene Ziele und die Host-SSH-Regel.',
+    'Bejelentkezés előtt nyitva lévő és blokkolt célok.': 'Vor der Anmeldung offene und blockierte Ziele.',
     'A beállításfájl hibás, a pre-auth lista üres:': 'Die Einstellungsdatei ist ungültig; die Pre-auth-Liste ist leer:',
     'A pre-auth szabályok megkerülik a portált: a megadott cél és port a bejelentkezés előtt is elérhető minden LAN-kliensnek. Csak olyan szolgáltatást adj hozzá, amelynek nyilvánosnak kell lennie.': 'Pre-auth-Regeln umgehen das Portal: Das angegebene Ziel und der Port sind für jeden LAN-Client schon vor der Anmeldung erreichbar. Füge nur einen Dienst hinzu, der öffentlich sein muss.',
-    'Host SSH': 'Host-SSH',
-    'admin: csak admin munkamenet kap SSH-t; any: bármely engedélyezett munkamenet; off: soha.': 'admin: nur eine Admin-Sitzung erhält SSH; any: jede autorisierte Sitzung; off: nie.',
-    'admin (csak admin)': 'admin (nur Admin)',
-    'any (bármely munkamenet)': 'any (jede Sitzung)',
-    'off (soha)': 'off (nie)',
-    'Host SSH szabály': 'Host-SSH-Regel',
     'Pre-auth szabályok': 'Pre-auth-Regeln',
     'Pre-auth: bejelentkezés előtt is elérhető célok. A blokk felülbírálja.': 'Pre-auth: vor der Anmeldung erreichbare Ziele. Die Sperrliste hat Vorrang.',
     'Új pre-auth szabály': 'Neue Pre-auth-Regel',
@@ -3393,6 +3434,15 @@ const I18N_PATTERNS = {
     [/^ez a szabály legfeljebb (\d+) percet engedélyez$/, m => `this rule allows at most ${m[1]} minutes`],
     [/^már létezik ilyen szabály: (.+)$/, m => `a rule with this ID already exists: ${m[1]}`],
     [/^nincs ilyen szabály: (.+)$/, m => `no such rule: ${m[1]}`],
+    [/^members: érvénytelen elem$/, 'members: invalid element'],
+    [/^members: érvénytelen elem: (.+)$/, m => `members: invalid element: ${m[1]}`],
+    [/^ismeretlen szabály a gyűjtőszabályban: (.+)$/, m => `unknown rule in the collection: ${m[1]}`],
+    [/^a gyűjtőszabály nem tartalmazhat másik gyűjtőszabályt: (.+)$/, m => `a collection rule cannot contain another collection: ${m[1]}`],
+    [/^a gyűjtőszabály nem tartalmazhat teljes hozzáférésű szabályt: (.+)$/, m => `a collection rule cannot contain a full-access rule: ${m[1]}`],
+    [/^körkörös gyűjtőszabály-hivatkozás: (.+)$/, m => `circular collection reference: ${m[1]}`],
+    [/^hiányzó gyűjtőszabály-tag: (.+)$/, m => `missing collection member: ${m[1]}`],
+    [/^a\(z\) (.+) szabály nem törölhető, mert tagja a következő gyűjtőszabályoknak: (.+); előbb vedd ki a tagok közül$/, m => `rule ${m[1]} cannot be deleted because it is a member of these collection rules: ${m[2]}; remove it from them first`],
+    [/^a\(z\) (.+) szabály tagja a következő gyűjtőszabályoknak: (.+); előbb vedd ki a tagok közül$/, m => `rule ${m[1]} is a member of these collection rules: ${m[2]}; remove it from them first`],
     [/^már létezik ilyen csoport: (.+)$/, m => `a group with this ID already exists: ${m[1]}`],
     [/^nincs ilyen csoport: (.+)$/, m => `no such group: ${m[1]}`],
     [/^már létezik ilyen felhasználó: (.+)$/, m => `a user with this name already exists: ${m[1]}`],
@@ -3500,6 +3550,15 @@ const I18N_PATTERNS = {
     [/^ez a szabály legfeljebb (\d+) percet engedélyez$/, m => `diese Regel erlaubt höchstens ${m[1]} Minuten`],
     [/^már létezik ilyen szabály: (.+)$/, m => `eine Regel mit dieser ID existiert bereits: ${m[1]}`],
     [/^nincs ilyen szabály: (.+)$/, m => `keine solche Regel: ${m[1]}`],
+    [/^members: érvénytelen elem$/, 'members: ungültiges Element'],
+    [/^members: érvénytelen elem: (.+)$/, m => `members: ungültiges Element: ${m[1]}`],
+    [/^ismeretlen szabály a gyűjtőszabályban: (.+)$/, m => `unbekannte Regel in der Sammlung: ${m[1]}`],
+    [/^a gyűjtőszabály nem tartalmazhat másik gyűjtőszabályt: (.+)$/, m => `eine Sammlungsregel darf keine andere Sammlung enthalten: ${m[1]}`],
+    [/^a gyűjtőszabály nem tartalmazhat teljes hozzáférésű szabályt: (.+)$/, m => `eine Sammlungsregel darf keine Vollzugriffsregel enthalten: ${m[1]}`],
+    [/^körkörös gyűjtőszabály-hivatkozás: (.+)$/, m => `zirkuläre Sammlungsreferenz: ${m[1]}`],
+    [/^hiányzó gyűjtőszabály-tag: (.+)$/, m => `fehlendes Sammlungsmitglied: ${m[1]}`],
+    [/^a\(z\) (.+) szabály nem törölhető, mert tagja a következő gyűjtőszabályoknak: (.+); előbb vedd ki a tagok közül$/, m => `Regel ${m[1]} kann nicht gelöscht werden, da sie Mitglied dieser Sammlungsregeln ist: ${m[2]}; entferne sie zuerst daraus`],
+    [/^a\(z\) (.+) szabály tagja a következő gyűjtőszabályoknak: (.+); előbb vedd ki a tagok közül$/, m => `Regel ${m[1]} ist Mitglied dieser Sammlungsregeln: ${m[2]}; entferne sie zuerst daraus`],
     [/^már létezik ilyen csoport: (.+)$/, m => `eine Gruppe mit dieser ID existiert bereits: ${m[1]}`],
     [/^nincs ilyen csoport: (.+)$/, m => `keine solche Gruppe: ${m[1]}`],
     [/^már létezik ilyen felhasználó: (.+)$/, m => `ein Benutzer mit diesem Namen existiert bereits: ${m[1]}`],
@@ -3561,6 +3620,31 @@ function tr(text) {
     }
   }
   return source;
+}
+
+/* A duplikált szabály neve a tárolt, nyelvfüggetlen „ — másolat”
+   utótaggal marad, ezért nyelvváltáskor nem íródik át. Megjelenítéskor a
+   törzset és az utótagot külön fordítjuk; a korábban elmentett lokalizált
+   (copy/Kopie), illetve a szerver alapértelmezett „(copy)” utótagját is
+   felismerjük. Egyedi nevek fordítása változatlanul a szótár szerint
+   történik, ismeretlen név pedig szó szerint marad. */
+const COPY_LABEL_SUFFIX = ' — másolat';
+function ruleDisplayLabel(label) {
+  const text = String(label ?? '');
+  const match = text.match(/^(.*)\s+—\s+(másolat|copy|Kopie)$/)
+    || text.match(/^(.*)\s+\(copy\)$/);
+  if (!match) return tr(text);
+  return `${tr(match[1])} — ${tr('másolat')}`;
+}
+
+/* A másolat utótagja mindig elférjen a szerver 80 karakteres
+   névkorlátján belül: a törzset az utótag hosszával rövidítjük, így egy
+   80 karakteres név másolata sem lesz azonossá az eredetivel. */
+function duplicateLabel(label) {
+  const base = Array.from(String(label ?? ''));
+  const suffix = COPY_LABEL_SUFFIX;
+  const room = Math.max(0, 80 - Array.from(suffix).length);
+  return base.slice(0, room).join('') + suffix;
 }
 
 function applyStaticI18n() {
@@ -4452,7 +4536,7 @@ function renderRules() {
       onclick: () => selectRule(rule.id, true)
     });
     cardEl.append(el('span', { class: 'check', text: '✓' }));
-    cardEl.append(el('b', { text: tr(rule.label || rule.id) }));
+    cardEl.append(el('b', { text: ruleDisplayLabel(rule.label || rule.id) }));
     if (rule.description) cardEl.append(el('span', { class: 'desc', text: tr(rule.description) }));
     const chips = el('div', { class: 'chips' });
     const labels = portChips(rule);
@@ -4526,7 +4610,7 @@ function updateTtlBounds() {
     ? `Beállítható: ${min}–${max} óra`
     : `Beállítható: ${min}–${max} perc`);
   const { rule } = ttlBounds();
-  if (rule) text += ` · ${tr(rule.label)}`;
+  if (rule) text += ` · ${ruleDisplayLabel(rule.label)}`;
   ttlHint.textContent = text;
 }
 function selectRule(ruleId, resetTtl) {
@@ -4596,7 +4680,7 @@ function showAccess(data) {
 function showSession(data, keepExpiry = false) {
   renderAuth(data, keepExpiry);
   auth.authorized = true;
-  sessionRule.textContent = tr(data.rule_label || (data.rule || '—'));
+  sessionRule.textContent = ruleDisplayLabel(data.rule_label || (data.rule || '—'));
   sessionSvcs.replaceChildren();
   const grant = data.grant || auth.grant;
   const labels = portChips(grant);
@@ -5088,6 +5172,11 @@ function boolValue(formEl, name) {
   const node = formEl.querySelector(`[name="${name}"]`);
   return !!(node && node.checked);
 }
+function rulePickerLabel(rule) {
+  const ports = tr(rule.ports_label || 'nincs port');
+  const marker = rule.collection ? ` · ${tr('gyűjtő')}` : '';
+  return `${ruleDisplayLabel(rule.label)} — ${ports}${marker}`;
+}
 /* Hiba esetén a megnyitott admin-űrlap értékeit elmentjük, hogy az
    újrarenderelés ne törölje a felhasználó által beírt mezőket. */
 function captureAdminDraft() {
@@ -5278,6 +5367,39 @@ function renderUsers() {
   wrap.append(table);
   adminPanel.append(wrap);
 }
+/* Egyenletes eloszlású index [0, max) tartományból, modulo-torzítás nélkül.
+   A 32 bites húzásból eldobjuk a max legnagyobb többszöröse feletti részt. */
+function secureRandomIndex(max) {
+  const buffer = new Uint32Array(1);
+  const limit = Math.floor(0x100000000 / max) * max;
+  do {
+    crypto.getRandomValues(buffer);
+  } while (buffer[0] >= limit);
+  return buffer[0] % max;
+}
+/* 20 karakter, biztosan legalább egy kisbetű, nagybetű, számjegy és jel.
+   Az ábécé kizárja az összetéveszthető O, 0, I, l és 1 karaktereket. */
+function generatePassword() {
+  const lower = 'abcdefghijkmnopqrstuvwxyz';
+  const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+  const digits = '23456789';
+  const symbols = '!@#$%^&*()-_=+';
+  const alphabet = lower + upper + digits + symbols;
+  const chars = [
+    lower[secureRandomIndex(lower.length)],
+    upper[secureRandomIndex(upper.length)],
+    digits[secureRandomIndex(digits.length)],
+    symbols[secureRandomIndex(symbols.length)]
+  ];
+  while (chars.length < 20) chars.push(alphabet[secureRandomIndex(alphabet.length)]);
+  for (let i = chars.length - 1; i > 0; i -= 1) {
+    const j = secureRandomIndex(i + 1);
+    const tmp = chars[i];
+    chars[i] = chars[j];
+    chars[j] = tmp;
+  }
+  return chars.join('');
+}
 function renderUserForm(name) {
   const users = (adminState && adminState.users) || [];
   const groups = (adminState && adminState.groups) || [];
@@ -5310,7 +5432,108 @@ function renderUserForm(name) {
     el('label', { text: tr(edit
       ? 'Új jelszó (üresen hagyva nem változik; a felhasználónak első belépéskor le kell cserélnie)'
       : 'Kezdetleges jelszó (első belépéskor le kell cserélnie)') }),
-    el('input', { name: 'password', type: 'password', value: draftValue(draft, 'password', ''), autocomplete: 'new-password', required: !edit })
+    (() => {
+      const passwordInput = el('input', {
+        name: 'password', type: 'password',
+        value: draftValue(draft, 'password', ''),
+        autocomplete: 'new-password', spellcheck: 'false', autocapitalize: 'off',
+        required: !edit
+      });
+      const passwordStatus = el('div', { class: 'password-status', 'aria-live': 'polite' });
+      let passwordStatusTimer = null;
+      const setPasswordStatus = (text, ok) => {
+        if (passwordStatusTimer) clearTimeout(passwordStatusTimer);
+        passwordStatus.textContent = text ? tr(text) : '';
+        passwordStatus.classList.toggle('ok', !!text && !!ok);
+        passwordStatus.classList.toggle('err', !!text && !ok);
+        if (!text) {
+          passwordStatusTimer = null;
+          return;
+        }
+        passwordStatusTimer = setTimeout(() => {
+          passwordStatus.textContent = '';
+          passwordStatus.classList.remove('ok', 'err');
+          passwordStatusTimer = null;
+        }, 2500);
+      };
+      const passwordToggle = el('button', {
+        type: 'button', class: 'ghost small',
+        'aria-pressed': 'false', 'aria-label': tr('Mutat')
+      }, tr('Mutat'));
+      const setPasswordVisible = visible => {
+        passwordInput.type = visible ? 'text' : 'password';
+        passwordToggle.textContent = tr(visible ? 'Elrejtés' : 'Mutat');
+        passwordToggle.setAttribute('aria-pressed', visible ? 'true' : 'false');
+        passwordToggle.setAttribute('aria-label', tr(visible ? 'Elrejtés' : 'Mutat'));
+      };
+      passwordToggle.addEventListener('click', () => {
+        setPasswordVisible(passwordInput.type === 'password');
+      });
+      const passwordGenerate = el('button', {
+        type: 'button', class: 'ghost small',
+        onclick: () => {
+          passwordInput.value = generatePassword();
+          passwordCopy.disabled = !passwordInput.value;
+          setPasswordVisible(true);
+          passwordInput.focus();
+          passwordInput.select();
+          setPasswordStatus('');
+          if (hint) hint.hidden = false;
+        }
+      }, tr('Jelszó generálása'));
+      const passwordCopy = el('button', {
+        type: 'button', class: 'ghost small',
+        disabled: !passwordInput.value,
+        onclick: async () => {
+          const text = passwordInput.value;
+          // Üres mezőnél ne írjunk üres szöveget a vágólapra, és ne
+          // jelentsünk sikert.
+          if (!text) {
+            setPasswordStatus('Nincs jelszó a vágólapra másoláshoz.', false);
+            return;
+          }
+          let ok = false;
+          try {
+            if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+              await navigator.clipboard.writeText(text);
+              ok = true;
+            }
+          } catch (err) {
+            ok = false;
+          }
+          if (!ok) {
+            try {
+              passwordInput.focus();
+              passwordInput.select();
+              ok = document.execCommand('copy');
+            } catch (err) {
+              ok = false;
+            }
+          }
+          setPasswordStatus(ok
+            ? 'Jelszó a vágólapra másolva.'
+            : 'A vágólapra másolás nem sikerült.', ok);
+        }
+      }, tr('Másolás'));
+      passwordInput.addEventListener('input', () => {
+        passwordCopy.disabled = !passwordInput.value;
+      });
+      const passwordField = el('div', { class: 'password-field' },
+        passwordInput, passwordGenerate, passwordToggle, passwordCopy);
+      const hint = edit
+        ? el('small', {
+            class: 'password-hint',
+            text: tr('A mentéssel a felhasználó jelszava megváltozik.'),
+            hidden: !passwordInput.value
+          })
+        : null;
+      if (hint) {
+        passwordInput.addEventListener('input', () => {
+          hint.hidden = !passwordInput.value;
+        });
+      }
+      return [passwordField, hint, passwordStatus];
+    })()
   ));
   grid.append(el('div', { class: 'field' },
     el('label', { text: tr('Szerepkör') }),
@@ -5337,7 +5560,7 @@ function renderUserForm(name) {
     picker(
       rules, draftList(draft, 'rules', edit ? user.rules : []), 'rules',
       rule => rule.id,
-      rule => `${tr(rule.label)} — ${tr(rule.ports_label || 'nincs port')}`,
+      rule => rulePickerLabel(rule),
       'Keresés a szabályok között…'
     )
   ));
@@ -5443,7 +5666,7 @@ function renderGroupForm(id) {
     picker(
       rules, draftList(draft, 'rules', edit ? group.rules : []), 'rules',
       rule => rule.id,
-      rule => `${tr(rule.label)} — ${tr(rule.ports_label || 'nincs port')}`,
+      rule => rulePickerLabel(rule),
       'Keresés a szabályok között…'
     )
   ));
@@ -5490,19 +5713,49 @@ function renderRulesAdmin() {
       actions.append(el('span', { class: 'muted', text: tr('beépített') }));
     } else {
       actions.append(
+        el('button', { type: 'button', class: 'ghost small', onclick: async event => {
+          const button = event.currentTarget;
+          // Két gyors kattintás ne indítson két másolási kérést.
+          if (button.disabled) return;
+          button.disabled = true;
+          try {
+            await adminSend('/api/admin/rules', {
+              action: 'duplicate', id: rule.id,
+              label: duplicateLabel(rule.label)
+            });
+          } finally {
+            button.disabled = false;
+          }
+        } }, tr('Duplikálás')),
         el('button', { type: 'button', class: 'ghost small', onclick: () => {
           adminEdit = { kind: 'rule', id: rule.id }; adminDraft = null; adminFlash = null; renderAdminPanel();
         } }, tr('Szerkesztés')),
         el('button', { type: 'button', class: 'danger small', onclick: () => {
-          if (confirm(tr(`Biztosan törlöd a szabályt: ${rule.label}?`))) {
+          if (confirm(tr(`Biztosan törlöd a szabályt: ${ruleDisplayLabel(rule.label)}?`))) {
             adminSend('/api/admin/rules', { action: 'delete', id: rule.id });
           }
         } }, tr('Törlés'))
       );
     }
+    const nameCell = el('td', {});
+    const nameLine = el('div', {}, el('b', { text: ruleDisplayLabel(rule.label) }));
+    if (rule.collection) {
+      nameLine.append(' ', el('span', { class: 'pill', text: tr('gyűjtő') }));
+    }
+    nameCell.append(nameLine);
+    if (rule.members && rule.members.length) {
+      nameCell.append(el('div', {
+        class: 'muted mono', text: rule.members.join(', ')
+      }));
+    }
+    if (rule.description) {
+      nameCell.append(el('div', {
+        class: 'muted', text: tr(rule.description)
+      }));
+    }
     body.append(el('tr', {},
       el('td', { class: 'mono', text: rule.id }),
-      el('td', {}, el('b', { text: tr(rule.label) }), rule.description ? el('div', { class: 'muted', text: tr(rule.description) }) : null),
+      nameCell,
       el('td', { class: 'mono', text: tr(rule.ports_label || '—') }),
       el('td', { text: tr(Math.round(rule.default_ttl / 60) + ' perc') }),
       el('td', { text: tr(Math.round(rule.max_ttl / 60) + ' perc') }),
@@ -5539,8 +5792,39 @@ function renderRuleForm(id) {
   const rule = id ? rules.find(item => item.id === id) : null;
   const edit = !!rule;
   const draft = adminDraftFor('rule', id);
+  // Gyűjtő tagja csak nem beépített, egyedi, nem teljes hozzáférésű szabály
+  // lehet; a szerkesztett szabályt önmagaként nem kínáljuk fel.
+  const memberChoices = rules.filter(item =>
+    !item.builtin && !item.collection && !item.full &&
+    (!edit || item.id !== rule.id)
+  );
+  const submit = (payload) => adminSend('/api/admin/rules', payload);
   const box = el('form', { class: 'admin-form', onsubmit: e => {
     e.preventDefault();
+    const collection = boolValue(box, 'collection');
+    const maxMinutes = Number(formValue(box, 'max_ttl'));
+    const base = {
+      action: edit ? 'update' : 'create',
+      id: formValue(box, 'id').trim(),
+      label: formValue(box, 'label').trim(),
+      description: formValue(box, 'description').trim(),
+      default_ttl: Math.round(Number(formValue(box, 'default_ttl')) * 60),
+      max_ttl: Math.round(maxMinutes * 60)
+    };
+    if (collection) {
+      const members = pickedValues(box, 'members');
+      if (members.length < 2) {
+        captureAdminDraft();
+        adminFlash = {
+          text: 'Legalább két egyedi szabályt válassz a gyűjtőszabályhoz.',
+          kind: 'err'
+        };
+        renderAdminPanel();
+        return;
+      }
+      submit({ ...base, collection: true, members });
+      return;
+    }
     const full = boolValue(box, 'full');
     const icmp = boolValue(box, 'icmp');
     const tcp = parsePortInput(formValue(box, 'tcp'));
@@ -5572,21 +5856,16 @@ function renderRuleForm(id) {
       renderAdminPanel();
       return;
     }
-    const maxMinutes = Number(formValue(box, 'max_ttl'));
-    adminSend('/api/admin/rules', {
-      action: edit ? 'update' : 'create',
-      id: formValue(box, 'id').trim(),
-      label: formValue(box, 'label').trim(),
-      description: formValue(box, 'description').trim(),
+    submit({
+      ...base,
+      collection: false,
       tcp: full ? [] : tcp.ports,
       udp: full ? [] : udp.ports,
       icmp: full ? false : icmp,
-      full,
-      default_ttl: Math.round(Number(formValue(box, 'default_ttl')) * 60),
-      max_ttl: Math.round(maxMinutes * 60)
+      full
     });
   }});
-  box.append(el('h3', { text: tr(edit ? `Szabály szerkesztése: ${rule.label}` : 'Új szabály') }));
+  box.append(el('h3', { text: tr(edit ? `Szabály szerkesztése: ${ruleDisplayLabel(rule.label)}` : 'Új szabály') }));
   const grid = el('div', { class: 'form-grid' });
   grid.append(el('div', { class: 'field' },
     el('label', { text: tr('Azonosító (kisbetű, szám, - és _)') }),
@@ -5599,6 +5878,18 @@ function renderRuleForm(id) {
   grid.append(el('div', { class: 'field full' },
     el('label', { text: tr('Leírás') }),
     el('input', { name: 'description', value: draftValue(draft, 'description', edit ? rule.description : '') })
+  ));
+  const collectionBox = el('input', {
+    type: 'checkbox', name: 'collection',
+    checked: !!draftValue(draft, 'collection', edit && !!rule.collection)
+  });
+  grid.append(el('div', { class: 'field full' },
+    el('label', { style: 'display:flex;gap:7px;align-items:center;margin-top:0' },
+      collectionBox, tr('Gyűjtőszabály')),
+    el('span', {
+      class: 'port-hint',
+      text: tr('A gyűjtőszabály portjai a tagok uniója. Teljes hozzáférésű és gyűjtő szabály nem választható tagként.')
+    })
   ));
   const tcpInput = el('input', {
     name: 'tcp', value: draftValue(draft, 'tcp', edit ? (rule.tcp || []).join(', ') : ''),
@@ -5614,25 +5905,17 @@ function renderRuleForm(id) {
   const fullBox = el('input', {
     type: 'checkbox', name: 'full', checked: !!draftValue(draft, 'full', edit && !!rule.full)
   });
-  const syncFull = () => {
-    const full = fullBox.checked;
-    tcpInput.disabled = full;
-    udpInput.disabled = full;
-    icmpBox.disabled = full;
-  };
-  fullBox.addEventListener('change', syncFull);
-  syncFull();
-  grid.append(el('div', { class: 'field' },
+  const tcpField = el('div', { class: 'field' },
     el('label', { text: tr('TCP portok') }),
     tcpInput,
     el('span', { class: 'port-hint', text: tr('vesszővel vagy szóközzel elválasztva') })
-  ));
-  grid.append(el('div', { class: 'field' },
+  );
+  const udpField = el('div', { class: 'field' },
     el('label', { text: tr('UDP portok') }),
     udpInput,
     el('span', { class: 'port-hint', text: tr('vesszővel vagy szóközzel elválasztva') })
-  ));
-  grid.append(el('div', { class: 'field full' },
+  );
+  const accessField = el('div', { class: 'field full' },
     el('div', { class: 'port-checks' },
       el('label', {}, icmpBox, tr('ICMP (ping) engedélyezése')),
       el('label', {}, fullBox, tr('Teljes hozzáférés (minden port és protokoll)'))
@@ -5642,7 +5925,34 @@ function renderRuleForm(id) {
       text: tr('Docker által publikált konténerhez a host portját add meg '
         + '(a szabály a DNAT előtti célportra illeszkedik).')
     })
-  ));
+  );
+  const membersField = el('div', { class: 'field full' },
+    el('label', { text: tr('Tartalmazott szabályok') }),
+    picker(
+      memberChoices,
+      draftList(draft, 'members', edit && rule.collection ? rule.members : []),
+      'members',
+      item => item.id,
+      item => rulePickerLabel(item),
+      'Keresés az egyedi szabályok között…'
+    )
+  );
+  grid.append(tcpField, udpField, accessField, membersField);
+  const syncMode = () => {
+    const collection = collectionBox.checked;
+    const full = !collection && fullBox.checked;
+    tcpInput.disabled = collection || full;
+    udpInput.disabled = collection || full;
+    icmpBox.disabled = collection || full;
+    fullBox.disabled = collection;
+    tcpField.hidden = collection;
+    udpField.hidden = collection;
+    accessField.hidden = collection;
+    membersField.hidden = !collection;
+  };
+  collectionBox.addEventListener('change', syncMode);
+  fullBox.addEventListener('change', syncMode);
+  syncMode();
   grid.append(el('div', { class: 'field' },
     el('label', { text: tr('Alapértelmezett idő (perc)') }),
     el('input', { name: 'default_ttl', type: 'number', min: 1, max: 1440, value: draftValue(draft, 'default_ttl', edit ? Math.round(rule.default_ttl / 60) : 60), required: true }),
@@ -5674,7 +5984,10 @@ function logDetail(entry) {
   const parts = [];
   for (const key of keys) {
     if (entry[key] !== undefined && entry[key] !== '' && entry[key] !== null) {
-      parts.push(`${key}=${(key === 'reason' || key === 'rule_label') ? tr(entry[key]) : entry[key]}`);
+      const value = key === 'rule_label'
+        ? ruleDisplayLabel(entry[key])
+        : (key === 'reason' ? tr(entry[key]) : entry[key]);
+      parts.push(`${key}=${value}`);
     }
   }
   const wrapper = el('div', { class: 'log-detail' });
@@ -6436,7 +6749,7 @@ function scheduleDrops() {
 
 function settingsData() {
   return (adminState && adminState.settings) || {
-    host_ssh: 'admin', preauth: [], block: [], error: ''
+    preauth: [], block: [], error: ''
   };
 }
 function parsePorts(text) {
@@ -6619,7 +6932,7 @@ function renderSettings() {
   const settings = settingsData();
   adminPanel.append(adminHead(
     'Tűzfal testreszabása',
-    'Bejelentkezés előtt nyitva lévő célok és a host SSH szabály.',
+    'Bejelentkezés előtt nyitva lévő és blokkolt célok.',
     null, null
   ));
   if (settings.error) {
@@ -6633,30 +6946,6 @@ function renderSettings() {
     class: 'admin-flash',
     text: tr('A pre-auth szabályok megkerülik a portált: a megadott cél és port a bejelentkezés előtt is elérhető minden LAN-kliensnek. Csak olyan szolgáltatást adj hozzá, amelynek nyilvánosnak kell lennie.')
   }));
-
-  const sshSection = el('div', { class: 'admin-form' });
-  sshSection.append(el('h3', { text: tr('Host SSH') }));
-  sshSection.append(el('p', {
-    class: 'port-hint',
-    text: tr('admin: csak admin munkamenet kap SSH-t; any: bármely engedélyezett munkamenet; off: soha.')
-  }));
-  const sshSelect = el('select', {},
-    ...[['admin', 'admin (csak admin)'], ['any', 'any (bármely munkamenet)'], ['off', 'off (soha)']].map(([value, label]) =>
-      el('option', { value, text: tr(label), selected: (settings.host_ssh || 'admin') === value })
-    )
-  );
-  sshSection.append(el('div', { class: 'field' },
-    el('label', { text: tr('Host SSH szabály') }), sshSelect
-  ));
-  sshSection.append(el('div', { class: 'form-actions' },
-    el('button', {
-      type: 'button', class: 'small',
-      onclick: () => adminSend('/api/admin/settings', {
-        action: 'host_ssh', host_ssh: sshSelect.value
-      })
-    }, tr('Mentés'))
-  ));
-  adminPanel.append(sshSection);
 
   const registrationSection = el('div', { class: 'admin-form' });
   registrationSection.append(el('h3', { text: tr('Fiókkérelmek') }));
@@ -6746,7 +7035,7 @@ function renderSessions() {
       'data-deadline': String(deadline)
     }, row.expires_in > 0 ? fmtRemaining(row.expires_in) : tr('lejárt'));
     const ruleCell = el('td', {});
-    ruleCell.append(el('b', { text: tr(row.rule_label || row.rule || '—') }));
+    ruleCell.append(el('b', { text: ruleDisplayLabel(row.rule_label || row.rule || '—') }));
     if (row.ports_label && row.authorized) {
       ruleCell.append(' ', el('span', { class: 'mono muted', text: tr(row.ports_label) }));
     }

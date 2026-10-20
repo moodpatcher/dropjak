@@ -212,15 +212,6 @@ LAN_NETWORK = _parse_lan_network(HV_LAN_NET_RAW)
 MAC_BINDING = bool(HV_LAN_IF and LAN_NETWORK is not None)
 ARP_PATH = os.environ.get("HV_ARP_PATH", "").strip() or "/proc/net/arp"
 
-# A host SSH munkamenet-hozzáférése. ``admin``: csak admin szerepkörű
-# portál-munkamenet nyitja meg (ez az alapértelmezés); ``any``: minden
-# engedélyezett munkamenet; ``off``: soha. Az ``any`` visszafelé
-# kompatibilis viselkedés, de a szűkebb szabályú felhasználóknak nem ad
-# rendszergazdai belépést a kapu hostjára.
-HOST_SSH_MODE = os.environ.get("HV_HOST_SSH", "admin").strip().lower()
-if HOST_SSH_MODE not in ("admin", "any", "off"):
-    HOST_SSH_MODE = "admin"
-
 PORTAL_URL = os.environ.get("HV_PORTAL_URL", "").strip()
 COOKIE_NAME = "hv_session"
 COOKIE_SECURE = (
@@ -457,10 +448,18 @@ class Rule:
     max_ttl: int = MAX_TTL
     builtin: bool = False
     created: int = 0
+    # Gyűjtőszabály: egyedi szabály-azonosítók, amelyek portjai unióként
+    # érvényesek. A tárolt portmezők ilyenkor üresek; a feloldott nézet
+    # számolja ki az uniót.
+    members: tuple[str, ...] = ()
 
     @property
     def ports(self) -> Ports:
         return Ports(self.tcp, self.udp, self.icmp, self.full)
+
+    @property
+    def collection(self) -> bool:
+        return bool(self.members)
 
     def public(self) -> dict:
         return {
@@ -476,6 +475,8 @@ class Rule:
             "max_ttl": self.max_ttl,
             "builtin": self.builtin,
             "created": self.created,
+            "members": list(self.members),
+            "collection": self.collection,
         }
 
 
@@ -955,6 +956,17 @@ def _clean_text(raw, field: str, maximum: int, required: bool = True) -> str:
     return value
 
 
+def _copy_label(label: str, suffix: str = " (copy)", maximum: int = 80) -> str:
+    """Másolatnév úgy, hogy az utótag a hosszkorlátba is beleférjen.
+
+    A törzset az utótag hosszával rövidítjük, így hosszú forrásnév esetén
+    sem tűnik el a másolat jelölése, és a két név nem lesz azonos.
+    """
+    if len(label) + len(suffix) <= maximum:
+        return label + suffix
+    return label[: max(0, maximum - len(suffix))] + suffix
+
+
 def _clean_id(raw, field: str = "azonosító") -> str:
     if not isinstance(raw, str) or not _SERVICE_ID_RE.match(raw.strip()):
         raise ValueError(
@@ -980,6 +992,30 @@ def _clean_str_list(raw, field: str, pattern=None, maximum: int = 64) -> tuple[s
         if value not in out:
             out.append(value)
     return tuple(out)
+
+
+def _clean_rule_members(raw, field: str = "members") -> tuple[str, ...]:
+    """Gyűjtőszabály tagjainak ellenőrzése.
+
+    A tagok egyedi szabály-azonosítók; az ismétlődést nem csendben vonjuk
+    össze, mert az elgépelt szabálylista így láthatatlanul megváltozna.
+    """
+    if not isinstance(raw, list):
+        raise ValueError(f"{field}: 2–64 szabály-azonosítóból álló lista kell")
+    values = [
+        value.strip() for value in raw
+        if isinstance(value, str) and value.strip()
+    ]
+    cleaned = _clean_str_list(
+        raw, field, pattern=_SERVICE_ID_RE, maximum=64
+    )
+    if len(values) != len(cleaned):
+        raise ValueError(f"{field}: ismétlődő szabály-azonosító")
+    if not 2 <= len(cleaned) <= 64:
+        raise ValueError(
+            f"{field}: legalább 2 és legfeljebb 64 egyedi szabály kell"
+        )
+    return cleaned
 
 
 def _clean_ports(raw, field: str, maximum: int = 256) -> tuple[int, ...]:
@@ -1055,7 +1091,10 @@ class RuleStore:
         self.path = os.path.abspath(path)
         self.catalog = catalog if catalog is not None else ServiceCatalog.load()
         self.log = logger
-        self._lock = threading.Lock()
+        # RLock: a _locked() ugyanabban a szálban beágyazható (például egy
+        # zárt szakaszból hívott create()), és a _load() is újra beléphet.
+        self._lock = threading.RLock()
+        self._lock_state = threading.local()
         self._rules: dict[str, Rule] = {}
         self._order: list[str] = []
         self._loaded = False
@@ -1064,16 +1103,39 @@ class RuleStore:
 
     @contextmanager
     def _locked(self):
-        directory = os.path.dirname(self.path) or "."
-        os.makedirs(directory, exist_ok=True)
-        lock_path = self.path + ".lock"
-        fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
+        """Kizárólagos szabálytár-zár (folyamaton belül és fájlszinten).
+
+        A belső hívások ugyanazt a zárat használják: a flockot csak a
+        legkülső _locked() nyitja meg, így a beágyazott hívás nem akad meg
+        önmagán. A folyamaton belüli RLock a _load()/_rules konzisztenciáját
+        is biztosítja a fájllock alatt.
+        """
+        self._lock.acquire()
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            yield
+            depth = getattr(self._lock_state, "depth", 0)
+            if depth:
+                self._lock_state.depth = depth + 1
+                try:
+                    yield
+                finally:
+                    self._lock_state.depth -= 1
+                return
+            directory = os.path.dirname(self.path) or "."
+            os.makedirs(directory, exist_ok=True)
+            lock_path = self.path + ".lock"
+            fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                self._lock_state.depth = 1
+                try:
+                    yield
+                finally:
+                    self._lock_state.depth = 0
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            os.close(fd)
+            self._lock.release()
 
     def _read_raw(self) -> dict:
         try:
@@ -1168,7 +1230,16 @@ class RuleStore:
     def _parse_rule(self, rule_id: str, item: dict) -> Rule:
         if not isinstance(item, dict):
             raise RuleStoreError(f"{rule_id}: hibás bejegyzés")
-        if self._is_legacy(item):
+        members: tuple[str, ...] = ()
+        if "members" in item:
+            # A gyűjtőszabály tárolt portmezői nem mérvadók: a portokat a
+            # tagokból számoljuk. A fájlban csak a taglista marad meg.
+            try:
+                members = _clean_rule_members(item.get("members"))
+            except ValueError as exc:
+                raise RuleStoreError(f"{rule_id}: {exc}") from exc
+            ports = Ports()
+        elif self._is_legacy(item):
             services = _clean_str_list(
                 item.get("services"), f"{rule_id}.services", maximum=32
             )
@@ -1208,7 +1279,41 @@ class RuleStore:
             max_ttl=max_ttl,
             builtin=False,
             created=int(item.get("created", 0) or 0),
+            members=members,
         )
+
+    @staticmethod
+    def _collection_issue(
+        rule: Rule, rules: dict[str, Rule]
+    ) -> str:
+        """A gyűjtőszabály hivatkozási hibája, vagy üres szöveg.
+
+        Egy szintű gyűjtést engedünk: a tagok létező, egyedi, nem teljes
+        hozzáférésű szabályok lehetnek, másik gyűjtő nem.
+        """
+        if not rule.members:
+            return ""
+        for member_id in rule.members:
+            if member_id == rule.id:
+                return "a gyűjtőszabály nem tartalmazhatja önmagát"
+            if member_id == ADMIN_RULE_ID:
+                return (
+                    "a beépített admin szabály nem lehet gyűjtőszabály tagja"
+                )
+            member = rules.get(member_id)
+            if member is None:
+                return f"ismeretlen szabály a gyűjtőszabályban: {member_id}"
+            if member.members:
+                return (
+                    "a gyűjtőszabály nem tartalmazhat másik "
+                    f"gyűjtőszabályt: {member_id}"
+                )
+            if member.full:
+                return (
+                    "a gyűjtőszabály nem tartalmazhat teljes hozzáférésű "
+                    f"szabályt: {member_id}"
+                )
+        return ""
 
     def _seed(self) -> dict[str, Rule]:
         seeded: dict[str, Rule] = {}
@@ -1261,6 +1366,18 @@ class RuleStore:
                 except (ValueError, RuleStoreError) as exc:
                     parse_failed = True
                     self.log(f"[szabályok] kihagyott hibás szabály: {exc}")
+            # A gyűjtőszabályok hivatkozásait csak azután tudjuk ellenőrizni,
+            # hogy az összes szabály beolvasódott. A hibás gyűjtőket kihagyjuk;
+            # így az admin felület és a hozzáférés sem lát csonka uniót.
+            for collection_id in list(rules):
+                issue = self._collection_issue(rules[collection_id], rules)
+                if issue:
+                    parse_failed = True
+                    self.log(
+                        "[szabályok] kihagyott hibás gyűjtőszabály: "
+                        f"{collection_id}: {issue}"
+                    )
+                    del rules[collection_id]
             # Csak az első induláskor (amikor még nincs szabályfájl) seedingelünk.
             # Ha az admin később minden szabályt töröl, az üres fájl megmarad,
             # és a szabályok nem kelnek újra életre a következő indításnál.
@@ -1307,6 +1424,17 @@ class RuleStore:
 
     @staticmethod
     def _rule_storage(rule: Rule) -> dict:
+        if rule.members:
+            # Gyűjtőnél a portok számított értékek: soha nem perzisztáljuk
+            # őket, különben a tagok későbbi módosítása elavult uniót adna.
+            return {
+                "label": rule.label,
+                "description": rule.description,
+                "members": list(rule.members),
+                "default_ttl": rule.default_ttl,
+                "max_ttl": rule.max_ttl,
+                "created": rule.created,
+            }
         return {
             "label": rule.label,
             "description": rule.description,
@@ -1321,19 +1449,94 @@ class RuleStore:
 
     # -- olvasás ---------------------------------------------------------------
 
+    def _resolve_rule(
+        self,
+        rule: Rule,
+        _seen: set[str] | None = None,
+        _cache: dict[str, Rule] | None = None,
+    ) -> Rule:
+        """A gyűjtőszabály feloldott nézete: a tagok portjainak uniója.
+
+        A tagok teljes hozzáférését szándékosan nem vesszük át: gyűjtő sosem
+        adhat teljes hozzáférést. Körkörös vagy hiányzó hivatkozás esetén
+        inkább hibát dobunk, mint részleges jogosultságot.
+        """
+        if not rule.members:
+            return rule
+        cache = {} if _cache is None else _cache
+        if rule.id in cache:
+            return cache[rule.id]
+        seen = set() if _seen is None else set(_seen)
+        if rule.id in seen:
+            raise RuleStoreError(
+                f"körkörös gyűjtőszabály-hivatkozás: {rule.id}"
+            )
+        seen.add(rule.id)
+        tcp: set[int] = set()
+        udp: set[int] = set()
+        icmp = False
+        for member_id in rule.members:
+            member = self._rules.get(member_id)
+            if member is None:
+                raise RuleStoreError(
+                    f"hiányzó gyűjtőszabály-tag: {member_id}"
+                )
+            resolved = self._resolve_rule(member, seen, cache)
+            tcp.update(resolved.tcp)
+            udp.update(resolved.udp)
+            icmp = icmp or resolved.icmp
+        resolved_rule = replace(
+            rule,
+            tcp=tuple(sorted(tcp)),
+            udp=tuple(sorted(udp)),
+            icmp=icmp,
+            full=False,
+        )
+        cache[rule.id] = resolved_rule
+        return resolved_rule
+
+    def _resolved_or_none(
+        self, rule: Rule, cache: dict[str, Rule] | None = None
+    ) -> Rule | None:
+        try:
+            return self._resolve_rule(rule, _cache=cache)
+        except RuleStoreError as exc:
+            self.log(
+                f"[szabályok] a(z) {rule.id} gyűjtőszabály nem oldható fel: "
+                f"{exc}"
+            )
+            return None
+
     def get(self, rule_id: str) -> Rule | None:
         self._load()
         if rule_id == ADMIN_RULE_ID:
             return self._builtin()
-        return self._rules.get(rule_id)
+        rule = self._rules.get(rule_id)
+        if rule is None:
+            return None
+        return self._resolved_or_none(rule)
 
     def all_rules(self) -> list[Rule]:
         self._load()
-        return [self._builtin(), *self._rules.values()]
+        cache: dict[str, Rule] = {}
+        resolved = [
+            item for item in (
+                self._resolved_or_none(rule, cache)
+                for rule in self._rules.values()
+            ) if item is not None
+        ]
+        return [self._builtin(), *resolved]
 
     def persisted_rules(self) -> list[Rule]:
         self._load()
-        return list(self._rules.values())
+        cache: dict[str, Rule] = {}
+        resolved = [
+            item for item in (
+                self._resolved_or_none(rule, cache)
+                for rule in self._rules.values()
+            ) if item is not None
+        ]
+        return resolved
 
     def effective_for(self, user, groups: list[Group] | tuple[Group, ...]) -> list[Rule]:
         """A felhasználó által választható szabályok.
@@ -1357,18 +1560,30 @@ class RuleStore:
                 if rule_id not in assigned:
                     assigned.append(rule_id)
         is_admin = getattr(user, "role", ROLE_USER) == ROLE_ADMIN
+        cache: dict[str, Rule] = {}
+
+        def resolved(rule_id: str) -> Rule | None:
+            raw = self._rules.get(rule_id)
+            if raw is None:
+                return None
+            return self._resolved_or_none(raw, cache)
+
         if is_admin:
-            return [self._builtin(), *[
-                self._rules[rule_id]
-                for rule_id in assigned
-                if rule_id in self._rules
-            ]]
+            assigned_rules = [
+                item for item in (resolved(rule_id) for rule_id in assigned)
+                if item is not None
+            ]
+            return [self._builtin(), *assigned_rules]
         if not assigned and not getattr(user, "rules_set", False):
-            return list(self._rules.values())
+            return [
+                item for item in (
+                    self._resolved_or_none(raw, cache)
+                    for raw in self._rules.values()
+                ) if item is not None
+            ]
         return [
-            self._rules[rule_id]
-            for rule_id in assigned
-            if rule_id in self._rules
+            item for item in (resolved(rule_id) for rule_id in assigned)
+            if item is not None
         ]
 
     def resolve_for(
@@ -1390,7 +1605,42 @@ class RuleStore:
     def _validate_payload(self, data: dict, rule_id: str) -> Rule:
         if not isinstance(data, dict):
             raise RuleStoreError("hibás szabály-adat")
-        if self._is_legacy(data):
+        collection_flag = data.get("collection")
+        if collection_flag is not None and not isinstance(collection_flag, bool):
+            raise RuleStoreError("collection: logikai érték kell")
+        members_raw = data.get("members")
+        if "members" in data and not isinstance(members_raw, list):
+            raise RuleStoreError(
+                "members: 2–64 szabály-azonosítóból álló lista kell"
+            )
+        is_collection = collection_flag is True or bool(members_raw)
+        members: tuple[str, ...] = ()
+        ports = Ports()
+        if is_collection:
+            tcp = _clean_ports(data.get("tcp"), "tcp")
+            udp = _clean_ports(data.get("udp"), "udp")
+            icmp = data.get("icmp", False)
+            full = data.get("full", False)
+            if not isinstance(icmp, bool):
+                raise RuleStoreError("icmp: logikai érték kell")
+            if not isinstance(full, bool):
+                raise RuleStoreError("full: logikai érték kell")
+            if tcp or udp or icmp or full:
+                raise RuleStoreError(
+                    "gyűjtőszabályhoz nem adható meg port, ICMP vagy "
+                    "teljes hozzáférés"
+                )
+            try:
+                members = _clean_rule_members(members_raw)
+            except ValueError as exc:
+                raise RuleStoreError(str(exc)) from exc
+            issue = self._collection_issue(
+                Rule(id=rule_id, label="", description="", members=members),
+                self._rules,
+            )
+            if issue:
+                raise RuleStoreError(issue)
+        elif self._is_legacy(data):
             # Régi API-hívók még szolgáltatásneveket küldhetnek.
             services = _clean_str_list(
                 data.get("services"), "services", maximum=32
@@ -1430,17 +1680,22 @@ class RuleStore:
             max_ttl=max_ttl,
             builtin=False,
             created=int(time.time()),
+            members=members,
         )
 
     def create(self, rule_id: str, data: dict) -> Rule:
         rule_id = _clean_id(rule_id, "szabály-azonosító")
         if rule_id == ADMIN_RULE_ID:
             raise RuleStoreError("ez a szabály-azonosító foglalt")
-        rule = self._validate_payload(data, rule_id)
-        self._load()
+        # A betöltés, a létezés-ellenőrzés, a taghivatkozások validálása és
+        # a commit ugyanazon zár alatt történik. Így egy párhuzamos
+        # delete()/update() nem teheti érvénytelenné a már validált
+        # gyűjtőszabályt a mentés előtt.
         with self._locked():
+            self._load()
             if rule_id in self._rules:
                 raise RuleStoreError(f"már létezik ilyen szabály: {rule_id}")
+            rule = self._validate_payload(data, rule_id)
             raw = {
                 rid: self._rule_storage(item)
                 for rid, item in {**self._rules, rule_id: rule}.items()
@@ -1448,26 +1703,150 @@ class RuleStore:
             self._write_raw(raw)
             self._rules[rule_id] = rule
             self._order.append(rule_id)
-        return rule
+            return self._resolve_rule(rule)
+
+    def _update_locked(self, rule_id: str, data: dict) -> tuple[Rule, list[str]]:
+        """Módosítás a hívó által tartott _locked() alatt.
+
+        Visszatérés: (feloldott szabály, a commit pontján függő gyűjtők).
+        A függő gyűjtőket ugyanabban a zárt szakaszban olvassuk, mint a
+        mentést: egy közben létrehozott gyűjtő is belekerül, ezért a
+        munkamenet-visszavonás nem maradhat el.
+        """
+        self._load()
+        existing = self._rules.get(rule_id)
+        if existing is None:
+            raise RuleStoreError(f"nincs ilyen szabály: {rule_id}")
+        updated = self._validate_payload(data, rule_id)
+        if updated.members or updated.full:
+            # Egy gyűjtő tagja nem válhat gyűjtővé vagy teljes
+            # hozzáférésűvé: azzal a szülő gyűjtő két szintűvé, illetve
+            # érvénytelenné válna. Előbb ki kell venni a szülőkből.
+            # Mivel a create() is a commitig tartja a zárat, a soron lévő
+            # gyűjtő már itt látszik.
+            parents = [
+                rid for rid, item in self._rules.items()
+                if rid != rule_id and rule_id in item.members
+            ]
+            if parents:
+                raise RuleStoreError(
+                    f"a(z) {rule_id} szabály tagja a következő "
+                    f"gyűjtőszabályoknak: {', '.join(parents)}; előbb "
+                    "vedd ki a tagok közül"
+                )
+        updated = replace(updated, created=existing.created)
+        rules = dict(self._rules)
+        rules[rule_id] = updated
+        dependents = [
+            rid for rid, item in rules.items()
+            if rid != rule_id and rule_id in item.members
+        ]
+        self._write_raw(
+            {rid: self._rule_storage(item) for rid, item in rules.items()}
+        )
+        self._rules = rules
+        return self._resolve_rule(updated), dependents
 
     def update(self, rule_id: str, data: dict) -> Rule:
         rule_id = _clean_id(rule_id, "szabály-azonosító")
         if rule_id == ADMIN_RULE_ID:
             raise RuleStoreError("a beépített admin szabály nem módosítható")
+        with self._locked():
+            resolved, _ = self._update_locked(rule_id, data)
+            return resolved
+
+    def update_with_dependents(
+        self, rule_id: str, data: dict
+    ) -> tuple[Rule, list[str]]:
+        """Szabály módosítása és a tőle függő gyűjtők egy záron belül.
+
+        A szervernek a szabály saját és a függő gyűjtők munkameneteit is
+        vissza kell vonnia. Ha a függőlistát a módosítás előtt, külön
+        zárral olvasnánk, egy közben létrehozott gyűjtő kimaradhatna, és a
+        munkamenete a lejáratig a régi portokkal élvezne hozzáférést.
+        """
+        rule_id = _clean_id(rule_id, "szabály-azonosító")
+        if rule_id == ADMIN_RULE_ID:
+            raise RuleStoreError("a beépített admin szabály nem módosítható")
+        with self._locked():
+            return self._update_locked(rule_id, data)
+
+    def duplicate(
+        self,
+        rule_id: str,
+        new_id: str | None = None,
+        label: str | None = None,
+    ) -> Rule:
+        """Meglévő szabály másolása új azonosítóval.
+
+        A másolat sosem lesz beépített, és nem ad önmagában hozzáférést:
+        csak a szabálytárba kerül, ugyanúgy, mint bármely új szabály.
+        """
+        source_id = _clean_id(rule_id, "szabály-azonosító")
+        if source_id == ADMIN_RULE_ID:
+            raise RuleStoreError("a beépített admin szabály nem duplikálható")
         self._load()
         with self._locked():
-            existing = self._rules.get(rule_id)
-            if existing is None:
-                raise RuleStoreError(f"nincs ilyen szabály: {rule_id}")
-            updated = self._validate_payload(data, rule_id)
-            updated = replace(updated, created=existing.created)
+            source = self._rules.get(source_id)
+            if source is None:
+                raise RuleStoreError(f"nincs ilyen szabály: {source_id}")
+            if new_id is None:
+                target_id = self._unique_copy_id(source_id)
+            else:
+                target_id = _clean_id(new_id, "szabály-azonosító")
+                if target_id == ADMIN_RULE_ID:
+                    raise RuleStoreError("ez a szabály-azonosító foglalt")
+                if target_id in self._rules:
+                    raise RuleStoreError(
+                        f"már létezik ilyen szabály: {target_id}"
+                    )
+            # Az utótag helyét mindig foglaljuk le: 80 karakteres forrásnév
+            # esetén a puszta végvágás eltüntetné a másolat jelölését, és a
+            # két szabály neve azonos lenne.
+            default_label = _copy_label(source.label)
+            raw_label = label if label is not None else default_label
+            # Az explicit címkét a hívó (a felület) már az utótaggal együtt,
+            # a korláton belül küldi; a biztonság kedvéért itt is vágunk.
+            clean_label = _clean_text(
+                str(raw_label)[:80], "label", 80
+            )
+            copied = replace(
+                source,
+                id=target_id,
+                label=clean_label,
+                created=int(time.time()),
+            )
             rules = dict(self._rules)
-            rules[rule_id] = updated
+            rules[target_id] = copied
             self._write_raw(
                 {rid: self._rule_storage(item) for rid, item in rules.items()}
             )
             self._rules = rules
-        return updated
+            self._order.append(target_id)
+            return self._resolve_rule(copied)
+
+    def _unique_copy_id(self, source_id: str) -> str:
+        def build(suffix: str) -> str:
+            room = max(1, 32 - len(suffix))
+            return f"{source_id[:room]}{suffix}"
+
+        candidate = build("-copy")
+        if candidate != ADMIN_RULE_ID and candidate not in self._rules:
+            return candidate
+        counter = 2
+        while True:
+            candidate = build(f"-{counter}")
+            if candidate != ADMIN_RULE_ID and candidate not in self._rules:
+                return candidate
+            counter += 1
+
+    def collections_containing(self, rule_id: str) -> list[str]:
+        """Azon gyűjtőszabályok azonosítói, amelyek tagként hivatkoznak rá."""
+        self._load()
+        return [
+            rid for rid, item in self._rules.items()
+            if rule_id in item.members
+        ]
 
     def delete(self, rule_id: str) -> Rule:
         rule_id = _clean_id(rule_id, "szabály-azonosító")
@@ -1478,6 +1857,16 @@ class RuleStore:
             existing = self._rules.get(rule_id)
             if existing is None:
                 raise RuleStoreError(f"nincs ilyen szabály: {rule_id}")
+            parents = [
+                rid for rid, item in self._rules.items()
+                if rule_id in item.members
+            ]
+            if parents:
+                raise RuleStoreError(
+                    f"a(z) {rule_id} szabály nem törölhető, mert tagja a "
+                    f"következő gyűjtőszabályoknak: {', '.join(parents)}; "
+                    "előbb vedd ki a tagok közül"
+                )
             rules = dict(self._rules)
             del rules[rule_id]
             self._write_raw(
@@ -1746,8 +2135,9 @@ class Firewall:
     A teljes hozzáférés az allowed_v4 halmazban van (egy IP-elem). A
     portokhoz kötött hozzáférés két összetett halmazban: allowed_tcp és
     allowed_udp (IP . DNAT előtti célport), illetve allowed_icmp.
-    A host SSH-t a host_ssh_v4 halmaz nyitja meg; ide csak engedélyezett
-    portál-munkamenet kerül, a munkamenet TTL-jével.
+    A host SSH-t a host_ssh_v4 halmaz nyitja meg; ide csak a beépített
+    ``admin-full`` szabályt választó, engedélyezett portál-munkamenet
+    kerül, a munkamenet TTL-jével.
     """
 
     def __init__(
@@ -2167,8 +2557,9 @@ class Firewall:
     def grant_host_ssh(self, ip: str, ttl: int) -> None:
         """A host SSH megnyitása a portál-munkamenet idejére.
 
-        A host SSH külön halmazban van, hogy a szűkebb szolgáltatási
-        szabály is megnyithassa. A MAC-kötés itt is érvényes a LAN-on.
+        Csak a beépített ``admin-full`` szabály engedélyezése hívja meg;
+        szűk szolgáltatási szabály vagy gyűjtőszabály nem nyit SSH-t.
+        A MAC-kötés itt is érvényes a LAN-on.
         """
         if not is_ipv4(ip):
             raise FirewallError("csak IPv4-cím engedélyezhető")
@@ -2716,7 +3107,9 @@ def group_firewall_snapshot(
         actual_icmp = item["icmp"] is not None
         actual_full = item["full"] is not None
         actual_ssh = item["host_ssh"] is not None
-        expected_ssh = bool(item["sessions"])
+        expected_ssh = any(
+            row.get("rule") == ADMIN_RULE_ID for row in item["sessions"]
+        )
 
         mismatch: list[str] = []
         for label, expected, actual in (
@@ -3739,9 +4132,10 @@ class SessionManager:
 
     A belépés két lépcsős: a jelszó ellenőrzése után a munkamenet még nem
     ad hálózati hozzáférést. A kliens ezután szabályt és időtartamot választ;
-    a forward-lánc csak ekkor nyílik meg, a szabály portjaira. Ugyanekkor
-    nyílik meg a host SSH is a kliens IP-jéről, szintén a munkamenet
-    lejártáig.
+    a forward-lánc csak ekkor nyílik meg, a szabály portjaira. A host SSH
+    csak akkor nyílik meg, ha a munkamenet a beépített ``admin-full``
+    szabályt engedélyezte; egyedi teljes hozzáférésű és gyűjtőszabályok
+    nem nyitják meg.
 
     A munkamenet lejárta és az nftables-elemek timeoutja ugyanaz az érték.
     Ha a folyamat leáll, a kernel a timeoutnál magától törli az engedélyt.
@@ -3753,16 +4147,12 @@ class SessionManager:
         ttl: int = SESSION_TTL,
         pending_ttl: int = AUTH_TTL,
         audit: AuditLog | None = None,
-        host_ssh_mode: str = HOST_SSH_MODE,
         rule_check=None,
     ) -> None:
         self.firewall = firewall
         self.ttl = max(MIN_TTL, min(int(ttl), MAX_TTL))
         self.pending_ttl = max(1, int(pending_ttl))
         self.audit = audit
-        # admin | any | off — a host SSH-t csak a megfelelő munkamenet kapja.
-        mode = str(host_ssh_mode or "").strip().lower()
-        self.host_ssh_mode = mode if mode in ("admin", "any", "off") else "admin"
         # Visszahívás: a szabály a döntés pillanatában is a felhasználóé-e.
         # Ezzel zárjuk be azt a versenyhelyzetet, amikor az admin a szabály
         # törlése után, de a grant előtt érkező kérést engedélyezne.
@@ -3829,46 +4219,6 @@ class SessionManager:
             for session in self._sessions.values()
             if session.authorized
         }
-
-    def _host_ssh_wanted(self, session: "Session") -> bool:
-        if self.host_ssh_mode == "off":
-            return False
-        if self.host_ssh_mode == "any":
-            return True
-        return session.role == ROLE_ADMIN
-
-    def set_host_ssh_mode(self, mode: str) -> list[str]:
-        """A host SSH szabály futásidejű módosítása.
-
-        Szűkítéskor (pl. any -> admin, vagy off) a már megnyitott SSH-
-        engedélyeket azonnal visszavonja. Bővítéskor a meglévő munkamenetek
-        nem kapnak utólag SSH-t; az a következő engedélyezéskor nyílik meg.
-        Visszatérés: a visszavonási hibák szöveges listája.
-        """
-        mode = str(mode or "").strip().lower()
-        if mode not in ("admin", "any", "off"):
-            raise ValueError("a host SSH szabály értéke admin, any vagy off lehet")
-        with self._lock:
-            self.host_ssh_mode = mode
-            targets = sorted({
-                session.ip
-                for session in self._sessions.values()
-                if session.authorized and not self._host_ssh_wanted(session)
-            })
-        errors: list[str] = []
-        for ip in targets:
-            try:
-                self.firewall.revoke_host_ssh(ip)
-            except FirewallError as exc:
-                errors.append(f"{ip}: {exc}")
-        if self.audit is not None and targets:
-            self.audit.write(
-                "host_ssh_policy_applied",
-                mode=mode,
-                revoked_ips=", ".join(targets),
-                errors="; ".join(errors),
-            )
-        return errors
 
     def _revoke_access(self, ip: str, grants=()) -> None:
         try:
@@ -4003,7 +4353,7 @@ class SessionManager:
             ):
                 raise AccessError("ez a szabály már nem elérhető")
 
-            want_ssh = self._host_ssh_wanted(session)
+            want_ssh = rule.id == ADMIN_RULE_ID
             if session.authorized:
                 # Módosításnál előbb töröljük a régi engedélyeket. Ha ez nem
                 # sikerül, a régi hozzáférés marad érvényben, és hibát
@@ -4402,7 +4752,7 @@ class Gateway:
         self.settings = (
             settings
             if settings is not None
-            else settings_store.SettingsStore(default_host_ssh=HOST_SSH_MODE)
+            else settings_store.SettingsStore()
         )
         self.drops = (
             drops if drops is not None else droplog.DropLogService()
@@ -4415,7 +4765,6 @@ class Gateway:
                 ttl=DEFAULT_TTL,
                 pending_ttl=AUTH_TTL,
                 audit=self.audit,
-                host_ssh_mode=self.settings.host_ssh,
                 rule_check=self._rule_available,
             )
         )
@@ -4639,8 +4988,7 @@ class Gateway:
                 "[fail2ban] FIGYELEM: a mentett tiltásokat nem sikerült "
                 "visszatölteni a tűzfalba"
             )
-        # A settings-fájl host SSH módja felülírja a környezeti alapértéket.
-        self.sessions.host_ssh_mode = self.settings.host_ssh
+        # A settings-fájl pre-auth és blokk szabályainak telepítése.
         self._apply_custom_settings()
 
     def _apply_custom_settings(self, snapshot: dict | None = None) -> None:
@@ -4670,16 +5018,14 @@ class Gateway:
         active_block = _enabled_custom_entries(snapshot.get("block", []))
         log(
             f"[beállítások] {len(active_preauth)} pre-auth, "
-            f"{len(active_block)} blokk bejegyzés; "
-            f"host SSH: {snapshot.get('host_ssh', HOST_SSH_MODE)}"
+            f"{len(active_block)} blokk bejegyzés"
         )
 
-    def apply_settings(self, new_data: dict) -> list[str]:
+    def apply_settings(self, new_data: dict) -> None:
         """Az admin által előkészített beállítások telepítése és mentése.
 
         Sorrend: nft alkalmazás -> atomi fájlírás. Ha a mentés nem sikerül,
-        a korábbi nft-szabályokat visszaállítjuk. Visszatérés: a host SSH
-        visszavonásánál keletkezett figyelmeztetések.
+        a korábbi nft-szabályokat visszaállítjuk.
         """
         old = self.settings.snapshot()
         try:
@@ -4713,12 +5059,6 @@ class Gateway:
                     f"visszaállítása nem sikerült: {rollback_exc}"
                 )
             raise
-        warnings: list[str] = []
-        try:
-            warnings = self.sessions.set_host_ssh_mode(new_data["host_ssh"])
-        except (ValueError, FirewallError) as exc:
-            warnings = [str(exc)]
-        return warnings
 
     def start(self) -> None:
         self.sessions.start_reaper()

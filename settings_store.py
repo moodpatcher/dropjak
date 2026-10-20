@@ -38,11 +38,6 @@ SETTINGS_PATH = (
     or os.path.join(STATE_DIR, "firewall-settings.json")
 )
 
-HOST_SSH_MODES = ("admin", "any", "off")
-DEFAULT_HOST_SSH = os.environ.get("HV_HOST_SSH", "admin").strip().lower()
-if DEFAULT_HOST_SSH not in HOST_SSH_MODES:
-    DEFAULT_HOST_SSH = "admin"
-
 MAX_ENTRIES = 64
 MAX_PORTS = 64
 MAX_LABEL = 64
@@ -165,18 +160,12 @@ def normalize_entry(kind: str, entry, entry_id: str = "") -> dict:
 def validate_state(data) -> dict:
     if not isinstance(data, dict):
         raise SettingsError("a beállítások JSON-objektum kell")
-    host_ssh = str(data.get("host_ssh", DEFAULT_HOST_SSH)).strip().lower()
-    if host_ssh not in HOST_SSH_MODES:
-        raise SettingsError(
-            "a host SSH szabály értéke admin, any vagy off lehet"
-        )
     registration_enabled = data.get("registration_enabled", False)
     if not isinstance(registration_enabled, bool):
         raise SettingsError(
             "a registration_enabled mező igaz/hamis érték kell"
         )
     result = {
-        "host_ssh": host_ssh,
         "registration_enabled": registration_enabled,
         "preauth": [],
         "block": [],
@@ -213,18 +202,11 @@ class SettingsStore:
         self,
         path: str = SETTINGS_PATH,
         logger=_default_log,
-        default_host_ssh: str = DEFAULT_HOST_SSH,
     ) -> None:
         self.path = os.path.abspath(path)
         self.log = logger
-        self.default_host_ssh = (
-            default_host_ssh
-            if default_host_ssh in HOST_SSH_MODES
-            else "admin"
-        )
         self._lock = threading.Lock()
         self._data = {
-            "host_ssh": self.default_host_ssh,
             "registration_enabled": False,
             "preauth": [],
             "block": [],
@@ -234,7 +216,6 @@ class SettingsStore:
 
     def _defaults(self) -> dict:
         return {
-            "host_ssh": self.default_host_ssh,
             "registration_enabled": False,
             "preauth": [],
             "block": [],
@@ -270,11 +251,6 @@ class SettingsStore:
             data["error"] = self._error
             return data
 
-    @property
-    def host_ssh(self) -> str:
-        with self._lock:
-            return self._data["host_ssh"]
-
     def _copy_locked(self) -> dict:
         return copy.deepcopy(self._data)
 
@@ -284,7 +260,6 @@ class SettingsStore:
         kind: str = "",
         entry_id: str = "",
         entry=None,
-        host_ssh: str = "",
     ) -> dict:
         """A módosítás érvényesítése és az új állapot előállítása.
 
@@ -294,14 +269,6 @@ class SettingsStore:
         with self._lock:
             data = self._copy_locked()
         action = str(action or "").strip().lower()
-        if action == "host_ssh":
-            mode = str(host_ssh or "").strip().lower()
-            if mode not in HOST_SSH_MODES:
-                raise SettingsError(
-                    "a host SSH szabály értéke admin, any vagy off lehet"
-                )
-            data["host_ssh"] = mode
-            return validate_state(data)
         if kind not in ("preauth", "block"):
             raise SettingsError(f"ismeretlen beállítás-típus: {kind!r}")
         entries = data[kind]
