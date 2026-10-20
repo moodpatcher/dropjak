@@ -153,6 +153,7 @@ FLUSH_ON_START = os.environ.get("HV_FLUSH_ON_START", "1") == "1"
 # a tűzfal a LAN-on csak ezzel a MAC-címmel engedi át a forgalmat. Ez zárja
 # ki, hogy egy kliens egy másik engedélyezett kliens IP-címét használja.
 HV_LAN_IF = os.environ.get("HV_LAN_IF", "").strip()
+HV_WAN_IF = os.environ.get("HV_WAN_IF", "").strip()
 HV_LAN_NET_RAW = os.environ.get("HV_LAN_NET", "").strip()
 
 
@@ -1676,6 +1677,7 @@ class Firewall:
         dry_run: bool = DRY_RUN,
         logger=log,
         lan_if: str = HV_LAN_IF,
+        wan_if: str = HV_WAN_IF,
         lan_network=LAN_NETWORK,
         arp_path: str = ARP_PATH,
         fwd_mark: str = FWD_MARK,
@@ -1689,6 +1691,8 @@ class Firewall:
             raise ValueError(f"érvénytelen nftables mark: {fwd_mark!r}")
         if lan_if and not _LAN_IF_RE.match(lan_if):
             raise ValueError(f"érvénytelen LAN interfész: {lan_if!r}")
+        if wan_if and not _LAN_IF_RE.match(wan_if):
+            raise ValueError(f"érvénytelen WAN interfész: {wan_if!r}")
         self.fwd_mark = fwd_mark
         self.drop_log_group = max(1, min(65535, int(drop_log_group)))
         self.table = table
@@ -1699,6 +1703,7 @@ class Firewall:
         self.ssh_set = "host_ssh_v4"
         self.mac_set = "client_mac"
         self.lan_if = (lan_if or "").strip()
+        self.wan_if = (wan_if or "").strip()
         self.lan_network = lan_network
         self.arp_path = arp_path
         self.mac_binding = bool(self.lan_if and self.lan_network is not None)
@@ -1793,9 +1798,9 @@ class Firewall:
     def apply_custom(self, preauth=(), block=()) -> None:
         """A bejelentkezés előtti engedélyek és a blokkolt célok telepítése.
 
-        A pre-auth szabályok három irányt fednek le: a LAN felől induló
-        új kapcsolatot, a válaszirányt (established) és a kapcsolathoz
-        tartozó related forgalmat. A blokk a LAN felől induló forgalmat
+        A pre-auth cél üresen minden célra érvényes. A LAN felől a megadott
+        célra/portra nyit; a WAN felől csak DNAT-olt (publikált) forgalomra,
+        így nem válik nyílt továbbítóvá. A blokk a LAN felől induló forgalmat
         dobja el, a 80-as TCP-portnál a portál-átirányítás előtt is.
         """
         if preauth and not self.lan_if:
@@ -1841,41 +1846,55 @@ class Firewall:
             dst = str(entry.get("dst", "")).strip()
             proto = str(entry.get("proto", "")).strip().lower()
             ports = [int(port) for port in entry.get("ports", [])]
-            if not dst or proto not in ("tcp", "udp") or not ports:
+            if proto not in ("tcp", "udp") or not ports:
                 raise FirewallError("érvénytelen pre-auth bejegyzés")
-            try:
-                dst = str(ipaddress.ip_network(dst, strict=False))
-            except ValueError as exc:
-                raise FirewallError(
-                    f"érvénytelen pre-auth cél: {dst}"
-                ) from exc
-            port_expr = self._port_set(ports)
-            lan = f'iifname "{self.lan_if}"'
-            lines.append(
-                f"add rule inet {self.table} preauth {lan} "
-                f"meta l4proto {proto} ct original ip daddr {dst} "
-                f"ct original proto-dst {port_expr} "
-                f"meta mark set {self.fwd_mark} accept"
-            )
+            if dst:
+                try:
+                    dst = str(ipaddress.ip_network(dst, strict=False))
+                except ValueError as exc:
+                    raise FirewallError(
+                        f"érvénytelen pre-auth cél: {dst}"
+                    ) from exc
+            match = f"meta l4proto {proto}"
+            if dst:
+                match += f" ct original ip daddr {dst}"
+            match += f" ct original proto-dst {self._port_set(ports)}"
+            # A LAN felől a pre-auth a megadott célra/portra nyit. A WAN
+            # felől csak DNAT-olt (publikált) forgalomra: így a szabály
+            # nem válik nyílt továbbítóvá tetszőleges külső cél felé.
+            interfaces = [(self.lan_if, "")]
+            if self.wan_if and self.wan_if != self.lan_if:
+                interfaces.append((self.wan_if, "ct status dnat "))
+            for iface, extra in interfaces:
+                lines.append(
+                    f'add rule inet {self.table} preauth iifname "{iface}" '
+                    f"{extra}{match} "
+                    f"meta mark set {self.fwd_mark} accept"
+                )
             lines.append(
                 f"add rule inet {self.table} preauth ct state established "
-                f"meta l4proto {proto} ct original ip daddr {dst} "
-                f"ct original proto-dst {port_expr} "
-                f"meta mark set {self.fwd_mark} accept"
+                f"{match} meta mark set {self.fwd_mark} accept"
             )
-            lines.append(
-                f"add rule inet {self.table} preauth ct state related "
-                f"ct original ip daddr {dst} "
-                f"meta mark set {self.fwd_mark} accept"
-            )
+            if dst:
+                # Cél nélküli pre-auth esetén ezt kihagyjuk: a related
+                # szabály cél nélkül minden kapcsolódó forgalmat átengedne.
+                lines.append(
+                    f"add rule inet {self.table} preauth ct state related "
+                    f"ct original ip daddr {dst} "
+                    f"meta mark set {self.fwd_mark} accept"
+                )
             if proto == "tcp" and 80 in ports:
                 # A prerouting a 80-as TCP-t a portálra irányítja. A
                 # conntrack-jelölés ezt a láncot kikerülteti a base chain
                 # return szabályával; a forward pre-auth szabály továbbra is
-                # külön dönt a csomagról.
+                # külön dönt a csomagról. Cél nélkül ez minden LAN-oldali
+                # HTTP-t kivesz a portál-átirányítás alól.
+                nat = "meta l4proto tcp"
+                if dst:
+                    nat += f" ct original ip daddr {dst}"
+                nat += " ct original proto-dst 80"
                 lines.append(
-                    f"add rule inet {self.table} preauth_nat meta l4proto tcp "
-                    f"ct original ip daddr {dst} ct original proto-dst 80 "
+                    f"add rule inet {self.table} preauth_nat {nat} "
                     f"ct mark set {PREAUTH_CT_MARK}"
                 )
         self._run_script("\n".join(lines) + ("\n" if lines else ""))

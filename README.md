@@ -176,10 +176,13 @@ process. Only packet headers are stored, never payloads.
 
 The **Settings** admin tab manages three things:
 
-- **Pre-auth rules** — destination (IP/CIDR) and ports that are reachable
-  from the LAN *before* portal sign-in. Every LAN client can use them, so
-  only deliberately public services belong here. Port 80 entries also skip
-  the captive-portal redirect.
+- **Pre-auth rules** — destination (IP/CIDR, optional) and ports that are
+  reachable from the LAN *before* portal sign-in. From the WAN side they
+  apply only to DNATed (published Docker) services. An empty destination
+  means any destination. For a published Docker port, use the pre-DNAT
+  address (the VM IP), not the container's internal address. Every client
+  can use them, so only deliberately public services belong here. Port 80
+  entries also skip the captive-portal redirect.
 - **Block rules** — destination/ports that are always dropped. The block is
   evaluated before pre-auth, so it overrides a pre-auth entry.
 - **Host SSH policy** — `admin`, `any` or `off`, applied immediately.

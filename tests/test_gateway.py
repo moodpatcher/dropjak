@@ -2724,8 +2724,6 @@ class AdminHttpTests(unittest.TestCase):
         cookie = self.admin_cookie()
         cases = [
             {"action": "create", "kind": "preauth",
-             "entry": {"label": "Cél nélkül", "proto": "tcp", "ports": [80]}},
-            {"action": "create", "kind": "preauth",
              "entry": {"label": "Rossz proto", "dst": "192.168.50.10",
                        "proto": "icmp", "ports": [80]}},
             {"action": "create", "kind": "block",
@@ -3113,11 +3111,6 @@ class SettingsStoreTests(unittest.TestCase):
         with self.assertRaises(gateway.settings_store.SettingsError):
             self.store.prepare(
                 "create", "preauth",
-                entry={"label": "Nincs cél", "proto": "tcp", "ports": [80]},
-            )
-        with self.assertRaises(gateway.settings_store.SettingsError):
-            self.store.prepare(
-                "create", "preauth",
                 entry={"label": "IPv6", "dst": "2001:db8::/32",
                        "proto": "tcp", "ports": [80]},
             )
@@ -3161,6 +3154,13 @@ class SettingsStoreTests(unittest.TestCase):
             entry={"label": "Minden DNS", "proto": "udp", "ports": [53]},
         )
         self.assertEqual(new["block"][0]["dst"], "")
+        # Pre-auth cél nélkül is érvényes: minden célra nyit.
+        any_dst = self.store.prepare(
+            "create", "preauth",
+            entry={"label": "Minden Minecraft", "proto": "tcp",
+                   "ports": [25565]},
+        )
+        self.assertEqual(any_dst["preauth"][0]["dst"], "")
 
     def test_corrupt_file_fails_closed(self) -> None:
         with open(self.path, "w", encoding="utf-8") as fh:
@@ -3189,7 +3189,7 @@ class FirewallCustomTests(unittest.TestCase):
         self.tools = FakeTools(self.tmp.name)
         self.fw = gateway.Firewall(
             binary=str(self.tools.nft), logger=lambda *_: None,
-            lan_if="eth1",
+            lan_if="eth1", wan_if="eth0",
             lan_network=ipaddress.ip_network("192.168.50.0/24"),
         )
 
@@ -3246,6 +3246,14 @@ class FirewallCustomTests(unittest.TestCase):
             script,
         )
         self.assertIn(
+            'add rule inet hatarvedelem preauth iifname "eth0" '
+            "ct status dnat meta l4proto tcp "
+            "ct original ip daddr 192.168.50.10/32 "
+            "ct original proto-dst 80 "
+            f"meta mark set {self.fw.fwd_mark} accept",
+            script,
+        )
+        self.assertIn(
             "add rule inet hatarvedelem preauth ct state established "
             "meta l4proto tcp ct original ip daddr 192.168.50.10/32 "
             "ct original proto-dst 80 "
@@ -3263,6 +3271,36 @@ class FirewallCustomTests(unittest.TestCase):
             "ct original ip daddr 192.168.50.10/32 ct original proto-dst 80 "
             f"ct mark set {gateway.PREAUTH_CT_MARK}",
             script,
+        )
+
+    def test_preauth_any_destination(self) -> None:
+        self.fw.apply_custom(
+            preauth=[{"dst": "", "proto": "tcp", "ports": [25565]}]
+        )
+        script = "\n".join(self.tools.script())
+        self.assertIn(
+            'add rule inet hatarvedelem preauth iifname "eth1" '
+            "meta l4proto tcp ct original proto-dst 25565 "
+            f"meta mark set {self.fw.fwd_mark} accept",
+            script,
+        )
+        self.assertIn(
+            'add rule inet hatarvedelem preauth iifname "eth0" '
+            "ct status dnat meta l4proto tcp ct original proto-dst 25565 "
+            f"meta mark set {self.fw.fwd_mark} accept",
+            script,
+        )
+        preauth_lines = [
+            line for line in self.tools.script()
+            if "inet hatarvedelem preauth " in line
+        ]
+        self.assertTrue(preauth_lines)
+        self.assertFalse(
+            any("ct original ip daddr" in line for line in preauth_lines)
+        )
+        # Cél nélkül nincs széles related szabály.
+        self.assertFalse(
+            any("ct state related" in line for line in preauth_lines)
         )
 
     def test_preauth_requires_lan_interface(self) -> None:

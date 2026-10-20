@@ -6,8 +6,8 @@ Két, a portálon kezelhető szabálytípust tárol:
 
 * ``preauth``: bejelentkezés előtt is nyitva lévő célok és portok. Ezeket
   a forward lánc a portál-munkamenet nélkül is átengedi (és megjelöli a
-  Docker-védelemhez). Csak akkor használható, ha a cél és a port tudatosan
-  nyilvános.
+  Docker-védelemhez). Üres cél esetén minden célra érvényes. Csak akkor
+  használható, ha a cél és a port tudatosan nyilvános.
 * ``block``: mindig eldobott célok és portok. A blokk a pre-auth szabályt
   is felülbírálja.
 
@@ -70,15 +70,13 @@ def _text(value, field: str, maximum: int = MAX_LABEL) -> str:
     return value
 
 
-def _normalize_dst(raw, required: bool) -> str:
+def _normalize_dst(raw) -> str:
     if raw is None:
         raw = ""
     if not isinstance(raw, str):
         raise SettingsError("cél: szöveg kell (IP vagy CIDR)")
     raw = raw.strip()
     if not raw:
-        if required:
-            raise SettingsError("a pre-auth bejegyzéshez cél szükséges")
         return ""
     try:
         network = ipaddress.ip_network(raw, strict=False)
@@ -139,7 +137,7 @@ def normalize_entry(kind: str, entry, entry_id: str = "") -> dict:
             entry_id = secrets.token_hex(4)
     # A típus nem szerepel a bejegyzésben; a lista hordozza.
     label = _text(entry.get("label"), "címke")
-    dst = _normalize_dst(entry.get("dst", ""), required=(kind == "preauth"))
+    dst = _normalize_dst(entry.get("dst", ""))
     proto = str(entry.get("proto", "")).strip().lower()
     if proto not in ("tcp", "udp"):
         raise SettingsError(f"érvénytelen protokoll: {entry.get('proto')!r}")

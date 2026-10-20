@@ -1102,7 +1102,8 @@ const I18N = {
     'Cél (IP vagy CIDR; üresen minden cél)': 'Destination (IP or CIDR; empty means any)',
     'pl. 192.0.2.10 vagy 192.0.2.0/24': 'e.g. 192.0.2.10 or 192.0.2.0/24',
     'Portok (vesszővel elválasztva)': 'Ports (comma-separated)',
-    'A pre-auth szabály a portál bejelentkezés nélkül is átengedi a megadott cél és port forgalmát. Csak tudatosan nyilvános szolgáltatáshoz használd.': 'The pre-auth rule lets traffic to the given destination and port through without a portal sign-in. Only use it for a deliberately public service.',
+    'A pre-auth szabály a portál bejelentkezés nélkül is átengedi a megadott cél és port forgalmát. Üres cél esetén minden célra érvényes. Csak tudatosan nyilvános szolgáltatáshoz használd.': 'The pre-auth rule lets traffic to the given destination and port through without a portal sign-in. An empty destination means any destination. Only use it for a deliberately public service.',
+    'WAN felől csak DNAT-olt (publikált) portokra érvényes. A cél a DNAT előtti cím (publikált Docker-portnál a VM IP-je), nem a konténer belső címe.': 'From the WAN side it only applies to DNATed (published) ports. The destination is the pre-DNAT address (for a published Docker port, the VM IP), not the container’s internal address.',
     'A tűzfalbeállítások mentve.': 'Firewall settings saved.',
   },
 
@@ -1517,7 +1518,8 @@ const I18N = {
     'Cél (IP vagy CIDR; üresen minden cél)': 'Ziel (IP oder CIDR; leer bedeutet beliebig)',
     'pl. 192.0.2.10 vagy 192.0.2.0/24': 'z. B. 192.0.2.10 oder 192.0.2.0/24',
     'Portok (vesszővel elválasztva)': 'Ports (kommagetrennt)',
-    'A pre-auth szabály a portál bejelentkezés nélkül is átengedi a megadott cél és port forgalmát. Csak tudatosan nyilvános szolgáltatáshoz használd.': 'Die Pre-auth-Regel lässt Verkehr zum angegebenen Ziel und Port ohne Portal-Anmeldung durch. Verwende sie nur für einen bewusst öffentlichen Dienst.',
+    'A pre-auth szabály a portál bejelentkezés nélkül is átengedi a megadott cél és port forgalmát. Üres cél esetén minden célra érvényes. Csak tudatosan nyilvános szolgáltatáshoz használd.': 'Die Pre-auth-Regel lässt Verkehr zum angegebenen Ziel und Port ohne Portal-Anmeldung durch. Ein leeres Ziel bedeutet beliebiges Ziel. Verwende sie nur für einen bewusst öffentlichen Dienst.',
+    'WAN felől csak DNAT-olt (publikált) portokra érvényes. A cél a DNAT előtti cím (publikált Docker-portnál a VM IP-je), nem a konténer belső címe.': 'Von der WAN-Seite gilt sie nur für DNATete (veröffentlichte) Ports. Das Ziel ist die Adresse vor dem DNAT (bei einem veröffentlichten Docker-Port die VM-IP), nicht die interne Container-Adresse.',
     'A tűzfalbeállítások mentve.': 'Firewall-Einstellungen gespeichert.',
   },
 };
@@ -3891,13 +3893,11 @@ function renderSettingForm(kind, entryId) {
     })
   ));
   grid.append(el('div', { class: 'field' },
-    el('label', { text: tr(kind === 'preauth'
-      ? 'Cél (IP vagy CIDR; pre-auth-nál kötelező)'
-      : 'Cél (IP vagy CIDR; üresen minden cél)') }),
+    el('label', { text: tr('Cél (IP vagy CIDR; üresen minden cél)') }),
     el('input', {
       name: 'dst', value: draftValue(draft, 'dst', edit ? entry.dst : ''),
       placeholder: tr('pl. 192.0.2.10 vagy 192.0.2.0/24'),
-      required: kind === 'preauth', autocomplete: 'off'
+      autocomplete: 'off'
     })
   ));
   grid.append(el('div', { class: 'field' },
@@ -3924,7 +3924,11 @@ function renderSettingForm(kind, entryId) {
   if (kind === 'preauth') {
     box.append(el('p', {
       class: 'port-hint',
-      text: tr('A pre-auth szabály a portál bejelentkezés nélkül is átengedi a megadott cél és port forgalmát. Csak tudatosan nyilvános szolgáltatáshoz használd.')
+      text: tr('A pre-auth szabály a portál bejelentkezés nélkül is átengedi a megadott cél és port forgalmát. Üres cél esetén minden célra érvényes. Csak tudatosan nyilvános szolgáltatáshoz használd.')
+    }));
+    box.append(el('p', {
+      class: 'port-hint',
+      text: tr('WAN felől csak DNAT-olt (publikált) portokra érvényes. A cél a DNAT előtti cím (publikált Docker-portnál a VM IP-je), nem a konténer belső címe.')
     }));
   }
   const actions = el('div', { class: 'form-actions' });
