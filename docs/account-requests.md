@@ -2,7 +2,9 @@
 
 **Date:** 2026-10-20
 
-**Status:** in development; not committed or deployed yet.
+**Status:** implemented and committed as `c88b912`, deployed to the test VM
+on 2026-10-20. The feature is disabled by default; the test portal has it
+enabled.
 
 This document describes the optional self-service account request feature.
 The behavior below is the implementation contract; it is disabled by default.

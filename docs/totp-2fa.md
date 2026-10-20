@@ -2,9 +2,8 @@
 
 **Date:** 2026-10-20
 
-**Status:** implemented and committed as `8f46da3`, deployed to the test VM
-on 2026-10-20. The QR-code enrollment addition described below is not
-committed or deployed yet.
+**Status:** implemented and committed as `c88b912`, deployed to the test VM
+on 2026-10-20. QR-code enrollment is included in that commit and deployed.
 
 This document is the technical reference for the optional per-user TOTP 2FA
 in the portal. It describes the behavior, state, API surface and limitations.
