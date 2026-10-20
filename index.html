@@ -363,6 +363,66 @@
   .log-detail details summary{cursor:pointer;color:#777;font-size:10.5px}
   .log-detail pre{margin:4px 0 0;padding:6px;background:#f7f7f5;border:1px solid var(--line);border-radius:5px;font-size:10px;white-space:pre-wrap;word-break:break-word;max-height:160px;overflow:auto}
   .log-table td{font-size:11.5px}
+  /* drop napló — áttekintés */
+  .drop-status{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin:0 0 10px;padding:7px 10px;font-size:11px;color:#555;background:var(--soft);border:1px solid var(--line);border-radius:8px}
+  .drop-status b{font-size:11.5px;color:var(--ink)}
+  .drop-status.err{border-color:var(--red-line);background:var(--red-bg)}
+  .drop-status.err b{color:var(--red)}
+  .drop-dot{flex:0 0 auto;width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 0 3px var(--green-bg)}
+  .drop-dot.off{background:var(--red);box-shadow:0 0 0 3px var(--red-bg)}
+  .drop-status-sep{color:#c3c3be}
+  .drop-status-path{margin-left:auto;max-width:46%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:9.5px;color:var(--muted)}
+  .drop-status-error{color:var(--red);font-size:10.5px}
+  .drop-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:10px}
+  .drop-stat{padding:8px 11px;background:#fff;border:1px solid var(--line);border-radius:9px;min-width:0}
+  .drop-stat > span{display:block;font-size:9.5px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#8a8a85}
+  .drop-stat b{display:block;margin-top:2px;font-size:15px;line-height:1.25;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .drop-stat small{display:block;margin-top:1px;font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .drop-dashboard{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(225px,.9fr);gap:10px;margin-bottom:12px}
+  .drop-card{min-width:0;padding:11px 13px 10px;background:#fff;border:1px solid var(--line);border-radius:10px}
+  .drop-card-head{display:flex;align-items:flex-start;gap:8px;justify-content:space-between;margin-bottom:6px}
+  .drop-card-head h3{margin:0;font-size:12.5px}
+  .drop-card-sub{margin:2px 0 0;font-size:10px;color:var(--muted)}
+  .drop-chart{display:block;width:100%;height:auto;overflow:visible}
+  .chart-grid{stroke:#ececea;stroke-width:1;vector-effect:non-scaling-stroke}
+  .chart-axis{fill:#8a8a85;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;font-size:9px}
+  .chart-bar{transition:opacity .12s}
+  .chart-bar:hover{opacity:.78}
+  .drop-legend{display:flex;flex-wrap:wrap;gap:4px 11px;margin-top:5px;font-size:10px;color:#666}
+  .drop-legend-item{display:inline-flex;align-items:center;gap:5px;min-width:0}
+  .drop-legend-swatch{flex:0 0 auto;width:7px;height:7px;border-radius:2px}
+  .drop-legend b{font-weight:600;color:#3f3f3b}
+  .drop-top-src{display:flex;flex-direction:column;gap:7px;margin-top:8px}
+  .drop-src-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:2px 8px;font-size:11px}
+  .drop-src-ip{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#3f3f3b}
+  .drop-src-count{font-size:10px;font-weight:600;color:#777;font-variant-numeric:tabular-nums}
+  .drop-src-bar{grid-column:1/-1;height:4px;background:var(--soft);border-radius:999px;overflow:hidden}
+  .drop-src-bar i{display:block;height:100%;background:var(--blue);border-radius:999px;min-width:3px}
+  .drop-empty-small{margin:10px 0 2px;font-size:11px;color:var(--muted)}
+  .drop-filters{margin:0 0 12px;padding:10px 12px 11px;background:#fff;border:1px solid var(--line);border-radius:10px}
+  .drop-filter-head{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+  .drop-filter-head b{font-size:12px}
+  .drop-filter-count{padding:1px 6px;font-size:9.5px;font-weight:600;color:var(--blue);background:var(--blue-bg);border:1px solid var(--blue-line);border-radius:999px}
+  .drop-auto{display:flex;align-items:center;gap:5px;margin:0 0 0 auto;font-size:10.5px;font-weight:400;color:#666;cursor:pointer}
+  .drop-auto input{width:14px;height:14px;margin:0;padding:0;flex:0 0 auto}
+  .drop-filter-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(118px,1fr));gap:8px}
+  .drop-filter-field{display:flex;flex-direction:column;gap:3px;min-width:0}
+  .drop-filter-field label{margin:0;font-size:9.5px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;color:#8a8a85}
+  .drop-filter-field input,.drop-filter-field select{width:100%;margin:0;padding:6px 8px;font-size:11.5px;border-radius:7px}
+  .drop-filter-actions{display:flex;justify-content:flex-end;gap:6px;margin-top:9px;padding-top:9px;border-top:1px solid #f0f0ed}
+  .drop-filter-actions button{padding:6px 10px;font-size:11.5px}
+  .drop-table-wrap{max-height:min(58vh,620px)}
+  .drop-table td{font-size:11.5px;vertical-align:middle}
+  .drop-table tbody tr:hover{background:#fbfbf9}
+  .drop-time .t{display:block;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .drop-time .d{display:block;font-size:9.5px;color:var(--muted);white-space:nowrap}
+  .reason-pill{display:inline-flex;align-items:center;gap:5px;padding:2px 7px;font-size:10.5px;font-weight:600;color:#3f3f3b;background:var(--soft);border:1px solid var(--line);border-radius:999px;white-space:nowrap}
+  .reason-pill i{flex:0 0 auto;width:6px;height:6px;border-radius:50%}
+  .drop-route{display:flex;align-items:baseline;gap:6px;white-space:nowrap}
+  .drop-route-arrow{color:#b0b0aa}
+  .port-pill{display:inline-block;padding:2px 6px;font-size:10px;font-weight:600;color:#4a4a45;background:var(--soft);border:1px solid var(--line-strong);border-radius:5px;white-space:nowrap}
+  .drop-iface{font-size:10px;color:#777;white-space:nowrap}
+  .drop-facts{font-size:10px;color:#777;margin-bottom:2px}
   .fw-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:10px}
   .fw-card{padding:12px 13px;background:#fff;border:1px solid var(--line);border-radius:10px}
   .fw-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:7px}
@@ -378,6 +438,10 @@
   .fw-session:first-child{padding-top:0;border-top:0}
   .fw-warn{margin-top:8px;padding:6px 8px;font-size:11px;line-height:1.4;border-radius:7px;background:var(--amber-bg);border:1px solid var(--amber-line);color:var(--amber)}
   .fw-warn.err{background:var(--red-bg);border-color:var(--red-line);color:var(--red)}
+
+  @media (max-width:900px){
+    .drop-dashboard{grid-template-columns:1fr}
+  }
 
   @media (max-width:760px){
     body.app{padding:0}
@@ -401,6 +465,9 @@
     .admin-nav button{width:auto;white-space:nowrap}
     .admin-panel{padding:12px}
     .form-grid{grid-template-columns:1fr}
+    .drop-stats{grid-template-columns:repeat(2,minmax(0,1fr))}
+    .drop-status-path{display:none}
+    .drop-table-wrap{max-height:none}
   }
 </style>
 </head>
@@ -985,6 +1052,23 @@ const I18N = {
     'container-pivot': 'container → LAN pivot',
     'ipv6': 'IPv6',
     'unknown': 'unknown',
+    'automatikus frissítés kikapcsolva': 'auto-refresh is off',
+    'Eldobások időben': 'Drops over time',
+    'a szűrt találatok alapján': 'based on the filtered results',
+    'Legaktívabb források': 'Top sources',
+    'Nincs megjeleníthető forrás.': 'No source to display.',
+    'Találat': 'Matches',
+    'Időtartam': 'Time span',
+    'Leggyakoribb ok': 'Top reason',
+    'Egyedi forrás': 'Unique sources',
+    'Minden ok': 'All reasons',
+    'Forrás → cél': 'Source → destination',
+    'Egyéb': 'Other',
+    'Szűrők': 'Filters',
+    'mp': 's',
+    'nap': 'd',
+    'pl. 192.168.10.2': 'e.g. 192.168.10.2',
+    'pl. 1.1.1.1': 'e.g. 1.1.1.1',
     // -- firewall settings --------------------------------------------
     'Tűzfal testreszabása': 'Firewall customization',
     'Bejelentkezés előtt nyitva lévő célok, mindig blokkolt célok és a host SSH szabály.': 'Destinations open before sign-in, always-blocked destinations and the host SSH policy.',
@@ -1383,6 +1467,23 @@ const I18N = {
     'container-pivot': 'Container → LAN-Pivot',
     'ipv6': 'IPv6',
     'unknown': 'unbekannt',
+    'automatikus frissítés kikapcsolva': 'automatische Aktualisierung ist aus',
+    'Eldobások időben': 'Verwürfe im Zeitverlauf',
+    'a szűrt találatok alapján': 'basierend auf den gefilterten Ergebnissen',
+    'Legaktívabb források': 'Aktivste Quellen',
+    'Nincs megjeleníthető forrás.': 'Keine Quelle anzeigbar.',
+    'Találat': 'Treffer',
+    'Időtartam': 'Zeitraum',
+    'Leggyakoribb ok': 'Häufigster Grund',
+    'Egyedi forrás': 'Eindeutige Quellen',
+    'Minden ok': 'Alle Gründe',
+    'Forrás → cél': 'Quelle → Ziel',
+    'Egyéb': 'Sonstige',
+    'Szűrők': 'Filter',
+    'mp': 's',
+    'nap': 'T',
+    'pl. 192.168.10.2': 'z. B. 192.168.10.2',
+    'pl. 1.1.1.1': 'z. B. 1.1.1.1',
     // -- Firewall-Einstellungen ---------------------------------------
     'Tűzfal testreszabása': 'Firewall anpassen',
     'Bejelentkezés előtt nyitva lévő célok, mindig blokkolt célok és a host SSH szabály.': 'Vor der Anmeldung offene Ziele, immer blockierte Ziele und die Host-SSH-Regel.',
@@ -1425,6 +1526,7 @@ const I18N_PATTERNS = {
     [/^(\d+) szabály · az admin beépített teljes hozzáférése mindig él$/, m => `${countLabel(m[1], 'rule', 'rules')} · the admin's built-in full access is always active`],
     [/^(\d+) nyitott munkamenet · a hátralévő idő élőben frissül \(5 másodpercenként\)$/, m => `${countLabel(m[1], 'open session', 'open sessions')} · time left updates live (every 5 seconds)`],
     [/^(\d+) sor$/, m => countLabel(m[1], 'row', 'rows')],
+    [/^(\d+) csomag$/, m => countLabel(m[1], 'packet', 'packets')],
     [/^(\d+) IP-cím$/, m => countLabel(m[1], 'IP address', 'IP addresses')],
     [/^(\d+) engedély$/, m => countLabel(m[1], 'grant', 'grants')],
     [/^(\d+) munkamenet nélküli$/, m => `${m[1]} without a session`],
@@ -1483,6 +1585,7 @@ const I18N_PATTERNS = {
     [/^(\d+) szabály · az admin beépített teljes hozzáférése mindig él$/, m => `${countLabel(m[1], 'Regel', 'Regeln')} · der integrierte Vollzugriff des Admins ist immer aktiv`],
     [/^(\d+) nyitott munkamenet · a hátralévő idő élőben frissül \(5 másodpercenként\)$/, m => `${countLabel(m[1], 'offene Sitzung', 'offene Sitzungen')} · die verbleibende Zeit wird live aktualisiert (alle 5 Sekunden)`],
     [/^(\d+) sor$/, m => countLabel(m[1], 'Zeile', 'Zeilen')],
+    [/^(\d+) csomag$/, m => countLabel(m[1], 'Paket', 'Pakete')],
     [/^(\d+) IP-cím$/, m => countLabel(m[1], 'IP-Adresse', 'IP-Adressen')],
     [/^(\d+) engedély$/, m => countLabel(m[1], 'Freigabe', 'Freigaben')],
     [/^(\d+) munkamenet nélküli$/, m => `${m[1]} ohne Sitzung`],
@@ -1844,6 +1947,20 @@ function el(tag, attrs = {}, ...children) {
     else if (key.startsWith('on') && typeof value === 'function') {
       node.addEventListener(key.slice(2), value);
     } else if (value === true) node.setAttribute(key, '');
+    else node.setAttribute(key, String(value));
+  }
+  for (const child of children.flat()) {
+    if (child === null || child === undefined || child === false) continue;
+    node.append(child instanceof Node ? child : document.createTextNode(String(child)));
+  }
+  return node;
+}
+
+function svgEl(tag, attrs = {}, ...children) {
+  const node = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const [key, value] of Object.entries(attrs || {})) {
+    if (value === null || value === undefined || value === false) continue;
+    if (key === 'text') node.textContent = value;
     else node.setAttribute(key, String(value));
   }
   for (const child of children.flat()) {
@@ -3161,24 +3278,426 @@ function dropTimeText(entry) {
     return entry.time || '—';
   }
 }
+const DROP_REASON_COLORS = {
+  'no-grant': '#265a88',
+  'wan-drop': '#a05a2c',
+  'spoof-lan': '#6b4a86',
+  'spoof-wan': '#8c5a9e',
+  'mac': '#2f6f6a',
+  'input-lan': '#b07a12',
+  'input-wan': '#8a5a00',
+  'block': '#8a2a2a',
+  'docker-guard': '#3d6b3d',
+  'dns-revoked': '#4f6d8a',
+  'ssh-revoked': '#6f86a0',
+  'container-spoof': '#7a3d6b',
+  'container-pivot': '#8c4f7c',
+  'ipv6': '#6f6f6a',
+  'unknown': '#9a9a95'
+};
+const DROP_FALLBACK_COLORS = ['#356c8a', '#7d6b3f', '#5d6f4a', '#7a5568', '#4a6f85', '#8a6a4a'];
+function dropReasonColor(reason) {
+  if (DROP_REASON_COLORS[reason]) return DROP_REASON_COLORS[reason];
+  let hash = 0;
+  for (const ch of String(reason || '')) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
+  return DROP_FALLBACK_COLORS[hash % DROP_FALLBACK_COLORS.length];
+}
+function dropFmtTime(ts, withSeconds) {
+  return new Date(ts * 1000).toLocaleTimeString(LOCALES[lang], {
+    hour: '2-digit', minute: '2-digit',
+    ...(withSeconds ? { second: '2-digit' } : {}),
+    hour12: false
+  });
+}
+function dropFmtDate(ts) {
+  return new Date(ts * 1000).toLocaleDateString(LOCALES[lang], {
+    year: 'numeric', month: '2-digit', day: '2-digit'
+  });
+}
+function dropFmtShort(ts) {
+  const date = new Date(ts * 1000).toLocaleDateString(LOCALES[lang], {
+    month: '2-digit', day: '2-digit'
+  });
+  return `${date} ${dropFmtTime(ts, false)}`;
+}
+function dropDurationText(seconds) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '—';
+  if (seconds < 90) return `${Math.round(seconds)} ${tr('mp')}`;
+  if (seconds < 5400) return `${Math.round(seconds / 60)} ${tr('perc')}`;
+  if (seconds < 172800) return `${Math.round(seconds / 3600)} h`;
+  return `${Math.round(seconds / 86400)} ${tr('nap')}`;
+}
+function dropAnalysis(rows) {
+  const reasonCounts = new Map();
+  const sourceCounts = new Map();
+  for (const row of rows) {
+    const reason = row.reason || 'unknown';
+    reasonCounts.set(reason, (reasonCounts.get(reason) || 0) + 1);
+    const src = row.src || '—';
+    sourceCounts.set(src, (sourceCounts.get(src) || 0) + 1);
+  }
+  const valid = rows
+    .map(row => ({ row, ts: Number(row.ts) }))
+    .filter(item => Number.isFinite(item.ts) && item.ts > 0)
+    .sort((a, b) => a.ts - b.ts);
+  const first = valid.length ? valid[0].ts : 0;
+  const last = valid.length ? valid[valid.length - 1].ts : 0;
+  return {
+    rows,
+    valid,
+    first,
+    last,
+    span: Math.max(0, last - first),
+    reasonCounts,
+    ranked: Array.from(reasonCounts.entries()).sort((a, b) => b[1] - a[1]),
+    sources: Array.from(sourceCounts.entries()).sort((a, b) => b[1] - a[1]).slice(0, 5),
+    uniqueSources: sourceCounts.size
+  };
+}
+function dropNiceMax(value) {
+  if (value <= 4) return 4;
+  const power = Math.pow(10, Math.floor(Math.log10(value)));
+  const norm = value / power;
+  const step = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10;
+  return Math.ceil((step * power) / 4) * 4;
+}
+function dropChartModel(analysis) {
+  if (!analysis.valid.length) return null;
+  const bucketCount = 24;
+  const span = Math.max(60, analysis.span);
+  const start = analysis.last - span;
+  const bucketSec = span / bucketCount;
+  const stackReasons = analysis.ranked.slice(0, 5).map(([reason]) => reason);
+  const stackSet = new Set(stackReasons);
+  const buckets = Array.from({ length: bucketCount }, (_, index) => ({
+    start: start + index * bucketSec,
+    counts: new Map()
+  }));
+  for (const item of analysis.valid) {
+    const index = Math.min(bucketCount - 1, Math.max(0, Math.floor((item.ts - start) / bucketSec)));
+    const counts = buckets[index].counts;
+    const reason = item.row.reason || 'unknown';
+    counts.set(reason, (counts.get(reason) || 0) + 1);
+  }
+  let otherTotal = 0;
+  for (const bucket of buckets) {
+    const segments = [];
+    let other = 0;
+    for (const reason of stackReasons) {
+      const count = bucket.counts.get(reason) || 0;
+      if (count) segments.push({ reason, count, color: dropReasonColor(reason) });
+    }
+    for (const [reason, count] of bucket.counts) {
+      if (!stackSet.has(reason)) other += count;
+    }
+    if (other) {
+      segments.push({ reason: '__other', count: other, color: '#a3a39e' });
+      otherTotal += other;
+    }
+    bucket.segments = segments;
+    bucket.total = segments.reduce((sum, segment) => sum + segment.count, 0);
+  }
+  const maxTotal = Math.max(1, ...buckets.map(bucket => bucket.total));
+  return {
+    analysis, buckets, bucketSec, span, stackReasons, otherTotal,
+    yMax: dropNiceMax(maxTotal)
+  };
+}
+function dropChartSvg(model) {
+  const width = 760, height = 224;
+  const left = 38, right = 10, top = 12, bottom = 30;
+  const plotW = width - left - right;
+  const plotH = height - top - bottom;
+  const root = svgEl('svg', {
+    class: 'drop-chart', viewBox: `0 0 ${width} ${height}`,
+    role: 'img', 'aria-label': tr('Eldobások időben')
+  });
+  const tickCount = 4;
+  for (let index = 0; index <= tickCount; index++) {
+    const y = top + plotH - (plotH * index) / tickCount;
+    root.append(svgEl('line', {
+      x1: left, x2: left + plotW, y1: y, y2: y, class: 'chart-grid'
+    }));
+    root.append(svgEl('text', {
+      x: left - 6, y: y + 3, class: 'chart-axis', 'text-anchor': 'end',
+      text: String(Math.round((model.yMax * index) / tickCount))
+    }));
+  }
+  const slot = plotW / model.buckets.length;
+  const barW = Math.max(2.5, slot * 0.62);
+  model.buckets.forEach((bucket, index) => {
+    const x = left + slot * index + (slot - barW) / 2;
+    let y = top + plotH;
+    for (const segment of bucket.segments) {
+      const segmentH = (segment.count / model.yMax) * plotH;
+      if (segmentH <= 0) continue;
+      y -= segmentH;
+      const label = segment.reason === '__other' ? tr('Egyéb') : tr(segment.reason);
+      const rect = svgEl('rect', {
+        x, y, width: barW, height: segmentH,
+        rx: Math.min(1.5, segmentH / 2), fill: segment.color, class: 'chart-bar'
+      });
+      rect.append(svgEl('title', {},
+        `${dropFmtTime(bucket.start, false)} · ${label}: ${segment.count}`));
+      root.append(rect);
+    }
+  });
+  const labelIndexes = Array.from({ length: 6 }, (_, index) =>
+    Math.round((index * (model.buckets.length - 1)) / 5)
+  );
+  for (const index of new Set(labelIndexes)) {
+    root.append(svgEl('text', {
+      x: left + slot * index + slot / 2,
+      y: height - 9, class: 'chart-axis', 'text-anchor': 'middle',
+      text: dropFmtTime(model.buckets[index].start, false)
+    }));
+  }
+  return root;
+}
+function dropLegend(model) {
+  const entries = model.stackReasons.map(reason =>
+    [reason, model.analysis.reasonCounts.get(reason) || 0]
+  );
+  if (model.otherTotal) entries.push(['__other', model.otherTotal]);
+  const legend = el('div', { class: 'drop-legend' });
+  for (const [reason, count] of entries) {
+    const label = reason === '__other' ? tr('Egyéb') : tr(reason);
+    legend.append(el('span', { class: 'drop-legend-item' },
+      el('i', {
+        class: 'drop-legend-swatch',
+        style: `background:${reason === '__other' ? '#a3a39e' : dropReasonColor(reason)}`
+      }),
+      el('span', { text: label }),
+      el('b', { text: String(count) })
+    ));
+  }
+  return legend;
+}
+function dropChartCard(chart) {
+  const analysis = chart.analysis;
+  const sub = `${tr(`${analysis.valid.length} csomag`)} · ${dropFmtShort(analysis.first)} – ${dropFmtShort(analysis.last)}`;
+  const card = el('section', { class: 'drop-card' },
+    el('div', { class: 'drop-card-head' },
+      el('div', {},
+        el('h3', { text: tr('Eldobások időben') }),
+        el('p', { class: 'drop-card-sub', text: sub })
+      )
+    ),
+    dropChartSvg(chart),
+    dropLegend(chart)
+  );
+  return card;
+}
+function dropSourcesCard(analysis) {
+  const card = el('section', { class: 'drop-card' },
+    el('div', { class: 'drop-card-head' },
+      el('div', {},
+        el('h3', { text: tr('Legaktívabb források') }),
+        el('p', { class: 'drop-card-sub', text: tr('a szűrt találatok alapján') })
+      )
+    )
+  );
+  if (!analysis.sources.length) {
+    card.append(el('p', { class: 'drop-empty-small', text: tr('Nincs megjeleníthető forrás.') }));
+    return card;
+  }
+  const max = analysis.sources[0][1] || 1;
+  const list = el('div', { class: 'drop-top-src' });
+  for (const [src, count] of analysis.sources) {
+    list.append(el('div', { class: 'drop-src-row', title: `${src} · ${count}` },
+      el('span', { class: 'drop-src-ip mono', text: src }),
+      el('span', { class: 'drop-src-count', text: String(count) }),
+      el('span', { class: 'drop-src-bar' },
+        el('i', { style: `width:${Math.max(3, (count / max) * 100)}%` })
+      )
+    ));
+  }
+  card.append(list);
+  return card;
+}
+function dropStat(label, value, sub) {
+  return el('div', { class: 'drop-stat' },
+    el('span', { text: tr(label) }),
+    el('b', { text: value, title: value }),
+    el('small', { text: sub || '—', title: sub || '' })
+  );
+}
+function dropStatsRow(analysis) {
+  const top = analysis.ranked[0];
+  const range = analysis.valid.length
+    ? `${dropFmtShort(analysis.first)} – ${dropFmtShort(analysis.last)}`
+    : '—';
+  const topSub = top
+    ? `${tr(`${top[1]} csomag`)} · ${Math.round((top[1] / analysis.rows.length) * 100)}%`
+    : '—';
+  const topSource = analysis.sources.length ? analysis.sources[0][0] : '—';
+  return el('div', { class: 'drop-stats' },
+    dropStat('Találat', String(analysis.rows.length), tr('a szűrt találatok alapján')),
+    dropStat('Időtartam', dropDurationText(analysis.span), range),
+    dropStat('Leggyakoribb ok', top ? tr(top[0]) : '—', topSub),
+    dropStat('Egyedi forrás', String(analysis.uniqueSources), topSource)
+  );
+}
 function dropStatusLine() {
   const st = dropStatus || (adminState && adminState.drop_log) || {};
-  const line = el('div', { class: 'admin-flash ' + (st.running ? 'ok' : 'err') });
-  line.append(el('b', { text: tr('Drop log állapot') + ': ' }));
-  if (st.enabled === false) line.append(tr('kikapcsolva'));
-  else line.append(tr(st.running ? 'aktív' : 'nem fut'));
-  line.append(` · ${tr('csoport')} ${st.group ?? '—'}`);
-  line.append(` · ${st.received ?? 0} ${tr('fogadott')}`);
-  line.append(` · ${st.written ?? 0} ${tr('kiírt')}`);
-  line.append(` · ${st.errors ?? 0} ${tr('hiba')}`);
-  if (st.path) line.append(` · ${tr('Naplófájl')}: ${st.path}`);
-  if (st.error) line.append(` · ${st.error}`);
+  const running = !!st.running && st.enabled !== false;
+  const line = el('div', { class: 'drop-status' + (running ? '' : ' err') });
+  line.append(el('i', { class: 'drop-dot' + (running ? '' : ' off') }));
+  line.append(el('b', {
+    text: tr(st.enabled === false ? 'kikapcsolva' : (running ? 'aktív' : 'nem fut'))
+  }));
+  for (const text of [
+    `${st.received ?? 0} ${tr('fogadott')}`,
+    `${st.written ?? 0} ${tr('kiírt')}`,
+    `${st.errors ?? 0} ${tr('hiba')}`,
+    `${tr('csoport')} ${st.group ?? '—'}`
+  ]) {
+    line.append(el('span', { class: 'drop-status-sep', text: '·' }));
+    line.append(el('span', { text }));
+  }
+  if (st.path) {
+    line.append(el('span', { class: 'drop-status-path', text: st.path, title: st.path }));
+  }
+  if (st.error) {
+    line.append(el('span', { class: 'drop-status-error', text: st.error, title: st.error }));
+  }
   return line;
+}
+function dropFiltersBar() {
+  const box = el('div', { class: 'drop-filters' });
+  const head = el('div', { class: 'drop-filter-head' });
+  head.append(el('b', { text: tr('Szűrők') }));
+  const active = ['src', 'dst', 'proto', 'port', 'reason', 'q']
+    .filter(key => dropFilter[key]).length;
+  if (active) {
+    head.append(el('span', {
+      class: 'drop-filter-count', text: `${active} ${tr('aktív')}`
+    }));
+  }
+  const autoBox = el('input', { type: 'checkbox', checked: dropAuto });
+  autoBox.addEventListener('change', () => {
+    dropAuto = autoBox.checked;
+    stopDropTimer();
+    if (dropAuto && activeView === 'admin' && adminTabName === 'drops') scheduleDrops();
+  });
+  head.append(el('label', { class: 'drop-auto' }, autoBox, tr('automatikus frissítés')));
+  box.append(head);
+
+  const qInput = el('input', {
+    type: 'search', placeholder: tr('Keresés'), value: dropFilter.q
+  });
+  const reasonValues = Array.from(new Set([
+    ...DROP_REASONS,
+    ...dropRows.map(row => row.reason || 'unknown'),
+    dropFilter.reason
+  ].filter(Boolean)));
+  const reasonSelect = el('select', {},
+    el('option', { value: '', text: tr('Minden ok') }),
+    ...reasonValues.map(reason => el('option', {
+      value: reason, text: tr(reason), selected: dropFilter.reason === reason
+    }))
+  );
+  const srcInput = el('input', {
+    type: 'text', placeholder: tr('pl. 192.168.10.2'), value: dropFilter.src
+  });
+  const dstInput = el('input', {
+    type: 'text', placeholder: tr('pl. 1.1.1.1'), value: dropFilter.dst
+  });
+  const protoSelect = el('select', {},
+    ...[['', 'Minden protokoll'], ['tcp', 'TCP'], ['udp', 'UDP'], ['icmp', 'ICMP']].map(([value, label]) =>
+      el('option', { value, text: tr(label), selected: dropFilter.proto === value })
+    )
+  );
+  const portInput = el('input', {
+    type: 'number', min: 1, max: 65535, placeholder: tr('Port'), value: dropFilter.port
+  });
+  const limitSelect = el('select', {},
+    ...[200, 500, 1000, 2000].map(value =>
+      el('option', { value, text: tr(`${value} sor`), selected: Number(dropFilter.limit) === value })
+    )
+  );
+  const grid = el('div', { class: 'drop-filter-grid' });
+  for (const [label, node] of [
+    ['Keresés', qInput], ['Ok', reasonSelect], ['Forrás', srcInput], ['Cél', dstInput],
+    ['Protokoll', protoSelect], ['Port', portInput], ['Darab', limitSelect]
+  ]) {
+    grid.append(el('div', { class: 'drop-filter-field' },
+      el('label', { text: tr(label) }), node));
+  }
+  const apply = () => {
+    dropFilter = {
+      src: srcInput.value.trim(),
+      dst: dstInput.value.trim(),
+      proto: protoSelect.value,
+      port: portInput.value.trim(),
+      reason: reasonSelect.value,
+      q: qInput.value.trim(),
+      limit: Number(limitSelect.value) || 500
+    };
+    loadDrops();
+  };
+  for (const node of [qInput, srcInput, dstInput, portInput]) {
+    node.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); apply(); }
+    });
+  }
+  box.append(grid);
+  box.append(el('div', { class: 'drop-filter-actions' },
+    el('button', { type: 'button', class: 'ghost', onclick: () => {
+      dropFilter = { src: '', dst: '', proto: '', port: '', reason: '', q: '', limit: 500 };
+      loadDrops();
+    } }, tr('Szűrők törlése')),
+    el('button', { type: 'button', onclick: apply }, tr('Frissítés'))
+  ));
+  return box;
+}
+function dropTimeCell(entry) {
+  const ts = Number(entry.ts);
+  if (!Number.isFinite(ts) || ts <= 0) {
+    return el('div', { class: 'drop-time' },
+      el('span', { class: 't', text: entry.time || '—' }));
+  }
+  return el('div', { class: 'drop-time', title: dropTimeText(entry) },
+    el('span', { class: 't', text: dropFmtTime(ts, true) }),
+    el('span', { class: 'd', text: dropFmtDate(ts) })
+  );
+}
+function dropPortNode(entry) {
+  const text = dropPortText(entry);
+  if (text === '—') return el('span', { class: 'muted', text });
+  return el('span', { class: 'port-pill mono', text: text.toUpperCase() });
+}
+function dropRouteNode(entry) {
+  return el('div', { class: 'drop-route' },
+    el('span', { class: 'mono', text: entry.src || '—' }),
+    el('span', { class: 'drop-route-arrow', text: '→' }),
+    el('span', { class: 'mono', text: entry.dst || '—' })
+  );
+}
+function dropIfaceNode(entry) {
+  const parts = [entry.if_in, entry.mac].filter(Boolean);
+  return el('div', { class: 'drop-iface mono', text: parts.join(' · ') || '—' });
+}
+function dropDetail(entry) {
+  const facts = [];
+  if (entry.length !== undefined) facts.push(`len=${entry.length}`);
+  if (entry.if_out) facts.push(`if_out=${entry.if_out}`);
+  if (entry.hook !== undefined) facts.push(`hook=${entry.hook}`);
+  if (entry.mark !== undefined) facts.push(`mark=${entry.mark}`);
+  const wrapper = el('div', { class: 'log-detail drop-detail' });
+  wrapper.append(el('div', { class: 'drop-facts mono', text: facts.join(' · ') || '—' }));
+  wrapper.append(el('details', {},
+    el('summary', { text: tr('teljes JSON') }),
+    el('pre', { text: JSON.stringify(entry, null, 2) })
+  ));
+  return wrapper;
 }
 function renderDrops() {
   adminPanel.append(adminHead(
     'Eldobott csomagok',
-    `${dropRows.length} ${tr('csomag')} · ${tr('a lista 5 másodpercenként frissül')}`,
+    `${tr(`${dropRows.length} csomag`)} · ${tr(dropAuto
+      ? 'a lista 5 másodpercenként frissül'
+      : 'automatikus frissítés kikapcsolva')}`,
     null, null
   ));
   adminPanel.append(dropStatusLine());
@@ -3189,65 +3708,16 @@ function renderDrops() {
       text: tr('A drop log nem aktív. Ellenőrizd, hogy a kernel támogatja-e az NFLOG-ot (nfnetlink_log), és hogy a HV_DROP_LOG nincs kikapcsolva.')
     }));
   }
-  const tools = el('div', { class: 'log-tools' });
-  const srcInput = el('input', { type: 'text', placeholder: tr('forrás IP'), value: dropFilter.src });
-  const dstInput = el('input', { type: 'text', placeholder: tr('cél IP'), value: dropFilter.dst });
-  const protoSelect = el('select', {},
-    ...[['', 'Minden protokoll'], ['tcp', 'TCP'], ['udp', 'UDP'], ['icmp', 'ICMP']].map(([value, label]) =>
-      el('option', { value, text: tr(label), selected: dropFilter.proto === value })
-    )
-  );
-  const portInput = el('input', {
-    type: 'number', min: 1, max: 65535, placeholder: tr('Port'),
-    value: dropFilter.port, style: 'width:90px'
-  });
-  const reasonInput = el('input', {
-    type: 'text', list: 'drop-reasons', placeholder: tr('Ok'),
-    value: dropFilter.reason
-  });
-  const reasonList = el('datalist', { id: 'drop-reasons' },
-    ...DROP_REASONS.map(reason => el('option', { value: reason, label: tr(reason) }))
-  );
-  const qInput = el('input', { type: 'text', placeholder: tr('Keresés'), value: dropFilter.q, style: 'width:150px' });
-  const limitSelect = el('select', {},
-    ...[200, 500, 1000, 2000].map(value =>
-      el('option', { value, text: tr(`${value} sor`), selected: Number(dropFilter.limit) === value })
-    )
-  );
-  const autoBox = el('input', { type: 'checkbox', checked: dropAuto });
-  autoBox.addEventListener('change', () => {
-    dropAuto = autoBox.checked;
-    stopDropTimer();
-    if (dropAuto && activeView === 'admin' && adminTabName === 'drops') scheduleDrops();
-  });
-  const apply = () => {
-    dropFilter = {
-      src: srcInput.value.trim(),
-      dst: dstInput.value.trim(),
-      proto: protoSelect.value,
-      port: portInput.value.trim(),
-      reason: reasonInput.value.trim(),
-      q: qInput.value.trim(),
-      limit: Number(limitSelect.value) || 500
-    };
-    loadDrops();
-  };
-  for (const [label, node] of [
-    ['Forrás', srcInput], ['Cél', dstInput], ['Protokoll', protoSelect],
-    ['Port', portInput], ['Ok', reasonInput], ['Keresés', qInput], ['Darab', limitSelect]
-  ]) {
-    tools.append(el('div', { class: 'field' }, el('label', { text: tr(label) }), node));
+  const analysis = dropAnalysis(dropRows);
+  adminPanel.append(dropStatsRow(analysis));
+  const chart = dropChartModel(analysis);
+  if (chart) {
+    adminPanel.append(el('div', { class: 'drop-dashboard' },
+      dropChartCard(chart),
+      dropSourcesCard(analysis)
+    ));
   }
-  tools.append(el('label', { class: 'auto' }, autoBox, tr('automatikus frissítés')));
-  tools.append(el('button', { type: 'button', class: 'ghost', onclick: apply }, tr('Frissítés')));
-  tools.append(el('button', { type: 'button', class: 'ghost', onclick: () => {
-    dropFilter = { src: '', dst: '', proto: '', port: '', reason: '', q: '', limit: 500 };
-    loadDrops();
-  } }, tr('Szűrők törlése')));
-  for (const node of [srcInput, dstInput, portInput, reasonInput, qInput]) {
-    node.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); apply(); } });
-  }
-  adminPanel.append(tools);
+  adminPanel.append(dropFiltersBar());
   const notice = adminNotice(); if (notice) adminPanel.append(notice);
   if (!dropRows.length) {
     adminPanel.append(el('div', {
@@ -3256,35 +3726,27 @@ function renderDrops() {
     }));
     return;
   }
-  const counts = new Map();
-  for (const row of dropRows) {
-    const reason = row.reason || 'unknown';
-    counts.set(reason, (counts.get(reason) || 0) + 1);
-  }
-  const summary = el('div', { class: 'chips', style: 'margin-bottom:10px' });
-  for (const [reason, count] of Array.from(counts.entries()).sort((a, b) => b[1] - a[1]).slice(0, 8)) {
-    summary.append(chip(`${tr(reason)}: ${count}`));
-  }
-  adminPanel.append(summary);
-  const wrap = el('div', { class: 'table-wrap' });
-  const table = el('table', { class: 'log-table' });
+  const wrap = el('div', { class: 'table-wrap drop-table-wrap' });
+  const table = el('table', { class: 'log-table drop-table' });
   table.append(el('thead', {}, el('tr', {},
     el('th', { text: tr('Idő') }), el('th', { text: tr('Ok') }),
-    el('th', { text: tr('Forrás') }), el('th', { text: tr('Cél') }),
+    el('th', { text: tr('Forrás → cél') }),
     el('th', { text: tr('Proto / port') }), el('th', { text: tr('Interfész / MAC') }),
     el('th', { text: tr('Részletek') })
   )));
   const body = el('tbody');
   for (const entry of dropRows) {
-    const iface = [entry.if_in, entry.mac].filter(Boolean).join(' · ') || '—';
+    const reason = entry.reason || 'unknown';
     body.append(el('tr', {},
-      el('td', { class: 'mono', text: dropTimeText(entry) }),
-      el('td', {}, el('b', { text: tr(entry.reason || 'unknown') })),
-      el('td', { class: 'mono', text: entry.src || '—' }),
-      el('td', { class: 'mono', text: entry.dst || '—' }),
-      el('td', { class: 'mono', text: dropPortText(entry) }),
-      el('td', { class: 'mono', text: iface }),
-      el('td', {}, logDetail(entry))
+      el('td', {}, dropTimeCell(entry)),
+      el('td', {}, el('span', { class: 'reason-pill' },
+        el('i', { style: `background:${dropReasonColor(reason)}` }),
+        tr(reason)
+      )),
+      el('td', {}, dropRouteNode(entry)),
+      el('td', {}, dropPortNode(entry)),
+      el('td', {}, dropIfaceNode(entry)),
+      el('td', {}, dropDetail(entry))
     ));
   }
   table.append(body);
