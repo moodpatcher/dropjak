@@ -3952,6 +3952,52 @@ class AdminHttpTests(unittest.TestCase):
         self.assertEqual(self.gw.settings.snapshot()["block"], [])
         self.tools.clear_fail()
 
+    def test_settings_ui_block_trigger_removed_but_block_api_persists(
+        self,
+    ) -> None:
+        status, headers, body = self.get("/")
+        self.assertEqual(status, 200)
+        self.assertIn("text/html", headers["Content-Type"])
+        page = body.decode("utf-8")
+        # A beállítások oldal csak a pre-auth szakaszt rendereli; a blokk
+        # felület eltűnt, a Host SSH szakasz és a pre-auth figyelmeztetés marad.
+        self.assertNotIn("renderSettingSection('block'", page)
+        self.assertIn("renderSettingSection('preauth'", page)
+        self.assertIn(
+            "sshSection.append(el('h3', { text: tr('Host SSH') }))", page
+        )
+        self.assertIn("Host SSH szabály", page)
+        self.assertIn(
+            "A pre-auth szabályok megkerülik a portált: a megadott cél és port "
+            "a bejelentkezés előtt is elérhető minden LAN-kliensnek. Csak olyan "
+            "szolgáltatást adj hozzá, amelynek nyilvánosnak kell lennie.",
+            page,
+        )
+        self.assertNotIn("mindig blokkolt célok", page)
+        self.assertNotIn("pre-auth és blokk listák üresek", page)
+
+        # A háttér és az API változatlanul kezeli a blokk szabályokat.
+        cookie = self.admin_cookie()
+        status, _, body = self.post(
+            "/api/admin/settings",
+            {"action": "create", "kind": "block",
+             "entry": {"label": "Blokk", "dst": "198.51.100.0/24",
+                       "proto": "tcp", "ports": [443]}},
+            cookie=cookie, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+        block = json.loads(body)["settings"]["block"]
+        self.assertEqual(block[0]["dst"], "198.51.100.0/24")
+        self.assertEqual(block[0]["ports"], [443])
+        self.assertTrue(block[0]["enabled"])
+        entry_id = block[0]["id"]
+        self.assertTrue(entry_id)
+
+        self.gw.settings.load()
+        persisted = self.gw.settings.snapshot()["block"]
+        self.assertEqual(persisted[0]["id"], entry_id)
+        self.assertEqual(persisted[0]["dst"], "198.51.100.0/24")
+
 
     # -- fail2ban ----------------------------------------------------------
     def fail2ban_state(self, cookie: str) -> dict:

@@ -1568,7 +1568,6 @@ const I18N = {
     'Minden protokoll': 'All protocols',
     'Hozzáférés': 'Access',
     'Hamisítás': 'Spoofing',
-    'Blokkolt cél': 'Blocked destination',
     'Konténer': 'Container',
     'Fail2ban': 'Fail2ban',
     'fail2ban utáni kísérlet': 'attempt after fail2ban',
@@ -1606,8 +1605,8 @@ const I18N = {
     'pl. 1.1.1.1': 'e.g. 1.1.1.1',
     // -- firewall settings --------------------------------------------
     'Tűzfal testreszabása': 'Firewall customization',
-    'Bejelentkezés előtt nyitva lévő célok, mindig blokkolt célok és a host SSH szabály.': 'Destinations open before sign-in, always-blocked destinations and the host SSH policy.',
-    'A beállításfájl hibás, a pre-auth és blokk listák üresek:': 'The settings file is invalid; the pre-auth and block lists are empty:',
+    'Bejelentkezés előtt nyitva lévő célok és a host SSH szabály.': 'Destinations open before sign-in and the host SSH policy.',
+    'A beállításfájl hibás, a pre-auth lista üres:': 'The settings file is invalid; the pre-auth list is empty:',
     'A pre-auth szabályok megkerülik a portált: a megadott cél és port a bejelentkezés előtt is elérhető minden LAN-kliensnek. Csak olyan szolgáltatást adj hozzá, amelynek nyilvánosnak kell lennie.': 'Pre-auth rules bypass the portal: the given destination and port are reachable by every LAN client before sign-in. Only add a service that must be public.',
     'Host SSH': 'Host SSH',
     'admin: csak admin munkamenet kap SSH-t; any: bármely engedélyezett munkamenet; off: soha.': 'admin: only an admin session gets SSH; any: any authorized session; off: never.',
@@ -1616,16 +1615,12 @@ const I18N = {
     'off (soha)': 'off (never)',
     'Host SSH szabály': 'Host SSH policy',
     'Pre-auth szabályok': 'Pre-auth rules',
-    'Blokkolt célok': 'Blocked destinations',
     'Pre-auth: bejelentkezés előtt is elérhető célok. A blokk felülbírálja.': 'Pre-auth: destinations reachable before sign-in. The block list overrides it.',
-    'A blokk a pre-auth szabályt is felülbírálja. A cél megadása itt opcionális.': 'The block list overrides pre-auth rules too. The destination is optional here.',
     'Új pre-auth szabály': 'New pre-auth rule',
-    'Új blokk szabály': 'New block rule',
     'Nincs bejegyzés.': 'No entries.',
     'Címke': 'Label',
     'bármely': 'any',
     'Pre-auth szabály szerkesztése': 'Edit pre-auth rule',
-    'Blokk szabály szerkesztése': 'Edit block rule',
     'Cél (IP vagy CIDR; pre-auth-nál kötelező)': 'Destination (IP or CIDR; required for pre-auth)',
     'Cél (IP vagy CIDR; üresen minden cél)': 'Destination (IP or CIDR; empty means any)',
     'pl. 192.0.2.10 vagy 192.0.2.0/24': 'e.g. 192.0.2.10 or 192.0.2.0/24',
@@ -2141,7 +2136,6 @@ const I18N = {
     'Minden protokoll': 'Alle Protokolle',
     'Hozzáférés': 'Zugriff',
     'Hamisítás': 'Spoofing',
-    'Blokkolt cél': 'Blockiertes Ziel',
     'Konténer': 'Container',
     'Fail2ban': 'Fail2ban-Sperre',
     'fail2ban utáni kísérlet': 'Versuch nach Fail2ban',
@@ -2179,8 +2173,8 @@ const I18N = {
     'pl. 1.1.1.1': 'z. B. 1.1.1.1',
     // -- Firewall-Einstellungen ---------------------------------------
     'Tűzfal testreszabása': 'Firewall anpassen',
-    'Bejelentkezés előtt nyitva lévő célok, mindig blokkolt célok és a host SSH szabály.': 'Vor der Anmeldung offene Ziele, immer blockierte Ziele und die Host-SSH-Regel.',
-    'A beállításfájl hibás, a pre-auth és blokk listák üresek:': 'Die Einstellungsdatei ist ungültig; die Pre-auth- und Sperrlisten sind leer:',
+    'Bejelentkezés előtt nyitva lévő célok és a host SSH szabály.': 'Vor der Anmeldung offene Ziele und die Host-SSH-Regel.',
+    'A beállításfájl hibás, a pre-auth lista üres:': 'Die Einstellungsdatei ist ungültig; die Pre-auth-Liste ist leer:',
     'A pre-auth szabályok megkerülik a portált: a megadott cél és port a bejelentkezés előtt is elérhető minden LAN-kliensnek. Csak olyan szolgáltatást adj hozzá, amelynek nyilvánosnak kell lennie.': 'Pre-auth-Regeln umgehen das Portal: Das angegebene Ziel und der Port sind für jeden LAN-Client schon vor der Anmeldung erreichbar. Füge nur einen Dienst hinzu, der öffentlich sein muss.',
     'Host SSH': 'Host-SSH',
     'admin: csak admin munkamenet kap SSH-t; any: bármely engedélyezett munkamenet; off: soha.': 'admin: nur eine Admin-Sitzung erhält SSH; any: jede autorisierte Sitzung; off: nie.',
@@ -2189,16 +2183,12 @@ const I18N = {
     'off (soha)': 'off (nie)',
     'Host SSH szabály': 'Host-SSH-Regel',
     'Pre-auth szabályok': 'Pre-auth-Regeln',
-    'Blokkolt célok': 'Blockierte Ziele',
     'Pre-auth: bejelentkezés előtt is elérhető célok. A blokk felülbírálja.': 'Pre-auth: vor der Anmeldung erreichbare Ziele. Die Sperrliste hat Vorrang.',
-    'A blokk a pre-auth szabályt is felülbírálja. A cél megadása itt opcionális.': 'Die Sperrliste hat auch Vorrang vor Pre-auth-Regeln. Das Ziel ist hier optional.',
     'Új pre-auth szabály': 'Neue Pre-auth-Regel',
-    'Új blokk szabály': 'Neue Sperrregel',
     'Nincs bejegyzés.': 'Keine Einträge.',
     'Címke': 'Bezeichnung',
     'bármely': 'beliebig',
     'Pre-auth szabály szerkesztése': 'Pre-auth-Regel bearbeiten',
-    'Blokk szabály szerkesztése': 'Sperrregel bearbeiten',
     'Cél (IP vagy CIDR; pre-auth-nál kötelező)': 'Ziel (IP oder CIDR; für Pre-auth erforderlich)',
     'Cél (IP vagy CIDR; üresen minden cél)': 'Ziel (IP oder CIDR; leer bedeutet beliebig)',
     'pl. 192.0.2.10 vagy 192.0.2.0/24': 'z. B. 192.0.2.10 oder 192.0.2.0/24',
@@ -5238,9 +5228,7 @@ function renderSettingForm(kind, entryId) {
     adminSend('/api/admin/settings', payload);
   }});
   box.append(el('h3', {
-    text: tr(edit
-      ? (kind === 'preauth' ? 'Pre-auth szabály szerkesztése' : 'Blokk szabály szerkesztése')
-      : (kind === 'preauth' ? 'Új pre-auth szabály' : 'Új blokk szabály'))
+    text: tr(edit ? 'Pre-auth szabály szerkesztése' : 'Új pre-auth szabály')
   }));
   const grid = el('div', { class: 'form-grid' });
   grid.append(el('div', { class: 'field' },
@@ -5301,14 +5289,11 @@ function renderSettingForm(kind, entryId) {
   return box;
 }
 function renderSettingSection(kind, entries) {
-  const preauth = kind === 'preauth';
   const section = el('div', { class: 'admin-form' });
-  section.append(el('h3', { text: tr(preauth ? 'Pre-auth szabályok' : 'Blokkolt célok') }));
+  section.append(el('h3', { text: tr('Pre-auth szabályok') }));
   section.append(el('p', {
     class: 'port-hint',
-    text: tr(preauth
-      ? 'Pre-auth: bejelentkezés előtt is elérhető célok. A blokk felülbírálja.'
-      : 'A blokk a pre-auth szabályt is felülbírálja. A cél megadása itt opcionális.')
+    text: tr('Pre-auth: bejelentkezés előtt is elérhető célok. A blokk felülbírálja.')
   }));
   section.append(el('div', { style: 'margin:8px 0 10px' },
     el('button', {
@@ -5319,7 +5304,7 @@ function renderSettingSection(kind, entries) {
         adminFlash = null;
         renderAdminPanel();
       }
-    }, tr(preauth ? 'Új pre-auth szabály' : 'Új blokk szabály'))
+    }, tr('Új pre-auth szabály'))
   ));
   if (adminEdit && adminEdit.kind === 'setting' &&
       settingKindOf(adminEdit.id) === kind) {
@@ -5388,13 +5373,13 @@ function renderSettings() {
   const settings = settingsData();
   adminPanel.append(adminHead(
     'Tűzfal testreszabása',
-    'Bejelentkezés előtt nyitva lévő célok, mindig blokkolt célok és a host SSH szabály.',
+    'Bejelentkezés előtt nyitva lévő célok és a host SSH szabály.',
     null, null
   ));
   if (settings.error) {
     adminPanel.append(el('div', {
       class: 'admin-flash err',
-      text: tr('A beállításfájl hibás, a pre-auth és blokk listák üresek:') + ' ' + settings.error
+      text: tr('A beállításfájl hibás, a pre-auth lista üres:') + ' ' + settings.error
     }));
   }
   const notice = adminNotice(); if (notice) adminPanel.append(notice);
@@ -5428,7 +5413,6 @@ function renderSettings() {
   adminPanel.append(sshSection);
 
   adminPanel.append(renderSettingSection('preauth', settings.preauth || []));
-  adminPanel.append(renderSettingSection('block', settings.block || []));
 }
 /* ============================================================ admin: munkamenetek */
 
