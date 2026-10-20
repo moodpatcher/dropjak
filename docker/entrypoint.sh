@@ -105,6 +105,7 @@ render_ruleset() {
     HV_PORTAL_NET=${HV_PORTAL_NET:-$HV_MGMT_NET}
     PORT=${PORT:-8100}
     HV_FWD_MARK=${HV_FWD_MARK:-0x44524a4b}
+    HV_DROP_LOG_GROUP=${HV_DROP_LOG_GROUP:-5}
 
     require_env HV_LAN_IF
     require_env HV_WAN_IF
@@ -118,6 +119,8 @@ render_ruleset() {
     valid_network 4 "$HV_PORTAL_NET" \
         || die "érvénytelen HV_PORTAL_NET (IPv4 CIDR kell, pl. 0.0.0.0/0): $HV_PORTAL_NET"
     valid_port "$PORT" || die "érvénytelen PORT: $PORT"
+    valid_port "$HV_DROP_LOG_GROUP" \
+        || die "érvénytelen HV_DROP_LOG_GROUP (1–65535): $HV_DROP_LOG_GROUP"
     case "$HV_FWD_MARK" in
         0x[0-9A-Fa-f]*) ;;
         *) die "érvénytelen HV_FWD_MARK (0x kezdetű hex szám kell): $HV_FWD_MARK" ;;
@@ -126,6 +129,9 @@ render_ruleset() {
         || die "érvénytelen HV_FWD_MARK (32 bites hex szám lehet): $HV_FWD_MARK"
     [ "$HV_LAN_IF" != "$HV_WAN_IF" ] \
         || die "a HV_LAN_IF és a HV_WAN_IF nem lehet ugyanaz"
+
+    # A portál és a drop-log figyelő ugyanezt az értéket olvassa.
+    export HV_FWD_MARK HV_DROP_LOG_GROUP
 
     # Ha a /run nem írható (pl. read-only gyökér, tmpfs nélkül), a /tmp a
     # tartalék. A compose konfiguráció mindkettőt tmpfs-ként biztosítja.
@@ -141,6 +147,7 @@ render_ruleset() {
         -e "s|__PORTAL_NET__|$HV_PORTAL_NET|g" \
         -e "s|__PORT__|$PORT|g" \
         -e "s|__FWD_MARK__|$HV_FWD_MARK|g" \
+        -e "s|__DROP_LOG_GROUP__|$HV_DROP_LOG_GROUP|g" \
         "$TEMPLATE" >"$RENDERED" || die "a szabálysablon nem tölthető ki"
 
     chmod 0600 "$RENDERED" || true
@@ -179,6 +186,17 @@ docker_forward_guard() {
             comment '"hv-docker-fwd-mark"'; then
         log "HIBA: a Docker forward-engedélye nem állítható be (DOCKER-USER accept)"
         return 1
+    fi
+    # Csak a naplózás: a jelöletlen (tehát eldobásra kerülő) csomagokat
+    # NFLOG-ra küldi. Ha a naplózás nem állítható be, a védelem akkor is
+    # működik, ezért ez nem végzetes hiba.
+    if ! "$NFT_BIN" insert rule ip filter DOCKER-USER \
+            meta mark != "$HV_FWD_MARK" \
+            limit rate 30/minute burst 60 packets \
+            log prefix '"dropjak-drop reason=docker-guard "' \
+            group "$HV_DROP_LOG_GROUP" \
+            comment '"hv-docker-fwd-log"'; then
+        log "FIGYELEM: a Docker-guard drop naplózása nem állítható be"
     fi
 
     # A korábbi (széles) áthidaló szabályokat most már biztonságosan

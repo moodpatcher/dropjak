@@ -16,7 +16,9 @@ import http.client
 import ipaddress
 import json
 import os
+import socket
 import stat
+import struct
 import sys
 import tempfile
 import time
@@ -1230,6 +1232,43 @@ class SessionTests(unittest.TestCase):
             self.tools.deletes(),
         )
 
+    def test_set_host_ssh_mode_narrowing_revokes_ssh(self) -> None:
+        alice = self.sessions.login("alice", "192.168.50.23")
+        root = self.sessions.login(
+            "root", "192.168.50.24", role=gateway.ROLE_ADMIN
+        )
+        self.sessions.authorize(
+            alice.token, "192.168.50.23", self.web_rule, 60
+        )
+        self.sessions.authorize(
+            root.token, "192.168.50.24", self.web_rule, 60
+        )
+        ssh_delete = (
+            "nft delete element inet hatarvedelem host_ssh_v4 "
+            "{ %s }"
+        )
+        self.tools.clear()
+        self.assertEqual(self.sessions.set_host_ssh_mode("admin"), [])
+        deletes = self.tools.deletes()
+        self.assertIn(ssh_delete % "192.168.50.23", deletes)
+        self.assertNotIn(ssh_delete % "192.168.50.24", deletes)
+
+        self.tools.clear()
+        self.assertEqual(self.sessions.set_host_ssh_mode("off"), [])
+        deletes = self.tools.deletes()
+        self.assertIn(ssh_delete % "192.168.50.23", deletes)
+        self.assertIn(ssh_delete % "192.168.50.24", deletes)
+
+        # Bővítéskor a meglévő munkamenetek nem kapnak utólag SSH-t.
+        self.tools.clear()
+        self.assertEqual(self.sessions.set_host_ssh_mode("any"), [])
+        self.assertEqual(self.tools.deletes(), [])
+
+    def test_set_host_ssh_mode_rejects_invalid(self) -> None:
+        with self.assertRaises(ValueError):
+            self.sessions.set_host_ssh_mode("sometimes")
+        self.assertEqual(self.sessions.host_ssh_mode, "any")
+
 
 # ------------------------------------------------------------------ egyéb mag
 
@@ -1965,11 +2004,22 @@ class AdminHttpTests(unittest.TestCase):
         )
         cls.users.add("alice", "alice-jelszo-1", rules=("web-only",))
         cls.users.add("resetme", "resetme-jelszo-1", rules=("web-only",))
-        cls.fw = gateway.Firewall(binary=str(cls.tools.nft), logger=lambda *_: None)
+        cls.fw = gateway.Firewall(
+            binary=str(cls.tools.nft), logger=lambda *_: None, lan_if="eth1"
+        )
+        cls.settings = gateway.settings_store.SettingsStore(
+            os.path.join(cls.tmp.name, "firewall-settings.json"),
+            logger=lambda *_: None, default_host_ssh="any",
+        )
+        cls.drops = gateway.droplog.DropLogService(
+            os.path.join(cls.tmp.name, "drops.jsonl"),
+            enabled=False, logger=lambda *_: None,
+        )
         cls.gw = gateway.Gateway(
             users=cls.users, firewall=cls.fw, catalog=CATALOG,
             rules=cls.rules, groups=cls.groups, audit=cls.audit,
             rate_limiter=gateway.RateLimiter(window=60, maximum=1000),
+            settings=cls.settings, drops=cls.drops,
         )
         cls.server = server.AppServer(("127.0.0.1", 0), cls.gw)
         import threading
@@ -1992,6 +2042,18 @@ class AdminHttpTests(unittest.TestCase):
         self.tools.clear()
         self.tools.clear_fail()
         self.tools.clear_json()
+        # A beállítások és a drop napló közös a tesztek között; minden teszt
+        # ismert, üres állapotból induljon.
+        self.gw.settings.commit(
+            {"host_ssh": "any", "preauth": [], "block": []}
+        )
+        self.gw.sessions.host_ssh_mode = "any"
+        base = self.drops.store.path
+        for suffix in ("", ".1", ".2", ".3", ".4", ".5"):
+            try:
+                os.unlink(base + suffix)
+            except FileNotFoundError:
+                pass
 
     def conn(self, source: str = "127.0.0.1") -> http.client.HTTPConnection:
         return http.client.HTTPConnection(
@@ -2528,6 +2590,175 @@ class AdminHttpTests(unittest.TestCase):
         self.assertEqual(status, 400, body)
         self.assertIn("utolsó admin", json.loads(body)["error"])
 
+    def test_admin_drop_log_filters(self) -> None:
+        cookie = self.admin_cookie()
+        now = time.time()
+        rows = [
+            {"ts": now - 30, "src": "10.0.0.1", "dst": "203.0.113.9",
+             "proto": "tcp", "sport": 41000, "dport": 443,
+             "reason": "no-grant", "if_in": "eth1"},
+            {"ts": now - 20, "src": "10.0.0.2", "dst": "203.0.113.9",
+             "proto": "udp", "sport": 5353, "dport": 53,
+             "reason": "block"},
+            {"ts": now - 10, "src": "10.0.0.1", "dst": "198.51.100.7",
+             "proto": "tcp", "sport": 41001, "dport": 8443,
+             "reason": "block"},
+        ]
+        for row in rows:
+            self.drops.store.write(row)
+
+        status, _, body = self.get(
+            "/api/admin/drops?src=10.0.0.1&proto=tcp&port=443&reason=no-grant",
+            cookie=cookie, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+        data = json.loads(body)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["count"], 1)
+        self.assertEqual(data["drops"][0]["reason"], "no-grant")
+        self.assertEqual(data["drops"][0]["dport"], 443)
+        self.assertFalse(data["status"]["running"])
+
+        status, _, body = self.get(
+            "/api/admin/drops?port=99999", cookie=cookie, source="127.0.0.5"
+        )
+        self.assertEqual(status, 400, body)
+
+        status, _, body = self.get(
+            "/api/admin/drops?q=198.51.100", cookie=cookie, source="127.0.0.5"
+        )
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body)["count"], 1)
+
+        status, _, body = self.get(
+            "/api/admin/drops", cookie=cookie, source="127.0.0.5"
+        )
+        self.assertEqual(status, 200, body)
+        times = [row["ts"] for row in json.loads(body)["drops"]]
+        self.assertEqual(times, sorted(times, reverse=True))
+
+    def test_non_admin_cannot_read_drop_log_or_settings(self) -> None:
+        cookie, _ = self.login("alice", "alice-jelszo-1")
+        for path in ("/api/admin/drops", "/api/admin/settings"):
+            status, _, body = self.get(path, cookie=cookie)
+            self.assertEqual(status, 403, body)
+
+    def test_admin_settings_crud_and_host_ssh(self) -> None:
+        cookie = self.admin_cookie()
+
+        status, _, body = self.get(
+            "/api/admin/settings", cookie=cookie, source="127.0.0.5"
+        )
+        self.assertEqual(status, 200, body)
+        data = json.loads(body)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["settings"]["host_ssh"], "any")
+        self.assertEqual(data["settings"]["preauth"], [])
+        self.assertIn("drop_log", data)
+
+        status, _, body = self.post(
+            "/api/admin/settings",
+            {"action": "create", "kind": "preauth",
+             "entry": {"label": "Kiosk web", "dst": "192.168.50.10",
+                       "proto": "tcp", "ports": [80, 443]}},
+            cookie=cookie, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+        data = json.loads(body)
+        entry = data["settings"]["preauth"][0]
+        self.assertEqual(entry["label"], "Kiosk web")
+        self.assertEqual(entry["ports"], [80, 443])
+        self.assertTrue(entry["enabled"])
+        entry_id = entry["id"]
+        script = "\n".join(self.tools.script())
+        self.assertIn("flush chain inet hatarvedelem preauth", script)
+        self.assertIn("192.168.50.10", script)
+        self.assertIn("preauth_nat", script)
+
+        status, _, body = self.post(
+            "/api/admin/settings",
+            {"action": "update", "kind": "preauth", "id": entry_id,
+             "entry": {"label": "Kiosk web 2", "dst": "192.168.50.10",
+                       "proto": "tcp", "ports": [8080], "enabled": False}},
+            cookie=cookie, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+        entry = json.loads(body)["settings"]["preauth"][0]
+        self.assertEqual(entry["label"], "Kiosk web 2")
+        self.assertEqual(entry["ports"], [8080])
+        self.assertFalse(entry["enabled"])
+
+        status, _, body = self.post(
+            "/api/admin/settings",
+            {"action": "toggle", "kind": "preauth", "id": entry_id,
+             "entry": {"enabled": True}},
+            cookie=cookie, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+        self.assertTrue(
+            json.loads(body)["settings"]["preauth"][0]["enabled"]
+        )
+
+        status, _, body = self.post(
+            "/api/admin/settings",
+            {"action": "host_ssh", "host_ssh": "off"},
+            cookie=cookie, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body)["settings"]["host_ssh"], "off")
+        self.assertEqual(self.gw.sessions.host_ssh_mode, "off")
+
+        status, _, body = self.post(
+            "/api/admin/settings",
+            {"action": "delete", "kind": "preauth", "id": entry_id},
+            cookie=cookie, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body)["settings"]["preauth"], [])
+
+        # A mentett állapot újratöltve is megmarad.
+        self.gw.settings.load()
+        self.assertEqual(self.gw.settings.snapshot()["host_ssh"], "off")
+
+    def test_admin_settings_invalid_is_400(self) -> None:
+        cookie = self.admin_cookie()
+        cases = [
+            {"action": "create", "kind": "preauth",
+             "entry": {"label": "Cél nélkül", "proto": "tcp", "ports": [80]}},
+            {"action": "create", "kind": "preauth",
+             "entry": {"label": "Rossz proto", "dst": "192.168.50.10",
+                       "proto": "icmp", "ports": [80]}},
+            {"action": "create", "kind": "block",
+             "entry": {"label": "80 cél nélkül", "proto": "tcp",
+                       "ports": [80]}},
+            {"action": "create", "kind": "block",
+             "entry": {"label": "Rossz port", "dst": "192.168.50.10",
+                       "proto": "tcp", "ports": [70000]}},
+            {"action": "ismeretlen", "kind": "preauth"},
+            {"action": "host_ssh", "host_ssh": "mindig"},
+        ]
+        for payload in cases:
+            status, _, body = self.post(
+                "/api/admin/settings", payload,
+                cookie=cookie, source="127.0.0.5",
+            )
+            self.assertEqual(status, 400, (payload, body))
+        self.assertEqual(self.gw.settings.snapshot()["preauth"], [])
+
+    def test_admin_settings_apply_failure_is_503_and_unchanged(self) -> None:
+        cookie = self.admin_cookie()
+        self.tools.make_fail("nft hiba")
+        status, _, body = self.post(
+            "/api/admin/settings",
+            {"action": "create", "kind": "block",
+             "entry": {"label": "Blokk", "dst": "198.51.100.0/24",
+                       "proto": "tcp", "ports": [443]}},
+            cookie=cookie, source="127.0.0.5",
+        )
+        self.assertEqual(status, 503, body)
+        self.assertEqual(self.gw.settings.snapshot()["block"], [])
+        self.tools.clear_fail()
+
 
 class RateLimitHttpTests(unittest.TestCase):
     def test_second_attempt_is_429(self) -> None:
@@ -2571,6 +2802,466 @@ class RateLimitHttpTests(unittest.TestCase):
                 srv.shutdown(); srv.server_close(); th.join(timeout=5)
         finally:
             tmp.cleanup()
+
+
+# ---------------------------------------------------- drop log és beállítások
+
+def _nl_attr(attr_type: int, payload: bytes) -> bytes:
+    length = 4 + len(payload)
+    return (
+        struct.pack("!HH", length, attr_type)
+        + payload
+        + b"\x00" * ((4 - length % 4) % 4)
+    )
+
+
+def _ipv4_packet(
+    src: str,
+    dst: str,
+    proto: int = 6,
+    sport: int = 0,
+    dport: int = 0,
+    frag: int = 0,
+    icmp_type: int = 8,
+) -> bytes:
+    if proto in (6, 17):
+        transport = struct.pack("!HH", sport, dport)
+    elif proto == 1:
+        transport = bytes([icmp_type, 0, 0, 0])
+    else:
+        transport = b""
+    total = 20 + len(transport)
+    header = struct.pack(
+        "!BBHHHBBH4s4s",
+        0x45, 0, total, 0, frag, 64, proto, 0,
+        socket.inet_aton(src), socket.inet_aton(dst),
+    )
+    return header + transport
+
+
+def _packet_body(
+    prefix: bytes = b"dropjak-drop reason=block ",
+    packet: bytes = b"",
+    ts: float | None = None,
+    mark: int = 0x44524A4B,
+    ifindex: int = 1,
+    mac: str = "aa:bb:cc:dd:ee:ff",
+    hook: int = 0,
+) -> bytes:
+    body = struct.pack("!BBH", socket.AF_INET, 0, 5)
+    body += _nl_attr(gateway.droplog.NFULA_PREFIX, prefix + b"\x00")
+    body += _nl_attr(gateway.droplog.NFULA_PAYLOAD, packet)
+    body += _nl_attr(gateway.droplog.NFULA_MARK, struct.pack("!I", mark))
+    if ts is not None:
+        seconds = int(ts)
+        useconds = int(round((ts - seconds) * 1_000_000))
+        body += _nl_attr(
+            gateway.droplog.NFULA_TIMESTAMP,
+            struct.pack("!QQ", seconds, useconds),
+        )
+    body += _nl_attr(
+        gateway.droplog.NFULA_IFINDEX_INDEV, struct.pack("!I", ifindex)
+    )
+    if mac:
+        body += _nl_attr(
+            gateway.droplog.NFULA_HWADDR,
+            struct.pack("!HH", 6, 0)
+            + bytes.fromhex(mac.replace(":", "")),
+        )
+    body += _nl_attr(
+        gateway.droplog.NFULA_PACKET_HDR,
+        struct.pack("!HBB", 0x0800, hook, 0),
+    )
+    return body
+
+
+class DropLogParserTests(unittest.TestCase):
+    def test_parse_tcp_packet(self) -> None:
+        packet = _ipv4_packet("10.0.0.5", "203.0.113.9", 6, 41000, 443)
+        record = gateway.droplog.parse_packet_message(
+            _packet_body(packet=packet, ts=1_700_000_000.5, hook=0),
+            now=time.time(),
+        )
+        self.assertIsNotNone(record)
+        self.assertEqual(record["reason"], "block")
+        self.assertEqual(record["src"], "10.0.0.5")
+        self.assertEqual(record["dst"], "203.0.113.9")
+        self.assertEqual(record["proto"], "tcp")
+        self.assertEqual(record["sport"], 41000)
+        self.assertEqual(record["dport"], 443)
+        self.assertEqual(record["length"], len(packet))
+        self.assertEqual(record["mark"], 0x44524A4B)
+        self.assertEqual(record["mac"], "aa:bb:cc:dd:ee:ff")
+        self.assertEqual(record["hook"], 0)
+        self.assertTrue(record.get("if_in"))
+        self.assertAlmostEqual(record["ts"], 1_700_000_000.5, places=3)
+        self.assertIn("T", record["time"])
+
+    def test_parse_udp_icmp_and_fragment(self) -> None:
+        udp = gateway.droplog.parse_packet_message(
+            _packet_body(
+                packet=_ipv4_packet("10.0.0.6", "8.8.8.8", 17, 5353, 53)
+            ),
+            now=time.time(),
+        )
+        self.assertEqual(udp["proto"], "udp")
+        self.assertEqual(udp["dport"], 53)
+
+        icmp = gateway.droplog.parse_packet_message(
+            _packet_body(packet=_ipv4_packet("10.0.0.7", "1.1.1.1", 1)),
+            now=time.time(),
+        )
+        self.assertEqual(icmp["proto"], "icmp")
+        self.assertEqual(icmp["icmp_type"], 8)
+        self.assertNotIn("sport", icmp)
+
+        fragment = gateway.droplog.parse_packet_message(
+            _packet_body(
+                packet=_ipv4_packet(
+                    "10.0.0.8", "203.0.113.10", 6, 1234, 80, frag=0x2001
+                )
+            ),
+            now=time.time(),
+        )
+        self.assertEqual(fragment["proto"], "tcp")
+        self.assertNotIn("sport", fragment)
+        self.assertNotIn("dport", fragment)
+
+    def test_prefix_without_reason_and_missing_payload(self) -> None:
+        record = gateway.droplog.parse_packet_message(
+            _packet_body(prefix=b"valami mas szoveg "),
+            now=1_700_000_000.0,
+        )
+        self.assertEqual(record["reason"], "valami mas szoveg")
+        self.assertEqual(record["src"], "")
+        self.assertAlmostEqual(record["ts"], 1_700_000_000.0, places=3)
+
+        unknown = gateway.droplog.parse_packet_message(
+            _packet_body(prefix=b""), now=time.time()
+        )
+        self.assertEqual(unknown["reason"], "unknown")
+        self.assertIsNone(gateway.droplog.parse_packet_message(b"\x00"))
+
+    def test_parse_netlink_buffer_with_ack(self) -> None:
+        dl = gateway.droplog
+        msg_type = (dl.NFNL_SUBSYS_ULOG << 8) | dl.NFULNL_MSG_PACKET
+        packet = _ipv4_packet("10.0.0.5", "203.0.113.9", 6, 1000, 80)
+        data = dl._nlmsg(msg_type, 0, 1, _packet_body(packet=packet))
+        data += dl._nlmsg(dl.NLMSG_ERROR, 0, 2, struct.pack("!i", 0))
+        data += dl._nlmsg(dl.NLMSG_NOOP, 0, 3, b"")
+        items = dl.parse_netlink_buffer(data, now=time.time())
+        self.assertEqual([item["kind"] for item in items], ["packet", "ack"])
+        self.assertEqual(items[1]["error"], 0)
+        self.assertEqual(items[0]["record"]["dport"], 80)
+        self.assertEqual(dl.parse_netlink_buffer(b"\x00\x00"), [])
+
+
+class DropLogStoreTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmp.name, "drops.jsonl")
+        self.store = gateway.droplog.DropLog(
+            self.path, logger=lambda *_: None
+        )
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_write_read_filters_and_permissions(self) -> None:
+        now = time.time()
+        self.store.write({"ts": now - 30, "src": "10.0.0.1",
+                          "dst": "203.0.113.9", "proto": "tcp",
+                          "sport": 41000, "dport": 443,
+                          "reason": "no-grant"})
+        self.store.write({"ts": now - 20, "src": "10.0.0.2",
+                          "dst": "203.0.113.9", "proto": "udp",
+                          "sport": 5353, "dport": 53, "reason": "block"})
+        self.store.write({"ts": now - 10, "src": "10.0.0.1",
+                          "dst": "198.51.100.7", "proto": "tcp",
+                          "sport": 41001, "dport": 8443,
+                          "reason": "block"})
+
+        mode = stat.S_IMODE(os.stat(self.path).st_mode)
+        self.assertEqual(mode, 0o600)
+
+        self.assertEqual(len(self.store.read()), 3)
+        self.assertEqual(
+            [row["dport"] for row in self.store.read()], [8443, 53, 443]
+        )
+        self.assertEqual(len(self.store.read(src="10.0.0.1")), 2)
+        self.assertEqual(len(self.store.read(dst="198.51.100")), 1)
+        self.assertEqual(len(self.store.read(proto="udp")), 1)
+        self.assertEqual(len(self.store.read(port=443)), 1)
+        self.assertEqual(len(self.store.read(port=5353)), 1)
+        self.assertEqual(len(self.store.read(reason="block")), 2)
+        self.assertEqual(len(self.store.read(q="198.51.100")), 1)
+        self.assertEqual(len(self.store.read(before=now - 25)), 1)
+        self.assertEqual(len(self.store.read(limit=1)), 1)
+
+        # A hiányzó kötelező mezők pótlódnak, a hosszú szöveg csonkolódik.
+        record = self.store.write({"src": "x" * 1000})
+        self.assertEqual(record["reason"], "unknown")
+        self.assertIn("ts", record)
+        self.assertLessEqual(len(record["src"]), 256)
+
+    def test_rotation_keeps_old_entries(self) -> None:
+        self.store.max_bytes = 200
+        for index in range(8):
+            self.store.write({
+                "ts": time.time() + index,
+                "src": f"10.0.0.{index}",
+                "proto": "tcp", "dport": 80, "reason": "block",
+            })
+        self.assertTrue(os.path.exists(self.path + ".1"))
+        rows = self.store.read(limit=2000)
+        self.assertEqual(len(rows), 8)
+        self.assertEqual(rows[0]["src"], "10.0.0.7")
+        self.assertEqual(rows[-1]["src"], "10.0.0.0")
+
+
+class SettingsStoreTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmp.name, "firewall-settings.json")
+        self.store = gateway.settings_store.SettingsStore(
+            self.path, logger=lambda *_: None, default_host_ssh="off"
+        )
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_crud_and_atomic_commit(self) -> None:
+        before = self.store.snapshot()
+        self.assertEqual(before["host_ssh"], "off")
+        self.assertEqual(before["preauth"], [])
+        self.assertEqual(before["error"], "")
+
+        new = self.store.prepare(
+            "create", "preauth",
+            entry={"label": "Kiosk", "dst": "192.168.50.10",
+                   "proto": "tcp", "ports": [443, 80, 443]},
+        )
+        # A prepare nem ír fájlt és nem módosítja a memóriabeli állapotot.
+        self.assertEqual(self.store.snapshot()["preauth"], [])
+        self.assertFalse(os.path.exists(self.path))
+        self.assertEqual(new["preauth"][0]["ports"], [80, 443])
+        entry_id = new["preauth"][0]["id"]
+
+        self.store.commit(new)
+        self.assertEqual(
+            stat.S_IMODE(os.stat(self.path).st_mode), 0o600
+        )
+        self.assertEqual(
+            [name for name in os.listdir(self.tmp.name)
+             if name.startswith(".firewall-settings-")],
+            [],
+        )
+
+        toggled = self.store.prepare(
+            "toggle", "preauth", entry_id, {"enabled": False}
+        )
+        self.store.commit(toggled)
+        self.assertFalse(self.store.snapshot()["preauth"][0]["enabled"])
+
+        updated = self.store.prepare(
+            "update", "preauth", entry_id,
+            {"label": "Kiosk 2", "dst": "192.168.50.11",
+             "proto": "tcp", "ports": [8080], "enabled": True},
+        )
+        self.store.commit(updated)
+        reloaded = gateway.settings_store.SettingsStore(
+            self.path, logger=lambda *_: None
+        )
+        entry = reloaded.snapshot()["preauth"][0]
+        self.assertEqual(entry["label"], "Kiosk 2")
+        self.assertEqual(entry["dst"], "192.168.50.11")
+        self.assertTrue(entry["enabled"])
+
+        deleted = self.store.prepare("delete", "preauth", entry_id)
+        self.store.commit(deleted)
+        self.assertEqual(self.store.snapshot()["preauth"], [])
+        self.assertEqual(
+            gateway.settings_store.SettingsStore(
+                self.path, logger=lambda *_: None
+            ).snapshot()["preauth"],
+            [],
+        )
+
+    def test_validation(self) -> None:
+        with self.assertRaises(gateway.settings_store.SettingsError):
+            self.store.prepare(
+                "create", "preauth",
+                entry={"label": "Nincs cél", "proto": "tcp", "ports": [80]},
+            )
+        with self.assertRaises(gateway.settings_store.SettingsError):
+            self.store.prepare(
+                "create", "preauth",
+                entry={"label": "IPv6", "dst": "2001:db8::/32",
+                       "proto": "tcp", "ports": [80]},
+            )
+        with self.assertRaises(gateway.settings_store.SettingsError):
+            self.store.prepare(
+                "create", "preauth",
+                entry={"label": "Multicast", "dst": "224.0.0.1",
+                       "proto": "udp", "ports": [53]},
+            )
+        with self.assertRaises(gateway.settings_store.SettingsError):
+            self.store.prepare(
+                "create", "block",
+                entry={"label": "80 cél nélkül", "proto": "tcp",
+                       "ports": [80]},
+            )
+        with self.assertRaises(gateway.settings_store.SettingsError):
+            self.store.prepare(
+                "create", "block",
+                entry={"label": "Rossz port", "dst": "10.0.0.1",
+                       "proto": "tcp", "ports": [0]},
+            )
+        with self.assertRaises(gateway.settings_store.SettingsError):
+            self.store.prepare(
+                "create", "block",
+                entry={"label": "Rossz proto", "dst": "10.0.0.1",
+                       "proto": "icmp", "ports": [80]},
+            )
+        with self.assertRaises(gateway.settings_store.SettingsError):
+            self.store.prepare("host_ssh", host_ssh="mindig")
+        with self.assertRaises(gateway.settings_store.SettingsError):
+            self.store.prepare("ismeretlen")
+        with self.assertRaises(gateway.settings_store.SettingsError):
+            self.store.prepare(
+                "update", "block", "nincs-ilyen",
+                {"label": "X", "dst": "10.0.0.1", "proto": "tcp",
+                 "ports": [80]},
+            )
+        # Blokk cél nélkül is érvényes, ha nem a 80-as TCP-port.
+        new = self.store.prepare(
+            "create", "block",
+            entry={"label": "Minden DNS", "proto": "udp", "ports": [53]},
+        )
+        self.assertEqual(new["block"][0]["dst"], "")
+
+    def test_corrupt_file_fails_closed(self) -> None:
+        with open(self.path, "w", encoding="utf-8") as fh:
+            fh.write("{nem json")
+        store = gateway.settings_store.SettingsStore(
+            self.path, logger=lambda *_: None, default_host_ssh="any"
+        )
+        snapshot = store.snapshot()
+        self.assertEqual(snapshot["preauth"], [])
+        self.assertEqual(snapshot["block"], [])
+        self.assertEqual(snapshot["host_ssh"], "any")
+        self.assertTrue(snapshot["error"])
+
+        # Egy sikeres mentés törli a hibát és felülírja a sérült fájlt.
+        store.commit(store.prepare("host_ssh", host_ssh="admin"))
+        self.assertEqual(store.snapshot()["error"], "")
+        fresh = gateway.settings_store.SettingsStore(
+            self.path, logger=lambda *_: None
+        )
+        self.assertEqual(fresh.snapshot()["host_ssh"], "admin")
+
+
+class FirewallCustomTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tools = FakeTools(self.tmp.name)
+        self.fw = gateway.Firewall(
+            binary=str(self.tools.nft), logger=lambda *_: None,
+            lan_if="eth1",
+            lan_network=ipaddress.ip_network("192.168.50.0/24"),
+        )
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_clear_custom_creates_and_flushes_chains(self) -> None:
+        self.fw.clear_custom()
+        lines = self.tools.script()
+        for chain in ("preauth", "block", "preauth_nat", "block_nat"):
+            self.assertIn(
+                f"add chain inet hatarvedelem {chain}", lines
+            )
+            self.assertIn(
+                f"flush chain inet hatarvedelem {chain}", lines
+            )
+        self.assertEqual(len(lines), 8)
+
+    def test_apply_custom_rules(self) -> None:
+        self.fw.apply_custom(
+            preauth=[{"dst": "192.168.50.10", "proto": "tcp",
+                      "ports": [80]}],
+            block=[{"dst": "10.0.0.0/24", "proto": "tcp",
+                    "ports": [80, 443]}],
+        )
+        script = "\n".join(self.tools.script())
+        log = (
+            'limit rate 30/minute burst 60 packets log prefix '
+            '"dropjak-drop reason=block " group 5'
+        )
+        self.assertIn(
+            "add rule inet hatarvedelem block meta l4proto tcp "
+            "ct original ip daddr 10.0.0.0/24 ct original proto-dst "
+            "{ 80, 443 } " + log,
+            script,
+        )
+        self.assertIn(
+            "add rule inet hatarvedelem block meta l4proto tcp "
+            "ct original ip daddr 10.0.0.0/24 ct original proto-dst "
+            "{ 80, 443 } drop",
+            script,
+        )
+        self.assertIn(
+            "add rule inet hatarvedelem block_nat meta l4proto tcp "
+            "ct original ip daddr 10.0.0.0/24 ct original proto-dst 80 "
+            "drop",
+            script,
+        )
+        self.assertIn(
+            'add rule inet hatarvedelem preauth iifname "eth1" '
+            "meta l4proto tcp ct original ip daddr 192.168.50.10/32 "
+            "ct original proto-dst 80 "
+            f"meta mark set {self.fw.fwd_mark} accept",
+            script,
+        )
+        self.assertIn(
+            "add rule inet hatarvedelem preauth ct state established "
+            "meta l4proto tcp ct original ip daddr 192.168.50.10/32 "
+            "ct original proto-dst 80 "
+            f"meta mark set {self.fw.fwd_mark} accept",
+            script,
+        )
+        self.assertIn(
+            "add rule inet hatarvedelem preauth ct state related "
+            "ct original ip daddr 192.168.50.10/32 "
+            f"meta mark set {self.fw.fwd_mark} accept",
+            script,
+        )
+        self.assertIn(
+            "add rule inet hatarvedelem preauth_nat meta l4proto tcp "
+            "ct original ip daddr 192.168.50.10/32 ct original proto-dst 80 "
+            f"ct mark set {gateway.PREAUTH_CT_MARK}",
+            script,
+        )
+
+    def test_preauth_requires_lan_interface(self) -> None:
+        no_lan = gateway.Firewall(
+            binary=str(self.tools.nft), logger=lambda *_: None,
+            lan_if="", lan_network=None,
+        )
+        with self.assertRaises(gateway.FirewallError):
+            no_lan.apply_custom(
+                preauth=[{"dst": "192.168.50.10", "proto": "tcp",
+                          "ports": [80]}]
+            )
+        # Blokk szabály LAN interfész nélkül is alkalmazható.
+        no_lan.apply_custom(
+            block=[{"dst": "10.0.0.0/24", "proto": "udp", "ports": [53]}]
+        )
+        with self.assertRaises(gateway.FirewallError):
+            no_lan.apply_custom(
+                block=[{"dst": "10.0.0.0/24", "proto": "icmp",
+                        "ports": [1]}]
+            )
 
 
 if __name__ == "__main__":

@@ -536,7 +536,9 @@
         <button type="button" data-admin="rules" data-i18n="Szabályok">Szabályok</button>
         <button type="button" data-admin="sessions" data-i18n="Munkamenetek">Munkamenetek</button>
         <button type="button" data-admin="firewall" data-i18n="Tűzfal">Tűzfal</button>
+        <button type="button" data-admin="drops" data-i18n="Drop napló">Drop napló</button>
         <button type="button" data-admin="logs" data-i18n="Naplók">Naplók</button>
+        <button type="button" data-admin="settings" data-i18n="Beállítások">Beállítások</button>
       </aside>
       <div class="admin-panel" id="admin-panel"></div>
     </div>
@@ -941,6 +943,76 @@ const I18N = {
     'admin_rule_created': 'rule created',
     'admin_rule_updated': 'rule updated',
     'admin_rule_deleted': 'rule deleted',
+    'admin_settings_changed': 'firewall settings changed',
+    // -- drop log ------------------------------------------------------
+    'Drop napló': 'Drop log',
+    'Beállítások': 'Settings',
+    'Eldobott csomagok': 'Dropped packets',
+    'csomag': 'packet',
+    'a lista 5 másodpercenként frissül': 'the list refreshes every 5 seconds',
+    'Drop log állapot': 'Drop log status',
+    'kikapcsolva': 'disabled',
+    'nem fut': 'not running',
+    'csoport': 'group',
+    'fogadott': 'received',
+    'kiírt': 'written',
+    'hiba': 'error',
+    'Naplófájl': 'Log file',
+    'A drop log nem aktív. Ellenőrizd, hogy a kernel támogatja-e az NFLOG-ot (nfnetlink_log), és hogy a HV_DROP_LOG nincs kikapcsolva.': 'The drop log is not running. Check that the kernel supports NFLOG (nfnetlink_log) and that HV_DROP_LOG is not disabled.',
+    'Nincs a szűrésnek megfelelő eldobott csomag.': 'No dropped packet matches the filter.',
+    'Forrás': 'Source',
+    'Cél': 'Destination',
+    'Protokoll': 'Protocol',
+    'Port': 'Port',
+    'Ok': 'Reason',
+    'Proto / port': 'Proto / port',
+    'Interfész / MAC': 'Interface / MAC',
+    'forrás IP': 'source IP',
+    'cél IP': 'destination IP',
+    'Minden protokoll': 'All protocols',
+    'no-grant': 'no active grant',
+    'wan-drop': 'dropped from WAN',
+    'spoof-lan': 'spoofed LAN source',
+    'spoof-wan': 'spoofed WAN source',
+    'mac': 'MAC mismatch',
+    'input-lan': 'inbound LAN traffic dropped',
+    'input-wan': 'inbound WAN traffic dropped',
+    'block': 'blocked destination',
+    'docker-guard': 'Docker guard',
+    'dns-revoked': 'revoked DNS',
+    'ssh-revoked': 'revoked SSH',
+    'container-spoof': 'container spoofing',
+    'container-pivot': 'container → LAN pivot',
+    'ipv6': 'IPv6',
+    'unknown': 'unknown',
+    // -- firewall settings --------------------------------------------
+    'Tűzfal testreszabása': 'Firewall customization',
+    'Bejelentkezés előtt nyitva lévő célok, mindig blokkolt célok és a host SSH szabály.': 'Destinations open before sign-in, always-blocked destinations and the host SSH policy.',
+    'A beállításfájl hibás, a pre-auth és blokk listák üresek:': 'The settings file is invalid; the pre-auth and block lists are empty:',
+    'A pre-auth szabályok megkerülik a portált: a megadott cél és port a bejelentkezés előtt is elérhető minden LAN-kliensnek. Csak olyan szolgáltatást adj hozzá, amelynek nyilvánosnak kell lennie.': 'Pre-auth rules bypass the portal: the given destination and port are reachable by every LAN client before sign-in. Only add a service that must be public.',
+    'Host SSH': 'Host SSH',
+    'admin: csak admin munkamenet kap SSH-t; any: bármely engedélyezett munkamenet; off: soha.': 'admin: only an admin session gets SSH; any: any authorized session; off: never.',
+    'admin (csak admin)': 'admin (admin only)',
+    'any (bármely munkamenet)': 'any (any session)',
+    'off (soha)': 'off (never)',
+    'Host SSH szabály': 'Host SSH policy',
+    'Pre-auth szabályok': 'Pre-auth rules',
+    'Blokkolt célok': 'Blocked destinations',
+    'Pre-auth: bejelentkezés előtt is elérhető célok. A blokk felülbírálja.': 'Pre-auth: destinations reachable before sign-in. The block list overrides it.',
+    'A blokk a pre-auth szabályt is felülbírálja. A cél megadása itt opcionális.': 'The block list overrides pre-auth rules too. The destination is optional here.',
+    'Új pre-auth szabály': 'New pre-auth rule',
+    'Új blokk szabály': 'New block rule',
+    'Nincs bejegyzés.': 'No entries.',
+    'Címke': 'Label',
+    'bármely': 'any',
+    'Pre-auth szabály szerkesztése': 'Edit pre-auth rule',
+    'Blokk szabály szerkesztése': 'Edit block rule',
+    'Cél (IP vagy CIDR; pre-auth-nál kötelező)': 'Destination (IP or CIDR; required for pre-auth)',
+    'Cél (IP vagy CIDR; üresen minden cél)': 'Destination (IP or CIDR; empty means any)',
+    'pl. 192.0.2.10 vagy 192.0.2.0/24': 'e.g. 192.0.2.10 or 192.0.2.0/24',
+    'Portok (vesszővel elválasztva)': 'Ports (comma-separated)',
+    'A pre-auth szabály a portál bejelentkezés nélkül is átengedi a megadott cél és port forgalmát. Csak tudatosan nyilvános szolgáltatáshoz használd.': 'The pre-auth rule lets traffic to the given destination and port through without a portal sign-in. Only use it for a deliberately public service.',
+    'A tűzfalbeállítások mentve.': 'Firewall settings saved.',
   },
 
   de: {
@@ -1269,6 +1341,76 @@ const I18N = {
     'admin_rule_created': 'Regel erstellt',
     'admin_rule_updated': 'Regel aktualisiert',
     'admin_rule_deleted': 'Regel gelöscht',
+    'admin_settings_changed': 'Firewall-Einstellungen geändert',
+    // -- Drop-Protokoll -----------------------------------------------
+    'Drop napló': 'Drop-Protokoll',
+    'Beállítások': 'Einstellungen',
+    'Eldobott csomagok': 'Verworfene Pakete',
+    'csomag': 'Paket',
+    'a lista 5 másodpercenként frissül': 'die Liste wird alle 5 Sekunden aktualisiert',
+    'Drop log állapot': 'Drop-Protokoll-Status',
+    'kikapcsolva': 'deaktiviert',
+    'nem fut': 'läuft nicht',
+    'csoport': 'Gruppe',
+    'fogadott': 'empfangen',
+    'kiírt': 'geschrieben',
+    'hiba': 'Fehler',
+    'Naplófájl': 'Protokolldatei',
+    'A drop log nem aktív. Ellenőrizd, hogy a kernel támogatja-e az NFLOG-ot (nfnetlink_log), és hogy a HV_DROP_LOG nincs kikapcsolva.': 'Das Drop-Protokoll läuft nicht. Prüfe, ob der Kernel NFLOG (nfnetlink_log) unterstützt und ob HV_DROP_LOG nicht deaktiviert ist.',
+    'Nincs a szűrésnek megfelelő eldobott csomag.': 'Kein verworfenes Paket entspricht dem Filter.',
+    'Forrás': 'Quelle',
+    'Cél': 'Ziel',
+    'Protokoll': 'Protokoll',
+    'Port': 'Port',
+    'Ok': 'Grund',
+    'Proto / port': 'Proto / Port',
+    'Interfész / MAC': 'Schnittstelle / MAC',
+    'forrás IP': 'Quell-IP',
+    'cél IP': 'Ziel-IP',
+    'Minden protokoll': 'Alle Protokolle',
+    'no-grant': 'keine aktive Freigabe',
+    'wan-drop': 'vom WAN verworfen',
+    'spoof-lan': 'gefälschte LAN-Quelle',
+    'spoof-wan': 'gefälschte WAN-Quelle',
+    'mac': 'MAC-Abweichung',
+    'input-lan': 'eingehender LAN-Verkehr verworfen',
+    'input-wan': 'eingehender WAN-Verkehr verworfen',
+    'block': 'blockiertes Ziel',
+    'docker-guard': 'Docker-Schutz',
+    'dns-revoked': 'widerrufenes DNS',
+    'ssh-revoked': 'widerrufenes SSH',
+    'container-spoof': 'Container-Spoofing',
+    'container-pivot': 'Container → LAN-Pivot',
+    'ipv6': 'IPv6',
+    'unknown': 'unbekannt',
+    // -- Firewall-Einstellungen ---------------------------------------
+    'Tűzfal testreszabása': 'Firewall anpassen',
+    'Bejelentkezés előtt nyitva lévő célok, mindig blokkolt célok és a host SSH szabály.': 'Vor der Anmeldung offene Ziele, immer blockierte Ziele und die Host-SSH-Regel.',
+    'A beállításfájl hibás, a pre-auth és blokk listák üresek:': 'Die Einstellungsdatei ist ungültig; die Pre-auth- und Sperrlisten sind leer:',
+    'A pre-auth szabályok megkerülik a portált: a megadott cél és port a bejelentkezés előtt is elérhető minden LAN-kliensnek. Csak olyan szolgáltatást adj hozzá, amelynek nyilvánosnak kell lennie.': 'Pre-auth-Regeln umgehen das Portal: Das angegebene Ziel und der Port sind für jeden LAN-Client schon vor der Anmeldung erreichbar. Füge nur einen Dienst hinzu, der öffentlich sein muss.',
+    'Host SSH': 'Host-SSH',
+    'admin: csak admin munkamenet kap SSH-t; any: bármely engedélyezett munkamenet; off: soha.': 'admin: nur eine Admin-Sitzung erhält SSH; any: jede autorisierte Sitzung; off: nie.',
+    'admin (csak admin)': 'admin (nur Admin)',
+    'any (bármely munkamenet)': 'any (jede Sitzung)',
+    'off (soha)': 'off (nie)',
+    'Host SSH szabály': 'Host-SSH-Regel',
+    'Pre-auth szabályok': 'Pre-auth-Regeln',
+    'Blokkolt célok': 'Blockierte Ziele',
+    'Pre-auth: bejelentkezés előtt is elérhető célok. A blokk felülbírálja.': 'Pre-auth: vor der Anmeldung erreichbare Ziele. Die Sperrliste hat Vorrang.',
+    'A blokk a pre-auth szabályt is felülbírálja. A cél megadása itt opcionális.': 'Die Sperrliste hat auch Vorrang vor Pre-auth-Regeln. Das Ziel ist hier optional.',
+    'Új pre-auth szabály': 'Neue Pre-auth-Regel',
+    'Új blokk szabály': 'Neue Sperrregel',
+    'Nincs bejegyzés.': 'Keine Einträge.',
+    'Címke': 'Bezeichnung',
+    'bármely': 'beliebig',
+    'Pre-auth szabály szerkesztése': 'Pre-auth-Regel bearbeiten',
+    'Blokk szabály szerkesztése': 'Sperrregel bearbeiten',
+    'Cél (IP vagy CIDR; pre-auth-nál kötelező)': 'Ziel (IP oder CIDR; für Pre-auth erforderlich)',
+    'Cél (IP vagy CIDR; üresen minden cél)': 'Ziel (IP oder CIDR; leer bedeutet beliebig)',
+    'pl. 192.0.2.10 vagy 192.0.2.0/24': 'z. B. 192.0.2.10 oder 192.0.2.0/24',
+    'Portok (vesszővel elválasztva)': 'Ports (kommagetrennt)',
+    'A pre-auth szabály a portál bejelentkezés nélkül is átengedi a megadott cél és port forgalmát. Csak tudatosan nyilvános szolgáltatáshoz használd.': 'Die Pre-auth-Regel lässt Verkehr zum angegebenen Ziel und Port ohne Portal-Anmeldung durch. Verwende sie nur für einen bewusst öffentlichen Dienst.',
+    'A tűzfalbeállítások mentve.': 'Firewall-Einstellungen gespeichert.',
   },
 };
 
@@ -1676,6 +1818,11 @@ let adminDraft = null;        // megőrzött űrlapértékek hiba után
 let logRows = [];
 let logTimer = null;
 let logAuto = true;
+let dropRows = [];
+let dropStatus = null;
+let dropTimer = null;
+let dropAuto = true;
+let dropFilter = { src: '', dst: '', proto: '', port: '', reason: '', q: '', limit: 500 };
 let sessionsState = null;
 let sessionClockTimer = null;
 let sessionPollTimer = null;
@@ -1775,6 +1922,7 @@ function setView(name) {
   }
   if (name !== 'admin') {
     stopLogTimer();
+    stopDropTimer();
     stopSessionTimers();
     stopFirewallTimers();
   }
@@ -1791,12 +1939,17 @@ function stopTimers() {
   tickTimer = null;
   pollTimer = null;
   stopLogTimer();
+  stopDropTimer();
   stopSessionTimers();
   stopFirewallTimers();
 }
 function stopLogTimer() {
   clearTimeout(logTimer);
   logTimer = null;
+}
+function stopDropTimer() {
+  clearTimeout(dropTimer);
+  dropTimer = null;
 }
 function stopSessionTimers() {
   clearInterval(sessionClockTimer);
@@ -2244,9 +2397,11 @@ function adminSetTab(name) {
     button.classList.toggle('active', button.dataset.admin === name);
   }
   stopLogTimer();
+  stopDropTimer();
   stopSessionTimers();
   stopFirewallTimers();
   if (name === 'logs') loadLogs();
+  else if (name === 'drops') loadDrops();
   else if (name === 'sessions') loadSessions();
   else if (name === 'firewall') loadFirewall();
   else loadAdminState();
@@ -2981,6 +3136,433 @@ async function loadAdminState() {
     renderAdminPanel();
   }
 }
+
+/* ============================================================ admin: drop napló */
+
+const DROP_REASONS = [
+  'no-grant', 'wan-drop', 'spoof-lan', 'spoof-wan', 'mac',
+  'input-lan', 'input-wan', 'block', 'docker-guard',
+  'dns-revoked', 'ssh-revoked', 'container-spoof', 'container-pivot',
+  'ipv6', 'unknown'
+];
+
+function dropPortText(entry) {
+  const proto = entry.proto || '';
+  if (entry.dport !== undefined) return `${proto} ${entry.dport}`.trim();
+  if (entry.sport !== undefined) return `${proto} ${entry.sport}`.trim();
+  if (entry.icmp_type !== undefined) return `${proto || 'icmp'} ${entry.icmp_type}`.trim();
+  return proto || '—';
+}
+function dropTimeText(entry) {
+  if (!entry.ts) return '—';
+  try {
+    return new Date(entry.ts * 1000).toLocaleString(LOCALES[lang], { hour12: false });
+  } catch (e) {
+    return entry.time || '—';
+  }
+}
+function dropStatusLine() {
+  const st = dropStatus || (adminState && adminState.drop_log) || {};
+  const line = el('div', { class: 'admin-flash ' + (st.running ? 'ok' : 'err') });
+  line.append(el('b', { text: tr('Drop log állapot') + ': ' }));
+  if (st.enabled === false) line.append(tr('kikapcsolva'));
+  else line.append(tr(st.running ? 'aktív' : 'nem fut'));
+  line.append(` · ${tr('csoport')} ${st.group ?? '—'}`);
+  line.append(` · ${st.received ?? 0} ${tr('fogadott')}`);
+  line.append(` · ${st.written ?? 0} ${tr('kiírt')}`);
+  line.append(` · ${st.errors ?? 0} ${tr('hiba')}`);
+  if (st.path) line.append(` · ${tr('Naplófájl')}: ${st.path}`);
+  if (st.error) line.append(` · ${st.error}`);
+  return line;
+}
+function renderDrops() {
+  adminPanel.append(adminHead(
+    'Eldobott csomagok',
+    `${dropRows.length} ${tr('csomag')} · ${tr('a lista 5 másodpercenként frissül')}`,
+    null, null
+  ));
+  adminPanel.append(dropStatusLine());
+  const st = dropStatus || (adminState && adminState.drop_log) || {};
+  if (st.enabled !== false && !st.running) {
+    adminPanel.append(el('p', {
+      class: 'port-hint',
+      text: tr('A drop log nem aktív. Ellenőrizd, hogy a kernel támogatja-e az NFLOG-ot (nfnetlink_log), és hogy a HV_DROP_LOG nincs kikapcsolva.')
+    }));
+  }
+  const tools = el('div', { class: 'log-tools' });
+  const srcInput = el('input', { type: 'text', placeholder: tr('forrás IP'), value: dropFilter.src });
+  const dstInput = el('input', { type: 'text', placeholder: tr('cél IP'), value: dropFilter.dst });
+  const protoSelect = el('select', {},
+    ...[['', 'Minden protokoll'], ['tcp', 'TCP'], ['udp', 'UDP'], ['icmp', 'ICMP']].map(([value, label]) =>
+      el('option', { value, text: tr(label), selected: dropFilter.proto === value })
+    )
+  );
+  const portInput = el('input', {
+    type: 'number', min: 1, max: 65535, placeholder: tr('Port'),
+    value: dropFilter.port, style: 'width:90px'
+  });
+  const reasonInput = el('input', {
+    type: 'text', list: 'drop-reasons', placeholder: tr('Ok'),
+    value: dropFilter.reason
+  });
+  const reasonList = el('datalist', { id: 'drop-reasons' },
+    ...DROP_REASONS.map(reason => el('option', { value: reason, label: tr(reason) }))
+  );
+  const qInput = el('input', { type: 'text', placeholder: tr('Keresés'), value: dropFilter.q, style: 'width:150px' });
+  const limitSelect = el('select', {},
+    ...[200, 500, 1000, 2000].map(value =>
+      el('option', { value, text: tr(`${value} sor`), selected: Number(dropFilter.limit) === value })
+    )
+  );
+  const autoBox = el('input', { type: 'checkbox', checked: dropAuto });
+  autoBox.addEventListener('change', () => {
+    dropAuto = autoBox.checked;
+    stopDropTimer();
+    if (dropAuto && activeView === 'admin' && adminTabName === 'drops') scheduleDrops();
+  });
+  const apply = () => {
+    dropFilter = {
+      src: srcInput.value.trim(),
+      dst: dstInput.value.trim(),
+      proto: protoSelect.value,
+      port: portInput.value.trim(),
+      reason: reasonInput.value.trim(),
+      q: qInput.value.trim(),
+      limit: Number(limitSelect.value) || 500
+    };
+    loadDrops();
+  };
+  for (const [label, node] of [
+    ['Forrás', srcInput], ['Cél', dstInput], ['Protokoll', protoSelect],
+    ['Port', portInput], ['Ok', reasonInput], ['Keresés', qInput], ['Darab', limitSelect]
+  ]) {
+    tools.append(el('div', { class: 'field' }, el('label', { text: tr(label) }), node));
+  }
+  tools.append(el('label', { class: 'auto' }, autoBox, tr('automatikus frissítés')));
+  tools.append(el('button', { type: 'button', class: 'ghost', onclick: apply }, tr('Frissítés')));
+  tools.append(el('button', { type: 'button', class: 'ghost', onclick: () => {
+    dropFilter = { src: '', dst: '', proto: '', port: '', reason: '', q: '', limit: 500 };
+    loadDrops();
+  } }, tr('Szűrők törlése')));
+  for (const node of [srcInput, dstInput, portInput, reasonInput, qInput]) {
+    node.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); apply(); } });
+  }
+  adminPanel.append(tools);
+  const notice = adminNotice(); if (notice) adminPanel.append(notice);
+  if (!dropRows.length) {
+    adminPanel.append(el('div', {
+      class: 'empty-box',
+      text: tr('Nincs a szűrésnek megfelelő eldobott csomag.')
+    }));
+    return;
+  }
+  const counts = new Map();
+  for (const row of dropRows) {
+    const reason = row.reason || 'unknown';
+    counts.set(reason, (counts.get(reason) || 0) + 1);
+  }
+  const summary = el('div', { class: 'chips', style: 'margin-bottom:10px' });
+  for (const [reason, count] of Array.from(counts.entries()).sort((a, b) => b[1] - a[1]).slice(0, 8)) {
+    summary.append(chip(`${tr(reason)}: ${count}`));
+  }
+  adminPanel.append(summary);
+  const wrap = el('div', { class: 'table-wrap' });
+  const table = el('table', { class: 'log-table' });
+  table.append(el('thead', {}, el('tr', {},
+    el('th', { text: tr('Idő') }), el('th', { text: tr('Ok') }),
+    el('th', { text: tr('Forrás') }), el('th', { text: tr('Cél') }),
+    el('th', { text: tr('Proto / port') }), el('th', { text: tr('Interfész / MAC') }),
+    el('th', { text: tr('Részletek') })
+  )));
+  const body = el('tbody');
+  for (const entry of dropRows) {
+    const iface = [entry.if_in, entry.mac].filter(Boolean).join(' · ') || '—';
+    body.append(el('tr', {},
+      el('td', { class: 'mono', text: dropTimeText(entry) }),
+      el('td', {}, el('b', { text: tr(entry.reason || 'unknown') })),
+      el('td', { class: 'mono', text: entry.src || '—' }),
+      el('td', { class: 'mono', text: entry.dst || '—' }),
+      el('td', { class: 'mono', text: dropPortText(entry) }),
+      el('td', { class: 'mono', text: iface }),
+      el('td', {}, logDetail(entry))
+    ));
+  }
+  table.append(body);
+  wrap.append(table);
+  adminPanel.append(wrap);
+}
+async function loadDrops() {
+  stopDropTimer();
+  try {
+    const query = new URLSearchParams({
+      limit: String(dropFilter.limit || 500),
+      src: dropFilter.src || '',
+      dst: dropFilter.dst || '',
+      proto: dropFilter.proto || '',
+      port: dropFilter.port || '',
+      reason: dropFilter.reason || '',
+      q: dropFilter.q || ''
+    });
+    const res = await fetch('/api/admin/drops?' + query.toString(), { cache: 'no-store' });
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || 'a drop napló nem olvasható');
+    dropRows = data.drops || [];
+    dropStatus = data.status || null;
+    adminFlash = null;
+    const focus = document.activeElement;
+    const typing = !!focus && adminPanel.contains(focus) &&
+      ['INPUT', 'SELECT', 'TEXTAREA'].includes(focus.tagName);
+    if (!typing) {
+      const scrollTop = adminPanel.scrollTop;
+      renderAdminPanel();
+      adminPanel.scrollTop = scrollTop;
+    }
+    if (dropAuto && activeView === 'admin' && adminTabName === 'drops') scheduleDrops();
+  } catch (err) {
+    adminFlash = { text: err.message || 'A drop napló betöltése nem sikerült.', kind: 'err' };
+    renderAdminPanel();
+    if (dropAuto && activeView === 'admin' && adminTabName === 'drops') scheduleDrops();
+  }
+}
+function scheduleDrops() {
+  stopDropTimer();
+  dropTimer = setTimeout(() => {
+    if (activeView === 'admin' && adminTabName === 'drops') loadDrops();
+  }, 5000);
+}
+
+/* ============================================================ admin: beállítások */
+
+function settingsData() {
+  return (adminState && adminState.settings) || {
+    host_ssh: 'admin', preauth: [], block: [], error: ''
+  };
+}
+function parsePorts(text) {
+  return String(text || '').split(/[\s,;]+/).filter(Boolean);
+}
+function settingKindOf(id) {
+  return String(id || '').split(':', 1)[0];
+}
+function settingEntryId(id) {
+  const kind = settingKindOf(id);
+  return String(id || '').slice(kind.length + 1);
+}
+function renderSettingForm(kind, entryId) {
+  const entries = settingsData()[kind] || [];
+  const entry = entryId && entryId !== 'new'
+    ? entries.find(item => item.id === entryId)
+    : null;
+  const edit = !!entry;
+  const draftKey = `${kind}:${entryId || 'new'}`;
+  const draft = adminDraftFor('setting', draftKey);
+  const box = el('form', { class: 'admin-form', onsubmit: e => {
+    e.preventDefault();
+    const payload = {
+      action: edit ? 'update' : 'create',
+      kind,
+      entry: {
+        label: formValue(box, 'label').trim(),
+        dst: formValue(box, 'dst').trim(),
+        proto: formValue(box, 'proto'),
+        ports: parsePorts(formValue(box, 'ports')),
+        enabled: boolValue(box, 'enabled')
+      }
+    };
+    if (edit) payload.id = entry.id;
+    adminSend('/api/admin/settings', payload);
+  }});
+  box.append(el('h3', {
+    text: tr(edit
+      ? (kind === 'preauth' ? 'Pre-auth szabály szerkesztése' : 'Blokk szabály szerkesztése')
+      : (kind === 'preauth' ? 'Új pre-auth szabály' : 'Új blokk szabály'))
+  }));
+  const grid = el('div', { class: 'form-grid' });
+  grid.append(el('div', { class: 'field' },
+    el('label', { text: tr('Címke') }),
+    el('input', {
+      name: 'label', value: draftValue(draft, 'label', edit ? entry.label : ''),
+      maxlength: 64, required: true, autocomplete: 'off'
+    })
+  ));
+  grid.append(el('div', { class: 'field' },
+    el('label', { text: tr(kind === 'preauth'
+      ? 'Cél (IP vagy CIDR; pre-auth-nál kötelező)'
+      : 'Cél (IP vagy CIDR; üresen minden cél)') }),
+    el('input', {
+      name: 'dst', value: draftValue(draft, 'dst', edit ? entry.dst : ''),
+      placeholder: tr('pl. 192.0.2.10 vagy 192.0.2.0/24'),
+      required: kind === 'preauth', autocomplete: 'off'
+    })
+  ));
+  grid.append(el('div', { class: 'field' },
+    el('label', { text: tr('Protokoll') }),
+    el('select', { name: 'proto' },
+      el('option', { value: 'tcp', text: 'TCP', selected: draftValue(draft, 'proto', edit ? entry.proto : 'tcp') !== 'udp' }),
+      el('option', { value: 'udp', text: 'UDP', selected: draftValue(draft, 'proto', edit ? entry.proto : 'tcp') === 'udp' })
+    )
+  ));
+  grid.append(el('div', { class: 'field' },
+    el('label', { text: tr('Portok (vesszővel elválasztva)') }),
+    el('input', {
+      name: 'ports', value: draftValue(draft, 'ports', edit ? entry.ports.join(', ') : ''),
+      placeholder: '80, 443', required: true, autocomplete: 'off'
+    })
+  ));
+  grid.append(el('div', { class: 'field full' },
+    el('label', { style: 'display:flex;gap:7px;align-items:center' },
+      el('input', { type: 'checkbox', name: 'enabled', checked: !!draftValue(draft, 'enabled', !edit || entry.enabled) }),
+      tr('aktív')
+    )
+  ));
+  box.append(grid);
+  if (kind === 'preauth') {
+    box.append(el('p', {
+      class: 'port-hint',
+      text: tr('A pre-auth szabály a portál bejelentkezés nélkül is átengedi a megadott cél és port forgalmát. Csak tudatosan nyilvános szolgáltatáshoz használd.')
+    }));
+  }
+  const actions = el('div', { class: 'form-actions' });
+  actions.append(
+    el('button', {
+      type: 'button', class: 'ghost small',
+      onclick: () => { adminEdit = null; adminDraft = null; renderAdminPanel(); }
+    }, tr('Mégse')),
+    el('button', { type: 'submit', class: 'small' }, tr('Mentés'))
+  );
+  box.append(actions);
+  return box;
+}
+function renderSettingSection(kind, entries) {
+  const preauth = kind === 'preauth';
+  const section = el('div', { class: 'admin-form' });
+  section.append(el('h3', { text: tr(preauth ? 'Pre-auth szabályok' : 'Blokkolt célok') }));
+  section.append(el('p', {
+    class: 'port-hint',
+    text: tr(preauth
+      ? 'Pre-auth: bejelentkezés előtt is elérhető célok. A blokk felülbírálja.'
+      : 'A blokk a pre-auth szabályt is felülbírálja. A cél megadása itt opcionális.')
+  }));
+  section.append(el('div', { style: 'margin:8px 0 10px' },
+    el('button', {
+      type: 'button', class: 'ghost small',
+      onclick: () => {
+        adminEdit = { kind: 'setting', id: `${kind}:new` };
+        adminDraft = null;
+        adminFlash = null;
+        renderAdminPanel();
+      }
+    }, tr(preauth ? 'Új pre-auth szabály' : 'Új blokk szabály'))
+  ));
+  if (adminEdit && adminEdit.kind === 'setting' &&
+      settingKindOf(adminEdit.id) === kind) {
+    section.append(renderSettingForm(kind, settingEntryId(adminEdit.id)));
+  }
+  if (!entries.length) {
+    section.append(el('div', { class: 'empty-box', text: tr('Nincs bejegyzés.') }));
+    return section;
+  }
+  const wrap = el('div', { class: 'table-wrap' });
+  const table = el('table');
+  table.append(el('thead', {}, el('tr', {},
+    el('th', { text: tr('Címke') }), el('th', { text: tr('Cél') }),
+    el('th', { text: tr('Protokoll') }), el('th', { text: tr('Portok') }),
+    el('th', { text: tr('Állapot') }), el('th', { text: '' })
+  )));
+  const body = el('tbody');
+  for (const entry of entries) {
+    const actions = el('td', { class: 'actions' });
+    actions.append(
+      el('button', {
+        type: 'button', class: 'ghost small',
+        onclick: () => adminSend('/api/admin/settings', {
+          action: 'toggle', kind, id: entry.id,
+          entry: { enabled: !entry.enabled }
+        })
+      }, tr(entry.enabled ? 'Letiltás' : 'Aktiválás')),
+      el('button', {
+        type: 'button', class: 'ghost small',
+        onclick: () => {
+          adminEdit = { kind: 'setting', id: `${kind}:${entry.id}` };
+          adminDraft = null;
+          adminFlash = null;
+          renderAdminPanel();
+        }
+      }, tr('Szerkesztés')),
+      el('button', {
+        type: 'button', class: 'danger small',
+        onclick: () => {
+          if (confirm(tr(`Biztosan törlöd: ${entry.label}?`))) {
+            adminSend('/api/admin/settings', {
+              action: 'delete', kind, id: entry.id
+            });
+          }
+        }
+      }, tr('Törlés'))
+    );
+    body.append(el('tr', {},
+      el('td', {}, el('b', { text: entry.label })),
+      el('td', { class: 'mono', text: entry.dst || tr('bármely') }),
+      el('td', { class: 'mono', text: String(entry.proto || '').toUpperCase() }),
+      el('td', { class: 'mono', text: (entry.ports || []).join(', ') || '—' }),
+      el('td', {}, el('span', {
+        class: 'pill ' + (entry.enabled ? 'on' : 'off'),
+        text: tr(entry.enabled ? 'aktív' : 'letiltva')
+      })),
+      actions
+    ));
+  }
+  table.append(body);
+  wrap.append(table);
+  section.append(wrap);
+  return section;
+}
+function renderSettings() {
+  const settings = settingsData();
+  adminPanel.append(adminHead(
+    'Tűzfal testreszabása',
+    'Bejelentkezés előtt nyitva lévő célok, mindig blokkolt célok és a host SSH szabály.',
+    null, null
+  ));
+  if (settings.error) {
+    adminPanel.append(el('div', {
+      class: 'admin-flash err',
+      text: tr('A beállításfájl hibás, a pre-auth és blokk listák üresek:') + ' ' + settings.error
+    }));
+  }
+  const notice = adminNotice(); if (notice) adminPanel.append(notice);
+  adminPanel.append(el('div', {
+    class: 'admin-flash',
+    text: tr('A pre-auth szabályok megkerülik a portált: a megadott cél és port a bejelentkezés előtt is elérhető minden LAN-kliensnek. Csak olyan szolgáltatást adj hozzá, amelynek nyilvánosnak kell lennie.')
+  }));
+
+  const sshSection = el('div', { class: 'admin-form' });
+  sshSection.append(el('h3', { text: tr('Host SSH') }));
+  sshSection.append(el('p', {
+    class: 'port-hint',
+    text: tr('admin: csak admin munkamenet kap SSH-t; any: bármely engedélyezett munkamenet; off: soha.')
+  }));
+  const sshSelect = el('select', {},
+    ...[['admin', 'admin (csak admin)'], ['any', 'any (bármely munkamenet)'], ['off', 'off (soha)']].map(([value, label]) =>
+      el('option', { value, text: tr(label), selected: (settings.host_ssh || 'admin') === value })
+    )
+  );
+  sshSection.append(el('div', { class: 'field' },
+    el('label', { text: tr('Host SSH szabály') }), sshSelect
+  ));
+  sshSection.append(el('div', { class: 'form-actions' },
+    el('button', {
+      type: 'button', class: 'small',
+      onclick: () => adminSend('/api/admin/settings', {
+        action: 'host_ssh', host_ssh: sshSelect.value
+      })
+    }, tr('Mentés'))
+  ));
+  adminPanel.append(sshSection);
+
+  adminPanel.append(renderSettingSection('preauth', settings.preauth || []));
+  adminPanel.append(renderSettingSection('block', settings.block || []));
+}
 /* ============================================================ admin: munkamenetek */
 
 function clockTime(epoch) {
@@ -3354,6 +3936,8 @@ function renderAdminPanel() {
   else if (adminTabName === 'rules') renderRulesAdmin();
   else if (adminTabName === 'sessions') renderSessions();
   else if (adminTabName === 'firewall') renderFirewall();
+  else if (adminTabName === 'drops') renderDrops();
+  else if (adminTabName === 'settings') renderSettings();
   else renderLogs();
 }
 

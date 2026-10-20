@@ -83,6 +83,18 @@ services:
       # Host SSH: admin (csak admin munkamenet), any (bármely engedélyezett
       # munkamenet) vagy off (soha).
       HV_HOST_SSH: ${HV_HOST_SSH:-admin}
+      # Drop log: az nftables által eldobott csomagok NFLOG-csoportja és a
+      # JSONL-napló a state-köteten. HV_DROP_LOG=0 esetén a portál nem
+      # figyeli a csoportot (az nft-szabályok naplózása megmarad).
+      HV_DROP_LOG: ${HV_DROP_LOG:-1}
+      HV_DROP_LOG_GROUP: ${HV_DROP_LOG_GROUP:-5}
+      HV_DROP_LOG_PATH: ${HV_DROP_LOG_PATH:-/var/lib/hatarvedelem/drops.jsonl}
+      HV_DROP_LOG_MAX_BYTES: ${HV_DROP_LOG_MAX_BYTES:-10485760}
+      HV_DROP_LOG_KEEP: ${HV_DROP_LOG_KEEP:-5}
+      # A felületen beállított pre-auth/blokk szabályok és host SSH mód.
+      HV_SETTINGS: ${HV_SETTINGS:-/var/lib/hatarvedelem/firewall-settings.json}
+      # A forward-jelölés; a Docker DOCKER-USER guard ehhez igazodik.
+      HV_FWD_MARK: ${HV_FWD_MARK:-0x44524a4b}
       HV_COOKIE_SECURE: ${HV_COOKIE_SECURE:-0}
       HV_DRY_RUN: ${HV_DRY_RUN:-0}
       HV_SKIP_FIREWALL: ${HV_SKIP_FIREWALL:-0}

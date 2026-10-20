@@ -28,6 +28,7 @@ from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import gateway
+import settings_store
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 
@@ -241,6 +242,8 @@ class Handler(BaseHTTPRequestHandler):
             "limits": self._limits(),
             "builtin_rule": gateway.ADMIN_RULE_ID,
             "roles": [gateway.ROLE_USER, gateway.ROLE_ADMIN],
+            "settings": self.gw.settings.snapshot(),
+            "drop_log": self.gw.drops.status(),
         }
 
     @staticmethod
@@ -333,6 +336,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._admin_sessions()
         if path == "/api/admin/firewall":
             return self._admin_firewall()
+        if path == "/api/admin/drops":
+            return self._admin_drops()
+        if path == "/api/admin/settings":
+            return self._admin_settings_api()
         if path.startswith("/api/"):
             return self._json(404, {"ok": False, "error": "ismeretlen végpont"})
 
@@ -544,6 +551,143 @@ class Handler(BaseHTTPRequestHandler):
             },
         )
 
+    def _admin_drops(self) -> None:
+        if self._admin_guard() is None:
+            return
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+
+        def first(name: str) -> str:
+            return (query.get(name) or [""])[0].strip()
+
+        try:
+            limit = int(first("limit") or "500")
+        except ValueError:
+            limit = 500
+        limit = max(1, min(2000, limit))
+        port: int | None = None
+        port_raw = first("port")
+        if port_raw:
+            try:
+                port = int(port_raw)
+            except ValueError:
+                port = -1
+            if port < 1 or port > 65535:
+                self._json(
+                    400,
+                    {
+                        "ok": False,
+                        "error": "a port 1 és 65535 között lehet",
+                    },
+                )
+                return
+        try:
+            before_raw = first("before")
+            before = float(before_raw) if before_raw else None
+        except ValueError:
+            before = None
+        rows = self.gw.drops.read(
+            limit=limit,
+            src=first("src")[:120],
+            dst=first("dst")[:120],
+            proto=first("proto")[:16],
+            port=port,
+            reason=first("reason")[:80],
+            q=first("q")[:120],
+            before=before,
+        )
+        self._json(
+            200,
+            {
+                "ok": True,
+                "drops": rows,
+                "count": len(rows),
+                "server_time": time.time(),
+                "status": self.gw.drops.status(),
+            },
+        )
+
+    def _admin_settings_api(self) -> None:
+        if self._admin_guard() is None:
+            return
+        self._json(
+            200,
+            {
+                "ok": True,
+                "settings": self.gw.settings.snapshot(),
+                "drop_log": self.gw.drops.status(),
+            },
+        )
+
+    def _admin_settings_action(self) -> None:
+        session = self._admin_guard()
+        if session is None:
+            return
+        if not self._origin_ok():
+            self._json(403, {"ok": False, "error": "érvénytelen kérés-eredet"})
+            return
+        data = self._read_json()
+        if data is None:
+            return self._json(400, {"ok": False, "error": "hibás kérés"})
+        action = str(data.get("action", "")).strip().lower()
+        kind = str(data.get("kind", "")).strip().lower()
+        entry_id = data.get("id", "")
+        if entry_id is None:
+            entry_id = ""
+        if not isinstance(entry_id, str):
+            self._json(
+                400, {"ok": False, "error": "érvénytelen bejegyzés-azonosító"}
+            )
+            return
+        # A módosítás előkészítése és az nftables-re alkalmazása egy zár
+        # alatt fut, hogy két párhuzamos admin-kérés ne írja felül
+        # egymás beállításait (TOCTOU).
+        with self.gw.admin_lock:
+            try:
+                new_data = self.gw.settings.prepare(
+                    action,
+                    kind=kind,
+                    entry_id=entry_id.strip(),
+                    entry=data.get("entry"),
+                    host_ssh=data.get("host_ssh", ""),
+                )
+            except (settings_store.SettingsError, ValueError) as exc:
+                self._admin_action_error(f"settings_{action}", exc)
+                self._json(400, {"ok": False, "error": str(exc)})
+                return
+            try:
+                warnings = self.gw.apply_settings(new_data)
+            except (gateway.FirewallError, settings_store.SettingsError,
+                    OSError) as exc:
+                self._admin_action_error(f"settings_{action}", exc)
+                self._json(
+                    503,
+                    {
+                        "ok": False,
+                        "error": "a tűzfal-beállítások alkalmazása nem "
+                                 f"sikerült: {exc}",
+                    },
+                )
+                return
+            target = entry_id.strip()
+            if action == "host_ssh":
+                target = new_data.get("host_ssh", "")
+            self._audit(
+                "admin_settings_changed",
+                user=session.user,
+                action=action or "ismeretlen",
+                kind=kind,
+                target=target,
+                host_ssh=new_data.get("host_ssh", ""),
+                preauth_count=len(new_data.get("preauth", [])),
+                block_count=len(new_data.get("block", [])),
+                warnings=len(warnings),
+            )
+        payload = self._admin_state()
+        payload["message"] = "A tűzfalbeállítások mentve."
+        if warnings:
+            payload["warnings"] = warnings
+        self._json(200, payload)
+
     # -- POST ------------------------------------------------------------------
 
     def do_POST(self) -> None:
@@ -564,6 +708,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._admin_rules()
         if path == "/api/admin/sessions":
             return self._admin_sessions_action()
+        if path == "/api/admin/settings":
+            return self._admin_settings_action()
         self._discard_body()
         self._json(404, {"ok": False, "error": "ismeretlen végpont"})
 

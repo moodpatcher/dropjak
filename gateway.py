@@ -33,6 +33,9 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
+import droplog
+import settings_store
+
 
 # --------------------------------------------------------------- konfiguráció
 
@@ -132,6 +135,16 @@ NFT_BIN = os.environ.get("HV_NFT_BIN", "").strip() or shutil.which("nft") or "/u
 NFT_TABLE = os.environ.get("HV_NFT_TABLE", "hatarvedelem").strip()
 NFT_SET = os.environ.get("HV_NFT_SET", "allowed_v4").strip()
 CONNTRACK_BIN = os.environ.get("HV_CONNTRACK_BIN", "").strip() or shutil.which("conntrack") or ""
+# A forward-lánc által megjelölt csomagok azonosítója. A Docker-védelem
+# csak ezt a jelölést engedi át. A sablon és a portál ugyanezt használja.
+FWD_MARK = os.environ.get("HV_FWD_MARK", "0x44524a4b").strip().lower()
+if not re.match(r"^0x[0-9a-f]{1,8}$", FWD_MARK):
+    FWD_MARK = "0x44524a4b"
+# A pre-auth port 80-as forgalma a preroutingban conntrack-jelölést kap,
+# hogy a portál-átirányítás ne térítse el. Ez nem hozzáférési jelölés.
+PREAUTH_CT_MARK = "0x50524541"
+CUSTOM_CHAINS = ("preauth", "block", "preauth_nat", "block_nat")
+_LAN_IF_RE = re.compile(r"^[A-Za-z0-9_.:@+-]{1,15}$")
 DRY_RUN = os.environ.get("HV_DRY_RUN", "0") == "1"
 FLUSH_ON_START = os.environ.get("HV_FLUSH_ON_START", "1") == "1"
 
@@ -1665,10 +1678,19 @@ class Firewall:
         lan_if: str = HV_LAN_IF,
         lan_network=LAN_NETWORK,
         arp_path: str = ARP_PATH,
+        fwd_mark: str = FWD_MARK,
+        drop_log_group: int = droplog.DROP_LOG_GROUP,
     ) -> None:
         for name in (table, set_name):
             if not _NFT_NAME_RE.match(name):
                 raise ValueError(f"érvénytelen nftables név: {name!r}")
+        fwd_mark = str(fwd_mark or "").strip().lower()
+        if not re.match(r"^0x[0-9a-f]{1,8}$", fwd_mark):
+            raise ValueError(f"érvénytelen nftables mark: {fwd_mark!r}")
+        if lan_if and not _LAN_IF_RE.match(lan_if):
+            raise ValueError(f"érvénytelen LAN interfész: {lan_if!r}")
+        self.fwd_mark = fwd_mark
+        self.drop_log_group = max(1, min(65535, int(drop_log_group)))
         self.table = table
         self.set_name = set_name
         self.tcp_set = "allowed_tcp"
@@ -1735,6 +1757,128 @@ class Firewall:
         if result.returncode != 0:
             detail = result.stderr.decode("utf-8", "replace").strip()
             raise FirewallError(detail or f"az nft kilépési kódja: {result.returncode}")
+
+    # -- admin testreszabás ----------------------------------------------------
+
+    @staticmethod
+    def _port_set(ports: list[int]) -> str:
+        values = [str(int(port)) for port in ports]
+        if len(values) == 1:
+            return values[0]
+        return "{ " + ", ".join(values) + " }"
+
+    def _log_statement(self, reason: str, rate: str = "30/minute") -> str:
+        """Rate-limited NFLOG log kifejezés (önálló, nem eldobó szabályhoz)."""
+        return (
+            f"limit rate {rate} burst 60 packets log prefix "
+            f'"dropjak-drop reason={reason} " group {self.drop_log_group}'
+        )
+
+    def clear_custom(self) -> None:
+        """A pre-auth és blokk láncok ürítése (a láncok létrehozásával).
+
+        Külön tranzakcióban fut az alkalmazás előtt: ha az új szabályok
+        érvénytelenek, a régi pre-auth engedélyek nem maradnak életben.
+        """
+        lines = [
+            f"add chain inet {self.table} {chain}"
+            for chain in CUSTOM_CHAINS
+        ]
+        lines.extend(
+            f"flush chain inet {self.table} {chain}"
+            for chain in CUSTOM_CHAINS
+        )
+        self._run_script("\n".join(lines) + "\n")
+
+    def apply_custom(self, preauth=(), block=()) -> None:
+        """A bejelentkezés előtti engedélyek és a blokkolt célok telepítése.
+
+        A pre-auth szabályok három irányt fednek le: a LAN felől induló
+        új kapcsolatot, a válaszirányt (established) és a kapcsolathoz
+        tartozó related forgalmat. A blokk a LAN felől induló forgalmat
+        dobja el, a 80-as TCP-portnál a portál-átirányítás előtt is.
+        """
+        if preauth and not self.lan_if:
+            raise FirewallError(
+                "pre-auth szabály csak ismert LAN interfésszel alkalmazható"
+            )
+        lines: list[str] = []
+        for entry in block:
+            dst = str(entry.get("dst", "")).strip()
+            proto = str(entry.get("proto", "")).strip().lower()
+            ports = [int(port) for port in entry.get("ports", [])]
+            if proto not in ("tcp", "udp") or not ports:
+                raise FirewallError("érvénytelen blokk-bejegyzés")
+            if dst:
+                try:
+                    dst = str(
+                        ipaddress.ip_network(dst, strict=False)
+                    )
+                except ValueError as exc:
+                    raise FirewallError(f"érvénytelen blokk-cél: {dst}") from exc
+            match = f"meta l4proto {proto}"
+            if dst:
+                match += f" ct original ip daddr {dst}"
+            match += f" ct original proto-dst {self._port_set(ports)}"
+            lines.append(
+                f"add rule inet {self.table} block {match} "
+                f"{self._log_statement('block')}"
+            )
+            lines.append(
+                f"add rule inet {self.table} block {match} drop"
+            )
+            if proto == "tcp" and 80 in ports and dst:
+                lines.append(
+                    f"add rule inet {self.table} block_nat meta l4proto tcp "
+                    f"ct original ip daddr {dst} ct original proto-dst 80 "
+                    f"{self._log_statement('block')}"
+                )
+                lines.append(
+                    f"add rule inet {self.table} block_nat meta l4proto tcp "
+                    f"ct original ip daddr {dst} ct original proto-dst 80 drop"
+                )
+        for entry in preauth:
+            dst = str(entry.get("dst", "")).strip()
+            proto = str(entry.get("proto", "")).strip().lower()
+            ports = [int(port) for port in entry.get("ports", [])]
+            if not dst or proto not in ("tcp", "udp") or not ports:
+                raise FirewallError("érvénytelen pre-auth bejegyzés")
+            try:
+                dst = str(ipaddress.ip_network(dst, strict=False))
+            except ValueError as exc:
+                raise FirewallError(
+                    f"érvénytelen pre-auth cél: {dst}"
+                ) from exc
+            port_expr = self._port_set(ports)
+            lan = f'iifname "{self.lan_if}"'
+            lines.append(
+                f"add rule inet {self.table} preauth {lan} "
+                f"meta l4proto {proto} ct original ip daddr {dst} "
+                f"ct original proto-dst {port_expr} "
+                f"meta mark set {self.fwd_mark} accept"
+            )
+            lines.append(
+                f"add rule inet {self.table} preauth ct state established "
+                f"meta l4proto {proto} ct original ip daddr {dst} "
+                f"ct original proto-dst {port_expr} "
+                f"meta mark set {self.fwd_mark} accept"
+            )
+            lines.append(
+                f"add rule inet {self.table} preauth ct state related "
+                f"ct original ip daddr {dst} "
+                f"meta mark set {self.fwd_mark} accept"
+            )
+            if proto == "tcp" and 80 in ports:
+                # A prerouting a 80-as TCP-t a portálra irányítja. A
+                # conntrack-jelölés ezt a láncot kikerülteti a base chain
+                # return szabályával; a forward pre-auth szabály továbbra is
+                # külön dönt a csomagról.
+                lines.append(
+                    f"add rule inet {self.table} preauth_nat meta l4proto tcp "
+                    f"ct original ip daddr {dst} ct original proto-dst 80 "
+                    f"ct mark set {PREAUTH_CT_MARK}"
+                )
+        self._run_script("\n".join(lines) + ("\n" if lines else ""))
 
     def _delete_quiet(self, set_name: str, element: str) -> None:
         """Nem létező elem törlése nem hiba (a kernel már lejárattathatta)."""
@@ -3049,6 +3193,39 @@ class SessionManager:
             return True
         return session.role == ROLE_ADMIN
 
+    def set_host_ssh_mode(self, mode: str) -> list[str]:
+        """A host SSH szabály futásidejű módosítása.
+
+        Szűkítéskor (pl. any -> admin, vagy off) a már megnyitott SSH-
+        engedélyeket azonnal visszavonja. Bővítéskor a meglévő munkamenetek
+        nem kapnak utólag SSH-t; az a következő engedélyezéskor nyílik meg.
+        Visszatérés: a visszavonási hibák szöveges listája.
+        """
+        mode = str(mode or "").strip().lower()
+        if mode not in ("admin", "any", "off"):
+            raise ValueError("a host SSH szabály értéke admin, any vagy off lehet")
+        with self._lock:
+            self.host_ssh_mode = mode
+            targets = sorted({
+                session.ip
+                for session in self._sessions.values()
+                if session.authorized and not self._host_ssh_wanted(session)
+            })
+        errors: list[str] = []
+        for ip in targets:
+            try:
+                self.firewall.revoke_host_ssh(ip)
+            except FirewallError as exc:
+                errors.append(f"{ip}: {exc}")
+        if self.audit is not None and targets:
+            self.audit.write(
+                "host_ssh_policy_applied",
+                mode=mode,
+                revoked_ips=", ".join(targets),
+                errors="; ".join(errors),
+            )
+        return errors
+
     def _revoke_access(self, ip: str, grants=()) -> None:
         try:
             self.firewall.revoke_all(ip, grants)
@@ -3546,6 +3723,8 @@ class Gateway:
         rules: RuleStore | None = None,
         groups: GroupStore | None = None,
         audit: AuditLog | None = None,
+        settings: "settings_store.SettingsStore | None" = None,
+        drops: "droplog.DropLogService | None" = None,
     ) -> None:
         self.catalog = (
             catalog if catalog is not None else ServiceCatalog.load()
@@ -3557,6 +3736,14 @@ class Gateway:
         )
         self.groups = groups if groups is not None else GroupStore()
         self.firewall = firewall if firewall is not None else Firewall()
+        self.settings = (
+            settings
+            if settings is not None
+            else settings_store.SettingsStore(default_host_ssh=HOST_SSH_MODE)
+        )
+        self.drops = (
+            drops if drops is not None else droplog.DropLogService()
+        )
         self.sessions = (
             sessions
             if sessions is not None
@@ -3565,7 +3752,7 @@ class Gateway:
                 ttl=DEFAULT_TTL,
                 pending_ttl=AUTH_TTL,
                 audit=self.audit,
-                host_ssh_mode=HOST_SSH_MODE,
+                host_ssh_mode=self.settings.host_ssh,
                 rule_check=self._rule_available,
             )
         )
@@ -3654,12 +3841,97 @@ class Gateway:
                 "[tűzfal] FIGYELEM: a dinamikus halmazok nem érhetők el "
                 f"({why}). A belépések a hiba elhárításáig nem fognak működni."
             )
+        # A settings-fájl host SSH módja felülírja a környezeti alapértéket.
+        self.sessions.host_ssh_mode = self.settings.host_ssh
+        self._apply_custom_settings()
+
+    def _apply_custom_settings(self, snapshot: dict | None = None) -> None:
+        """A pre-auth és blokk szabályok telepítése az nftables-be.
+
+        Előbb ürítünk, aztán alkalmazunk. Ha az alkalmazás nem sikerül, a
+        pre-auth engedélyek nem maradnak életben (fail-closed).
+        """
+        snapshot = snapshot if snapshot is not None else self.settings.snapshot()
+        if snapshot.get("error"):
+            log(
+                "[beállítások] FIGYELEM: a beállításfájl hibás, a pre-auth "
+                f"és blokk listák üresek: {snapshot['error']}"
+            )
+        try:
+            self.firewall.clear_custom()
+            self.firewall.apply_custom(
+                snapshot.get("preauth", []), snapshot.get("block", [])
+            )
+        except FirewallError as exc:
+            log(
+                "[beállítások] HIBA: a testreszabott szabályok telepítése "
+                f"nem sikerült: {exc}"
+            )
+            raise
+        log(
+            f"[beállítások] {len(snapshot.get('preauth', []))} pre-auth, "
+            f"{len(snapshot.get('block', []))} blokk bejegyzés; "
+            f"host SSH: {snapshot.get('host_ssh', HOST_SSH_MODE)}"
+        )
+
+    def apply_settings(self, new_data: dict) -> list[str]:
+        """Az admin által előkészített beállítások telepítése és mentése.
+
+        Sorrend: nft alkalmazás -> atomi fájlírás. Ha a mentés nem sikerül,
+        a korábbi nft-szabályokat visszaállítjuk. Visszatérés: a host SSH
+        visszavonásánál keletkezett figyelmeztetések.
+        """
+        old = self.settings.snapshot()
+        try:
+            self.firewall.clear_custom()
+            self.firewall.apply_custom(
+                new_data.get("preauth", []), new_data.get("block", [])
+            )
+        except FirewallError:
+            try:
+                self.firewall.clear_custom()
+                self.firewall.apply_custom(
+                    old.get("preauth", []), old.get("block", [])
+                )
+            except FirewallError as rollback_exc:
+                log(
+                    "[beállítások] a korábbi szabályok visszaállítása sem "
+                    f"sikerült: {rollback_exc}"
+                )
+            raise
+        try:
+            self.settings.commit(new_data)
+        except Exception:
+            try:
+                self.firewall.clear_custom()
+                self.firewall.apply_custom(
+                    old.get("preauth", []), old.get("block", [])
+                )
+            except FirewallError as rollback_exc:
+                log(
+                    "[beállítások] mentési hiba után a korábbi szabályok "
+                    f"visszaállítása nem sikerült: {rollback_exc}"
+                )
+            raise
+        warnings: list[str] = []
+        try:
+            warnings = self.sessions.set_host_ssh_mode(new_data["host_ssh"])
+        except (ValueError, FirewallError) as exc:
+            warnings = [str(exc)]
+        return warnings
 
     def start(self) -> None:
         self.sessions.start_reaper()
         self.audit.write("service_start", reason="portál folyamat elindult")
+        if not self.drops.start():
+            status = self.drops.status()
+            log(f"[drop log] nem aktív: {status.get('error') or 'ismeretlen ok'}")
 
     def stop(self) -> None:
+        try:
+            self.drops.stop()
+        except Exception as exc:  # a leállás ne akadjon el a naplózón
+            log(f"[drop log] leállítási hiba: {exc}")
         self.sessions.stop_reaper()
         # Leállításkor ne maradjon nyitva egyetlen engedély sem a TTL-ig.
         try:

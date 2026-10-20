@@ -89,6 +89,18 @@ add chain inet hatarvedelem forward
 #   nft delete rule inet hatarvedelem breakglass handle <handle>
 add chain inet hatarvedelem breakglass
 
+# Admin által testreszabott láncok. A portál tölti fel őket induláskor és
+# beállításmódosításkor; a sablon betöltése nem üríti őket, hogy egy
+# újratöltés ne nyissa meg vagy ne zárja el a beállított célokat.
+#   preauth:    bejelentkezés előtt is elérhető célok/portok (LAN és válasz)
+#   block:      mindig eldobott LAN-forgalom (a pre-auth előtt)
+#   preauth_nat: a pre-auth TCP 80 kikerüli a portál-átirányítást
+#   block_nat:  a blokkolt TCP 80-at már a redirect előtt eldobja
+add chain inet hatarvedelem preauth
+add chain inet hatarvedelem block
+add chain inet hatarvedelem preauth_nat
+add chain inet hatarvedelem block_nat
+
 add chain inet hatarvedelem input {
     type filter hook input priority filter; policy drop;
 }
@@ -122,6 +134,7 @@ table inet hatarvedelem {
         # IPv6-t nem továbbítunk. Az ip_forward sysctl csak az IPv4-re
         # vonatkozik; ez a szabály akkor is zár, ha az IPv6 forwarding
         # valamilyen okból bekapcsolódna.
+        meta nfproto ipv6 limit rate 10/minute burst 20 packets log prefix "dropjak-drop reason=ipv6 " group __DROP_LOG_GROUP__
         meta nfproto ipv6 drop
 
         # Forrás-IP hamisítás tiltása. A LAN-interfészen csak a LAN
@@ -129,16 +142,22 @@ table inet hatarvedelem {
         # LAN címét felvenni. Ez zárja ki, hogy egy kliens egy másik,
         # engedélyezett kliens IP-jével (vagy LAN-forrással a WAN felől)
         # használja a forward-szabályokat.
+        iifname "__LAN_IF__" ip saddr != __LAN_NET__ limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-lan " group __DROP_LOG_GROUP__
         iifname "__LAN_IF__" ip saddr != __LAN_NET__ drop
+        iifname "__WAN_IF__" ip saddr __LAN_NET__ limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-wan " group __DROP_LOG_GROUP__
         iifname "__WAN_IF__" ip saddr __LAN_NET__ drop
 
         # MAC-kötés: aki engedélyezett IP-t használ, annak a munkamenet
         # alatt rögzített MAC-címmel kell küldenie. Ez a DHCP-lejárat
         # után más géphez kerülő IP és a LAN-on belüli IP-hamisítás
         # ellen véd. A MAC-t a portál az ARP-táblából rögzíti.
+        iifname "__LAN_IF__" ip saddr @allowed_v4 ip saddr . ether saddr != @client_mac limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
         iifname "__LAN_IF__" ip saddr @allowed_v4 ip saddr . ether saddr != @client_mac drop
+        iifname "__LAN_IF__" meta l4proto tcp ct original ip saddr . ct original proto-dst @allowed_tcp ip saddr . ether saddr != @client_mac limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
         iifname "__LAN_IF__" meta l4proto tcp ct original ip saddr . ct original proto-dst @allowed_tcp ip saddr . ether saddr != @client_mac drop
+        iifname "__LAN_IF__" meta l4proto udp ct original ip saddr . ct original proto-dst @allowed_udp ip saddr . ether saddr != @client_mac limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
         iifname "__LAN_IF__" meta l4proto udp ct original ip saddr . ct original proto-dst @allowed_udp ip saddr . ether saddr != @client_mac drop
+        iifname "__LAN_IF__" ip saddr @allowed_icmp ip saddr . ether saddr != @client_mac limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
         iifname "__LAN_IF__" ip saddr @allowed_icmp ip saddr . ether saddr != @client_mac drop
 
         # Portra korlátozott hozzáférés. A ct original proto-dst a DNAT
@@ -169,11 +188,13 @@ table inet hatarvedelem {
 
         # A WAN felől ne lehessen a konténer forrásával csomagot küldeni:
         # a konténer kimenő engedélyei csak a Docker-híd felől érvényesek.
+        iifname "__WAN_IF__" ip saddr 172.30.0.2 limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=container-spoof " group __DROP_LOG_GROUP__
         iifname "__WAN_IF__" ip saddr 172.30.0.2 drop
 
         # A konténer ne indíthasson új kapcsolatot a belső LAN felé. A
         # kliens -> konténer kapcsolatok válaszai established állapotúak,
         # ezért azokat ez a szabály nem érinti.
+        ip saddr 172.30.0.2 ip daddr __LAN_NET__ ct state new limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=container-pivot " group __DROP_LOG_GROUP__
         ip saddr 172.30.0.2 ip daddr __LAN_NET__ ct state new drop
 
         # A Minecraft konténer kimenő forgalma. A konténer saját, dedikált
@@ -189,6 +210,18 @@ table inet hatarvedelem {
         # átengedett, így a kliens->konténer kapcsolat a portengedély
         # lejárta után is életben maradt (a conntrack törlése nélkül).
         ip daddr 172.30.0.2 ct state established,related ct original ip saddr 172.30.0.2 meta mark set __FWD_MARK__ accept
+
+        # Admin által beállított blokk (a pre-auth előtt) és a
+        # bejelentkezés előtti engedélyek. A pre-auth lánc a válaszirányt
+        # is lefedi, ezért feltétel nélkül hívjuk.
+        iifname "__LAN_IF__" jump block
+        jump preauth
+
+        # A fennmaradó, nem engedélyezett forgalom naplózott eldobása.
+        # A limit csak a naplózást korlátozza; a drop minden csomagra fut.
+        iifname "__LAN_IF__" limit rate 60/minute burst 120 packets log prefix "dropjak-drop reason=no-grant " group __DROP_LOG_GROUP__
+        iifname "__WAN_IF__" limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=wan-drop " group __DROP_LOG_GROUP__
+        drop
     }
 
     chain input {
@@ -199,6 +232,7 @@ table inet hatarvedelem {
         jump breakglass
         # A portál és az SSH IPv4-only; IPv6-on semmilyen bejövő forgalmat
         # nem fogadunk (a loopback kivételével).
+        meta nfproto ipv6 limit rate 10/minute burst 20 packets log prefix "dropjak-drop reason=ipv6 " group __DROP_LOG_GROUP__
         meta nfproto ipv6 drop
 
         # DHCP-kérés a címkiosztás előtt 0.0.0.0 forrással érkezik, ezért
@@ -208,28 +242,38 @@ table inet hatarvedelem {
 
         # Forrás-IP hamisítás tiltása a host felé is. A WAN felől tilos a
         # LAN címét felvenni; a LAN felől csak a LAN hálózata jöhet.
+        iifname "__LAN_IF__" ip saddr != __LAN_NET__ limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-lan " group __DROP_LOG_GROUP__
         iifname "__LAN_IF__" ip saddr != __LAN_NET__ drop
+        iifname "__WAN_IF__" ip saddr __LAN_NET__ limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-wan " group __DROP_LOG_GROUP__
         iifname "__WAN_IF__" ip saddr __LAN_NET__ drop
 
         # A host felé irányuló engedélyezett forgalom (SSH, DNS, ICMP) is
         # csak a munkamenet alatt rögzített MAC-csel jöhet a LAN-on. A portál
         # forgalmát ez nem érinti, mert a portál IP-je nincs a dinamikus
         # halmazokban.
+        iifname "__LAN_IF__" ip saddr @host_ssh_v4 ip saddr . ether saddr != @client_mac limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
         iifname "__LAN_IF__" ip saddr @host_ssh_v4 ip saddr . ether saddr != @client_mac drop
+        iifname "__LAN_IF__" ip saddr @allowed_v4 ip saddr . ether saddr != @client_mac limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
         iifname "__LAN_IF__" ip saddr @allowed_v4 ip saddr . ether saddr != @client_mac drop
+        iifname "__LAN_IF__" ip saddr @allowed_icmp ip saddr . ether saddr != @client_mac limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
         iifname "__LAN_IF__" ip saddr @allowed_icmp ip saddr . ether saddr != @client_mac drop
+        iifname "__LAN_IF__" udp dport 53 ip saddr . ether saddr != @client_mac limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
         iifname "__LAN_IF__" udp dport 53 ip saddr . ether saddr != @client_mac drop
+        iifname "__LAN_IF__" tcp dport 53 ip saddr . ether saddr != @client_mac limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
         iifname "__LAN_IF__" tcp dport 53 ip saddr . ether saddr != @client_mac drop
 
         # A meglévő TCP DNS-kapcsolat se maradjon életben a jogosultság
         # lejárta után. (Az UDP DNS minden kérése külön csomag, ezért azt a
         # lenti engedélyező szabályok zárják le.)
         iifname "__LAN_IF__" tcp dport 53 ct state established,related \
+            ip saddr != @allowed_v4 ip saddr . tcp dport != @allowed_tcp limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=dns-revoked " group __DROP_LOG_GROUP__
+        iifname "__LAN_IF__" tcp dport 53 ct state established,related \
             ip saddr != @allowed_v4 ip saddr . tcp dport != @allowed_tcp drop
 
         # Meglévő SSH-kapcsolat se maradjon életben, ha az IP kikerült a
         # host_ssh_v4 halmazból (lejárat, kilépés, összeomlás után is).
         # Ez a szabály a lenti általános established-accept elé kerül.
+        tcp dport 22 ct state established,related ip saddr != @host_ssh_v4 limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=ssh-revoked " group __DROP_LOG_GROUP__
         tcp dport 22 ct state established,related ip saddr != @host_ssh_v4 drop
 
         ct state established,related accept
@@ -265,9 +309,21 @@ table inet hatarvedelem {
         iifname "__LAN_IF__" ip saddr . udp dport @allowed_udp udp dport 53 accept
         iifname "__LAN_IF__" ip saddr @allowed_v4 tcp dport 53 accept
         iifname "__LAN_IF__" ip saddr . tcp dport @allowed_tcp tcp dport 53 accept
+
+        # A portálra nem engedélyezett bejövő forgalom naplózása. A lánc
+        # policy drop; a limit csak a naplózást korlátozza.
+        iifname "__LAN_IF__" limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=input-lan " group __DROP_LOG_GROUP__
+        iifname "__WAN_IF__" limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=input-wan " group __DROP_LOG_GROUP__
     }
 
     chain prerouting {
+        # A beállított blokkolt TCP 80-at már a portál-átirányítás előtt
+        # eldobjuk; a pre-auth TCP 80 pedig conntrack-jelölést kap, hogy a
+        # lenti redirect return-nel kikerülhető legyen.
+        iifname "__LAN_IF__" jump block_nat
+        iifname "__LAN_IF__" jump preauth_nat
+        iifname "__LAN_IF__" ct mark 0x50524541 return
+
         # Aki még nincs engedélyezve, HTTP-n (80) a belépőoldalra kerül.
         # A teljes és a portokra korlátozott hozzáférés is megkerüli a
         # redirectet, különben a TCP 80 engedély ellenére is a portálra

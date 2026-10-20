@@ -165,11 +165,37 @@ docker compose ps
 docker compose logs -f hatarvedelem
 ```
 
+The **Drop log** admin tab shows packets the firewall dropped, with filters
+for source/destination, protocol, port, reason and free-text search. Entries
+are written to `drops.jsonl` in the state volume and rotate at 10 MiB (5
+files kept). The log is captured through NFLOG (`nfnetlink_log`) on group 5;
+the kernel must support NFLOG, and the group must not be used by another
+process. Only packet headers are stored, never payloads.
+
+### Firewall customization
+
+The **Settings** admin tab manages three things:
+
+- **Pre-auth rules** — destination (IP/CIDR) and ports that are reachable
+  from the LAN *before* portal sign-in. Every LAN client can use them, so
+  only deliberately public services belong here. Port 80 entries also skip
+  the captive-portal redirect.
+- **Block rules** — destination/ports that are always dropped. The block is
+  evaluated before pre-auth, so it overrides a pre-auth entry.
+- **Host SSH policy** — `admin`, `any` or `off`, applied immediately.
+  Narrowing the policy revokes SSH access for sessions that no longer
+  qualify.
+
+Changes are validated, applied to nftables, and only then written atomically
+to `firewall-settings.json`; if the nftables update fails, the previous rules
+are restored. Invalid or corrupted settings fall back to an empty pre-auth
+list (fail-closed).
+
 ### Backup
 
 State is stored in the `hatarvedelem-state` volume
-(`/var/lib/hatarvedelem`): `users.json`, `groups.json`, `rules.json` and
-`audit.jsonl`.
+(`/var/lib/hatarvedelem`): `users.json`, `groups.json`, `rules.json`,
+`audit.jsonl`, `drops.jsonl` and `firewall-settings.json`.
 
 ```bash
 docker volume ls | grep hatarvedelem-state
@@ -199,6 +225,11 @@ deletes the volume; without `-v` it is kept.
   can clone an authorized client's IP and MAC, or ARP-spoof the gateway.
   Enable 802.1X, port security, DHCP snooping and dynamic ARP inspection on
   the switches where available.
+- **Pre-auth rules intentionally bypass the portal.** Any client on the LAN
+  can reach the configured destinations and ports without signing in. Treat
+  them as publicly exposed services: keep the list minimal, and never add
+  management services (SSH, database, hypervisor) unless they are separately
+  protected. The block list overrides pre-auth rules.
 - The `breakglass` nftables chain is intentionally not flushed when the rules
   are reloaded, so an emergency SSH rule survives a restart. Keep it empty;
   remove the temporary rule as soon as the deployment is reachable.
