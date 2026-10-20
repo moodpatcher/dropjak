@@ -37,8 +37,14 @@ bottom-right corner.
   are marked by the firewall; Docker's `DOCKER-USER` chain accepts only
   marked packets and drops everything else. If the firewall table disappears,
   Docker cannot open a bypass.
+- Failed sign-ins are counted per source IP. When an IP reaches the
+  configurable threshold within the time window, it is added to the
+  `banned_v4` set and its packets are dropped. The portal (and DHCP) remain
+  reachable so the client can see why it was banned and does not lose its IP
+  address. Bans are persisted in `fail2ban.json` and survive a restart; manual
+  bans can be created and lifted in the admin UI.
 - Every restart flushes the dynamic sets; users must sign in again. Persistent
-  state (users, groups, rules, audit log) lives in a Docker volume.
+  state (users, groups, rules, audit log, bans) lives in a Docker volume.
 - The container uses `network_mode: host` because the host's `forward` chain
   cannot be managed from a Docker bridge namespace. Only one instance can run.
 
@@ -182,6 +188,29 @@ files kept). The log is captured through NFLOG (`nfnetlink_log`) on group 5;
 the kernel must support NFLOG, and the group must not be used by another
 process. Only packet headers are stored, never payloads.
 
+The **Fail2ban** admin tab protects the portal login. Failed passwords are
+counted per source IP; after the configured number of attempts within the
+window, the IP is banned for the configured duration. The tab shows the
+status, the active bans with a live countdown, and the pending attempts. Any
+IP can also be banned or unbanned manually, and a ban can be lifted before it
+expires. The threshold, window and ban duration are editable at runtime; the
+`HV_FAIL2BAN*` variables only provide the initial defaults. Bans are written
+to `fail2ban.json` (mode `0600`) and restored on start, and every ban is also
+recorded in the drop log with reason `fail2ban`.
+
+If the admin UI is unreachable, the ban list can be managed from the CLI:
+
+```bash
+docker compose exec hatarvedelem python3 /opt/hatarvedelem/server.py fail2ban list
+docker compose exec hatarvedelem python3 /opt/hatarvedelem/server.py fail2ban unban 203.0.113.10
+docker compose exec hatarvedelem python3 /opt/hatarvedelem/server.py fail2ban unban-all
+```
+
+Run these as root (the default for `docker compose exec`); the ban/unban
+commands call `nft` and need `NET_ADMIN`. The running portal reloads
+`fail2ban.json` when it changes, so CLI changes appear in the admin UI within
+a few seconds without a restart.
+
 ### Firewall customization
 
 The **Settings** admin tab manages three things:
@@ -208,7 +237,7 @@ list (fail-closed).
 
 State is stored in the `hatarvedelem-state` volume
 (`/var/lib/hatarvedelem`): `users.json`, `groups.json`, `rules.json`,
-`audit.jsonl`, `drops.jsonl` and `firewall-settings.json`.
+`audit.jsonl`, `drops.jsonl`, `fail2ban.json` and `firewall-settings.json`.
 
 ```bash
 docker volume ls | grep hatarvedelem-state
@@ -243,6 +272,13 @@ deletes the volume; without `-v` it is kept.
   them as publicly exposed services: keep the list minimal, and never add
   management services (SSH, database, hypervisor) unless they are separately
   protected. The block list overrides pre-auth rules.
+- Fail2ban bans every packet from the source IP except traffic to the portal
+  and DHCP, so a banned client loses all network access, including SSH, until
+  the ban expires. A manual ban can lock out your own management IP; the
+  portal stays reachable from that IP so you can sign in and lift the ban,
+  and the CLI commands above work from the host console. Treat the threshold
+  and ban duration as a trade-off: a very low threshold makes it easy to lock
+  out legitimate clients behind a shared NAT address.
 - The `breakglass` nftables chain is intentionally not flushed when the rules
   are reloaded, so an emergency SSH rule survives a restart. Keep it empty;
   remove the temporary rule as soon as the deployment is reachable.

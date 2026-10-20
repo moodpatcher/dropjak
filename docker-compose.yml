@@ -93,6 +93,14 @@ services:
       HV_DROP_LOG_KEEP: ${HV_DROP_LOG_KEEP:-5}
       # A felületen beállított pre-auth/blokk szabályok és host SSH mód.
       HV_SETTINGS: ${HV_SETTINGS:-/var/lib/hatarvedelem/firewall-settings.json}
+      # Fail2ban: a sikertelen belépések számlálása és a forrás-IP tiltása.
+      # A küszöb, az időablak és a tiltás hossza a felületen is állítható;
+      # ezek csak az első indulás alapértékei.
+      HV_FAIL2BAN: ${HV_FAIL2BAN:-1}
+      HV_FAIL2BAN_MAX: ${HV_FAIL2BAN_MAX:-5}
+      HV_FAIL2BAN_WINDOW: ${HV_FAIL2BAN_WINDOW:-600}
+      HV_FAIL2BAN_BAN: ${HV_FAIL2BAN_BAN:-3600}
+      HV_FAIL2BAN_STATE: ${HV_FAIL2BAN_STATE:-/var/lib/hatarvedelem/fail2ban.json}
       # A forward-jelölés; a Docker DOCKER-USER guard ehhez igazodik.
       HV_FWD_MARK: ${HV_FWD_MARK:-0x44524a4b}
       HV_COOKIE_SECURE: ${HV_COOKIE_SECURE:-0}

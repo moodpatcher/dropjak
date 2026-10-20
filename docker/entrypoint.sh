@@ -274,7 +274,7 @@ load_firewall() {
     # így a rövid átadási időben sem marad nyitva senki.
     if [ "${HV_FLUSH_ON_START:-1}" = "1" ]; then
         for hv_set in allowed_v4 allowed_tcp allowed_udp allowed_icmp \
-                host_ssh_v4 client_mac; do
+                host_ssh_v4 client_mac banned_v4; do
             "$NFT_BIN" flush set inet hatarvedelem "$hv_set" \
                 || die "a(z) $hv_set halmaz ürítése nem sikerült"
         done

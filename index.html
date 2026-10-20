@@ -875,6 +875,7 @@
         <button type="button" data-admin="sessions"><span class="nav-ico" data-icon="sessions" aria-hidden="true"></span><span data-i18n="Munkamenetek">Munkamenetek</span></button>
         <button type="button" data-admin="firewall"><span class="nav-ico" data-icon="firewall" aria-hidden="true"></span><span data-i18n="Tűzfal">Tűzfal</span></button>
         <button type="button" data-admin="drops"><span class="nav-ico" data-icon="drops" aria-hidden="true"></span><span data-i18n="Drop napló">Drop napló</span></button>
+        <button type="button" data-admin="fail2ban"><span class="nav-ico" data-icon="fail2ban" aria-hidden="true"></span><span data-i18n="Fail2ban">Fail2ban</span></button>
         <button type="button" data-admin="logs"><span class="nav-ico" data-icon="logs" aria-hidden="true"></span><span data-i18n="Naplók">Naplók</span></button>
         <button type="button" data-admin="settings"><span class="nav-ico" data-icon="settings" aria-hidden="true"></span><span data-i18n="Beállítások">Beállítások</span></button>
       </aside>
@@ -945,6 +946,7 @@ const ICON_SVGS = {
   sessions: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/></svg>`,
   firewall: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>`,
   drops: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>`,
+  fail2ban: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M5.64 5.64l12.72 12.72"/></svg>`,
   logs: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>`,
   settings: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`,
   login: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="3" y1="12" x2="15" y2="12"/></svg>`,
@@ -1445,6 +1447,60 @@ const I18N = {
     'A pre-auth szabály a portál bejelentkezés nélkül is átengedi a megadott cél és port forgalmát. Üres cél esetén minden célra érvényes. Csak tudatosan nyilvános szolgáltatáshoz használd.': 'The pre-auth rule lets traffic to the given destination and port through without a portal sign-in. An empty destination means any destination. Only use it for a deliberately public service.',
     'WAN felől csak DNAT-olt (publikált) portokra érvényes. A cél a DNAT előtti cím (publikált Docker-portnál a VM IP-je), nem a konténer belső címe.': 'From the WAN side it only applies to DNATed (published) ports. The destination is the pre-DNAT address (for a published Docker port, the VM IP), not the container’s internal address.',
     'A tűzfalbeállítások mentve.': 'Firewall settings saved.',
+    // -- Fail2ban ------------------------------------------------------
+    'Fail2ban': 'Fail2ban',
+    'Sikertelen belépések tiltása forrás-IP szerint · a lista 5 másodpercenként frissül': 'Banning failed sign-ins by source IP · the list refreshes every 5 seconds',
+    'A fail2ban hálózati szinkronizálása nem sikerült:': 'Failed to synchronize fail2ban with the firewall:',
+    'A fail2ban adatok betöltése nem sikerült.': 'Failed to load fail2ban data.',
+    'Fail2ban állapot': 'Fail2ban status',
+    'az automatikus tiltás bekapcsolva': 'automatic banning is enabled',
+    'automatikus tiltás bekapcsolva': 'automatic banning enabled',
+    'az automatikus tiltás kikapcsolva': 'automatic banning is disabled',
+    'Tiltott IP': 'Banned IPs',
+    'automatikus': 'automatic',
+    'kézi': 'manual',
+    'Várakozó próbálkozás': 'Pending attempts',
+    'a küszöb elérése előtt': 'before reaching the threshold',
+    'Küszöb': 'Threshold',
+    'kísérlet': 'attempts',
+    'tiltás': 'ban',
+    'Sikertelen belépés a tiltásig': 'Failed sign-ins before ban',
+    'Időablak (perc)': 'Window (minutes)',
+    'Tiltás hossza (perc)': 'Ban duration (minutes)',
+    'A küszöb elérésekor a forrás IP bekerül a banned_v4 halmazba, és a tűzfal eldobja a csomagjait. A portál és a DHCP kivétel, hogy a kliens lássa a tiltás okát, és ne veszítse el az IP-címét. A tiltás a megadott idő után automatikusan lejár; a kézi tiltások megmaradnak, ha az automatikus tiltást kikapcsolod.': 'When the threshold is reached, the source IP is added to the banned_v4 set and the firewall drops its packets. The portal and DHCP are exempt so the client can see why it was banned and does not lose its IP address. The ban expires automatically after the given time; manual bans remain when you disable automatic banning.',
+    'Adj meg érvényes számokat a küszöbhöz és az időtartamokhoz.': 'Enter valid numbers for the threshold and durations.',
+    'IP-cím kézi tiltása': 'Manually ban an IP address',
+    'Add meg a letiltandó IP-címet.': 'Enter the IP address to ban.',
+    'Adj meg érvényes tiltási időt percben.': 'Enter a valid ban duration in minutes.',
+    'Tiltás': 'Ban',
+    'Típus': 'Type',
+    'Kezdete': 'Started',
+    'Kísérletek': 'Attempts',
+    'Feloldás': 'Unban',
+    'Sikertelen kísérlet': 'Failed attempts',
+    'Időablak vége': 'Window ends',
+    'Tiltott IP-címek': 'Banned IP addresses',
+    'Jelenleg nincs fail2ban tiltás. A tiltott IP-címek itt jelennek meg a hátralévő idővel.': 'There are currently no fail2ban bans. Banned IP addresses appear here with the time remaining.',
+    'Összes tiltás feloldása': 'Unban all',
+    'Várakozó próbálkozások': 'Pending attempts',
+    'Nincs várakozó sikertelen belépés az időablakban.': 'No pending failed sign-ins in the window.',
+    'A sikertelen jelszavas belépések számítanak, a captcha- és a kérésgyakorisági hibák nem. A tiltott IP csomagjait a tűzfal dobja el; a portál és a DHCP kivétel, hogy a kliens értesülhessen a tiltásról. A tiltások újraindítás után is megmaradnak, és a lejárat után a kernel automatikusan feloldja őket.': 'Failed password sign-ins count; captcha and rate-limit failures do not. The firewall drops packets from a banned IP; the portal and DHCP are exempt so the client can be told about the ban. Bans survive a restart, and the kernel lifts them automatically when they expire.',
+    'Fail2ban tiltás': 'Fail2ban ban',
+    'lejárat': 'expires',
+    'fail2ban': 'fail2ban ban',
+    'Ez az IP-cím fail2ban tiltás alatt áll a túl sok sikertelen belépés miatt. Próbáld újra később.': 'This IP address is banned by fail2ban because of too many failed sign-ins. Try again later.',
+    'Túl sok sikertelen belépés: az IP-címedet a tűzfal letiltotta. Próbáld újra később.': 'Too many failed sign-ins: the firewall has banned your IP address. Try again later.',
+    'A fail2ban beállításai mentve.': 'Fail2ban settings saved.',
+    'hiányzó IP-cím': 'missing IP address',
+    'ez az IP-cím nem volt letiltva': 'this IP address was not banned',
+    'a saját IP-címed nem tiltható le a portálról': 'you cannot ban your own IP address from the portal',
+    'érvénytelen IP-cím': 'invalid IP address',
+    'csak IPv4-cím tiltható le': 'only an IPv4 address can be banned',
+    'a helyi (loopback) cím nem tiltható le': 'a loopback address cannot be banned',
+    'a 0.0.0.0 cím nem tiltható le': 'the 0.0.0.0 address cannot be banned',
+    'a multicast cím nem tiltható le': 'a multicast address cannot be banned',
+    'a broadcast cím nem tiltható le': 'the broadcast address cannot be banned',
+    'a tiltás hossza egész szám (másodperc) kell': 'the ban duration must be a whole number of seconds',
   },
 
   de: {
@@ -1896,6 +1952,60 @@ const I18N = {
     'A pre-auth szabály a portál bejelentkezés nélkül is átengedi a megadott cél és port forgalmát. Üres cél esetén minden célra érvényes. Csak tudatosan nyilvános szolgáltatáshoz használd.': 'Die Pre-auth-Regel lässt Verkehr zum angegebenen Ziel und Port ohne Portal-Anmeldung durch. Ein leeres Ziel bedeutet beliebiges Ziel. Verwende sie nur für einen bewusst öffentlichen Dienst.',
     'WAN felől csak DNAT-olt (publikált) portokra érvényes. A cél a DNAT előtti cím (publikált Docker-portnál a VM IP-je), nem a konténer belső címe.': 'Von der WAN-Seite gilt sie nur für DNATete (veröffentlichte) Ports. Das Ziel ist die Adresse vor dem DNAT (bei einem veröffentlichten Docker-Port die VM-IP), nicht die interne Container-Adresse.',
     'A tűzfalbeállítások mentve.': 'Firewall-Einstellungen gespeichert.',
+    // -- Fail2ban ------------------------------------------------------
+    'Fail2ban': 'Fail2ban',
+    'Sikertelen belépések tiltása forrás-IP szerint · a lista 5 másodpercenként frissül': 'Sperre fehlgeschlagener Anmeldungen nach Quell-IP · die Liste aktualisiert sich alle 5 Sekunden',
+    'A fail2ban hálózati szinkronizálása nem sikerült:': 'Die Fail2ban-Synchronisierung mit der Firewall ist fehlgeschlagen:',
+    'A fail2ban adatok betöltése nem sikerült.': 'Die Fail2ban-Daten konnten nicht geladen werden.',
+    'Fail2ban állapot': 'Fail2ban-Status',
+    'az automatikus tiltás bekapcsolva': 'automatische Sperre ist aktiviert',
+    'automatikus tiltás bekapcsolva': 'automatische Sperre aktiviert',
+    'az automatikus tiltás kikapcsolva': 'automatische Sperre ist deaktiviert',
+    'Tiltott IP': 'Gesperrte IPs',
+    'automatikus': 'automatisch',
+    'kézi': 'manuell',
+    'Várakozó próbálkozás': 'Ausstehende Versuche',
+    'a küszöb elérése előtt': 'vor Erreichen der Schwelle',
+    'Küszöb': 'Schwelle',
+    'kísérlet': 'Versuche',
+    'tiltás': 'Sperre',
+    'Sikertelen belépés a tiltásig': 'Fehlgeschlagene Anmeldungen bis zur Sperre',
+    'Időablak (perc)': 'Zeitfenster (Minuten)',
+    'Tiltás hossza (perc)': 'Sperrdauer (Minuten)',
+    'A küszöb elérésekor a forrás IP bekerül a banned_v4 halmazba, és a tűzfal eldobja a csomagjait. A portál és a DHCP kivétel, hogy a kliens lássa a tiltás okát, és ne veszítse el az IP-címét. A tiltás a megadott idő után automatikusan lejár; a kézi tiltások megmaradnak, ha az automatikus tiltást kikapcsolod.': 'Beim Erreichen der Schwelle wird die Quell-IP in die Menge banned_v4 aufgenommen und die Firewall verwirft ihre Pakete. Portal und DHCP sind ausgenommen, damit der Client den Grund der Sperre sieht und seine IP-Adresse nicht verliert. Die Sperre läuft nach der angegebenen Zeit automatisch ab; manuelle Sperren bleiben bestehen, wenn du die automatische Sperre deaktivierst.',
+    'Adj meg érvényes számokat a küszöbhöz és az időtartamokhoz.': 'Gib gültige Zahlen für Schwelle und Zeiträume ein.',
+    'IP-cím kézi tiltása': 'IP-Adresse manuell sperren',
+    'Add meg a letiltandó IP-címet.': 'Gib die zu sperrende IP-Adresse ein.',
+    'Adj meg érvényes tiltási időt percben.': 'Gib eine gültige Sperrdauer in Minuten ein.',
+    'Tiltás': 'Sperren',
+    'Típus': 'Typ',
+    'Kezdete': 'Beginn',
+    'Kísérletek': 'Versuche',
+    'Feloldás': 'Aufheben',
+    'Sikertelen kísérlet': 'Fehlgeschlagene Versuche',
+    'Időablak vége': 'Zeitfenster endet',
+    'Tiltott IP-címek': 'Gesperrte IP-Adressen',
+    'Jelenleg nincs fail2ban tiltás. A tiltott IP-címek itt jelennek meg a hátralévő idővel.': 'Derzeit gibt es keine Fail2ban-Sperren. Gesperrte IP-Adressen erscheinen hier mit der verbleibenden Zeit.',
+    'Összes tiltás feloldása': 'Alle Sperren aufheben',
+    'Várakozó próbálkozások': 'Ausstehende Versuche',
+    'Nincs várakozó sikertelen belépés az időablakban.': 'Keine ausstehenden fehlgeschlagenen Anmeldungen im Zeitfenster.',
+    'A sikertelen jelszavas belépések számítanak, a captcha- és a kérésgyakorisági hibák nem. A tiltott IP csomagjait a tűzfal dobja el; a portál és a DHCP kivétel, hogy a kliens értesülhessen a tiltásról. A tiltások újraindítás után is megmaradnak, és a lejárat után a kernel automatikusan feloldja őket.': 'Fehlgeschlagene Passwort-Anmeldungen zählen; Captcha- und Ratenlimit-Fehler nicht. Die Firewall verwirft Pakete einer gesperrten IP; Portal und DHCP sind ausgenommen, damit der Client über die Sperre informiert werden kann. Sperren überleben einen Neustart und werden nach Ablauf automatisch vom Kernel aufgehoben.',
+    'Fail2ban tiltás': 'Fail2ban-Sperre',
+    'lejárat': 'Ablauf',
+    'fail2ban': 'Fail2ban-Sperre',
+    'Ez az IP-cím fail2ban tiltás alatt áll a túl sok sikertelen belépés miatt. Próbáld újra később.': 'Diese IP-Adresse ist wegen zu vieler fehlgeschlagener Anmeldungen durch Fail2ban gesperrt. Versuche es später erneut.',
+    'Túl sok sikertelen belépés: az IP-címedet a tűzfal letiltotta. Próbáld újra később.': 'Zu viele fehlgeschlagene Anmeldungen: Die Firewall hat deine IP-Adresse gesperrt. Versuche es später erneut.',
+    'A fail2ban beállításai mentve.': 'Fail2ban-Einstellungen gespeichert.',
+    'hiányzó IP-cím': 'fehlende IP-Adresse',
+    'ez az IP-cím nem volt letiltva': 'diese IP-Adresse war nicht gesperrt',
+    'a saját IP-címed nem tiltható le a portálról': 'du kannst deine eigene IP-Adresse nicht über das Portal sperren',
+    'érvénytelen IP-cím': 'ungültige IP-Adresse',
+    'csak IPv4-cím tiltható le': 'nur eine IPv4-Adresse kann gesperrt werden',
+    'a helyi (loopback) cím nem tiltható le': 'eine Loopback-Adresse kann nicht gesperrt werden',
+    'a 0.0.0.0 cím nem tiltható le': 'die Adresse 0.0.0.0 kann nicht gesperrt werden',
+    'a multicast cím nem tiltható le': 'eine Multicast-Adresse kann nicht gesperrt werden',
+    'a broadcast cím nem tiltható le': 'die Broadcast-Adresse kann nicht gesperrt werden',
+    'a tiltás hossza egész szám (másodperc) kell': 'die Sperrdauer muss eine ganze Zahl in Sekunden sein',
   },
 };
 
@@ -1982,6 +2092,23 @@ const I18N_PATTERNS = {
     [/^(.+): (\d+)–(\d+) perc lehet$/, m => `${m[1]}: must be between ${m[2]} and ${m[3]} minutes`],
     [/^ellenőrzés nem elérhető \((.+)\)$/, m => `verification unavailable (${m[1]})`],
     [/^Captcha: (.+)$/, m => `Captcha: ${tr(m[1])}`],
+    [/^Letiltod a\(z\) (.+) IP-címet\? A csomagjait a tűzfal eldobja\.$/, m => `Ban ${m[1]}? The firewall will drop its packets.`],
+    [/^Feloldod (.+) tiltását\? A csomagjai ismét áthaladhatnak, ha van érvényes hozzáférésük\.$/, m => `Unban ${m[1]}? Its packets can pass again if it has valid access.`],
+    [/^Feloldod az összes fail2ban tiltást\? Minden tiltott IP csomagjai ismét áthaladhatnak\.$/, 'Unban every fail2ban ban? Packets from all banned IPs can pass again.'],
+    [/^(.+) forrás IP tiltva$/, m => `${m[1]} source IP banned`],
+    [/^(\d+) sikertelen kísérlet$/, m => `${m[1]} failed attempts`],
+    [/^(.+) letiltva\.$/, m => `${m[1]} banned.`],
+    [/^(.+) tiltása feloldva\.$/, m => `${m[1]}'s ban lifted.`],
+    [/^(\d+) tiltás feloldva\.$/, m => `${m[1]} bans lifted.`],
+    [/^a próbálkozások száma: (\d+) és (\d+) között lehet$/, m => `number of attempts: must be between ${m[1]} and ${m[2]}`],
+    [/^az időablak: (\d+) és (\d+) között lehet$/, m => `time window: must be between ${m[1]} and ${m[2]}`],
+    [/^a tiltás hossza: (\d+) és (\d+) között lehet$/, m => `ban duration: must be between ${m[1]} and ${m[2]}`],
+    [/^a tiltás hossza (\d+) és (\d+) másodperc között lehet$/, m => `ban duration must be between ${m[1]} and ${m[2]} seconds`],
+    [/^a\(z\) (.+) tűzfal-tiltása nem sikerült: (.+)$/, m => `failed to ban ${m[1]} in the firewall: ${m[2]}`],
+    [/^a\(z\) (.+) tiltásának feloldása nem sikerült: (.+)$/, m => `failed to lift the ban on ${m[1]}: ${m[2]}`],
+    [/^a tiltáslista mentése nem sikerült: (.+)$/, m => `failed to save the ban list: ${m[1]}`],
+    [/^a fail2ban művelet nem sikerült: (.+)$/, m => `the fail2ban operation failed: ${m[1]}`],
+    [/^érvénytelen IP-cím: (.+)$/, m => `invalid IP address: ${m[1]}`],
   ],
   de: [
     [/^(\d+) lánc$/, m => `${m[1]} ${Number(m[1]) === 1 ? 'Kette' : 'Ketten'}`],
@@ -2065,6 +2192,23 @@ const I18N_PATTERNS = {
     [/^(.+): (\d+)–(\d+) perc lehet$/, m => `${m[1]}: muss zwischen ${m[2]} und ${m[3]} Minuten liegen`],
     [/^ellenőrzés nem elérhető \((.+)\)$/, m => `Prüfung nicht erreichbar (${m[1]})`],
     [/^Captcha: (.+)$/, m => `Captcha: ${tr(m[1])}`],
+    [/^Letiltod a\(z\) (.+) IP-címet\? A csomagjait a tűzfal eldobja\.$/, m => `${m[1]} sperren? Die Firewall verwirft die Pakete.`],
+    [/^Feloldod (.+) tiltását\? A csomagjai ismét áthaladhatnak, ha van érvényes hozzáférésük\.$/, m => `Sperre für ${m[1]} aufheben? Die Pakete können wieder passieren, wenn ein gültiger Zugriff besteht.`],
+    [/^Feloldod az összes fail2ban tiltást\? Minden tiltott IP csomagjai ismét áthaladhatnak\.$/, 'Alle Fail2ban-Sperren aufheben? Die Pakete aller gesperrten IPs können wieder passieren.'],
+    [/^(.+) forrás IP tiltva$/, m => `${m[1]} Quell-IP gesperrt`],
+    [/^(\d+) sikertelen kísérlet$/, m => `${m[1]} fehlgeschlagene Versuche`],
+    [/^(.+) letiltva\.$/, m => `${m[1]} gesperrt.`],
+    [/^(.+) tiltása feloldva\.$/, m => `Sperre für ${m[1]} aufgehoben.`],
+    [/^(\d+) tiltás feloldva\.$/, m => `${m[1]} Sperren aufgehoben.`],
+    [/^a próbálkozások száma: (\d+) és (\d+) között lehet$/, m => `Anzahl der Versuche: muss zwischen ${m[1]} und ${m[2]} liegen`],
+    [/^az időablak: (\d+) és (\d+) között lehet$/, m => `Zeitfenster: muss zwischen ${m[1]} und ${m[2]} liegen`],
+    [/^a tiltás hossza: (\d+) és (\d+) között lehet$/, m => `Sperrdauer: muss zwischen ${m[1]} und ${m[2]} liegen`],
+    [/^a tiltás hossza (\d+) és (\d+) másodperc között lehet$/, m => `die Sperrdauer muss zwischen ${m[1]} und ${m[2]} Sekunden liegen`],
+    [/^a\(z\) (.+) tűzfal-tiltása nem sikerült: (.+)$/, m => `Sperre für ${m[1]} in der Firewall fehlgeschlagen: ${m[2]}`],
+    [/^a\(z\) (.+) tiltásának feloldása nem sikerült: (.+)$/, m => `Aufheben der Sperre für ${m[1]} fehlgeschlagen: ${m[2]}`],
+    [/^a tiltáslista mentése nem sikerült: (.+)$/, m => `Speichern der Sperrliste fehlgeschlagen: ${m[1]}`],
+    [/^a fail2ban művelet nem sikerült: (.+)$/, m => `die Fail2ban-Operation ist fehlgeschlagen: ${m[1]}`],
+    [/^érvénytelen IP-cím: (.+)$/, m => `ungültige IP-Adresse: ${m[1]}`],
   ],
 };
 
@@ -2427,6 +2571,10 @@ let dropFilter = { src: '', dst: '', proto: '', port: '', reason: '', q: '', lim
 let sessionsState = null;
 let sessionClockTimer = null;
 let sessionPollTimer = null;
+let fail2banState = null;
+let fail2banClockTimer = null;
+let fail2banPollTimer = null;
+let fail2banDraft = null;      // megőrzött űrlapértékek hiba után
 let firewallView = 'overview';        // 'overview' (vizuális) | 'raw'
 let firewallRulesState = null;
 let firewallRulesError = '';
@@ -2577,6 +2725,12 @@ function stopSessionTimers() {
 function stopFirewallTimers() {
   clearInterval(firewallPollTimer);
   firewallPollTimer = null;
+}
+function stopFail2banTimers() {
+  clearInterval(fail2banClockTimer);
+  clearInterval(fail2banPollTimer);
+  fail2banClockTimer = null;
+  fail2banPollTimer = null;
 }
 function startSessionTimers() {
   clearInterval(tickTimer);
@@ -3007,6 +3161,7 @@ function adminSetTab(name) {
   adminTabName = name;
   adminEdit = null;
   adminDraft = null;
+  fail2banDraft = null;
   adminFlash = null;
   for (const button of adminNav.querySelectorAll('button')) {
     button.classList.toggle('active', button.dataset.admin === name);
@@ -3015,9 +3170,11 @@ function adminSetTab(name) {
   stopDropTimer();
   stopSessionTimers();
   stopFirewallTimers();
+  stopFail2banTimers();
   if (name === 'logs') loadLogs();
   else if (name === 'drops') loadDrops();
   else if (name === 'sessions') loadSessions();
+  else if (name === 'fail2ban') loadFail2ban();
   else if (name === 'firewall') {
     renderAdminPanel();
     loadFirewallRules().then(() => {
@@ -3044,6 +3201,7 @@ const ADMIN_HEAD_ICONS = {
   'Tűzfal-nézet': 'firewall',
   'Tűzfal testreszabása': 'settings',
   'Eldobott csomagok': 'drops',
+  'Fail2ban': 'fail2ban',
   'Naplók': 'logs',
 };
 function adminHead(title, subtitle, actionLabel, action) {
@@ -3171,14 +3329,18 @@ async function adminSend(path, payload) {
   try {
     const data = await postJson(path, payload);
     adminState = data;
-    adminFlash = { text: tr('Mentve.'), kind: 'ok' };
+    if (data.fail2ban) fail2banState = data.fail2ban;
+    adminFlash = { text: tr(data.message || 'Mentve.'), kind: 'ok' };
     adminEdit = null;
     adminDraft = null;
+    fail2banDraft = null;
     renderAdminPanel();
+    return true;
   } catch (err) {
     captureAdminDraft();
     adminFlash = { text: err.message || 'A művelet nem sikerült.', kind: 'err' };
     renderAdminPanel();
+    return false;
   }
 }
 
@@ -3770,6 +3932,7 @@ async function loadAdminState() {
     const data = await res.json();
     if (!res.ok || !data.ok) throw new Error(data.error || 'az admin adatok nem olvashatók');
     adminState = data;
+    if (data.fail2ban) fail2banState = data.fail2ban;
     renderAdminPanel();
   } catch (err) {
     adminFlash = { text: err.message || 'Az admin adatok betöltése nem sikerült.', kind: 'err' };
@@ -3783,7 +3946,7 @@ const DROP_REASONS = [
   'no-grant', 'wan-drop', 'spoof-lan', 'spoof-wan', 'mac',
   'input-lan', 'input-wan', 'block', 'docker-guard',
   'dns-revoked', 'ssh-revoked', 'container-spoof', 'container-pivot',
-  'ipv6', 'unknown'
+  'fail2ban', 'ipv6', 'unknown'
 ];
 
 function dropPortText(entry) {
@@ -3815,6 +3978,7 @@ const DROP_REASON_COLORS = {
   'ssh-revoked': '#4f46e5',
   'container-spoof': '#9333ea',
   'container-pivot': '#db2777',
+  'fail2ban': '#b91c1c',
   'ipv6': '#64748b',
   'unknown': '#94a3b8'
 };
@@ -4261,7 +4425,25 @@ function dropDetail(entry) {
   if (entry.if_out) facts.push(`if_out=${entry.if_out}`);
   if (entry.hook !== undefined) facts.push(`hook=${entry.hook}`);
   if (entry.mark !== undefined) facts.push(`mark=${entry.mark}`);
+  if (entry.event === 'ban') {
+    facts.push(`event=ban`);
+    if (entry.attempts !== undefined) facts.push(`attempts=${entry.attempts}`);
+    if (entry.user) facts.push(`user=${entry.user}`);
+    if (entry.ban_until) facts.push(`until=${clockTime(entry.ban_until)}`);
+    if (entry.manual) facts.push('manual=1');
+  }
   const wrapper = el('div', { class: 'log-detail drop-detail' });
+  if (entry.event === 'ban') {
+    wrapper.append(el('div', { class: 'admin-flash err' },
+      el('b', { text: tr('Fail2ban tiltás') }),
+      ' — ',
+      el('span', {
+        text: tr(`${entry.src || '?'} forrás IP tiltva`)
+          + (entry.attempts !== undefined ? ` · ${tr(`${entry.attempts} sikertelen kísérlet`)}` : '')
+          + (entry.ban_until ? ` · ${tr('lejárat')}: ${clockTime(entry.ban_until)}` : '')
+      })
+    ));
+  }
   wrapper.append(el('div', { class: 'drop-facts mono', text: facts.join(' · ') || '—' }));
   wrapper.append(el('details', {},
     el('summary', { text: tr('teljes JSON') }),
@@ -4756,6 +4938,319 @@ async function loadSessions() {
   if (activeView === 'admin' && adminTabName === 'sessions') {
     sessionClockTimer = setInterval(tickSessionClocks, 1000);
     sessionPollTimer = setInterval(loadSessions, 5000);
+  }
+}
+
+/* ============================================================ admin: fail2ban */
+
+function fail2banData() {
+  return fail2banState || {};
+}
+function fail2banDraftFor(kind) {
+  return fail2banDraft && fail2banDraft.kind === kind ? fail2banDraft.values : null;
+}
+function fail2banDraftValue(kind, name, fallback) {
+  const values = fail2banDraftFor(kind);
+  return values && Object.prototype.hasOwnProperty.call(values, name)
+    ? values[name] : fallback;
+}
+function captureFail2banDraft(kind, box) {
+  const values = {};
+  for (const node of box.querySelectorAll('input, select, textarea')) {
+    if (!node.name) continue;
+    values[node.name] = node.type === 'checkbox' ? node.checked : node.value;
+  }
+  fail2banDraft = { kind, values };
+}
+function fail2banDraftError(text) {
+  adminFlash = { text: tr(text), kind: 'err' };
+  renderAdminPanel();
+}
+function tickFail2banClocks() {
+  for (const node of adminPanel.querySelectorAll('[data-ban-deadline]')) {
+    const left = Math.round((Number(node.dataset.banDeadline) - Date.now()) / 1000);
+    node.textContent = left > 0 ? fmtRemaining(left) : tr('lejárt');
+    node.classList.toggle('muted', left <= 0);
+  }
+  for (const node of adminPanel.querySelectorAll('[data-attempt-deadline]')) {
+    const left = Math.round((Number(node.dataset.attemptDeadline) - Date.now()) / 1000);
+    node.textContent = left > 0 ? fmtRemaining(left) : tr('lejárt');
+    node.classList.toggle('muted', left <= 0);
+  }
+}
+function fail2banStatusCards(fb) {
+  const bans = fb.bans || [];
+  const pending = fb.pending || [];
+  const auto = bans.filter(row => !row.manual).length;
+  const manual = bans.length - auto;
+  const running = fb.enabled !== false;
+  return el('div', { class: 'drop-stats' },
+    dropStat('Fail2ban állapot', tr(running ? 'aktív' : 'kikapcsolva'),
+      tr(running ? 'az automatikus tiltás bekapcsolva' : 'az automatikus tiltás kikapcsolva'),
+      running ? '#16a34a' : '#dc2626'),
+    dropStat('Tiltott IP', String(bans.length),
+      `${auto} ${tr('automatikus')} · ${manual} ${tr('kézi')}`, '#b91c1c'),
+    dropStat('Várakozó próbálkozás', String(pending.length),
+      tr('a küszöb elérése előtt'), '#ca8a04'),
+    dropStat('Küszöb', `${fb.max_attempts ?? '—'} ${tr('kísérlet')}`,
+      `${minutesOf(fb.window_seconds || 0)} ${tr('perc')} · ${tr('tiltás')}: ${minutesOf(fb.ban_seconds || 0)} ${tr('perc')}`,
+      '#2563eb')
+  );
+}
+function fail2banConfigForm(fb) {
+  const limits = fb.limits || {};
+  const box = el('form', { class: 'admin-form', onsubmit: e => {
+    e.preventDefault();
+    captureFail2banDraft('config', box);
+    const maxAttempts = Number(formValue(box, 'max_attempts'));
+    const windowMinutes = Number(formValue(box, 'window_minutes'));
+    const banMinutes = Number(formValue(box, 'ban_minutes'));
+    if (!Number.isFinite(maxAttempts) || !Number.isFinite(windowMinutes) || !Number.isFinite(banMinutes)) {
+      return fail2banDraftError('Adj meg érvényes számokat a küszöbhöz és az időtartamokhoz.');
+    }
+    adminSend('/api/admin/fail2ban', {
+      action: 'config',
+      enabled: boolValue(box, 'enabled'),
+      max_attempts: Math.round(maxAttempts),
+      window_seconds: Math.round(windowMinutes * 60),
+      ban_seconds: Math.round(banMinutes * 60)
+    });
+  }});
+  box.append(el('h3', { text: tr('Beállítások') }));
+  const grid = el('div', { class: 'form-grid' });
+  grid.append(el('div', { class: 'field' },
+    el('label', { text: tr('Állapot') }),
+    el('label', { style: 'display:flex;gap:7px;align-items:center;margin-top:9px' },
+      el('input', {
+        type: 'checkbox', name: 'enabled',
+        checked: !!fail2banDraftValue('config', 'enabled', fb.enabled !== false)
+      }),
+      tr('automatikus tiltás bekapcsolva')
+    )
+  ));
+  grid.append(el('div', { class: 'field' },
+    el('label', { text: tr('Sikertelen belépés a tiltásig') }),
+    el('input', {
+      type: 'number', name: 'max_attempts', required: true,
+      min: limits.min_attempts ?? 1, max: limits.max_attempts ?? 100, step: 1,
+      value: fail2banDraftValue('config', 'max_attempts', fb.max_attempts ?? 5)
+    })
+  ));
+  grid.append(el('div', { class: 'field' },
+    el('label', { text: tr('Időablak (perc)') }),
+    el('input', {
+      type: 'number', name: 'window_minutes', required: true,
+      min: Math.ceil((limits.min_window ?? 30) / 60),
+      max: Math.floor((limits.max_window ?? 86400) / 60),
+      step: 1,
+      value: fail2banDraftValue('config', 'window_minutes', minutesOf(fb.window_seconds || 600))
+    })
+  ));
+  grid.append(el('div', { class: 'field' },
+    el('label', { text: tr('Tiltás hossza (perc)') }),
+    el('input', {
+      type: 'number', name: 'ban_minutes', required: true,
+      min: Math.ceil((limits.min_ban ?? 60) / 60),
+      max: Math.floor((limits.max_ban ?? 2592000) / 60),
+      step: 1,
+      value: fail2banDraftValue('config', 'ban_minutes', minutesOf(fb.ban_seconds || 3600))
+    })
+  ));
+  box.append(grid);
+  box.append(el('p', {
+    class: 'port-hint',
+    text: tr('A küszöb elérésekor a forrás IP bekerül a banned_v4 halmazba, és a tűzfal eldobja a csomagjait. A portál és a DHCP kivétel, hogy a kliens lássa a tiltás okát, és ne veszítse el az IP-címét. A tiltás a megadott idő után automatikusan lejár; a kézi tiltások megmaradnak, ha az automatikus tiltást kikapcsolod.')
+  }));
+  box.append(el('div', { class: 'form-actions' },
+    el('button', { type: 'submit' }, tr('Mentés'))
+  ));
+  return box;
+}
+function fail2banBanForm(fb) {
+  const limits = fb.limits || {};
+  const box = el('form', { class: 'admin-form', onsubmit: e => {
+    e.preventDefault();
+    captureFail2banDraft('ban', box);
+    const ip = formValue(box, 'ip').trim();
+    if (!ip) return fail2banDraftError('Add meg a letiltandó IP-címet.');
+    const minutes = Number(formValue(box, 'ban_minutes'));
+    if (!Number.isFinite(minutes) || minutes <= 0) {
+      return fail2banDraftError('Adj meg érvényes tiltási időt percben.');
+    }
+    if (!confirm(tr(`Letiltod a(z) ${ip} IP-címet? A csomagjait a tűzfal eldobja.`))) return;
+    adminSend('/api/admin/fail2ban', {
+      action: 'ban', ip, seconds: Math.round(minutes * 60)
+    });
+  }});
+  box.append(el('h3', { text: tr('IP-cím kézi tiltása') }));
+  const grid = el('div', { class: 'form-grid' });
+  grid.append(el('div', { class: 'field' },
+    el('label', { text: tr('IP-cím') }),
+    el('input', {
+      name: 'ip', required: true, autocomplete: 'off', placeholder: '192.0.2.10',
+      value: fail2banDraftValue('ban', 'ip', '')
+    })
+  ));
+  grid.append(el('div', { class: 'field' },
+    el('label', { text: tr('Tiltás hossza (perc)') }),
+    el('input', {
+      type: 'number', name: 'ban_minutes', required: true,
+      min: Math.ceil((limits.min_ban ?? 60) / 60),
+      max: Math.floor((limits.max_ban ?? 2592000) / 60),
+      step: 1,
+      value: fail2banDraftValue('ban', 'ban_minutes', minutesOf(fb.ban_seconds || 3600))
+    })
+  ));
+  box.append(grid);
+  box.append(el('div', { class: 'form-actions' },
+    el('button', { type: 'submit', class: 'danger' }, tr('Tiltás'))
+  ));
+  return box;
+}
+function fail2banBannedTable(bans) {
+  const wrap = el('div', { class: 'table-wrap' });
+  const table = el('table');
+  table.append(el('thead', {}, el('tr', {},
+    el('th', { text: tr('IP-cím') }), el('th', { text: tr('Típus') }),
+    el('th', { text: tr('Kezdete') }), el('th', { text: tr('Hátralévő idő') }),
+    el('th', { text: tr('Kísérletek') }), el('th', { text: tr('Felhasználó') }),
+    el('th', { text: '' })
+  )));
+  const body = el('tbody');
+  for (const row of bans) {
+    const deadline = Number(row.until) * 1000;
+    const actions = el('td', { class: 'actions' },
+      el('button', {
+        type: 'button', class: 'ghost small',
+        onclick: () => fail2banUnban(row.ip)
+      }, tr('Feloldás'))
+    );
+    body.append(el('tr', {},
+      el('td', { class: 'mono' }, el('b', { text: row.ip })),
+      el('td', {}, el('span', {
+        class: 'pill ' + (row.manual ? 'admin' : 'off'),
+        text: tr(row.manual ? 'kézi' : 'automatikus')
+      })),
+      el('td', { class: 'mono', text: clockTime(row.since) }),
+      el('td', {
+        class: 'mono timer-cell', 'data-ban-deadline': String(deadline)
+      }, row.remaining > 0 ? fmtRemaining(row.remaining) : tr('lejárt')),
+      el('td', { class: 'mono', text: row.manual && !row.attempts ? '—' : String(row.attempts || 0) }),
+      el('td', { class: 'mono', text: row.user || '—' }),
+      actions
+    ));
+  }
+  table.append(body);
+  wrap.append(table);
+  return wrap;
+}
+function fail2banPendingTable(pending) {
+  const wrap = el('div', { class: 'table-wrap' });
+  const table = el('table');
+  table.append(el('thead', {}, el('tr', {},
+    el('th', { text: tr('IP-cím') }), el('th', { text: tr('Sikertelen kísérlet') }),
+    el('th', { text: tr('Felhasználó') }), el('th', { text: tr('Időablak vége') })
+  )));
+  const body = el('tbody');
+  for (const row of pending) {
+    const deadline = Number(row.expires_at) * 1000;
+    body.append(el('tr', {},
+      el('td', { class: 'mono', text: row.ip }),
+      el('td', { class: 'mono', text: `${row.count} / ${row.max_attempts}` }),
+      el('td', { class: 'mono', text: row.user || '—' }),
+      el('td', {
+        class: 'mono timer-cell', 'data-attempt-deadline': String(deadline)
+      }, fmtRemaining(Math.max(0, Math.round((deadline - Date.now()) / 1000))))
+    ));
+  }
+  table.append(body);
+  wrap.append(table);
+  return wrap;
+}
+async function fail2banUnban(ip) {
+  if (!confirm(tr(`Feloldod ${ip} tiltását? A csomagjai ismét áthaladhatnak, ha van érvényes hozzáférésük.`))) return;
+  await adminSend('/api/admin/fail2ban', { action: 'unban', ip });
+}
+async function fail2banUnbanAll() {
+  if (!confirm(tr('Feloldod az összes fail2ban tiltást? Minden tiltott IP csomagjai ismét áthaladhatnak.'))) return;
+  await adminSend('/api/admin/fail2ban', { action: 'unban_all' });
+}
+function renderFail2ban() {
+  const fb = fail2banData();
+  const bans = fb.bans || [];
+  const pending = fb.pending || [];
+  adminPanel.append(adminHead(
+    'Fail2ban',
+    'Sikertelen belépések tiltása forrás-IP szerint · a lista 5 másodpercenként frissül',
+    null, null
+  ));
+  if (fb.error) {
+    adminPanel.append(el('div', {
+      class: 'admin-flash err',
+      text: tr('A fail2ban hálózati szinkronizálása nem sikerült:') + ' ' + fb.error
+    }));
+  }
+  const notice = adminNotice(); if (notice) adminPanel.append(notice);
+  adminPanel.append(fail2banStatusCards(fb));
+  adminPanel.append(fail2banConfigForm(fb));
+  adminPanel.append(fail2banBanForm(fb));
+
+  adminPanel.append(el('h3', { text: tr('Tiltott IP-címek') }));
+  if (!bans.length) {
+    adminPanel.append(el('div', {
+      class: 'empty-box',
+      text: tr('Jelenleg nincs fail2ban tiltás. A tiltott IP-címek itt jelennek meg a hátralévő idővel.')
+    }));
+  } else {
+    adminPanel.append(fail2banBannedTable(bans));
+    if (bans.length > 1) {
+      adminPanel.append(el('div', { class: 'form-actions' },
+        el('button', {
+          type: 'button', class: 'ghost small',
+          onclick: fail2banUnbanAll
+        }, tr('Összes tiltás feloldása'))
+      ));
+    }
+  }
+
+  adminPanel.append(el('h3', { text: tr('Várakozó próbálkozások') }));
+  if (!pending.length) {
+    adminPanel.append(el('div', {
+      class: 'empty-box',
+      text: tr('Nincs várakozó sikertelen belépés az időablakban.')
+    }));
+  } else {
+    adminPanel.append(fail2banPendingTable(pending));
+  }
+  adminPanel.append(el('p', {
+    class: 'hint',
+    text: tr('A sikertelen jelszavas belépések számítanak, a captcha- és a kérésgyakorisági hibák nem. A tiltott IP csomagjait a tűzfal dobja el; a portál és a DHCP kivétel, hogy a kliens értesülhessen a tiltásról. A tiltások újraindítás után is megmaradnak, és a lejárat után a kernel automatikusan feloldja őket.')
+  }));
+}
+async function loadFail2ban() {
+  stopFail2banTimers();
+  try {
+    const res = await fetch('/api/admin/fail2ban', { cache: 'no-store' });
+    const data = await res.json();
+    if (!res.ok || !data.ok) throw new Error(data.error || 'a fail2ban adatok nem olvashatók');
+    fail2banState = data.fail2ban;
+    // Automatikus frissítésnél ne írjuk felül az éppen gépelt űrlapot.
+    const focus = document.activeElement;
+    const typing = !!focus && adminPanel.contains(focus) &&
+      ['INPUT', 'SELECT', 'TEXTAREA'].includes(focus.tagName);
+    if (!typing) {
+      const scrollTop = adminPanel.scrollTop;
+      adminFlash = null;
+      renderAdminPanel();
+      adminPanel.scrollTop = scrollTop;
+    }
+  } catch (err) {
+    adminFlash = { text: err.message || 'A fail2ban adatok betöltése nem sikerült.', kind: 'err' };
+    renderAdminPanel();
+  }
+  if (activeView === 'admin' && adminTabName === 'fail2ban') {
+    fail2banClockTimer = setInterval(tickFail2banClocks, 1000);
+    fail2banPollTimer = setInterval(loadFail2ban, 5000);
   }
 }
 
@@ -5471,6 +5966,7 @@ function renderAdminPanel() {
   else if (adminTabName === 'sessions') renderSessions();
   else if (adminTabName === 'firewall') renderFirewall();
   else if (adminTabName === 'drops') renderDrops();
+  else if (adminTabName === 'fail2ban') renderFail2ban();
   else if (adminTabName === 'settings') renderSettings();
   else renderLogs();
 }

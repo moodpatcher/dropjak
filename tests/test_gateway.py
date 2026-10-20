@@ -31,6 +31,7 @@ sys.path.insert(0, str(ROOT))
 
 import gateway  # noqa: E402
 import server    # noqa: E402
+import fail2ban as fail2ban_mod  # noqa: E402
 
 
 # ------------------------------------------------------------------ segédek
@@ -1437,10 +1438,18 @@ class HttpTests(unittest.TestCase):
             must_change_password=True,
         )
         cls.fw = gateway.Firewall(binary=str(cls.tools.nft), logger=lambda *_: None)
+        cls.fail2ban = fail2ban_mod.Fail2ban(
+            cls.fw,
+            path=os.path.join(cls.tmp.name, "fail2ban.json"),
+            audit=cls.audit,
+            logger=lambda *_: None,
+            on_ban=lambda record: cls.gw._on_fail2ban_ban(record),
+        )
         cls.gw = gateway.Gateway(
             users=cls.users, firewall=cls.fw, catalog=CATALOG,
             rules=cls.rules, groups=cls.groups, audit=cls.audit,
             rate_limiter=gateway.RateLimiter(window=60, maximum=1000),
+            fail2ban=cls.fail2ban,
         )
         cls.server = server.AppServer(("127.0.0.1", 0), cls.gw)
         import threading
@@ -1463,6 +1472,22 @@ class HttpTests(unittest.TestCase):
         self.tools.clear()
         self.tools.clear_fail()
         self.tools.clear_json()
+        self.reset_fail2ban()
+
+    def reset_fail2ban(self) -> None:
+        """Friss számláló minden HTTP-teszthez (a tiltásnevek ne szivárogjanak)."""
+        path = os.path.join(self.tmp.name, "fail2ban.json")
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        self.gw.fail2ban = fail2ban_mod.Fail2ban(
+            self.fw,
+            path=path,
+            audit=self.audit,
+            logger=lambda *_: None,
+            on_ban=lambda record: self.gw._on_fail2ban_ban(record),
+        )
 
     def conn(self, source: str | None = None) -> http.client.HTTPConnection:
         if source:
@@ -2089,11 +2114,18 @@ class AdminHttpTests(unittest.TestCase):
             os.path.join(cls.tmp.name, "drops.jsonl"),
             enabled=False, logger=lambda *_: None,
         )
+        cls.fail2ban = fail2ban_mod.Fail2ban(
+            cls.fw,
+            path=os.path.join(cls.tmp.name, "fail2ban.json"),
+            audit=cls.audit,
+            logger=lambda *_: None,
+            on_ban=lambda record: cls.gw._on_fail2ban_ban(record),
+        )
         cls.gw = gateway.Gateway(
             users=cls.users, firewall=cls.fw, catalog=CATALOG,
             rules=cls.rules, groups=cls.groups, audit=cls.audit,
             rate_limiter=gateway.RateLimiter(window=60, maximum=1000),
-            settings=cls.settings, drops=cls.drops,
+            settings=cls.settings, drops=cls.drops, fail2ban=cls.fail2ban,
         )
         cls.server = server.AppServer(("127.0.0.1", 0), cls.gw)
         import threading
@@ -2129,6 +2161,26 @@ class AdminHttpTests(unittest.TestCase):
                 os.unlink(base + suffix)
             except FileNotFoundError:
                 pass
+        self.reset_fail2ban()
+
+    def reset_fail2ban(self) -> None:
+        """Friss, izolált fail2ban-állapot minden teszthez."""
+        path = os.path.join(self.tmp.name, "fail2ban.json")
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        self.gw.fail2ban = fail2ban_mod.Fail2ban(
+            self.fw,
+            path=path,
+            audit=self.audit,
+            logger=lambda *_: None,
+            enabled=True,
+            max_attempts=3,
+            window_seconds=600,
+            ban_seconds=600,
+            on_ban=lambda record: self.gw._on_fail2ban_ban(record),
+        )
 
     def conn(self, source: str = "127.0.0.1") -> http.client.HTTPConnection:
         return http.client.HTTPConnection(
@@ -2866,6 +2918,195 @@ class AdminHttpTests(unittest.TestCase):
         self.tools.clear_fail()
 
 
+    # -- fail2ban ----------------------------------------------------------
+    def fail2ban_state(self, cookie: str) -> dict:
+        status, _, body = self.get(
+            "/api/admin/fail2ban", cookie=cookie, source="127.0.0.5"
+        )
+        self.assertEqual(status, 200, body)
+        data = json.loads(body)
+        self.assertTrue(data["ok"])
+        return data["fail2ban"]
+
+    def test_admin_fail2ban_config_and_rejections(self) -> None:
+        alice, _ = self.login("alice", "alice-jelszo-1", source="127.0.0.6")
+        status, _, _ = self.get(
+            "/api/admin/fail2ban", cookie=alice, source="127.0.0.6"
+        )
+        self.assertEqual(status, 403)
+        status, _, _ = self.post(
+            "/api/admin/fail2ban", {"action": "config", "enabled": True},
+            cookie=alice, source="127.0.0.6",
+        )
+        self.assertEqual(status, 403)
+
+        cookie = self.admin_cookie()
+        snapshot = self.fail2ban_state(cookie)
+        self.assertTrue(snapshot["enabled"])
+        self.assertEqual(snapshot["max_attempts"], 3)
+        self.assertEqual(snapshot["ban_seconds"], 600)
+
+        status, _, body = self.post(
+            "/api/admin/fail2ban",
+            {"action": "config", "enabled": True, "max_attempts": 4,
+             "window_seconds": 120, "ban_seconds": 900},
+            cookie=cookie, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+        data = json.loads(body)
+        self.assertEqual(data["message"], "A fail2ban beállításai mentve.")
+        self.assertEqual(data["fail2ban"]["max_attempts"], 4)
+        self.assertEqual(data["fail2ban"]["window_seconds"], 120)
+        self.assertEqual(data["fail2ban"]["ban_seconds"], 900)
+
+        for payload in (
+            {"action": "config", "max_attempts": 0},
+            {"action": "config", "window_seconds": 5},
+            {"action": "config", "ban_seconds": 5},
+            {"action": "config", "enabled": "igen"},
+            {"action": "ban", "ip": "127.0.0.1"},
+            {"action": "ban", "ip": "127.0.0.5"},
+            {"action": "ban", "ip": "10.0.0.0/8"},
+            {"action": "ismeretlen"},
+        ):
+            status, _, body = self.post(
+                "/api/admin/fail2ban", payload,
+                cookie=cookie, source="127.0.0.5",
+            )
+            self.assertEqual(status, 400, (payload, body))
+        status, _, body = self.post(
+            "/api/admin/fail2ban", {"action": "unban", "ip": "192.0.2.99"},
+            cookie=cookie, source="127.0.0.5",
+        )
+        self.assertEqual(status, 404, body)
+
+    def test_admin_manual_ban_and_unban(self) -> None:
+        cookie = self.admin_cookie()
+        status, _, body = self.post(
+            "/api/admin/fail2ban",
+            {"action": "ban", "ip": "192.0.2.50", "seconds": 600},
+            cookie=cookie, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+        data = json.loads(body)
+        self.assertEqual(data["message"], "192.0.2.50 letiltva.")
+        bans = data["fail2ban"]["bans"]
+        self.assertEqual(len(bans), 1)
+        self.assertEqual(bans[0]["ip"], "192.0.2.50")
+        self.assertTrue(bans[0]["manual"])
+        script = "\n".join(self.tools.script())
+        self.assertIn(
+            "add element inet hatarvedelem banned_v4 "
+            "{ 192.0.2.50 timeout 600s }", script
+        )
+        events = self.drops.store.read(reason="fail2ban")
+        self.assertTrue(events)
+        self.assertEqual(events[0]["event"], "ban")
+        self.assertEqual(events[0]["src"], "192.0.2.50")
+        self.assertTrue(events[0]["manual"])
+
+        status, _, body = self.post(
+            "/api/admin/fail2ban",
+            {"action": "ban", "ip": "192.0.2.51", "seconds": 600},
+            cookie=cookie, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+
+        status, _, body = self.post(
+            "/api/admin/fail2ban", {"action": "unban", "ip": "192.0.2.50"},
+            cookie=cookie, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+        self.assertEqual(
+            json.loads(body)["message"], "192.0.2.50 tiltása feloldva."
+        )
+        self.assertIn(
+            "nft delete element inet hatarvedelem banned_v4 { 192.0.2.50 }",
+            self.tools.deletes(),
+        )
+
+        status, _, body = self.post(
+            "/api/admin/fail2ban", {"action": "unban_all"},
+            cookie=cookie, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+        data = json.loads(body)
+        self.assertEqual(data["message"], "1 tiltás feloldva.")
+        self.assertEqual(data["fail2ban"]["banned_count"], 0)
+
+    def test_fail2ban_auto_ban_blocks_login_and_writes_drop_event(self) -> None:
+        source = "127.0.0.9"
+        for _ in range(2):
+            _, _, challenge_body = self.get("/api/challenge", source=source)
+            status, _, body = self.post(
+                "/api/login",
+                {"user": "alice", "pass": "rossz-jelszo",
+                 "captcha": solve(json.loads(challenge_body))},
+                source=source,
+            )
+            self.assertEqual(status, 403, body)
+            self.assertFalse(json.loads(body).get("banned", False))
+
+        _, _, challenge_body = self.get("/api/challenge", source=source)
+        status, _, body = self.post(
+            "/api/login",
+            {"user": "alice", "pass": "rossz-jelszo",
+             "captcha": solve(json.loads(challenge_body))},
+            source=source,
+        )
+        self.assertEqual(status, 403, body)
+        data = json.loads(body)
+        self.assertTrue(data.get("banned"))
+        self.assertTrue(595 <= data["remaining"] <= 600)
+        self.assertIn("Túl sok sikertelen belépés", data["error"])
+
+        script = "\n".join(self.tools.script())
+        self.assertIn(
+            "add element inet hatarvedelem banned_v4 "
+            "{ 127.0.0.9 timeout 600s }", script
+        )
+        events = self.drops.store.read(reason="fail2ban")
+        self.assertTrue(events)
+        self.assertEqual(events[0]["event"], "ban")
+        self.assertEqual(events[0]["src"], source)
+        self.assertEqual(events[0]["attempts"], 3)
+        self.assertEqual(events[0]["user"], "alice")
+        self.assertFalse(events[0]["manual"])
+
+        # A tiltott IP a helyes jelszóval is elutasításra kerül.
+        _, _, challenge_body = self.get("/api/challenge", source=source)
+        status, headers, body = self.post(
+            "/api/login",
+            {"user": "alice", "pass": "alice-jelszo-1",
+             "captcha": solve(json.loads(challenge_body))},
+            source=source,
+        )
+        self.assertEqual(status, 403, body)
+        self.assertTrue(json.loads(body).get("banned"))
+        self.assertIn("Retry-After", headers)
+
+        cookie = self.admin_cookie()
+        snapshot = self.fail2ban_state(cookie)
+        self.assertEqual(snapshot["banned_count"], 1)
+        self.assertEqual(snapshot["bans"][0]["ip"], source)
+        self.assertEqual(snapshot["bans"][0]["attempts"], 3)
+
+        status, _, body = self.post(
+            "/api/admin/fail2ban", {"action": "unban", "ip": source},
+            cookie=cookie, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+
+        _, _, challenge_body = self.get("/api/challenge", source=source)
+        status, _, body = self.post(
+            "/api/login",
+            {"user": "alice", "pass": "alice-jelszo-1",
+             "captcha": solve(json.loads(challenge_body))},
+            source=source,
+        )
+        self.assertEqual(status, 200, body)
+
+
 class RateLimitHttpTests(unittest.TestCase):
     def test_second_attempt_is_429(self) -> None:
         tmp = tempfile.TemporaryDirectory()
@@ -3468,6 +3709,261 @@ class FirewallCustomTests(unittest.TestCase):
                 block=[{"dst": "10.0.0.0/24", "proto": "icmp",
                         "ports": [1]}]
             )
+
+
+class FakeBanFirewall:
+    """A fail2ban tesztekhez elég tűzfal: hívásokat naplóz."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+        self.fail = False
+
+    def ban(self, ip: str, ttl: int) -> None:
+        if self.fail:
+            raise gateway.FirewallError("nft hiba")
+        self.calls.append(("ban", ip, ttl))
+
+    def unban(self, ip: str) -> None:
+        self.calls.append(("unban", ip))
+
+    def sync_bans(self, elements) -> None:
+        self.calls.append(("sync", list(elements)))
+
+
+class Fail2banTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmp.name, "fail2ban.json")
+        self.fw = FakeBanFirewall()
+        self.manager = self.make_manager()
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def make_manager(self, **kwargs):
+        options = {
+            "enabled": True,
+            "max_attempts": 3,
+            "window_seconds": 60,
+            "ban_seconds": 120,
+        }
+        options.update(kwargs)
+        return fail2ban_mod.Fail2ban(
+            self.fw, path=self.path, logger=lambda *_: None, **options
+        )
+
+    def test_normalize_ip_rejects_unsafe_addresses(self) -> None:
+        for value in (
+            "127.0.0.1", "0.0.0.0", "224.0.0.1", "239.255.255.250",
+            "255.255.255.255", "::1", "2001:db8::1", "nem-ip", "",
+        ):
+            with self.assertRaises(
+                fail2ban_mod.Fail2banError, msg=value
+            ):
+                fail2ban_mod.normalize_ip(value)
+        self.assertEqual(fail2ban_mod.normalize_ip("192.0.2.10"), "192.0.2.10")
+        self.assertEqual(
+            fail2ban_mod.normalize_ip(" 192.0.2.10 "), "192.0.2.10"
+        )
+        # A portál saját 127.0.0.1-e kivétel; más loopback cím tesztelhető.
+        self.assertEqual(fail2ban_mod.normalize_ip("127.0.0.9"), "127.0.0.9")
+
+    def test_auto_ban_after_threshold(self) -> None:
+        ip = "192.0.2.10"
+        self.assertIsNone(self.manager.record_failure(ip, "alice"))
+        self.assertIsNone(self.manager.record_failure(ip, "alice"))
+        view = self.manager.record_failure(ip, "alice")
+        self.assertIsNotNone(view)
+        self.assertEqual(view["ip"], ip)
+        self.assertEqual(view["attempts"], 3)
+        self.assertFalse(view["manual"])
+        self.assertGreater(view["remaining"], 0)
+        self.assertIn(("ban", ip, 120), self.fw.calls)
+        self.assertTrue(os.path.exists(self.path))
+        self.assertEqual(stat.S_IMODE(os.stat(self.path).st_mode), 0o600)
+        self.assertEqual(self.manager.snapshot()["pending"], [])
+
+        again = self.manager.record_failure(ip, "alice")
+        self.assertIsNotNone(again)
+        self.assertEqual(again["until"], view["until"])
+        self.assertEqual(
+            sum(1 for call in self.fw.calls if call[0] == "ban"), 1
+        )
+
+    def test_state_owner_defaults_to_state_directory(self) -> None:
+        info = os.stat(self.tmp.name)
+        self.assertEqual(
+            self.manager._state_owner(self.tmp.name),
+            (info.st_uid, info.st_gid),
+        )
+
+    def test_root_cli_save_preserves_state_owner(self) -> None:
+        # A CLI rootként fut, a portál viszont a szolgáltatásfelhasználóval.
+        # A mentésnek meg kell tartania a meglévő fájl tulajdonosát, különben
+        # a futó portál a következő mentésnél már nem tudná írni.
+        self.manager.ban("192.0.2.20", 120, manual=True)
+        info = os.stat(self.path)
+        self.assertEqual(
+            self.manager._state_owner(self.tmp.name),
+            (info.st_uid, info.st_gid),
+        )
+        calls = []
+        with mock.patch.object(fail2ban_mod.os, "geteuid", return_value=0), \
+                mock.patch.object(
+                    fail2ban_mod.os, "chown",
+                    side_effect=lambda *args: calls.append(args),
+                ):
+            self.assertTrue(self.manager.unban("192.0.2.20"))
+        self.assertTrue(calls)
+        self.assertEqual(calls[-1][1:], (info.st_uid, info.st_gid))
+
+    def write_state(self, payload) -> None:
+        """A CLI-hoz hasonló külső, atomi fájlírás."""
+        tmp = self.path + ".external"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+        os.replace(tmp, self.path)
+
+    def test_external_cli_ban_is_reloaded(self) -> None:
+        self.manager.ban("192.0.2.10", 120, manual=True)
+        with open(self.path, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        now = time.time()
+        payload["bans"].append({
+            "ip": "192.0.2.30", "since": now, "until": now + 120,
+            "attempts": 0, "user": "cli", "manual": True,
+        })
+        self.write_state(payload)
+        ips = {ban["ip"] for ban in self.manager.snapshot()["bans"]}
+        self.assertEqual(ips, {"192.0.2.10", "192.0.2.30"})
+        self.assertIsNotNone(self.manager.banned("192.0.2.30"))
+
+    def test_external_cli_unban_is_reloaded(self) -> None:
+        self.manager.ban("192.0.2.10", 120, manual=True)
+        with open(self.path, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        payload["bans"] = []
+        self.write_state(payload)
+        self.assertIsNone(self.manager.banned("192.0.2.10"))
+        self.assertEqual(self.manager.snapshot()["bans"], [])
+
+    def test_loopback_portal_traffic_is_exempt(self) -> None:
+        for _ in range(5):
+            self.assertIsNone(
+                self.manager.record_failure("127.0.0.1", "alice")
+            )
+        self.assertEqual(self.fw.calls, [])
+
+    def test_success_clears_pending_attempts(self) -> None:
+        ip = "192.0.2.11"
+        self.assertIsNone(self.manager.record_failure(ip, "alice"))
+        self.assertIsNone(self.manager.record_failure(ip, "alice"))
+        self.manager.record_success(ip)
+        self.assertIsNone(self.manager.record_failure(ip, "alice"))
+        self.assertEqual(self.manager.snapshot()["pending"][0]["count"], 1)
+
+    def test_manual_ban_persists_and_unban(self) -> None:
+        view = self.manager.ban("192.0.2.20", 600, manual=True, user="root")
+        self.assertEqual(view["ip"], "192.0.2.20")
+        self.assertTrue(view["manual"])
+        self.assertIn(("ban", "192.0.2.20", 600), self.fw.calls)
+
+        reloaded = self.make_manager()
+        bans = reloaded.snapshot()["bans"]
+        self.assertEqual([row["ip"] for row in bans], ["192.0.2.20"])
+        self.assertTrue(bans[0]["manual"])
+        self.assertEqual(bans[0]["user"], "root")
+
+        self.assertTrue(self.manager.unban("192.0.2.20"))
+        self.assertFalse(self.manager.unban("192.0.2.20"))
+        self.assertIn(("unban", "192.0.2.20"), self.fw.calls)
+
+    def test_ban_validation_never_reaches_firewall(self) -> None:
+        for payload in (
+            ("127.0.0.1", 600),
+            ("0.0.0.0", 600),
+            ("10.0.0.0/8", 600),
+            ("nem-ip", 600),
+            ("192.0.2.21", 30),
+            ("192.0.2.21", "600"),
+        ):
+            with self.assertRaises(fail2ban_mod.Fail2banError, msg=payload):
+                self.manager.ban(*payload)
+        self.assertEqual(self.fw.calls, [])
+
+    def test_configure_validates_and_disabling_keeps_manual_bans(self) -> None:
+        for _ in range(3):
+            self.manager.record_failure("192.0.2.30", "alice")
+        self.manager.ban("192.0.2.31", 600, manual=True)
+        self.fw.calls.clear()
+
+        snapshot = self.manager.configure({"enabled": False})
+        self.assertFalse(snapshot["enabled"])
+        bans = {row["ip"] for row in snapshot["bans"]}
+        self.assertEqual(bans, {"192.0.2.31"})
+        self.assertIn(("unban", "192.0.2.30"), self.fw.calls)
+        self.assertNotIn(("unban", "192.0.2.31"), self.fw.calls)
+        self.assertEqual(snapshot["pending"], [])
+        # Kikapcsolva a további kísérletek nem tiltanak.
+        for _ in range(5):
+            self.assertIsNone(
+                self.manager.record_failure("192.0.2.32", "alice")
+            )
+
+        snapshot = self.manager.configure({
+            "enabled": True, "max_attempts": 7,
+            "window_seconds": 90, "ban_seconds": 240,
+        })
+        self.assertTrue(snapshot["enabled"])
+        self.assertEqual(snapshot["max_attempts"], 7)
+        self.assertEqual(snapshot["window_seconds"], 90)
+        self.assertEqual(snapshot["ban_seconds"], 240)
+
+        for bad in (
+            {"max_attempts": 0}, {"max_attempts": True},
+            {"window_seconds": 10}, {"ban_seconds": 5},
+            {"enabled": "igen"},
+        ):
+            with self.assertRaises(
+                fail2ban_mod.Fail2banError, msg=bad
+            ):
+                self.manager.configure(bad)
+
+    def test_sync_restores_remaining_ttl(self) -> None:
+        self.manager.ban("192.0.2.40", 600, manual=True)
+        self.fw.calls.clear()
+        self.assertTrue(self.manager.sync())
+        sync_calls = [call for call in self.fw.calls if call[0] == "sync"]
+        self.assertEqual(len(sync_calls), 1)
+        elements = sync_calls[0][1]
+        self.assertEqual(elements[0][0], "192.0.2.40")
+        self.assertTrue(540 <= elements[0][1] <= 600)
+
+    def test_expired_ban_is_pruned(self) -> None:
+        self.manager.ban("192.0.2.41", 600, manual=True)
+        self.manager._bans["192.0.2.41"]["until"] = time.time() - 1
+        self.assertEqual(self.manager.snapshot()["banned_count"], 0)
+        self.assertIsNone(self.manager.banned("192.0.2.41"))
+
+    def test_firewall_failure_keeps_attempts_and_retries(self) -> None:
+        ip = "192.0.2.50"
+        self.fw.fail = True
+        self.assertIsNone(self.manager.record_failure(ip, "alice"))
+        self.assertIsNone(self.manager.record_failure(ip, "alice"))
+        with self.assertRaises(fail2ban_mod.Fail2banError):
+            self.manager.record_failure(ip, "alice")
+        self.assertEqual(self.manager.snapshot()["bans"], [])
+        self.fw.fail = False
+        view = self.manager.record_failure(ip, "alice")
+        self.assertIsNotNone(view)
+        self.assertEqual(view["attempts"], 4)
+
+    def test_corrupt_state_file_fails_closed(self) -> None:
+        Path(self.path).write_text("{", encoding="utf-8")
+        manager = self.make_manager()
+        snapshot = manager.snapshot()
+        self.assertEqual(snapshot["bans"], [])
+        self.assertTrue(snapshot["error"])
 
 
 if __name__ == "__main__":

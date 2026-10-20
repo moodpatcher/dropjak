@@ -74,6 +74,16 @@ add set inet hatarvedelem client_mac {
     size 4096
 }
 
+# fail2ban: a túl sok sikertelen belépést elkövető forrás-IP-k. Az elem a
+# beállított tiltási idővel jár le; a portál a sikeres tiltás után ide
+# teszi az IP-t, feloldáskor azonnal törli. A tiltott forrás csomagjai a
+# forward- és az input-láncban is eldobódnak (a portál és a DHCP kivétel).
+add set inet hatarvedelem banned_v4 {
+    type ipv4_addr
+    flags timeout
+    size 4096
+}
+
 # A forward láncot lentebb, a szabályokkal egy tranzakcióban hozzuk létre,
 # -10-es prioritással. Így az a Docker ip filter FORWARD lánca ELŐTT fut, és
 # a Docker DOCKER-USER lánca csak az általa megjelölt csomagokat engedi át.
@@ -146,6 +156,13 @@ table inet hatarvedelem {
         iifname "__LAN_IF__" ip saddr != __LAN_NET__ drop
         iifname "__WAN_IF__" ip saddr __LAN_NET__ limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-wan " group __DROP_LOG_GROUP__
         iifname "__WAN_IF__" ip saddr __LAN_NET__ drop
+
+        # fail2ban-tiltott forrás: a továbbított forgalom eldobása. Ez a
+        # szabály az engedélyező halmazok előtt fut, ezért egy korábban
+        # megnyitott hozzáférés sem érvényesül a tiltás alatt. A tiltás
+        # lejártával a kernel magától törli az elemet.
+        ip saddr @banned_v4 limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=fail2ban " group __DROP_LOG_GROUP__
+        ip saddr @banned_v4 drop
 
         # MAC-kötés: aki engedélyezett IP-t használ, annak a munkamenet
         # alatt rögzített MAC-címmel kell küldenie. Ez a DHCP-lejárat
@@ -246,6 +263,16 @@ table inet hatarvedelem {
         iifname "__LAN_IF__" ip saddr != __LAN_NET__ drop
         iifname "__WAN_IF__" ip saddr __LAN_NET__ limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-wan " group __DROP_LOG_GROUP__
         iifname "__WAN_IF__" ip saddr __LAN_NET__ drop
+
+        # fail2ban-tiltott forrás a host felé. A portál és a DHCP kivétel:
+        # a tiltott kliens továbbra is elérheti a belépőoldalt (ott látja a
+        # tiltás okát), és a DHCP-címe sem veszik el. Minden más host-
+        # szolgáltatás (SSH, DNS, ICMP) és a forward-forgalom eldobódik.
+        iifname "__LAN_IF__" udp sport 68 udp dport 67 accept
+        iifname "__LAN_IF__" tcp dport __PORT__ accept
+        ip saddr __PORTAL_NET__ tcp dport __PORT__ accept
+        ip saddr @banned_v4 limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=fail2ban " group __DROP_LOG_GROUP__
+        ip saddr @banned_v4 drop
 
         # A host felé irányuló engedélyezett forgalom (SSH, DNS, ICMP) is
         # csak a munkamenet alatt rögzített MAC-csel jöhet a LAN-on. A portál

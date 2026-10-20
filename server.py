@@ -28,6 +28,7 @@ from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import gateway
+import fail2ban as fail2ban_mod
 import settings_store
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -46,6 +47,10 @@ CONTENT_SECURITY_POLICY = (
     "connect-src 'self' https://challenges.cloudflare.com; "
     "base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 )
+
+
+def _log_fail2ban_error(ip: str, exc: Exception) -> None:
+    print(f"[{ip}] fail2ban: a tiltás nem sikerült: {exc}", flush=True)
 
 
 # -------------------------------------------------------------------- HTTP réteg
@@ -244,6 +249,7 @@ class Handler(BaseHTTPRequestHandler):
             "roles": [gateway.ROLE_USER, gateway.ROLE_ADMIN],
             "settings": self.gw.settings.snapshot(),
             "drop_log": self.gw.drops.status(),
+            "fail2ban": self.gw.fail2ban.snapshot(),
         }
 
     @staticmethod
@@ -342,6 +348,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._admin_drops()
         if path == "/api/admin/settings":
             return self._admin_settings_api()
+        if path == "/api/admin/fail2ban":
+            return self._admin_fail2ban_api()
         if path.startswith("/api/"):
             return self._json(404, {"ok": False, "error": "ismeretlen végpont"})
 
@@ -708,6 +716,103 @@ class Handler(BaseHTTPRequestHandler):
             payload["warnings"] = warnings
         self._json(200, payload)
 
+    def _admin_fail2ban_api(self) -> None:
+        if self._admin_guard() is None:
+            return
+        self._json(
+            200,
+            {
+                "ok": True,
+                "fail2ban": self.gw.fail2ban.snapshot(),
+                "server_time": time.time(),
+            },
+        )
+
+    def _admin_fail2ban_action(self) -> None:
+        session = self._admin_guard()
+        if session is None:
+            return
+        if not self._origin_ok():
+            self._json(403, {"ok": False, "error": "érvénytelen kérés-eredet"})
+            return
+        data = self._read_json()
+        if data is None:
+            return self._json(400, {"ok": False, "error": "hibás kérés"})
+        action = str(data.get("action", "")).strip().lower()
+        target = ""
+        message = ""
+        try:
+            with self.gw.admin_lock:
+                if action == "config":
+                    config_data = {
+                        key: data[key]
+                        for key in (
+                            "enabled", "max_attempts",
+                            "window_seconds", "ban_seconds",
+                        )
+                        if key in data
+                    }
+                    self.gw.fail2ban.configure(config_data)
+                    message = "A fail2ban beállításai mentve."
+                elif action in ("ban", "unban"):
+                    ip = data.get("ip")
+                    if not isinstance(ip, str) or not ip.strip():
+                        raise fail2ban_mod.Fail2banError("hiányzó IP-cím")
+                    ip = ip.strip()
+                    target = ip
+                    if action == "ban":
+                        if ip == self._client_ip():
+                            raise fail2ban_mod.Fail2banError(
+                                "a saját IP-címed nem tiltható le a portálról"
+                            )
+                        seconds = data.get("seconds", 0)
+                        self.gw.fail2ban.ban(
+                            ip, seconds, manual=True, user=session.user
+                        )
+                        message = f"{ip} letiltva."
+                    else:
+                        if not self.gw.fail2ban.unban(ip):
+                            self._json(
+                                404,
+                                {
+                                    "ok": False,
+                                    "error": "ez az IP-cím nem volt letiltva",
+                                },
+                            )
+                            return
+                        message = f"{ip} tiltása feloldva."
+                elif action == "unban_all":
+                    removed = self.gw.fail2ban.unban_all()
+                    message = f"{removed} tiltás feloldva."
+                else:
+                    self._json(
+                        400, {"ok": False, "error": "ismeretlen művelet"}
+                    )
+                    return
+                self._audit(
+                    "admin_fail2ban_changed",
+                    user=session.user,
+                    action=action or "ismeretlen",
+                    target=target,
+                )
+        except fail2ban_mod.Fail2banError as exc:
+            self._admin_action_error(f"fail2ban_{action}", exc)
+            self._json(400, {"ok": False, "error": str(exc)})
+            return
+        except Exception as exc:
+            self._admin_action_error(f"fail2ban_{action}", exc)
+            self._json(
+                503,
+                {
+                    "ok": False,
+                    "error": f"a fail2ban művelet nem sikerült: {exc}",
+                },
+            )
+            return
+        payload = self._admin_state()
+        payload["message"] = message
+        self._json(200, payload)
+
     # -- POST ------------------------------------------------------------------
 
     def do_POST(self) -> None:
@@ -730,6 +835,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._admin_sessions_action()
         if path == "/api/admin/settings":
             return self._admin_settings_action()
+        if path == "/api/admin/fail2ban":
+            return self._admin_fail2ban_action()
         self._discard_body()
         self._json(404, {"ok": False, "error": "ismeretlen végpont"})
 
@@ -758,6 +865,30 @@ class Handler(BaseHTTPRequestHandler):
             self._audit("login_failed", reason="érvénytelen kérés-eredet")
             return self._json(403, {"ok": False, "error": "érvénytelen kérés-eredet"})
 
+        banned = self.gw.fail2ban.banned(ip)
+        if banned is not None:
+            remaining = int(banned.get("remaining", 0))
+            self._audit(
+                "login_failed",
+                reason="fail2ban tiltás alatt",
+                ban_until=banned.get("until", 0),
+                remaining=remaining,
+            )
+            return self._json(
+                403,
+                {
+                    "ok": False,
+                    "error": (
+                        "Ez az IP-cím fail2ban tiltás alatt áll a túl sok "
+                        "sikertelen belépés miatt. Próbáld újra később."
+                    ),
+                    "banned": True,
+                    "ban_until": banned.get("until", 0),
+                    "remaining": remaining,
+                },
+                headers={"Retry-After": str(max(1, min(remaining, 86400)))},
+            )
+
         user = data.get("user")
         password = data.get("pass")
         captcha = data.get("captcha")
@@ -780,6 +911,25 @@ class Handler(BaseHTTPRequestHandler):
         if not self.gw.users.verify(user, password):
             self._audit("login_failed", user=user, reason="hibás felhasználónév vagy jelszó")
             print(f"[{ip}] sikertelen belépés: {user!r}", flush=True)
+            try:
+                ban = self.gw.fail2ban.record_failure(ip, user)
+            except fail2ban_mod.Fail2banError as exc:
+                _log_fail2ban_error(ip, exc)
+                ban = None
+            if ban is not None:
+                return self._json(
+                    403,
+                    {
+                        "ok": False,
+                        "error": (
+                            "Túl sok sikertelen belépés: az IP-címedet a "
+                            "tűzfal letiltotta. Próbáld újra később."
+                        ),
+                        "banned": True,
+                        "ban_until": ban.get("until", 0),
+                        "remaining": ban.get("remaining", 0),
+                    },
+                )
             return self._json(
                 403, {"ok": False, "error": "Hibás felhasználónév vagy jelszó."}
             )
@@ -787,10 +937,15 @@ class Handler(BaseHTTPRequestHandler):
         record = self.gw.users.record(user)
         if record is None or not record.enabled:
             self._audit("login_failed", user=user, reason="letiltott felhasználó")
+            try:
+                self.gw.fail2ban.record_failure(ip, user)
+            except fail2ban_mod.Fail2banError as exc:
+                _log_fail2ban_error(ip, exc)
             return self._json(
                 403, {"ok": False, "error": "Hibás felhasználónév vagy jelszó."}
             )
 
+        self.gw.fail2ban.record_success(ip)
         try:
             session = self.gw.sessions.login(
                 user, ip, role=record.role, ua=self._ua()
@@ -1569,6 +1724,73 @@ def _user_cli(argv: list[str]) -> int:
     return 0
 
 
+def _fail2ban_cli(argv: list[str]) -> int:
+    """Fail2ban kezelése a parancssorból (kizárás esetén vészmegoldás)."""
+    parser = argparse.ArgumentParser(
+        prog="server.py fail2ban",
+        description="A fail2ban tiltáslista kezelése.",
+    )
+    sub = parser.add_subparsers(dest="action", required=True)
+    sub.add_parser("list", help="tiltott IP-k listája")
+    p_ban = sub.add_parser("ban", help="IP-cím letiltása")
+    p_ban.add_argument("ip")
+    p_ban.add_argument(
+        "--seconds", type=int, default=0,
+        help="a tiltás hossza másodpercben (alapértelmezés: a beállított érték)",
+    )
+    p_unban = sub.add_parser("unban", help="egy IP-cím feloldása")
+    p_unban.add_argument("ip")
+    sub.add_parser("unban-all", help="minden tiltás feloldása")
+
+    args = parser.parse_args(argv)
+    manager = fail2ban_mod.Fail2ban(
+        gateway.Firewall(), audit=gateway.AuditLog()
+    )
+    try:
+        if args.action == "list":
+            snapshot = manager.snapshot()
+            state = "aktív" if snapshot["enabled"] else "kikapcsolva"
+            print(
+                f"Fail2ban: {state}; küszöb: {snapshot['max_attempts']} "
+                f"próbálkozás / {snapshot['window_seconds']} mp; "
+                f"tiltás: {snapshot['ban_seconds']} mp"
+            )
+            if snapshot["error"]:
+                print(f"FIGYELEM: {snapshot['error']}")
+            bans = snapshot["bans"]
+            if not bans:
+                print("Nincs tiltott IP.")
+                return 0
+            print(f"Tiltott IP-k ({len(bans)}):")
+            for ban in bans:
+                kind = "kézi" if ban["manual"] else "automatikus"
+                print(
+                    f"  {ban['ip']:<15}  hátralévő: {ban['remaining']:>6} mp  "
+                    f"{kind:<12}  {ban['attempts']} próbálkozás  "
+                    f"user={ban['user'] or '-'}"
+                )
+            return 0
+        if args.action == "ban":
+            ban = manager.ban(args.ip, args.seconds, manual=True, user="cli")
+            print(
+                f"Letiltva: {ban['ip']} ({ban['remaining']} mp)"
+            )
+            return 0
+        if args.action == "unban":
+            if manager.unban(args.ip):
+                print(f"Feloldva: {args.ip}")
+            else:
+                print(f"Nem volt letiltva: {args.ip}")
+            return 0
+        if args.action == "unban-all":
+            print(f"Feloldva: {manager.unban_all()} tiltás")
+            return 0
+    except fail2ban_mod.Fail2banError as exc:
+        print(f"hiba: {exc}", file=sys.stderr)
+        return 1
+    return 2
+
+
 def _serve() -> int:
     try:
         gw = gateway.Gateway()
@@ -1655,12 +1877,14 @@ def main(argv: list[str]) -> int:
         return _serve()
     if argv[0] == "user":
         return _user_cli(argv[1:])
+    if argv[0] == "fail2ban":
+        return _fail2ban_cli(argv[1:])
     if argv[0] == "check-firewall":
         ok, why = gateway.Firewall().healthy()
         print("rendben" if ok else f"hiba: {why}")
         return 0 if ok else 1
     print(
-        "Használat: server.py [serve | user ... | check-firewall]",
+        "Használat: server.py [serve | user ... | fail2ban ... | check-firewall]",
         file=sys.stderr,
     )
     return 2

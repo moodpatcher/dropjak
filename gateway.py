@@ -34,6 +34,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
 import droplog
+import fail2ban as fail2ban_mod
 import settings_store
 
 
@@ -1732,6 +1733,7 @@ class Firewall:
         self.icmp_set = "allowed_icmp"
         self.ssh_set = "host_ssh_v4"
         self.mac_set = "client_mac"
+        self.ban_set = "banned_v4"
         self.lan_if = (lan_if or "").strip()
         self.wan_if = (wan_if or "").strip()
         self.lan_network = lan_network
@@ -2131,6 +2133,45 @@ class Firewall:
             [(self.ssh_set, normalize_ip(ip))]
         )
 
+    def ban(self, ip: str, ttl: int) -> None:
+        """Forrás-IP felvétele a ``banned_v4`` halmazba.
+
+        A tiltás kerneloldali timeouttal rendelkezik. Újra hozzáadás előtt
+        töröljük, így a tiltás meghosszabbításakor a timeout újraindul.
+        """
+        if not is_ipv4(ip):
+            raise FirewallError("csak IPv4-cím tiltható le")
+        address = normalize_ip(ip)
+        ttl = max(1, int(ttl))
+        with self._lock:
+            self._delete_quiet(self.ban_set, address)
+            self._run_script(
+                f"add element inet {self.table} {self.ban_set} "
+                f"{{ {address} timeout {ttl}s }}\n"
+            )
+
+    def unban(self, ip: str) -> None:
+        """Forrás-IP törlése a ``banned_v4`` halmazból (hiányzó elem nem hiba)."""
+        if not is_ipv4(ip):
+            return
+        self._delete_elements([(self.ban_set, normalize_ip(ip))])
+
+    def sync_bans(self, elements) -> None:
+        """A tiltott IP-k és hátralévő idejük betöltése a halmazba.
+
+        Induláskor hívjuk a dinamikus halmazok ürítése után. A halmazt előbb
+        kiürítjük, hogy a kernel és a mentett nyilvántartás biztosan egyezzen.
+        """
+        lines = [f"flush set inet {self.table} {self.ban_set}"]
+        for ip, ttl in elements:
+            if not is_ipv4(ip):
+                continue
+            lines.append(
+                f"add element inet {self.table} {self.ban_set} "
+                f"{{ {normalize_ip(ip)} timeout {max(1, int(ttl))}s }}"
+            )
+        self._run_script("\n".join(lines) + "\n")
+
     def _delete_elements(self, elements: list[tuple[str, str]]) -> None:
         """Elemek törlése; a nem létező elem nem hiba."""
         errors: list[str] = []
@@ -2196,7 +2237,7 @@ class Firewall:
         with self._lock:
             for set_name in (
                 self.set_name, self.tcp_set, self.udp_set, self.icmp_set,
-                self.ssh_set, self.mac_set,
+                self.ssh_set, self.mac_set, self.ban_set,
             ):
                 result = self._run(
                     ["flush", "set", "inet", self.table, set_name],
@@ -2336,7 +2377,7 @@ class Firewall:
         """
         names = (
             self.set_name, self.tcp_set, self.udp_set, self.icmp_set,
-            self.ssh_set, self.mac_set,
+            self.ssh_set, self.mac_set, self.ban_set,
         )
         sets: dict[str, list[dict]] = {name: [] for name in names}
         errors: list[str] = []
@@ -2458,7 +2499,7 @@ class Firewall:
             with self._lock:
                 for set_name in (
                     self.set_name, self.tcp_set, self.udp_set, self.icmp_set,
-                    self.ssh_set, self.mac_set,
+                    self.ssh_set, self.mac_set, self.ban_set,
                 ):
                     self._run(["list", "set", "inet", self.table, set_name])
         except FirewallError as exc:
@@ -3164,6 +3205,10 @@ END_REASONS: dict[str, str] = {
     ),
     "disabled": "A fiókot kikapcsolták.",
     "admin_terminated": "Az adminisztrátor lezárta a munkamenetet.",
+    "fail2ban": (
+        "A forrás IP-címet a fail2ban tiltotta le a túl sok sikertelen "
+        "belépési kísérlet miatt."
+    ),
     "server_restart": "A portál újraindult, ezért a munkamenetek törlődtek.",
 }
 
@@ -3623,6 +3668,24 @@ class SessionManager:
             self._revoke_access(ip, ports)
         return len(revoked)
 
+    def revoke_ip(self, ip: str, reason: str = "fail2ban") -> int:
+        """Egy forrás-IP összes munkamenetének és engedélyének bontása.
+
+        Fail2ban-tiltáskor hívjuk: a tiltott kliens ne használhassa a már
+        megnyitott hozzáférést, és a meglévő kapcsolatai is szakadjanak meg.
+        """
+        try:
+            ip = normalize_ip(ip)
+        except ValueError:
+            return 0
+        revoked: list[Session] = []
+        with self._lock:
+            revoked = self._drop_ip_locked(ip, reason)
+        # A conntrack-t akkor is ürítjük, ha nem volt portál-munkamenet:
+        # egy pre-auth vagy korábbi kapcsolat is élhet a tiltás pillanatában.
+        self._revoke_access(ip, [session.ports for session in revoked])
+        return len(revoked)
+
     def reap_once(self, now: float | None = None) -> int:
         """Lejárt munkamenetek törlése; a megüresedett IP-k tiltása."""
         now = time.time() if now is None else now
@@ -3858,6 +3921,7 @@ class Gateway:
         audit: AuditLog | None = None,
         settings: "settings_store.SettingsStore | None" = None,
         drops: "droplog.DropLogService | None" = None,
+        fail2ban: "fail2ban_mod.Fail2ban | None" = None,
     ) -> None:
         self.catalog = (
             catalog if catalog is not None else ServiceCatalog.load()
@@ -3891,6 +3955,18 @@ class Gateway:
         )
         if self.sessions.audit is None:
             self.sessions.audit = self.audit
+        self.fail2ban = (
+            fail2ban
+            if fail2ban is not None
+            else fail2ban_mod.Fail2ban(
+                self.firewall,
+                path=fail2ban_mod.FAIL2BAN_PATH,
+                audit=self.audit,
+                on_ban=self._on_fail2ban_ban,
+            )
+        )
+        if self.fail2ban.audit is None:
+            self.fail2ban.audit = self.audit
         self.login_rate = (
             rate_limiter if rate_limiter is not None else RateLimiter()
         )
@@ -3931,6 +4007,58 @@ class Gateway:
         groups = [group.id for group in self.groups.groups_for(name)]
         return record.public(groups)
 
+    def _on_fail2ban_ban(self, record: dict) -> None:
+        """Egy friss tiltás utókezelése.
+
+        A tűzfalban már érvényes a tiltás; itt bontjuk a kliens meglévő
+        munkameneteit és kapcsolatait, naplózzuk az eseményt, és beírjuk a
+        drop logba a tiltás tényét. A hibák nem vonják vissza a tiltást.
+        """
+        ip = str(record.get("ip", "")).strip()
+        if not ip:
+            return
+        manual = bool(record.get("manual"))
+        attempts = int(record.get("attempts") or 0)
+        user = str(record.get("user") or "")
+        until = int(record.get("until") or 0)
+        revoked = 0
+        try:
+            revoked = self.sessions.revoke_ip(ip, reason="fail2ban")
+        except Exception as exc:
+            log(f"[fail2ban] a(z) {ip} munkameneteinek bontása nem sikerült: {exc}")
+        self.audit.write(
+            "fail2ban_ban",
+            ip=ip,
+            manual=manual,
+            attempts=attempts,
+            user=user,
+            until=until,
+            sessions_revoked=revoked,
+        )
+        try:
+            self.drops.store.write(
+                {
+                    "reason": "fail2ban",
+                    "src": ip,
+                    "dst": "",
+                    "proto": "",
+                    "event": "ban",
+                    "attempts": attempts,
+                    "user": user,
+                    "ban_until": until,
+                    "manual": manual,
+                }
+            )
+        except Exception as exc:
+            log(f"[fail2ban] a drop log bejegyzés nem sikerült: {exc}")
+        if manual:
+            log(f"[fail2ban] kézi tiltás: {ip} ({until - int(time.time())} mp)")
+        else:
+            log(
+                f"[fail2ban] automatikus tiltás: {ip} "
+                f"({attempts} sikertelen belépés, {user!r})"
+            )
+
     def prepare(self) -> None:
         """Induláskori tűzfal-ellenőrzés és a régi engedélyek törlése."""
         self.rules.all_rules()
@@ -3967,12 +4095,30 @@ class Gateway:
                 f"[tűzfal] rendben: inet {self.firewall.table} "
                 f"/ {self.firewall.set_name}, {self.firewall.tcp_set}, "
                 f"{self.firewall.udp_set}, {self.firewall.icmp_set}, "
-                f"{self.firewall.ssh_set}, {self.firewall.mac_set}"
+                f"{self.firewall.ssh_set}, {self.firewall.mac_set}, "
+                f"{self.firewall.ban_set}"
             )
         else:
             log(
                 "[tűzfal] FIGYELEM: a dinamikus halmazok nem érhetők el "
                 f"({why}). A belépések a hiba elhárításáig nem fognak működni."
+            )
+        # A felületen beállított tiltások visszatöltése az esetleges
+        # induláskori ürítés után. Ha ez nem sikerül, a portál elindul, de
+        # a védelem gyengébb; az admin a felületen látja a hibát.
+        if self.fail2ban.sync():
+            status = self.fail2ban.status()
+            log(
+                f"[fail2ban] {'aktív' if status['enabled'] else 'kikapcsolva'}; "
+                f"{status['banned']} tiltott IP, küszöb: "
+                f"{status['max_attempts']} próbálkozás / "
+                f"{status['window_seconds']} mp, tiltás: "
+                f"{status['ban_seconds']} mp"
+            )
+        else:
+            log(
+                "[fail2ban] FIGYELEM: a mentett tiltásokat nem sikerült "
+                "visszatölteni a tűzfalba"
             )
         # A settings-fájl host SSH módja felülírja a környezeti alapértéket.
         self.sessions.host_ssh_mode = self.settings.host_ssh
