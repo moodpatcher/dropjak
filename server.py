@@ -645,6 +645,7 @@ class Handler(BaseHTTPRequestHandler):
             proto=first("proto")[:16],
             port=port,
             reason=first("reason")[:80],
+            group=first("group")[:32],
             q=first("q")[:120],
             before=before,
         )

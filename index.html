@@ -498,8 +498,7 @@
   .drop-time .d{display:block;font-size:9.5px;color:var(--muted);white-space:nowrap}
   .reason-pill{display:inline-flex;align-items:center;gap:5px;padding:2px 7px;font-size:10.5px;font-weight:600;color:var(--rc-ink,#3f3f3b);background:var(--rc-bg,var(--soft));border:1px solid var(--rc-line,var(--line));border-radius:999px;white-space:nowrap}
   .reason-pill i{flex:0 0 auto;width:6px;height:6px;border-radius:50%;background:var(--rc,#9a9a95)}
-  .drop-route{display:flex;align-items:baseline;gap:6px;white-space:nowrap}
-  .drop-route-arrow{color:#8fa6bd}
+  .drop-addr{display:inline-block;max-width:100%;overflow:hidden;text-overflow:ellipsis;vertical-align:middle}
   .port-pill{display:inline-block;padding:2px 6px;font-size:10px;font-weight:600;color:var(--blue);background:var(--blue-bg);border:1px solid var(--blue-line);border-radius:5px;white-space:nowrap}
   .drop-iface{font-size:10px;color:#777;white-space:nowrap}
   .drop-facts{font-size:10px;color:#777;margin-bottom:2px}
@@ -756,7 +755,6 @@
   :root[data-theme="dark"] .drop-table-wrap{border-color:#2b3b4d}
   :root[data-theme="dark"] .drop-table thead th{background:#1a2430;color:#a9bac9}
   :root[data-theme="dark"] .drop-table tbody tr:hover{background:var(--row-tint,#1a2129)}
-  :root[data-theme="dark"] .drop-route-arrow{color:#7c93aa}
   :root[data-theme="dark"] .drop-iface,
   :root[data-theme="dark"] .drop-facts{color:#9b9d99}
   :root[data-theme="dark"] .reason-pill{color:var(--rc-ink,#d6d8da)}
@@ -1451,6 +1449,14 @@ const I18N = {
     'forrás IP': 'source IP',
     'cél IP': 'destination IP',
     'Minden protokoll': 'All protocols',
+    'Hozzáférés': 'Access',
+    'Hamisítás': 'Spoofing',
+    'Blokkolt cél': 'Blocked destination',
+    'Konténer': 'Container',
+    'Fail2ban': 'Fail2ban',
+    'további naplózott találat': 'further logged hits',
+    'utolsó találat': 'last hit',
+    'Fail2ban tiltás utáni forgalom': 'Traffic after the Fail2ban ban',
     'no-grant': 'no active grant',
     'wan-drop': 'dropped from WAN',
     'spoof-lan': 'spoofed LAN source',
@@ -1532,7 +1538,7 @@ const I18N = {
     'Sikertelen belépés a tiltásig': 'Failed sign-ins before ban',
     'Időablak (perc)': 'Window (minutes)',
     'Tiltás hossza (perc)': 'Ban duration (minutes)',
-    'A küszöb elérésekor a forrás IP bekerül a banned_v4 halmazba, és a tűzfal eldobja a csomagjait. A portál és a DHCP kivétel, hogy a kliens lássa a tiltás okát, és ne veszítse el az IP-címét. A tiltás a megadott idő után automatikusan lejár; a kézi tiltások megmaradnak, ha az automatikus tiltást kikapcsolod. A tiltásról a drop log egyetlen eseményt rögzít, a tiltás alatti csomagokat nem naplózza külön, és a tiltás a pre-auth szabályokat is felülírja.': 'When the threshold is reached, the source IP is added to the banned_v4 set and the firewall drops its packets. The portal and DHCP are exempt so the client can see why it was banned and does not lose its IP address. The ban expires automatically after the given time; manual bans remain when you disable automatic banning. The drop log records a single ban event; packets dropped while the ban is active are not logged individually, and the ban overrides pre-auth rules.',
+    'A küszöb elérésekor a forrás IP bekerül a banned_v4 halmazba, és a tűzfal eldobja a csomagjait. A portál és a DHCP kivétel, hogy a kliens lássa a tiltás okát, és ne veszítse el az IP-címét. A tiltás a megadott idő után automatikusan lejár; a kézi tiltások megmaradnak, ha az automatikus tiltást kikapcsolod. A tiltásról a drop log egyetlen eseményt rögzít, a tiltás alatti csomagokat ehhez az eseményhez rendeli, nem külön soronként, és a tiltás a pre-auth szabályokat is felülírja.': 'When the threshold is reached, the source IP is added to the banned_v4 set and the firewall drops its packets. The portal and DHCP are exempt so the client can see why it was banned and does not lose its IP address. The ban expires automatically after the given time; manual bans remain when you disable automatic banning. The drop log records a single ban event and folds packets dropped during the ban into that event instead of showing separate rows; the ban also overrides pre-auth rules.',
     'Adj meg érvényes számokat a küszöbhöz és az időtartamokhoz.': 'Enter valid numbers for the threshold and durations.',
     'IP-cím kézi tiltása': 'Manually ban an IP address',
     'Add meg a letiltandó IP-címet.': 'Enter the IP address to ban.',
@@ -1983,6 +1989,14 @@ const I18N = {
     'forrás IP': 'Quell-IP',
     'cél IP': 'Ziel-IP',
     'Minden protokoll': 'Alle Protokolle',
+    'Hozzáférés': 'Zugriff',
+    'Hamisítás': 'Spoofing',
+    'Blokkolt cél': 'Blockiertes Ziel',
+    'Konténer': 'Container',
+    'Fail2ban': 'Fail2ban-Sperre',
+    'további naplózott találat': 'weitere protokollierte Treffer',
+    'utolsó találat': 'letzter Treffer',
+    'Fail2ban tiltás utáni forgalom': 'Verkehr nach der Fail2ban-Sperre',
     'no-grant': 'keine aktive Freigabe',
     'wan-drop': 'vom WAN verworfen',
     'spoof-lan': 'gefälschte LAN-Quelle',
@@ -2064,7 +2078,7 @@ const I18N = {
     'Sikertelen belépés a tiltásig': 'Fehlgeschlagene Anmeldungen bis zur Sperre',
     'Időablak (perc)': 'Zeitfenster (Minuten)',
     'Tiltás hossza (perc)': 'Sperrdauer (Minuten)',
-    'A küszöb elérésekor a forrás IP bekerül a banned_v4 halmazba, és a tűzfal eldobja a csomagjait. A portál és a DHCP kivétel, hogy a kliens lássa a tiltás okát, és ne veszítse el az IP-címét. A tiltás a megadott idő után automatikusan lejár; a kézi tiltások megmaradnak, ha az automatikus tiltást kikapcsolod. A tiltásról a drop log egyetlen eseményt rögzít, a tiltás alatti csomagokat nem naplózza külön, és a tiltás a pre-auth szabályokat is felülírja.': 'Beim Erreichen der Schwelle wird die Quell-IP in die Menge banned_v4 aufgenommen und die Firewall verwirft ihre Pakete. Portal und DHCP sind ausgenommen, damit der Client den Grund der Sperre sieht und seine IP-Adresse nicht verliert. Die Sperre läuft nach der angegebenen Zeit automatisch ab; manuelle Sperren bleiben bestehen, wenn du die automatische Sperre deaktivierst. Der Drop-Log zeichnet ein einziges Sperrereignis auf; während der Sperre verworfene Pakete werden nicht einzeln protokolliert, und die Sperre übersteuert Pre-Auth-Regeln.',
+    'A küszöb elérésekor a forrás IP bekerül a banned_v4 halmazba, és a tűzfal eldobja a csomagjait. A portál és a DHCP kivétel, hogy a kliens lássa a tiltás okát, és ne veszítse el az IP-címét. A tiltás a megadott idő után automatikusan lejár; a kézi tiltások megmaradnak, ha az automatikus tiltást kikapcsolod. A tiltásról a drop log egyetlen eseményt rögzít, a tiltás alatti csomagokat ehhez az eseményhez rendeli, nem külön soronként, és a tiltás a pre-auth szabályokat is felülírja.': 'Beim Erreichen der Schwelle wird die Quell-IP in die Menge banned_v4 aufgenommen und die Firewall verwirft ihre Pakete. Portal und DHCP sind ausgenommen, damit der Client den Grund der Sperre sieht und seine IP-Adresse nicht verliert. Die Sperre läuft nach der angegebenen Zeit automatisch ab; manuelle Sperren bleiben bestehen, wenn du die automatische Sperre deaktivierst. Der Drop-Log zeichnet ein einziges Sperrereignis auf und ordnet während der Sperre verworfene Pakete diesem Ereignis zu, statt sie als separate Zeilen anzuzeigen; die Sperre übersteuert außerdem Pre-Auth-Regeln.',
     'Adj meg érvényes számokat a küszöbhöz és az időtartamokhoz.': 'Gib gültige Zahlen für Schwelle und Zeiträume ein.',
     'IP-cím kézi tiltása': 'IP-Adresse manuell sperren',
     'Add meg a letiltandó IP-címet.': 'Gib die zu sperrende IP-Adresse ein.',
@@ -2215,6 +2229,7 @@ const I18N_PATTERNS = {
     [/^Feloldod (.+) tiltását\? A csomagjai ismét áthaladhatnak, ha van érvényes hozzáférésük\.$/, m => `Unban ${m[1]}? Its packets can pass again if it has valid access.`],
     [/^Feloldod az összes fail2ban tiltást\? Minden tiltott IP csomagjai ismét áthaladhatnak\.$/, 'Unban every fail2ban ban? Packets from all banned IPs can pass again.'],
     [/^(.+) forrás IP tiltva$/, m => `${m[1]} source IP banned`],
+    [/^(.+) forrás IP$/, m => `${m[1]} source IP`],
     [/^(\d+) sikertelen kísérlet$/, m => `${m[1]} failed attempts`],
     [/^(.+) letiltva\.$/, m => `${m[1]} banned.`],
     [/^(.+) tiltása feloldva\.$/, m => `${m[1]}'s ban lifted.`],
@@ -2315,6 +2330,7 @@ const I18N_PATTERNS = {
     [/^Feloldod (.+) tiltását\? A csomagjai ismét áthaladhatnak, ha van érvényes hozzáférésük\.$/, m => `Sperre für ${m[1]} aufheben? Die Pakete können wieder passieren, wenn ein gültiger Zugriff besteht.`],
     [/^Feloldod az összes fail2ban tiltást\? Minden tiltott IP csomagjai ismét áthaladhatnak\.$/, 'Alle Fail2ban-Sperren aufheben? Die Pakete aller gesperrten IPs können wieder passieren.'],
     [/^(.+) forrás IP tiltva$/, m => `${m[1]} Quell-IP gesperrt`],
+    [/^(.+) forrás IP$/, m => `${m[1]} Quell-IP`],
     [/^(\d+) sikertelen kísérlet$/, m => `${m[1]} fehlgeschlagene Versuche`],
     [/^(.+) letiltva\.$/, m => `${m[1]} gesperrt.`],
     [/^(.+) tiltása feloldva\.$/, m => `Sperre für ${m[1]} aufgehoben.`],
@@ -2694,7 +2710,7 @@ let dropRows = [];
 let dropStatus = null;
 let dropTimer = null;
 let dropAuto = true;
-let dropFilter = { src: '', dst: '', proto: '', port: '', reason: '', q: '', limit: 500 };
+let dropFilter = { src: '', dst: '', proto: '', port: '', group: '', q: '', limit: 500 };
 let sessionsState = null;
 let sessionClockTimer = null;
 let sessionPollTimer = null;
@@ -4148,12 +4164,20 @@ async function loadAdminState() {
 
 /* ============================================================ admin: drop napló */
 
-const DROP_REASONS = [
-  'no-grant', 'wan-drop', 'spoof-lan', 'spoof-wan', 'mac',
-  'input-lan', 'input-wan', 'block', 'docker-guard',
-  'dns-revoked', 'ssh-revoked', 'container-spoof', 'container-pivot',
-  'fail2ban', 'ipv6', 'unknown'
+const DROP_GROUPS = [
+  { id: 'access', label: 'Hozzáférés', color: '#2563eb' },
+  { id: 'spoof', label: 'Hamisítás', color: '#7c3aed' },
+  { id: 'ban', label: 'Fail2ban', color: '#b91c1c' },
+  { id: 'block', label: 'Blokkolt cél', color: '#c2410c' },
+  { id: 'container', label: 'Konténer', color: '#0d9488' },
+  { id: 'other', label: 'Egyéb', color: '#64748b' }
 ];
+const DROP_GROUP_LABELS = Object.fromEntries(
+  DROP_GROUPS.map(group => [group.id, group.label])
+);
+const DROP_GROUP_COLORS = Object.fromEntries(
+  DROP_GROUPS.map(group => [group.id, group.color])
+);
 
 function dropPortText(entry) {
   const proto = entry.proto || '';
@@ -4170,30 +4194,15 @@ function dropTimeText(entry) {
     return entry.time || '—';
   }
 }
-const DROP_REASON_COLORS = {
-  'no-grant': '#2563eb',
-  'wan-drop': '#dc2626',
-  'spoof-lan': '#7c3aed',
-  'spoof-wan': '#c026d3',
-  'mac': '#0d9488',
-  'input-lan': '#ca8a04',
-  'input-wan': '#ea580c',
-  'block': '#be123c',
-  'docker-guard': '#16a34a',
-  'dns-revoked': '#0891b2',
-  'ssh-revoked': '#4f46e5',
-  'container-spoof': '#9333ea',
-  'container-pivot': '#db2777',
-  'fail2ban': '#b91c1c',
-  'ipv6': '#64748b',
-  'unknown': '#94a3b8'
-};
-const DROP_FALLBACK_COLORS = ['#0ea5e9', '#f59e0b', '#10b981', '#8b5cf6', '#ec4899', '#14b8a6'];
-function dropReasonColor(reason) {
-  if (DROP_REASON_COLORS[reason]) return DROP_REASON_COLORS[reason];
-  let hash = 0;
-  for (const ch of String(reason || '')) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
-  return DROP_FALLBACK_COLORS[hash % DROP_FALLBACK_COLORS.length];
+function dropGroupOf(entry) {
+  const group = entry && entry.group;
+  return DROP_GROUP_COLORS[group] ? group : 'other';
+}
+function dropGroupLabel(group) {
+  return tr(DROP_GROUP_LABELS[group] || DROP_GROUP_LABELS.other);
+}
+function dropGroupColor(group) {
+  return DROP_GROUP_COLORS[group] || DROP_GROUP_COLORS.other;
 }
 function dropMix(hex, target, ratio) {
   const parse = value => {
@@ -4222,8 +4231,8 @@ function dropToneStyle(base, tint = 0.92) {
   return `--accent:${base};--accent-ink:${dropMix(base, '#000000', 0.22)};` +
     `--tint:${dropMix(base, '#ffffff', tint)};--tint-line:${dropMix(base, '#ffffff', 0.76)}`;
 }
-function dropReasonTone(reason) {
-  const base = dropReasonColor(reason);
+function dropGroupTone(group) {
+  const base = dropGroupColor(group);
   if (dropIsDark()) {
     return {
       base,
@@ -4265,11 +4274,11 @@ function dropDurationText(seconds) {
   return `${Math.round(seconds / 86400)} ${tr('nap')}`;
 }
 function dropAnalysis(rows) {
-  const reasonCounts = new Map();
+  const groupCounts = new Map();
   const sourceCounts = new Map();
   for (const row of rows) {
-    const reason = row.reason || 'unknown';
-    reasonCounts.set(reason, (reasonCounts.get(reason) || 0) + 1);
+    const group = dropGroupOf(row);
+    groupCounts.set(group, (groupCounts.get(group) || 0) + 1);
     const src = row.src || '—';
     sourceCounts.set(src, (sourceCounts.get(src) || 0) + 1);
   }
@@ -4285,8 +4294,8 @@ function dropAnalysis(rows) {
     first,
     last,
     span: Math.max(0, last - first),
-    reasonCounts,
-    ranked: Array.from(reasonCounts.entries()).sort((a, b) => b[1] - a[1]),
+    groupCounts,
+    ranked: Array.from(groupCounts.entries()).sort((a, b) => b[1] - a[1]),
     sources: Array.from(sourceCounts.entries()).sort((a, b) => b[1] - a[1]).slice(0, 5),
     uniqueSources: sourceCounts.size
   };
@@ -4304,8 +4313,7 @@ function dropChartModel(analysis) {
   const span = Math.max(60, analysis.span);
   const start = analysis.last - span;
   const bucketSec = span / bucketCount;
-  const stackReasons = analysis.ranked.slice(0, 5).map(([reason]) => reason);
-  const stackSet = new Set(stackReasons);
+  const stackGroups = analysis.ranked.map(([group]) => group);
   const buckets = Array.from({ length: bucketCount }, (_, index) => ({
     start: start + index * bucketSec,
     counts: new Map()
@@ -4313,30 +4321,21 @@ function dropChartModel(analysis) {
   for (const item of analysis.valid) {
     const index = Math.min(bucketCount - 1, Math.max(0, Math.floor((item.ts - start) / bucketSec)));
     const counts = buckets[index].counts;
-    const reason = item.row.reason || 'unknown';
-    counts.set(reason, (counts.get(reason) || 0) + 1);
+    const group = dropGroupOf(item.row);
+    counts.set(group, (counts.get(group) || 0) + 1);
   }
-  let otherTotal = 0;
   for (const bucket of buckets) {
     const segments = [];
-    let other = 0;
-    for (const reason of stackReasons) {
-      const count = bucket.counts.get(reason) || 0;
-      if (count) segments.push({ reason, count, color: dropReasonColor(reason) });
-    }
-    for (const [reason, count] of bucket.counts) {
-      if (!stackSet.has(reason)) other += count;
-    }
-    if (other) {
-      segments.push({ reason: '__other', count: other, color: '#94a3b8' });
-      otherTotal += other;
+    for (const group of stackGroups) {
+      const count = bucket.counts.get(group) || 0;
+      if (count) segments.push({ group, count, color: dropGroupColor(group) });
     }
     bucket.segments = segments;
     bucket.total = segments.reduce((sum, segment) => sum + segment.count, 0);
   }
   const maxTotal = Math.max(1, ...buckets.map(bucket => bucket.total));
   return {
-    analysis, buckets, bucketSec, span, stackReasons, otherTotal,
+    analysis, buckets, bucketSec, span, stackGroups,
     yMax: dropNiceMax(maxTotal)
   };
 }
@@ -4369,7 +4368,7 @@ function dropChartSvg(model) {
       const segmentH = (segment.count / model.yMax) * plotH;
       if (segmentH <= 0) continue;
       y -= segmentH;
-      const label = segment.reason === '__other' ? tr('Egyéb') : tr(segment.reason);
+      const label = dropGroupLabel(segment.group);
       const rect = svgEl('rect', {
         x, y, width: barW, height: segmentH,
         rx: Math.min(1.5, segmentH / 2), fill: segment.color, class: 'chart-bar'
@@ -4392,14 +4391,13 @@ function dropChartSvg(model) {
   return root;
 }
 function dropLegend(model) {
-  const entries = model.stackReasons.map(reason =>
-    [reason, model.analysis.reasonCounts.get(reason) || 0]
+  const entries = model.stackGroups.map(group =>
+    [group, model.analysis.groupCounts.get(group) || 0]
   );
-  if (model.otherTotal) entries.push(['__other', model.otherTotal]);
   const legend = el('div', { class: 'drop-legend' });
-  for (const [reason, count] of entries) {
-    const label = reason === '__other' ? tr('Egyéb') : tr(reason);
-    const color = reason === '__other' ? '#94a3b8' : dropReasonColor(reason);
+  for (const [group, count] of entries) {
+    const label = dropGroupLabel(group);
+    const color = dropGroupColor(group);
     legend.append(el('span', { class: 'drop-legend-item' },
       el('i', { class: 'drop-legend-swatch', style: `background:${color}` }),
       el('span', { text: label }),
@@ -4480,8 +4478,8 @@ function dropStatsRow(analysis) {
   return el('div', { class: 'drop-stats' },
     dropStat('Találat', String(analysis.rows.length), tr('a szűrt találatok alapján'), '#2563eb'),
     dropStat('Időtartam', dropDurationText(analysis.span), range, '#0d9488'),
-    dropStat('Leggyakoribb ok', top ? tr(top[0]) : '—', topSub,
-      top ? dropReasonColor(top[0]) : '#64748b'),
+    dropStat('Leggyakoribb ok', top ? dropGroupLabel(top[0]) : '—', topSub,
+      top ? dropGroupColor(top[0]) : '#64748b'),
     dropStat('Egyedi forrás', String(analysis.uniqueSources), topSource, '#7c3aed')
   );
 }
@@ -4514,7 +4512,7 @@ function dropFiltersBar() {
   const box = el('div', { class: 'drop-filters' });
   const head = el('div', { class: 'drop-filter-head' });
   head.append(el('b', { text: tr('Szűrők') }));
-  const active = ['src', 'dst', 'proto', 'port', 'reason', 'q']
+  const active = ['src', 'dst', 'proto', 'port', 'group', 'q']
     .filter(key => dropFilter[key]).length;
   if (active) {
     head.append(el('span', {
@@ -4533,15 +4531,10 @@ function dropFiltersBar() {
   const qInput = el('input', {
     type: 'search', placeholder: tr('Keresés'), value: dropFilter.q
   });
-  const reasonValues = Array.from(new Set([
-    ...DROP_REASONS,
-    ...dropRows.map(row => row.reason || 'unknown'),
-    dropFilter.reason
-  ].filter(Boolean)));
   const reasonSelect = el('select', {},
     el('option', { value: '', text: tr('Minden ok') }),
-    ...reasonValues.map(reason => el('option', {
-      value: reason, text: tr(reason), selected: dropFilter.reason === reason
+    ...DROP_GROUPS.map(group => el('option', {
+      value: group.id, text: tr(group.label), selected: dropFilter.group === group.id
     }))
   );
   const srcInput = el('input', {
@@ -4577,7 +4570,7 @@ function dropFiltersBar() {
       dst: dstInput.value.trim(),
       proto: protoSelect.value,
       port: portInput.value.trim(),
-      reason: reasonSelect.value,
+      group: reasonSelect.value,
       q: qInput.value.trim(),
       limit: Number(limitSelect.value) || 500
     };
@@ -4591,7 +4584,7 @@ function dropFiltersBar() {
   box.append(grid);
   box.append(el('div', { class: 'drop-filter-actions' },
     el('button', { type: 'button', class: 'ghost', onclick: () => {
-      dropFilter = { src: '', dst: '', proto: '', port: '', reason: '', q: '', limit: 500 };
+      dropFilter = { src: '', dst: '', proto: '', port: '', group: '', q: '', limit: 500 };
       loadDrops();
     } }, tr('Szűrők törlése')),
     el('button', { type: 'button', onclick: apply }, tr('Frissítés'))
@@ -4614,12 +4607,10 @@ function dropPortNode(entry) {
   if (text === '—') return el('span', { class: 'muted', text });
   return el('span', { class: 'port-pill mono', text: text.toUpperCase() });
 }
-function dropRouteNode(entry) {
-  return el('div', { class: 'drop-route' },
-    el('span', { class: 'mono', text: entry.src || '—' }),
-    el('span', { class: 'drop-route-arrow', text: '→' }),
-    el('span', { class: 'mono', text: entry.dst || '—' })
-  );
+function dropAddressNode(value) {
+  const text = String(value || '').trim();
+  if (!text) return el('span', { class: 'muted', text: '—' });
+  return el('span', { class: 'drop-addr mono', text, title: text });
 }
 function dropIfaceNode(entry) {
   const parts = [entry.if_in, entry.mac].filter(Boolean);
@@ -4631,8 +4622,12 @@ function dropDetail(entry) {
   if (entry.if_out) facts.push(`if_out=${entry.if_out}`);
   if (entry.hook !== undefined) facts.push(`hook=${entry.hook}`);
   if (entry.mark !== undefined) facts.push(`mark=${entry.mark}`);
+  if (entry.reason) facts.push(`reason=${entry.reason}`);
+  if (entry.event) facts.push(`event=${entry.event}`);
+  if (entry.packets !== undefined) facts.push(`packets=${entry.packets}`);
+  if (entry.ban_ts) facts.push(`ban_ts=${clockTime(entry.ban_ts)}`);
+  if (entry.last_drop) facts.push(`last_drop=${clockTime(entry.last_drop)}`);
   if (entry.event === 'ban') {
-    facts.push(`event=ban`);
     if (entry.attempts !== undefined) facts.push(`attempts=${entry.attempts}`);
     if (entry.user) facts.push(`user=${entry.user}`);
     if (entry.ban_until) facts.push(`until=${clockTime(entry.ban_until)}`);
@@ -4640,6 +4635,10 @@ function dropDetail(entry) {
   }
   const wrapper = el('div', { class: 'log-detail drop-detail' });
   if (entry.event === 'ban') {
+    const after = entry.packets > 0
+      ? ` · ${entry.packets} ${tr('további naplózott találat')}`
+        + (entry.last_drop ? ` · ${tr('utolsó találat')}: ${clockTime(entry.last_drop)}` : '')
+      : '';
     wrapper.append(el('div', { class: 'admin-flash err' },
       el('b', { text: tr('Fail2ban tiltás') }),
       ' — ',
@@ -4647,6 +4646,17 @@ function dropDetail(entry) {
         text: tr(`${entry.src || '?'} forrás IP tiltva`)
           + (entry.attempts !== undefined ? ` · ${tr(`${entry.attempts} sikertelen kísérlet`)}` : '')
           + (entry.ban_until ? ` · ${tr('lejárat')}: ${clockTime(entry.ban_until)}` : '')
+          + after
+      })
+    ));
+  } else if (entry.event === 'ban-drop') {
+    wrapper.append(el('div', { class: 'admin-flash err' },
+      el('b', { text: tr('Fail2ban tiltás utáni forgalom') }),
+      ' — ',
+      el('span', {
+        text: tr(`${entry.src || '?'} forrás IP`)
+          + ` · ${entry.packets || 0} ${tr('további naplózott találat')}`
+          + (entry.last_drop ? ` · ${tr('utolsó találat')}: ${clockTime(entry.last_drop)}` : '')
       })
     ));
   }
@@ -4695,26 +4705,28 @@ function renderDrops() {
   const table = el('table', { class: 'log-table drop-table' });
   table.append(el('thead', {}, el('tr', {},
     el('th', { text: tr('Idő') }), el('th', { text: tr('Ok') }),
-    el('th', { text: tr('Forrás → cél') }),
+    el('th', { text: tr('Forrás') }), el('th', { text: tr('Cél') }),
     el('th', { text: tr('Proto / port') }), el('th', { text: tr('Interfész / MAC') }),
     el('th', { text: tr('Részletek') })
   )));
   const body = el('tbody');
   for (const entry of dropRows) {
-    const reason = entry.reason || 'unknown';
-    const tone = dropReasonTone(reason);
+    const group = dropGroupOf(entry);
+    const tone = dropGroupTone(group);
     body.append(el('tr', {
       style: `--row-tint:${dropMix(tone.base, dropIsDark() ? '#171b21' : '#ffffff', 0.9)}`
     },
       el('td', {}, dropTimeCell(entry)),
       el('td', {}, el('span', {
         class: 'reason-pill',
+        title: entry.reason || '',
         style: `--rc:${tone.base};--rc-bg:${tone.bg};--rc-line:${tone.line};--rc-ink:${tone.ink}`
       },
         el('i'),
-        tr(reason)
+        dropGroupLabel(group)
       )),
-      el('td', {}, dropRouteNode(entry)),
+      el('td', {}, dropAddressNode(entry.src)),
+      el('td', {}, dropAddressNode(entry.dst)),
       el('td', {}, dropPortNode(entry)),
       el('td', {}, dropIfaceNode(entry)),
       el('td', {}, dropDetail(entry))
@@ -4733,7 +4745,7 @@ async function loadDrops() {
       dst: dropFilter.dst || '',
       proto: dropFilter.proto || '',
       port: dropFilter.port || '',
-      reason: dropFilter.reason || '',
+      group: dropFilter.group || '',
       q: dropFilter.q || ''
     });
     const res = await fetch('/api/admin/drops?' + query.toString(), { cache: 'no-store' });
@@ -5315,7 +5327,7 @@ function fail2banConfigForm(fb) {
   box.append(grid);
   box.append(el('p', {
     class: 'port-hint',
-    text: tr('A küszöb elérésekor a forrás IP bekerül a banned_v4 halmazba, és a tűzfal eldobja a csomagjait. A portál és a DHCP kivétel, hogy a kliens lássa a tiltás okát, és ne veszítse el az IP-címét. A tiltás a megadott idő után automatikusan lejár; a kézi tiltások megmaradnak, ha az automatikus tiltást kikapcsolod. A tiltásról a drop log egyetlen eseményt rögzít, a tiltás alatti csomagokat nem naplózza külön, és a tiltás a pre-auth szabályokat is felülírja.')
+    text: tr('A küszöb elérésekor a forrás IP bekerül a banned_v4 halmazba, és a tűzfal eldobja a csomagjait. A portál és a DHCP kivétel, hogy a kliens lássa a tiltás okát, és ne veszítse el az IP-címét. A tiltás a megadott idő után automatikusan lejár; a kézi tiltások megmaradnak, ha az automatikus tiltást kikapcsolod. A tiltásról a drop log egyetlen eseményt rögzít, a tiltás alatti csomagokat ehhez az eseményhez rendeli, nem külön soronként, és a tiltás a pre-auth szabályokat is felülírja.')
   }));
   box.append(el('p', {
     class: 'port-hint',

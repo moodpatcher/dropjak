@@ -2785,6 +2785,14 @@ class AdminHttpTests(unittest.TestCase):
         self.assertFalse(data["status"]["running"])
 
         status, _, body = self.get(
+            "/api/admin/drops?group=block", cookie=cookie, source="127.0.0.5"
+        )
+        self.assertEqual(status, 200, body)
+        data = json.loads(body)
+        self.assertEqual(data["count"], 2)
+        self.assertTrue(all(row["group"] == "block" for row in data["drops"]))
+
+        status, _, body = self.get(
             "/api/admin/drops?port=99999", cookie=cookie, source="127.0.0.5"
         )
         self.assertEqual(status, 400, body)
@@ -3441,26 +3449,31 @@ class DropLogStoreTests(unittest.TestCase):
 
     def test_fail2ban_packet_drops_collapse_to_single_ban_event(self) -> None:
         now = time.time()
-        # Régi, csomagszintű fail2ban bejegyzések (a tiltás alatti dropok).
+        ban = self.store.write({
+            "ts": now,
+            "src": "192.0.2.9",
+            "reason": "fail2ban",
+            "event": "ban",
+            "attempts": 12,
+            "ban_until": now + 3600,
+        })
+        # A tiltás alatt naplózott, csomagszintű találatok.
         for index in range(20):
             self.store.write({
-                "ts": now + index,
+                "ts": now + 1 + index,
                 "src": "192.0.2.9",
                 "proto": "tcp",
                 "dport": 1000 + index,
                 "reason": "fail2ban",
             })
-        ban = self.store.write({
-            "ts": now + 30,
-            "src": "192.0.2.9",
-            "reason": "fail2ban",
-            "event": "ban",
-            "attempts": 12,
-        })
         rows = self.store.read(reason="fail2ban")
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["event"], "ban")
-        self.assertEqual(rows[0]["ts"], ban["ts"])
+        self.assertEqual(rows[0]["packets"], 20)
+        self.assertEqual(rows[0]["ban_ts"], ban["ts"])
+        self.assertEqual(rows[0]["ts"], now + 20)
+        self.assertEqual(rows[0]["last_dport"], 1019)
+        self.assertEqual(rows[0]["group"], "ban")
         # Más okú bejegyzéseket a szűrés nem érint.
         self.store.write({
             "ts": now + 31,
@@ -3468,6 +3481,48 @@ class DropLogStoreTests(unittest.TestCase):
             "reason": "no-grant",
         })
         self.assertEqual(len(self.store.read()), 2)
+
+    def test_legacy_fail2ban_packets_collapse_per_source(self) -> None:
+        now = time.time()
+        for index in range(5):
+            self.store.write({
+                "ts": now + index,
+                "src": "192.0.2.20",
+                "proto": "tcp",
+                "dport": 2000 + index,
+                "reason": "fail2ban",
+            })
+        for index in range(3):
+            self.store.write({
+                "ts": now + 10 + index,
+                "src": "192.0.2.21",
+                "proto": "tcp",
+                "dport": 3000 + index,
+                "reason": "fail2ban",
+            })
+        rows = self.store.read(reason="fail2ban")
+        self.assertEqual(len(rows), 2)
+        self.assertEqual([row["event"] for row in rows],
+                         ["ban-drop", "ban-drop"])
+        self.assertEqual(rows[0]["src"], "192.0.2.21")
+        self.assertEqual(rows[0]["packets"], 3)
+        self.assertEqual(rows[1]["src"], "192.0.2.20")
+        self.assertEqual(rows[1]["packets"], 5)
+        self.assertEqual(rows[1]["last_dport"], 2004)
+
+    def test_reason_groups(self) -> None:
+        now = time.time()
+        self.store.write({"ts": now, "src": "10.0.0.1",
+                          "reason": "no-grant"})
+        self.store.write({"ts": now + 1, "src": "10.0.0.2",
+                          "reason": "spoof-lan"})
+        self.store.write({"ts": now + 2, "src": "10.0.0.3",
+                          "reason": "some-new-reason"})
+        self.assertEqual(len(self.store.read(group="access")), 1)
+        self.assertEqual(len(self.store.read(group="spoof")), 1)
+        self.assertEqual(len(self.store.read(group="other")), 1)
+        self.assertEqual(len(self.store.read(group="ban")), 0)
+        self.assertTrue(all(row.get("group") for row in self.store.read()))
 
     def test_rotation_keeps_old_entries(self) -> None:
         self.store.max_bytes = 200
@@ -3844,11 +3899,20 @@ class RulesetTemplateTests(unittest.TestCase):
             self.forward.index("jump preauth"),
         )
 
-    def test_banned_packets_are_not_logged_per_packet(self) -> None:
-        # A tiltásról a portál egyetlen eseményt ír; a tiltás alatti
-        # csomagok NFLOG-naplózása elárasztaná a drop logot.
-        self.assertNotIn("reason=fail2ban ", self.text)
-        self.assertNotIn("banned_v4 limit", self.text)
+    def test_banned_packets_are_logged_with_rate_limit(self) -> None:
+        # A tiltás alatti forgalom mintavételezve naplózódik, hogy a
+        # drop log mutassa a további próbálkozásokat; a portál ezeket a
+        # tiltás egyetlen eseményéhez rendeli.
+        self.assertIn('reason=fail2ban ', self.text)
+        self.assertIn("ip saddr @banned_v4 limit rate", self.forward)
+        self.assertLess(
+            self.forward.index("ip saddr @banned_v4 limit rate"),
+            self.forward.index("ip saddr @banned_v4 drop"),
+        )
+        self.assertIn(
+            "ip saddr @banned_v4 limit rate", self.text.split(
+                "chain input {", 1)[1]
+        )
 
 
 class FakeBanFirewall:

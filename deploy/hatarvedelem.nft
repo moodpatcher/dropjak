@@ -157,13 +157,15 @@ table inet hatarvedelem {
         iifname "__WAN_IF__" ip saddr __LAN_NET__ limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-wan " group __DROP_LOG_GROUP__
         iifname "__WAN_IF__" ip saddr __LAN_NET__ drop
 
-        # fail2ban-tiltott forrás: a továbbított forgalom eldobása. Ez a
-        # szabály az engedélyező halmazok és a pre-auth lánc előtt fut,
-        # ezért egy korábban megnyitott vagy pre-auth hozzáférés sem
-        # érvényesül a tiltás alatt. A tiltásról a portál egyetlen eseményt
-        # ír a drop logba (event=ban); a tiltás alatti csomagokat külön nem
-        # naplózzuk, hogy ne árasszák el a naplót. A tiltás lejártával a
-        # kernel magától törli az elemet.
+        # fail2ban-tiltott forrás: a továbbított forgalom naplózott
+        # eldobása. Ez a szabály az engedélyező halmazok és a pre-auth lánc
+        # előtt fut, ezért egy korábban megnyitott vagy pre-auth hozzáférés
+        # sem érvényesül a tiltás alatt. A naplózás mintavételezett (a limit
+        # csak a logot korlátozza); a portál a tiltás egyetlen eseményéhez
+        # rendeli ezeket a találatokat, ezért a felület nem kap
+        # csomagonkénti sort. A tiltás lejártával a kernel magától törli az
+        # elemet.
+        ip saddr @banned_v4 limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=fail2ban " group __DROP_LOG_GROUP__
         ip saddr @banned_v4 drop
 
         # MAC-kötés: aki engedélyezett IP-t használ, annak a munkamenet
@@ -271,11 +273,12 @@ table inet hatarvedelem {
         # tiltás okát), és a DHCP-címe sem veszik el. Minden más host-
         # szolgáltatás (SSH, DNS, ICMP) és a forward-forgalom eldobódik,
         # akkor is, ha pre-auth szabály engedélyezné. A tiltás tényét a
-        # portál egyetlen drop-log eseményként rögzíti; a tiltás alatti
-        # csomagokat külön nem naplózzuk.
+        # portál egyetlen drop-log eseményként rögzíti; a tiltás alatti,
+        # mintavételezve naplózott csomagokat ehhez az eseményhez rendeli.
         iifname "__LAN_IF__" udp sport 68 udp dport 67 accept
         iifname "__LAN_IF__" tcp dport __PORT__ accept
         ip saddr __PORTAL_NET__ tcp dport __PORT__ accept
+        ip saddr @banned_v4 limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=fail2ban " group __DROP_LOG_GROUP__
         ip saddr @banned_v4 drop
 
         # A host felé irányuló engedélyezett forgalom (SSH, DNS, ICMP) is

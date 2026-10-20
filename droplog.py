@@ -83,10 +83,36 @@ _REASON_RE = re.compile(r"reason=([A-Za-z0-9_.:-]+)")
 _MAX_STRING = 256
 
 # A fail2ban tiltás tényét a portál egyetlen eseményként írja a naplóba
-# (reason=fail2ban, event=ban). A tiltás alatt eldobott csomagok régi,
-# csomagszintű bejegyzéseit a felület ne jelenítse meg külön soronként.
+# (reason=fail2ban, event=ban). A tiltás alatt eldobott csomagokat a tűzfal
+# mintavételezve naplózza (reason=fail2ban), a read() viszont ezeket a tiltás
+# egyetlen sorához kapcsolja, így a felület nem kap csomagonkénti sort.
 BAN_EVENT_REASON = "fail2ban"
 BAN_EVENT_KIND = "ban"
+
+# A felület hat ok-kategóriát mutat. A nyers ok (a napló reason mezője)
+# változatlanul megmarad, és a részletes JSON-ban látható; a szűrő és a
+# statisztika ezeket a csoportokat használja.
+REASON_GROUPS: dict[str, tuple[str, ...]] = {
+    "access": (
+        "no-grant", "wan-drop", "input-lan", "input-wan",
+        "dns-revoked", "ssh-revoked",
+    ),
+    "spoof": ("spoof-lan", "spoof-wan", "mac"),
+    "ban": (BAN_EVENT_REASON,),
+    "block": ("block",),
+    "container": ("docker-guard", "container-spoof", "container-pivot"),
+    "other": ("ipv6", "unknown"),
+}
+
+
+def reason_group(reason: str) -> str:
+    """A nyers drop-ok csoportja a felület számára."""
+    value = str(reason or "").strip().lower()
+    for group, reasons in REASON_GROUPS.items():
+        if group != "other" and value in reasons:
+            return group
+    # Az ismeretlen és a jövőbeli okok az Egyéb kategóriába kerülnek.
+    return "other"
 
 
 # --------------------------------------------------------------- NFLOG állandók
@@ -474,6 +500,7 @@ class DropLog:
         proto: str = "",
         port: int | None = None,
         reason: str = "",
+        group: str = "",
         q: str = "",
         before: float | None = None,
     ) -> list[dict]:
@@ -482,6 +509,7 @@ class DropLog:
         dst = (dst or "").strip().lower()
         proto = (proto or "").strip().lower()
         reason = (reason or "").strip().lower()
+        group = (group or "").strip().lower()
         q = (q or "").strip().lower()
         rows: list[dict] = []
         for path in self._files():
@@ -497,16 +525,10 @@ class DropLog:
                             continue
                         if not isinstance(item, dict):
                             continue
-                        if (
-                            str(item.get("reason", "")).strip().lower()
-                            == BAN_EVENT_REASON
-                            and str(item.get("event", "")).strip().lower()
-                            != BAN_EVENT_KIND
-                        ):
-                            # Régi szabály vagy külső naplóző által hagyott
-                            # csomagszintű fail2ban bejegyzés: a tiltásról
-                            # szóló egyetlen eseményt tartjuk meg.
+                        item_group = reason_group(item.get("reason"))
+                        if group and item_group != group:
                             continue
+                        item["group"] = item_group
                         if before is not None:
                             try:
                                 if float(item.get("ts", 0)) >= before:
@@ -537,8 +559,110 @@ class DropLog:
                 continue
             except OSError as exc:
                 self.log(f"[drop log] olvasási hiba ({path}): {exc}")
+        rows = self._collapse_fail2ban(rows)
         rows.sort(key=lambda item: float(item.get("ts", 0)), reverse=True)
         return rows[:limit]
+
+    @staticmethod
+    def _collapse_fail2ban(rows: list[dict]) -> list[dict]:
+        """A tiltás alatti csomagokat a tiltás egyetlen sorába vonja.
+
+        A tűzfal a tiltás alatt mintavételezve naplóz, hogy látszódjon, ha a
+        tiltott forrás tovább próbálkozik. A read() ezeket a tiltás
+        eseményéhez rendeli, és egyetlen összesített sort ad vissza. Ha a
+        naplóban nincs tiltás-esemény (régi bejegyzések), forrásonként egy
+        ``event=ban-drop`` sor készül.
+        """
+        plain: list[dict] = []
+        bans: list[dict] = []
+        packets: list[dict] = []
+        for row in rows:
+            if str(row.get("reason", "")).strip().lower() != BAN_EVENT_REASON:
+                plain.append(row)
+            elif str(row.get("event", "")).strip().lower() == BAN_EVENT_KIND:
+                bans.append(row)
+            else:
+                packets.append(row)
+        if not bans and not packets:
+            return plain
+
+        def ts_of(row: dict) -> float:
+            try:
+                return float(row.get("ts", 0) or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        def until_of(row: dict) -> float:
+            try:
+                return float(row.get("ban_until", 0) or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        bans.sort(key=ts_of)
+        packets.sort(key=ts_of)
+        by_src: dict[str, list[dict]] = {}
+        states: list[dict] = []
+        for ban in bans:
+            state = dict(ban)
+            state["event"] = BAN_EVENT_KIND
+            state["group"] = "ban"
+            state["packets"] = 0
+            state["first_drop"] = 0.0
+            state["last_drop"] = 0.0
+            states.append(state)
+            by_src.setdefault(
+                str(ban.get("src", "")).strip().lower(), []
+            ).append(state)
+
+        synthetic: dict[str, dict] = {}
+        for packet in packets:
+            src = str(packet.get("src", "")).strip().lower()
+            when = ts_of(packet)
+            target: dict | None = None
+            for state in by_src.get(src, []):
+                # A tiltás-esemény a nft-művelet után íródik, ezért egy
+                # rövid türelmi idővel a határ előtti csomag is hozzákapcsolható.
+                if ts_of(state) - 5.0 <= when and (
+                    not until_of(state) or when <= until_of(state) + 60.0
+                ):
+                    if target is None or ts_of(state) > ts_of(target):
+                        target = state
+            if target is None:
+                target = synthetic.get(src)
+                if target is None:
+                    target = {
+                        "reason": BAN_EVENT_REASON,
+                        "event": "ban-drop",
+                        "src": packet.get("src", ""),
+                        "group": "ban",
+                        "packets": 0,
+                        "first_drop": when,
+                        "last_drop": 0.0,
+                    }
+                    synthetic[src] = target
+            target["packets"] += 1
+            if not target["first_drop"] or when < target["first_drop"]:
+                target["first_drop"] = when
+            if when >= target["last_drop"]:
+                target["last_drop"] = when
+                for key in ("dst", "proto", "sport", "dport", "if_in", "mac"):
+                    if key in packet:
+                        target["last_" + key] = packet[key]
+
+        out = list(plain)
+        for state in states + list(synthetic.values()):
+            if state["packets"]:
+                if state["event"] == BAN_EVENT_KIND:
+                    state["ban_ts"] = ts_of(state)
+                # A sor a legutóbbi találat idejére kerül, hogy az
+                # automatikus frissítésnél a tetejére kerüljön.
+                state["ts"] = state["last_drop"]
+                state["time"] = _utc_iso(state["ts"])
+            else:
+                state.pop("first_drop", None)
+                state.pop("last_drop", None)
+            out.append(state)
+        return out
 
 
 # ------------------------------------------------------------------- figyelő
