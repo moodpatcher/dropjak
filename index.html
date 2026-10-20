@@ -430,6 +430,7 @@
   .log-tools label{font-size:10.5px;margin:0;color:#777}
   .log-tools input,.log-tools select{margin:0;padding:7px 8px;font-size:12px;border-radius:7px}
   .log-tools input[type=text]{width:150px}
+  .log-tools input.log-q{width:180px}
   .log-tools button{padding:7px 10px;font-size:12px}
   .log-tools .auto{display:flex;align-items:center;gap:5px;font-size:11.5px;color:#555;padding-bottom:8px}
   .log-detail{max-width:430px;white-space:normal}
@@ -594,6 +595,41 @@
     .drop-stats{grid-template-columns:repeat(2,minmax(0,1fr))}
     .drop-status-path{display:none}
     .drop-table-wrap{max-height:none}
+    /* A táblázatok megtartják az oszlopaikat: a keretük görgethető
+       oldalra, nem préselődnek össze olvashatatlanul. */
+    .table-wrap > table{min-width:560px}
+    .table-wrap > table.users-table,
+    .table-wrap > table.rules-table,
+    .table-wrap > table.settings-table{min-width:640px}
+    .table-wrap > table.sessions-table,
+    .table-wrap > table.log-table,
+    .table-wrap > table.f2b-bans-table{min-width:760px}
+    .table-wrap > table.drop-table{min-width:860px}
+    .table-wrap{-webkit-overflow-scrolling:touch}
+    /* A hosszú admin menü vízszintesen görgethető; az aktív fül a
+       kattintás után magától a látható részre kerül. */
+    .admin-nav{scroll-snap-type:x proximity;scroll-padding-inline:6px}
+    .admin-nav button{scroll-snap-align:start;min-height:36px}
+    /* A naplószűrők telefonon két oszlopban, a kereső teljes szélességgel. */
+    .log-tools .field{flex:1 1 calc(50% - 4px)}
+    .log-tools input[type=text]{width:100%}
+    .log-tools .auto{padding-bottom:0}
+  }
+
+  /* Fekvő telefon: kevés a függőleges hely, ezért a hozzáférés-választó
+     és az aktív munkamenet a teljes nézetben görgethető, nem préselődik
+     egy vékony sávba. */
+  @media (max-height:520px) and (max-width:900px){
+    .topbar{padding:6px 10px;gap:6px}
+    body.app .card-foot{margin:0 10px 8px}
+    #access-view{overflow:auto}
+    /* A választó a tartalmához nő, és a nézet egésze görgethető: így a
+       szabálykártyák és a láb nem csúsznak egymásra. */
+    .access-layout{flex:0 0 auto;height:auto;min-height:0;padding:10px 12px;gap:8px}
+    .access-head h2{font-size:16px}
+    .rules-scroll{flex:0 0 auto;min-height:0;overflow:visible;padding:0;margin:0}
+    .access-foot{padding-top:8px;gap:8px}
+    .session-layout{justify-content:flex-start;overflow:auto;padding:12px}
   }
 
   /* ---------------------------------------------------------- ikonok */
@@ -2711,6 +2747,8 @@ let sessionsState = null;
 let sessionClockTimer = null;
 let sessionPollTimer = null;
 let fail2banState = null;
+let fail2banRevision = 0;      // a kézi műveletek állapotváltozásainak sorszáma
+let authEpoch = 0;             // belépés/kijelentkezés generáció a késő 403-hoz
 let fail2banClockTimer = null;
 let fail2banPollTimer = null;
 let fail2banDraft = null;      // megőrzött űrlapértékek hiba után
@@ -2916,6 +2954,7 @@ function stopTimers() {
   stopDropTimer();
   stopSessionTimers();
   stopFirewallTimers();
+  stopFail2banTimers();
 }
 function stopLogTimer() {
   clearTimeout(logTimer);
@@ -3177,6 +3216,9 @@ function showPassword(message, ok) {
   setTimeout(() => { try { pwCurrent.focus(); } catch (e) { /* nincs fókusz */ } }, 40);
 }
 function endSession(text, ok) {
+  // Új generáció: a korábbi munkamenetből még úton lévő 403/200 válaszok
+  // ne bontsák és ne írják felül az új belépést.
+  authEpoch += 1;
   auth = null;
   selectedRuleId = null;
   modifying = false;
@@ -3381,6 +3423,7 @@ function adminSetTab(name) {
   adminDraft = null;
   fail2banDraft = null;
   adminFlash = null;
+  adminPanel.scrollTop = 0;
   for (const button of adminNav.querySelectorAll('button')) {
     button.classList.toggle('active', button.dataset.admin === name);
   }
@@ -3543,11 +3586,31 @@ function draftList(draft, name, fallback) {
     return fallback;
   }
 }
+/* Ha a munkamenet időközben megszűnt (például ugyanerről az IP-ről új
+   belépés történt), a 403-at ne általános hibaként mutassuk: lépjünk
+   vissza a bejelentkezéshez, és ne pörgessük tovább az admin-frissítéseket
+   egy érvénytelen sütivel. Az epoch a kérés indításakor érvényes generáció:
+   egy régi munkamenetből elkéső 403 nem bontja a friss belépést. */
+function adminSessionEnded(err, epoch) {
+  if (!err || err.status !== 403 || !err.data) return false;
+  const sessionError = err.data.code === 'admin_session' ||
+    err.data.error === 'admin jogosultság szükséges';
+  if (!sessionError) return false;
+  if (epoch !== undefined && epoch !== authEpoch) return false;
+  stopFail2banTimers();
+  endSession('A munkamenet lejárt (ugyanerről az IP-címről új belépés történhetett). Lépj be újra.');
+  return true;
+}
 async function adminSend(path, payload) {
+  const epoch = authEpoch;
   try {
     const data = await postJson(path, payload);
     adminState = data;
-    if (data.fail2ban) fail2banState = data.fail2ban;
+    if (data.fail2ban) {
+      // A kézi művelet után a soron lévő, régebbi poll-válasz ne írja felül.
+      fail2banRevision += 1;
+      fail2banState = data.fail2ban;
+    }
     adminFlash = { text: tr(data.message || 'Mentve.'), kind: 'ok' };
     adminEdit = null;
     adminDraft = null;
@@ -3555,6 +3618,7 @@ async function adminSend(path, payload) {
     renderAdminPanel();
     return true;
   } catch (err) {
+    if (adminSessionEnded(err, epoch)) return false;
     captureAdminDraft();
     adminFlash = { text: err.message || 'A művelet nem sikerült.', kind: 'err' };
     renderAdminPanel();
@@ -3581,7 +3645,7 @@ function renderUsers() {
     return;
   }
   const wrap = el('div', { class: 'table-wrap' });
-  const table = el('table');
+  const table = el('table', { class: 'users-table' });
   table.append(el('thead', {}, el('tr', {},
     el('th', { text: tr('Név') }), el('th', { text: tr('Szerep') }), el('th', { text: tr('Állapot') }),
     el('th', { text: tr('Csoportok') }), el('th', { text: tr('Közvetlen szabályok') }),
@@ -3724,7 +3788,7 @@ function renderGroups() {
     return;
   }
   const wrap = el('div', { class: 'table-wrap' });
-  const table = el('table');
+  const table = el('table', { class: 'groups-table' });
   table.append(el('thead', {}, el('tr', {},
     el('th', { text: tr('Azonosító') }), el('th', { text: tr('Név') }), el('th', { text: tr('Szabályok') }),
     el('th', { text: tr('Tagok') }), el('th', { text: '' })
@@ -3826,7 +3890,7 @@ function renderRulesAdmin() {
   const notice = adminNotice(); if (notice) adminPanel.append(notice);
   if (adminEdit && adminEdit.kind === 'rule') adminPanel.append(renderRuleForm(adminEdit.id));
   const wrap = el('div', { class: 'table-wrap' });
-  const table = el('table');
+  const table = el('table', { class: 'rules-table' });
   table.append(el('thead', {}, el('tr', {},
     el('th', { text: tr('Azonosító') }), el('th', { text: tr('Név') }), el('th', { text: tr('Portok') }),
     el('th', { text: tr('Alap TTL') }), el('th', { text: tr('Max TTL') }), el('th', { text: '' })
@@ -4042,7 +4106,7 @@ function renderLogs() {
   const tools = el('div', { class: 'log-tools' });
   const eventInput = el('input', { type: 'text', placeholder: tr('esemény'), value: logFilter.event });
   const userInput = el('input', { type: 'text', placeholder: tr('felhasználó'), value: logFilter.user });
-  const qInput = el('input', { type: 'text', placeholder: tr('keresés'), value: logFilter.q, style: 'width:180px' });
+  const qInput = el('input', { type: 'text', class: 'log-q', placeholder: tr('keresés'), value: logFilter.q });
   const limitSelect = el('select', {},
     ...[200, 500, 1000, 2000].map(value =>
       el('option', { value, text: tr(`${value} sor`), selected: Number(logFilter.limit) === value })
@@ -4145,14 +4209,26 @@ function scheduleLogs() {
   logTimer = setTimeout(() => { if (activeView === 'admin' && adminTabName === 'logs') loadLogs(); }, 5000);
 }
 async function loadAdminState() {
+  const epoch = authEpoch;
+  const revision = fail2banRevision;
   try {
     const res = await fetch('/api/admin/state', { cache: 'no-store' });
     const data = await res.json();
-    if (!res.ok || !data.ok) throw new Error(data.error || 'az admin adatok nem olvashatók');
+    if (!res.ok || !data.ok) {
+      const error = new Error(data.error || 'az admin adatok nem olvashatók');
+      error.status = res.status;
+      error.data = data;
+      throw error;
+    }
     adminState = data;
-    if (data.fail2ban) fail2banState = data.fail2ban;
+    // Ha közben kézi tiltás történt, a fail2ban-rész már elavult; a POST-ból
+    // kapott frissebb állapotot nem írjuk felül.
+    if (data.fail2ban && revision === fail2banRevision) {
+      fail2banState = data.fail2ban;
+    }
     renderAdminPanel();
   } catch (err) {
+    if (adminSessionEnded(err, epoch)) return;
     adminFlash = { text: err.message || 'Az admin adatok betöltése nem sikerült.', kind: 'err' };
     renderAdminPanel();
   }
@@ -4902,7 +4978,7 @@ function renderSettingSection(kind, entries) {
     return section;
   }
   const wrap = el('div', { class: 'table-wrap' });
-  const table = el('table');
+  const table = el('table', { class: 'settings-table' });
   table.append(el('thead', {}, el('tr', {},
     el('th', { text: tr('Címke') }), el('th', { text: tr('Cél') }),
     el('th', { text: tr('Protokoll') }), el('th', { text: tr('Portok') }),
@@ -5039,7 +5115,7 @@ function renderSessions() {
     return;
   }
   const wrap = el('div', { class: 'table-wrap' });
-  const table = el('table');
+  const table = el('table', { class: 'sessions-table' });
   table.append(el('thead', {}, el('tr', {},
     el('th', { text: tr('Felhasználó') }), el('th', { text: tr('IP-cím') }),
     el('th', { text: tr('Állapot') }), el('th', { text: tr('Szabály') }),
@@ -5373,7 +5449,7 @@ function fail2banBanForm(fb) {
 }
 function fail2banBannedTable(bans) {
   const wrap = el('div', { class: 'table-wrap' });
-  const table = el('table');
+  const table = el('table', { class: 'f2b-bans-table' });
   table.append(el('thead', {}, el('tr', {},
     el('th', { text: tr('IP-cím') }), el('th', { text: tr('Típus') }),
     el('th', { text: tr('Kezdete') }), el('th', { text: tr('Hátralévő idő') }),
@@ -5423,7 +5499,7 @@ function fail2banBannedTable(bans) {
 }
 function fail2banPendingTable(pending) {
   const wrap = el('div', { class: 'table-wrap' });
-  const table = el('table');
+  const table = el('table', { class: 'f2b-pending-table' });
   table.append(el('thead', {}, el('tr', {},
     el('th', { text: tr('IP-cím') }), el('th', { text: tr('Sikertelen kísérlet') }),
     el('th', { text: tr('Felhasználó') }), el('th', { text: tr('Időablak vége') })
@@ -5446,7 +5522,7 @@ function fail2banPendingTable(pending) {
 }
 function fail2banDropPendingTable(pending) {
   const wrap = el('div', { class: 'table-wrap' });
-  const table = el('table');
+  const table = el('table', { class: 'f2b-drop-table' });
   table.append(el('thead', {}, el('tr', {},
     el('th', { text: tr('IP-cím') }), el('th', { text: tr('Eldobott csomag') }),
     el('th', { text: tr('Különböző port') }), el('th', { text: tr('Ok') }),
@@ -5545,22 +5621,34 @@ function renderFail2ban() {
 }
 async function loadFail2ban() {
   stopFail2banTimers();
+  const epoch = authEpoch;
+  const revision = fail2banRevision;
   try {
     const res = await fetch('/api/admin/fail2ban', { cache: 'no-store' });
     const data = await res.json();
-    if (!res.ok || !data.ok) throw new Error(data.error || 'a fail2ban adatok nem olvashatók');
-    fail2banState = data.fail2ban;
-    // Automatikus frissítésnél ne írjuk felül az éppen gépelt űrlapot.
-    const focus = document.activeElement;
-    const typing = !!focus && adminPanel.contains(focus) &&
-      ['INPUT', 'SELECT', 'TEXTAREA'].includes(focus.tagName);
-    if (!typing) {
-      const scrollTop = adminPanel.scrollTop;
-      adminFlash = null;
-      renderAdminPanel();
-      adminPanel.scrollTop = scrollTop;
+    if (!res.ok || !data.ok) {
+      const error = new Error(data.error || 'a fail2ban adatok nem olvashatók');
+      error.status = res.status;
+      error.data = data;
+      throw error;
+    }
+    // Ha közben kézi tiltás vagy feloldás történt, ez a válasz már elavult;
+    // a frissebb, POST-ból kapott állapotot nem írjuk felül.
+    if (revision === fail2banRevision) {
+      fail2banState = data.fail2ban;
+      // Automatikus frissítésnél ne írjuk felül az éppen gépelt űrlapot.
+      const focus = document.activeElement;
+      const typing = !!focus && adminPanel.contains(focus) &&
+        ['INPUT', 'SELECT', 'TEXTAREA'].includes(focus.tagName);
+      if (!typing) {
+        const scrollTop = adminPanel.scrollTop;
+        adminFlash = null;
+        renderAdminPanel();
+        adminPanel.scrollTop = scrollTop;
+      }
     }
   } catch (err) {
+    if (adminSessionEnded(err, epoch)) return;
     adminFlash = { text: err.message || 'A fail2ban adatok betöltése nem sikerült.', kind: 'err' };
     renderAdminPanel();
   }
@@ -6328,6 +6416,7 @@ form.addEventListener('submit', async e => {
       pass: passEl.value,
       captcha
     });
+    authEpoch += 1;
     resetCaptcha();
     passEl.value = '';
     if (data.must_change_password) {

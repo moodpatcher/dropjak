@@ -62,6 +62,9 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     # Lassú/beragadt kapcsolatok ne foglalják örökre a szálakat.
     timeout = 30
+    # Kérésenként állítjuk; megakadályozza, hogy a már kiolvasott body-t
+    # egy későbbi hibaág még egyszer „elfogyassza” a keep-alive kapcsolatból.
+    _body_read = False
 
     # -- segédek ---------------------------------------------------------------
 
@@ -96,13 +99,20 @@ class Handler(BaseHTTPRequestHandler):
         if not origin:
             return True
         if origin == "null":
+            self._discard_body()
             return False
         try:
             origin_netloc = urllib.parse.urlsplit(origin).netloc
         except ValueError:
+            self._discard_body()
             return False
         host = (self.headers.get("Host") or "").strip()
-        return bool(host) and origin_netloc.lower() == host.lower()
+        ok = bool(host) and origin_netloc.lower() == host.lower()
+        if not ok:
+            # A korai 403 előtt olvassuk ki a body-t, különben a keep-alive
+            # kapcsolaton a következő kérés a régi body után olvasódna.
+            self._discard_body()
+        return ok
 
     def _send(
         self,
@@ -158,24 +168,31 @@ class Handler(BaseHTTPRequestHandler):
         try:
             data = json.loads(self.rfile.read(length))
         except (OSError, ValueError):
+            self._body_read = True
             self.close_connection = True
             return None
+        self._body_read = True
         return data if isinstance(data, dict) else None
 
     def _discard_body(self) -> None:
+        if self._body_read:
+            return
         try:
             length = int(self.headers.get("Content-Length") or "0")
         except ValueError:
             length = 0
         if length <= 0:
+            self._body_read = True
             return
         if length > 64 * 1024:
+            self._body_read = True
             self.close_connection = True
             return
         try:
             self.rfile.read(length)
         except OSError:
             self.close_connection = True
+        self._body_read = True
 
     def _ua(self) -> str:
         return (self.headers.get("User-Agent") or "")[:300]
@@ -197,7 +214,17 @@ class Handler(BaseHTTPRequestHandler):
                 reason="nincs admin munkamenet",
                 path=urllib.parse.urlsplit(self.path).path,
             )
-            self._json(403, {"ok": False, "error": "admin jogosultság szükséges"})
+            # A body-t a 403 előtt ki kell olvasni, különben a keep-alive
+            # kapcsolaton a következő kérés a régi body-ba futna.
+            self._discard_body()
+            self._json(
+                403,
+                {
+                    "ok": False,
+                    "error": "admin jogosultság szükséges",
+                    "code": "admin_session",
+                },
+            )
             return None
         record = self.gw.users.record(session.user)
         if record is None or not record.enabled or not record.is_admin:
@@ -211,7 +238,15 @@ class Handler(BaseHTTPRequestHandler):
                 reason="a felhasználó már nem aktív admin",
                 path=urllib.parse.urlsplit(self.path).path,
             )
-            self._json(403, {"ok": False, "error": "admin jogosultság szükséges"})
+            self._discard_body()
+            self._json(
+                403,
+                {
+                    "ok": False,
+                    "error": "admin jogosultság szükséges",
+                    "code": "admin_session",
+                },
+            )
             return None
         if record.must_change_password:
             self._audit(
@@ -220,6 +255,7 @@ class Handler(BaseHTTPRequestHandler):
                 reason="kötelező jelszócsere előtt",
                 path=urllib.parse.urlsplit(self.path).path,
             )
+            self._discard_body()
             self._json(
                 403,
                 {
@@ -329,6 +365,7 @@ class Handler(BaseHTTPRequestHandler):
     # -- GET / HEAD ------------------------------------------------------------
 
     def do_GET(self) -> None:
+        self._body_read = False
         path = urllib.parse.urlsplit(self.path).path
 
         if path == "/api/challenge":
@@ -844,6 +881,7 @@ class Handler(BaseHTTPRequestHandler):
     # -- POST ------------------------------------------------------------------
 
     def do_POST(self) -> None:
+        self._body_read = False
         path = urllib.parse.urlsplit(self.path).path
         if path == "/api/login":
             return self._login()

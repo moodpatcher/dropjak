@@ -3018,6 +3018,33 @@ class AdminHttpTests(unittest.TestCase):
         self.assertEqual(events[0]["src"], "192.0.2.50")
         self.assertTrue(events[0]["manual"])
 
+        # A felület 5 másodpercenként GET-tel frissít; a friss listaérésnek is
+        # tartalmaznia kell a kézi tiltást, nem csak a POST válaszának.
+        status, _, body = self.get(
+            "/api/admin/fail2ban", cookie=cookie, source="127.0.0.5"
+        )
+        self.assertEqual(status, 200, body)
+        listed = json.loads(body)["fail2ban"]["bans"]
+        self.assertEqual([row["ip"] for row in listed], ["192.0.2.50"])
+        self.assertTrue(listed[0]["manual"])
+        self.assertEqual(listed[0]["source"], "manual")
+
+        state = self.state(cookie)
+        self.assertEqual(
+            [row["ip"] for row in state["fail2ban"]["bans"]],
+            ["192.0.2.50"],
+        )
+
+        # Újraindítás után a tiltás a fail2ban.json-ból töltődik vissza.
+        reloaded = fail2ban_mod.Fail2ban(
+            self.fw,
+            path=os.path.join(self.tmp.name, "fail2ban.json"),
+            logger=lambda *_: None,
+        )
+        restored = reloaded.banned("192.0.2.50")
+        self.assertIsNotNone(restored)
+        self.assertTrue(restored["manual"])
+
         status, _, body = self.post(
             "/api/admin/fail2ban",
             {"action": "ban", "ip": "192.0.2.51", "seconds": 600},
@@ -3046,6 +3073,63 @@ class AdminHttpTests(unittest.TestCase):
         data = json.loads(body)
         self.assertEqual(data["message"], "1 tiltás feloldva.")
         self.assertEqual(data["fail2ban"]["banned_count"], 0)
+
+    def test_early_403_drains_body_on_keepalive(self) -> None:
+        """A korai 403 után a keep-alive kapcsolat ne mérgeződjön el."""
+        payload = json.dumps(
+            {"action": "ban", "ip": "192.0.2.77", "seconds": 600}
+        )
+
+        # Nincs admin munkamenet: a guard a body kiolvasása előtt 403-at ad.
+        conn = self.conn(source="127.0.0.5")
+        try:
+            conn.request(
+                "POST", "/api/admin/fail2ban", body=payload,
+                headers={"Content-Type": "application/json"},
+            )
+            resp = conn.getresponse()
+            body = resp.read()
+            self.assertEqual(resp.status, 403, body)
+            data = json.loads(body)
+            self.assertEqual(data.get("code"), "admin_session")
+
+            conn.request("GET", "/api/status")
+            follow = conn.getresponse()
+            follow_body = follow.read()
+            self.assertEqual(follow.status, 200, follow_body)
+            self.assertTrue(json.loads(follow_body).get("ok"))
+        finally:
+            conn.close()
+
+        # Érvénytelen Origin: a guard átenged, de az origin-ellenőrzés a body
+        # kiolvasása előtt 403-at ad.
+        cookie = self.admin_cookie()
+        conn = self.conn(source="127.0.0.5")
+        try:
+            conn.request(
+                "POST", "/api/admin/fail2ban", body=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "Cookie": cookie,
+                    "Origin": "http://evil.example",
+                },
+            )
+            resp = conn.getresponse()
+            body = resp.read()
+            self.assertEqual(resp.status, 403, body)
+            data = json.loads(body)
+            self.assertEqual(data.get("error"), "érvénytelen kérés-eredet")
+            self.assertNotIn("code", data)
+
+            conn.request(
+                "GET", "/api/admin/fail2ban", headers={"Cookie": cookie}
+            )
+            follow = conn.getresponse()
+            follow_body = follow.read()
+            self.assertEqual(follow.status, 200, follow_body)
+            self.assertTrue(json.loads(follow_body).get("ok"))
+        finally:
+            conn.close()
 
     def test_fail2ban_auto_ban_blocks_login_and_writes_drop_event(self) -> None:
         source = "127.0.0.9"
