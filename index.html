@@ -1454,9 +1454,8 @@ const I18N = {
     'Blokkolt cél': 'Blocked destination',
     'Konténer': 'Container',
     'Fail2ban': 'Fail2ban',
-    'további naplózott találat': 'further logged hits',
-    'utolsó találat': 'last hit',
-    'Fail2ban tiltás utáni forgalom': 'Traffic after the Fail2ban ban',
+    'fail2ban utáni kísérlet': 'attempt after fail2ban',
+    'utolsó': 'last',
     'no-grant': 'no active grant',
     'wan-drop': 'dropped from WAN',
     'spoof-lan': 'spoofed LAN source',
@@ -1481,7 +1480,6 @@ const I18N = {
     'Időtartam': 'Time span',
     'Leggyakoribb ok': 'Top reason',
     'Egyedi forrás': 'Unique sources',
-    'Minden ok': 'All reasons',
     'Forrás → cél': 'Source → destination',
     'Egyéb': 'Other',
     'Szűrők': 'Filters',
@@ -1994,9 +1992,8 @@ const I18N = {
     'Blokkolt cél': 'Blockiertes Ziel',
     'Konténer': 'Container',
     'Fail2ban': 'Fail2ban-Sperre',
-    'további naplózott találat': 'weitere protokollierte Treffer',
-    'utolsó találat': 'letzter Treffer',
-    'Fail2ban tiltás utáni forgalom': 'Verkehr nach der Fail2ban-Sperre',
+    'fail2ban utáni kísérlet': 'Versuch nach Fail2ban',
+    'utolsó': 'zuletzt',
     'no-grant': 'keine aktive Freigabe',
     'wan-drop': 'vom WAN verworfen',
     'spoof-lan': 'gefälschte LAN-Quelle',
@@ -2021,7 +2018,6 @@ const I18N = {
     'Időtartam': 'Zeitraum',
     'Leggyakoribb ok': 'Häufigster Grund',
     'Egyedi forrás': 'Eindeutige Quellen',
-    'Minden ok': 'Alle Gründe',
     'Forrás → cél': 'Quelle → Ziel',
     'Egyéb': 'Sonstige',
     'Szűrők': 'Filter',
@@ -2710,7 +2706,7 @@ let dropRows = [];
 let dropStatus = null;
 let dropTimer = null;
 let dropAuto = true;
-let dropFilter = { src: '', dst: '', proto: '', port: '', group: '', q: '', limit: 500 };
+let dropFilter = { src: '', dst: '', proto: '', port: '', q: '', limit: 500 };
 let sessionsState = null;
 let sessionClockTimer = null;
 let sessionPollTimer = null;
@@ -4164,19 +4160,18 @@ async function loadAdminState() {
 
 /* ============================================================ admin: drop napló */
 
-const DROP_GROUPS = [
-  { id: 'access', label: 'Hozzáférés', color: '#2563eb' },
-  { id: 'spoof', label: 'Hamisítás', color: '#7c3aed' },
-  { id: 'ban', label: 'Fail2ban', color: '#b91c1c' },
-  { id: 'block', label: 'Blokkolt cél', color: '#c2410c' },
-  { id: 'container', label: 'Konténer', color: '#0d9488' },
-  { id: 'other', label: 'Egyéb', color: '#64748b' }
+/* A napló csak kétféle sort különböztet meg: a hétköznapi eldobásokat
+   (DROP) és a fail2ban által tiltott forrásokat (fail2ban). A nyers ok a
+   részletes JSON-ban marad. */
+const DROP_KINDS = [
+  { id: 'drop', label: 'DROP', color: '#2563eb' },
+  { id: 'ban', label: 'fail2ban', color: '#b91c1c' }
 ];
-const DROP_GROUP_LABELS = Object.fromEntries(
-  DROP_GROUPS.map(group => [group.id, group.label])
+const DROP_KIND_LABELS = Object.fromEntries(
+  DROP_KINDS.map(kind => [kind.id, kind.label])
 );
-const DROP_GROUP_COLORS = Object.fromEntries(
-  DROP_GROUPS.map(group => [group.id, group.color])
+const DROP_KIND_COLORS = Object.fromEntries(
+  DROP_KINDS.map(kind => [kind.id, kind.color])
 );
 
 function dropPortText(entry) {
@@ -4194,15 +4189,15 @@ function dropTimeText(entry) {
     return entry.time || '—';
   }
 }
-function dropGroupOf(entry) {
-  const group = entry && entry.group;
-  return DROP_GROUP_COLORS[group] ? group : 'other';
+function dropKindOf(entry) {
+  const kind = entry && entry.group;
+  return DROP_KIND_COLORS[kind] ? kind : 'drop';
 }
-function dropGroupLabel(group) {
-  return tr(DROP_GROUP_LABELS[group] || DROP_GROUP_LABELS.other);
+function dropKindLabel(kind) {
+  return DROP_KIND_LABELS[kind] || DROP_KIND_LABELS.drop;
 }
-function dropGroupColor(group) {
-  return DROP_GROUP_COLORS[group] || DROP_GROUP_COLORS.other;
+function dropKindColor(kind) {
+  return DROP_KIND_COLORS[kind] || DROP_KIND_COLORS.drop;
 }
 function dropMix(hex, target, ratio) {
   const parse = value => {
@@ -4231,8 +4226,8 @@ function dropToneStyle(base, tint = 0.92) {
   return `--accent:${base};--accent-ink:${dropMix(base, '#000000', 0.22)};` +
     `--tint:${dropMix(base, '#ffffff', tint)};--tint-line:${dropMix(base, '#ffffff', 0.76)}`;
 }
-function dropGroupTone(group) {
-  const base = dropGroupColor(group);
+function dropKindTone(kind) {
+  const base = dropKindColor(kind);
   if (dropIsDark()) {
     return {
       base,
@@ -4274,11 +4269,11 @@ function dropDurationText(seconds) {
   return `${Math.round(seconds / 86400)} ${tr('nap')}`;
 }
 function dropAnalysis(rows) {
-  const groupCounts = new Map();
+  const kindCounts = new Map();
   const sourceCounts = new Map();
   for (const row of rows) {
-    const group = dropGroupOf(row);
-    groupCounts.set(group, (groupCounts.get(group) || 0) + 1);
+    const group = dropKindOf(row);
+    kindCounts.set(group, (kindCounts.get(group) || 0) + 1);
     const src = row.src || '—';
     sourceCounts.set(src, (sourceCounts.get(src) || 0) + 1);
   }
@@ -4294,8 +4289,8 @@ function dropAnalysis(rows) {
     first,
     last,
     span: Math.max(0, last - first),
-    groupCounts,
-    ranked: Array.from(groupCounts.entries()).sort((a, b) => b[1] - a[1]),
+    kindCounts,
+    ranked: Array.from(kindCounts.entries()).sort((a, b) => b[1] - a[1]),
     sources: Array.from(sourceCounts.entries()).sort((a, b) => b[1] - a[1]).slice(0, 5),
     uniqueSources: sourceCounts.size
   };
@@ -4313,7 +4308,7 @@ function dropChartModel(analysis) {
   const span = Math.max(60, analysis.span);
   const start = analysis.last - span;
   const bucketSec = span / bucketCount;
-  const stackGroups = analysis.ranked.map(([group]) => group);
+  const stackKinds = analysis.ranked.map(([group]) => group);
   const buckets = Array.from({ length: bucketCount }, (_, index) => ({
     start: start + index * bucketSec,
     counts: new Map()
@@ -4321,21 +4316,21 @@ function dropChartModel(analysis) {
   for (const item of analysis.valid) {
     const index = Math.min(bucketCount - 1, Math.max(0, Math.floor((item.ts - start) / bucketSec)));
     const counts = buckets[index].counts;
-    const group = dropGroupOf(item.row);
+    const group = dropKindOf(item.row);
     counts.set(group, (counts.get(group) || 0) + 1);
   }
   for (const bucket of buckets) {
     const segments = [];
-    for (const group of stackGroups) {
+    for (const group of stackKinds) {
       const count = bucket.counts.get(group) || 0;
-      if (count) segments.push({ group, count, color: dropGroupColor(group) });
+      if (count) segments.push({ group, count, color: dropKindColor(group) });
     }
     bucket.segments = segments;
     bucket.total = segments.reduce((sum, segment) => sum + segment.count, 0);
   }
   const maxTotal = Math.max(1, ...buckets.map(bucket => bucket.total));
   return {
-    analysis, buckets, bucketSec, span, stackGroups,
+    analysis, buckets, bucketSec, span, stackKinds,
     yMax: dropNiceMax(maxTotal)
   };
 }
@@ -4368,7 +4363,7 @@ function dropChartSvg(model) {
       const segmentH = (segment.count / model.yMax) * plotH;
       if (segmentH <= 0) continue;
       y -= segmentH;
-      const label = dropGroupLabel(segment.group);
+      const label = dropKindLabel(segment.group);
       const rect = svgEl('rect', {
         x, y, width: barW, height: segmentH,
         rx: Math.min(1.5, segmentH / 2), fill: segment.color, class: 'chart-bar'
@@ -4391,13 +4386,13 @@ function dropChartSvg(model) {
   return root;
 }
 function dropLegend(model) {
-  const entries = model.stackGroups.map(group =>
-    [group, model.analysis.groupCounts.get(group) || 0]
+  const entries = model.stackKinds.map(group =>
+    [group, model.analysis.kindCounts.get(group) || 0]
   );
   const legend = el('div', { class: 'drop-legend' });
   for (const [group, count] of entries) {
-    const label = dropGroupLabel(group);
-    const color = dropGroupColor(group);
+    const label = dropKindLabel(group);
+    const color = dropKindColor(group);
     legend.append(el('span', { class: 'drop-legend-item' },
       el('i', { class: 'drop-legend-swatch', style: `background:${color}` }),
       el('span', { text: label }),
@@ -4478,8 +4473,8 @@ function dropStatsRow(analysis) {
   return el('div', { class: 'drop-stats' },
     dropStat('Találat', String(analysis.rows.length), tr('a szűrt találatok alapján'), '#2563eb'),
     dropStat('Időtartam', dropDurationText(analysis.span), range, '#0d9488'),
-    dropStat('Leggyakoribb ok', top ? dropGroupLabel(top[0]) : '—', topSub,
-      top ? dropGroupColor(top[0]) : '#64748b'),
+    dropStat('Leggyakoribb ok', top ? dropKindLabel(top[0]) : '—', topSub,
+      top ? dropKindColor(top[0]) : '#64748b'),
     dropStat('Egyedi forrás', String(analysis.uniqueSources), topSource, '#7c3aed')
   );
 }
@@ -4512,7 +4507,7 @@ function dropFiltersBar() {
   const box = el('div', { class: 'drop-filters' });
   const head = el('div', { class: 'drop-filter-head' });
   head.append(el('b', { text: tr('Szűrők') }));
-  const active = ['src', 'dst', 'proto', 'port', 'group', 'q']
+  const active = ['src', 'dst', 'proto', 'port', 'q']
     .filter(key => dropFilter[key]).length;
   if (active) {
     head.append(el('span', {
@@ -4531,12 +4526,6 @@ function dropFiltersBar() {
   const qInput = el('input', {
     type: 'search', placeholder: tr('Keresés'), value: dropFilter.q
   });
-  const reasonSelect = el('select', {},
-    el('option', { value: '', text: tr('Minden ok') }),
-    ...DROP_GROUPS.map(group => el('option', {
-      value: group.id, text: tr(group.label), selected: dropFilter.group === group.id
-    }))
-  );
   const srcInput = el('input', {
     type: 'text', placeholder: tr('pl. 192.168.10.2'), value: dropFilter.src
   });
@@ -4558,7 +4547,7 @@ function dropFiltersBar() {
   );
   const grid = el('div', { class: 'drop-filter-grid' });
   for (const [label, node] of [
-    ['Keresés', qInput], ['Ok', reasonSelect], ['Forrás', srcInput], ['Cél', dstInput],
+    ['Keresés', qInput], ['Forrás', srcInput], ['Cél', dstInput],
     ['Protokoll', protoSelect], ['Port', portInput], ['Darab', limitSelect]
   ]) {
     grid.append(el('div', { class: 'drop-filter-field' },
@@ -4570,7 +4559,6 @@ function dropFiltersBar() {
       dst: dstInput.value.trim(),
       proto: protoSelect.value,
       port: portInput.value.trim(),
-      group: reasonSelect.value,
       q: qInput.value.trim(),
       limit: Number(limitSelect.value) || 500
     };
@@ -4584,7 +4572,7 @@ function dropFiltersBar() {
   box.append(grid);
   box.append(el('div', { class: 'drop-filter-actions' },
     el('button', { type: 'button', class: 'ghost', onclick: () => {
-      dropFilter = { src: '', dst: '', proto: '', port: '', group: '', q: '', limit: 500 };
+      dropFilter = { src: '', dst: '', proto: '', port: '', q: '', limit: 500 };
       loadDrops();
     } }, tr('Szűrők törlése')),
     el('button', { type: 'button', onclick: apply }, tr('Frissítés'))
@@ -4624,7 +4612,7 @@ function dropDetail(entry) {
   if (entry.mark !== undefined) facts.push(`mark=${entry.mark}`);
   if (entry.reason) facts.push(`reason=${entry.reason}`);
   if (entry.event) facts.push(`event=${entry.event}`);
-  if (entry.packets !== undefined) facts.push(`packets=${entry.packets}`);
+  if (entry.packets) facts.push(`packets=${entry.packets}`);
   if (entry.ban_ts) facts.push(`ban_ts=${clockTime(entry.ban_ts)}`);
   if (entry.last_drop) facts.push(`last_drop=${clockTime(entry.last_drop)}`);
   if (entry.event === 'ban') {
@@ -4635,10 +4623,6 @@ function dropDetail(entry) {
   }
   const wrapper = el('div', { class: 'log-detail drop-detail' });
   if (entry.event === 'ban') {
-    const after = entry.packets > 0
-      ? ` · ${entry.packets} ${tr('további naplózott találat')}`
-        + (entry.last_drop ? ` · ${tr('utolsó találat')}: ${clockTime(entry.last_drop)}` : '')
-      : '';
     wrapper.append(el('div', { class: 'admin-flash err' },
       el('b', { text: tr('Fail2ban tiltás') }),
       ' — ',
@@ -4646,17 +4630,26 @@ function dropDetail(entry) {
         text: tr(`${entry.src || '?'} forrás IP tiltva`)
           + (entry.attempts !== undefined ? ` · ${tr(`${entry.attempts} sikertelen kísérlet`)}` : '')
           + (entry.ban_until ? ` · ${tr('lejárat')}: ${clockTime(entry.ban_until)}` : '')
-          + after
       })
     ));
+    if (entry.packets > 0) {
+      wrapper.append(el('div', { class: 'admin-flash err drop-after-ban' },
+        el('b', { text: tr('fail2ban utáni kísérlet') }),
+        ' — ',
+        el('span', {
+          text: `${entry.packets}×`
+            + (entry.last_drop ? ` · ${tr('utolsó')}: ${clockTime(entry.last_drop)}` : '')
+        })
+      ));
+    }
   } else if (entry.event === 'ban-drop') {
     wrapper.append(el('div', { class: 'admin-flash err' },
-      el('b', { text: tr('Fail2ban tiltás utáni forgalom') }),
+      el('b', { text: tr('fail2ban utáni kísérlet') }),
       ' — ',
       el('span', {
         text: tr(`${entry.src || '?'} forrás IP`)
-          + ` · ${entry.packets || 0} ${tr('további naplózott találat')}`
-          + (entry.last_drop ? ` · ${tr('utolsó találat')}: ${clockTime(entry.last_drop)}` : '')
+          + ` · ${entry.packets || 0}×`
+          + (entry.last_drop ? ` · ${tr('utolsó')}: ${clockTime(entry.last_drop)}` : '')
       })
     ));
   }
@@ -4711,8 +4704,8 @@ function renderDrops() {
   )));
   const body = el('tbody');
   for (const entry of dropRows) {
-    const group = dropGroupOf(entry);
-    const tone = dropGroupTone(group);
+    const group = dropKindOf(entry);
+    const tone = dropKindTone(group);
     body.append(el('tr', {
       style: `--row-tint:${dropMix(tone.base, dropIsDark() ? '#171b21' : '#ffffff', 0.9)}`
     },
@@ -4723,7 +4716,7 @@ function renderDrops() {
         style: `--rc:${tone.base};--rc-bg:${tone.bg};--rc-line:${tone.line};--rc-ink:${tone.ink}`
       },
         el('i'),
-        dropGroupLabel(group)
+        dropKindLabel(group)
       )),
       el('td', {}, dropAddressNode(entry.src)),
       el('td', {}, dropAddressNode(entry.dst)),
@@ -4745,7 +4738,6 @@ async function loadDrops() {
       dst: dropFilter.dst || '',
       proto: dropFilter.proto || '',
       port: dropFilter.port || '',
-      group: dropFilter.group || '',
       q: dropFilter.q || ''
     });
     const res = await fetch('/api/admin/drops?' + query.toString(), { cache: 'no-store' });

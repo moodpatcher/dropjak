@@ -89,30 +89,19 @@ _MAX_STRING = 256
 BAN_EVENT_REASON = "fail2ban"
 BAN_EVENT_KIND = "ban"
 
-# A felület hat ok-kategóriát mutat. A nyers ok (a napló reason mezője)
-# változatlanul megmarad, és a részletes JSON-ban látható; a szűrő és a
-# statisztika ezeket a csoportokat használja.
-REASON_GROUPS: dict[str, tuple[str, ...]] = {
-    "access": (
-        "no-grant", "wan-drop", "input-lan", "input-wan",
-        "dns-revoked", "ssh-revoked",
-    ),
-    "spoof": ("spoof-lan", "spoof-wan", "mac"),
-    "ban": (BAN_EVENT_REASON,),
-    "block": ("block",),
-    "container": ("docker-guard", "container-spoof", "container-pivot"),
-    "other": ("ipv6", "unknown"),
-}
+# A felület kétféle sort különböztet meg: a hétköznapi eldobások "DROP",
+# a fail2ban által tiltott források (és a tiltás utáni kísérletek)
+# "fail2ban" címkét kapnak. A nyers kernel-ok (reason) változatlanul
+# megmaradnak, és a részletes JSON-ban láthatók.
+BAN_GROUP = "ban"
+DROP_GROUP = "drop"
 
 
 def reason_group(reason: str) -> str:
-    """A nyers drop-ok csoportja a felület számára."""
-    value = str(reason or "").strip().lower()
-    for group, reasons in REASON_GROUPS.items():
-        if group != "other" and value in reasons:
-            return group
-    # Az ismeretlen és a jövőbeli okok az Egyéb kategóriába kerülnek.
-    return "other"
+    """A sor felületi kategóriája: fail2ban vagy DROP."""
+    if str(reason or "").strip().lower() == BAN_EVENT_REASON:
+        return BAN_GROUP
+    return DROP_GROUP
 
 
 # --------------------------------------------------------------- NFLOG állandók
@@ -605,7 +594,7 @@ class DropLog:
         for ban in bans:
             state = dict(ban)
             state["event"] = BAN_EVENT_KIND
-            state["group"] = "ban"
+            state["group"] = BAN_GROUP
             state["packets"] = 0
             state["first_drop"] = 0.0
             state["last_drop"] = 0.0
@@ -634,7 +623,7 @@ class DropLog:
                         "reason": BAN_EVENT_REASON,
                         "event": "ban-drop",
                         "src": packet.get("src", ""),
-                        "group": "ban",
+                        "group": BAN_GROUP,
                         "packets": 0,
                         "first_drop": when,
                         "last_drop": 0.0,

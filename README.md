@@ -187,14 +187,13 @@ overview).
 
 The **Drop log** admin tab shows packets the firewall dropped, with source
 and destination in separate columns and filters for source, destination,
-protocol, port, reason group and free-text search. Entries are written to
-`drops.jsonl` in the state volume and rotate at 10 MiB (5 files kept). The
-reason shown in the table is one of a small set of groups (access, spoofing,
-fail2ban, blocked destination, container, other); the raw kernel reason is
-kept in the JSON details. The log is captured through NFLOG
-(`nfnetlink_log`) on group 5; the kernel must support NFLOG, and the group
-must not be used by another process. Only packet headers are stored, never
-payloads.
+protocol, port and free-text search. Entries are written to `drops.jsonl`
+in the state volume and rotate at 10 MiB (5 files kept). The table labels
+ordinary drops as **DROP** and rows produced by a fail2ban ban as
+**fail2ban**; the raw kernel reason is kept in the JSON details. The log is
+captured through NFLOG (`nfnetlink_log`) on group 5; the kernel must support
+NFLOG, and the group must not be used by another process. Only packet
+headers are stored, never payloads.
 
 The **Fail2ban** admin tab protects the portal login and the network edge.
 Failed passwords are counted per source IP; after the configured number of
@@ -210,7 +209,9 @@ variables only provide the initial defaults. Bans are written to
 in the drop log as a single `fail2ban` event with `event=ban`. Traffic from
 the banned source is still sampled through NFLOG (rate-limited), but the
 drop-log API folds those hits into the same event, so the UI shows one row
-per ban with the number of later logged hits instead of one row per packet.
+per ban with a short `fail2ban utáni kísérlet` (attempt after the ban) line,
+the number of later attempts and the last one, instead of one row per
+packet.
 
 Drop-based banning covers clients that never attempt a sign-in. The portal
 consumes the NFLOG drop events and counts unauthorized TCP traffic per source

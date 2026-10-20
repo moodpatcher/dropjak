@@ -2785,12 +2785,12 @@ class AdminHttpTests(unittest.TestCase):
         self.assertFalse(data["status"]["running"])
 
         status, _, body = self.get(
-            "/api/admin/drops?group=block", cookie=cookie, source="127.0.0.5"
+            "/api/admin/drops?group=drop", cookie=cookie, source="127.0.0.5"
         )
         self.assertEqual(status, 200, body)
         data = json.loads(body)
-        self.assertEqual(data["count"], 2)
-        self.assertTrue(all(row["group"] == "block" for row in data["drops"]))
+        self.assertEqual(data["count"], 3)
+        self.assertTrue(all(row["group"] == "drop" for row in data["drops"]))
 
         status, _, body = self.get(
             "/api/admin/drops?port=99999", cookie=cookie, source="127.0.0.5"
@@ -3510,7 +3510,7 @@ class DropLogStoreTests(unittest.TestCase):
         self.assertEqual(rows[1]["packets"], 5)
         self.assertEqual(rows[1]["last_dport"], 2004)
 
-    def test_reason_groups(self) -> None:
+    def test_reason_kinds(self) -> None:
         now = time.time()
         self.store.write({"ts": now, "src": "10.0.0.1",
                           "reason": "no-grant"})
@@ -3518,11 +3518,10 @@ class DropLogStoreTests(unittest.TestCase):
                           "reason": "spoof-lan"})
         self.store.write({"ts": now + 2, "src": "10.0.0.3",
                           "reason": "some-new-reason"})
-        self.assertEqual(len(self.store.read(group="access")), 1)
-        self.assertEqual(len(self.store.read(group="spoof")), 1)
-        self.assertEqual(len(self.store.read(group="other")), 1)
+        self.assertEqual(len(self.store.read(group="drop")), 3)
         self.assertEqual(len(self.store.read(group="ban")), 0)
-        self.assertTrue(all(row.get("group") for row in self.store.read()))
+        self.assertTrue(all(row.get("group") == "drop"
+                            for row in self.store.read()))
 
     def test_rotation_keeps_old_entries(self) -> None:
         self.store.max_bytes = 200
