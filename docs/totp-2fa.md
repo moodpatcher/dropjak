@@ -2,9 +2,8 @@
 
 **Date:** 2026-10-20
 
-**Status:** implemented in the working tree. Not committed and not deployed
-by this change. No service restart, migration or commit is part of this
-change.
+**Status:** implemented, committed as `8f46da3` and deployed to the test VM
+on 2026-10-20.
 
 This document is the technical reference for the optional per-user TOTP 2FA
 in the portal. It describes the behavior, state, API surface and limitations.
