@@ -22,6 +22,13 @@ bottom-right corner.
   reachable service.
 - A correct password alone does not grant network access. Sign-in is
   two-phase: authenticate, then explicitly select an access rule and TTL.
+- Account requests are optional and off by default. When an admin enables
+  **Fiókkérelmek** in **Admin → Settings**, the login page shows **Fiók
+  kérése** and a visitor can submit a username, password and email after the
+  usual captcha. This creates a pending, disabled account with no rules or
+  access; an admin approves or rejects it in **Admin → Users**. The email is
+  stored as contact data only and is never sent or logged.
+  See [docs/account-requests.md](docs/account-requests.md).
 - Grants are implemented with nftables dynamic sets (`allowed_v4`,
   `allowed_tcp`, `allowed_udp`, `allowed_icmp`, `host_ssh_v4`, `client_mac`).
   Entries expire in the kernel even if the portal stops.
@@ -167,9 +174,9 @@ authenticator app or a one-time recovery code. No session cookie is issued
 until the second factor succeeds.
 
 The first sign-in of a user who is required to use 2FA but is not enrolled
-shows a base32 secret and an `otpauth://totp/...` URI for manual entry into
-Google Authenticator (this MVP has no QR code). After the first code is
-confirmed, 10 recovery codes are shown exactly once. Each recovery code can
+shows a scannable QR code generated in the browser, with the base32 secret
+and `otpauth://totp/...` URI under a manual-entry fallback. After the first
+code is confirmed, 10 recovery codes are shown exactly once. Each recovery code can
 be used once in place of the 6-digit code. Store them offline: if both the
 authenticator and the recovery codes are lost, an admin must reset 2FA.
 

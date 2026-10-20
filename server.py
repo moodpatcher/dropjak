@@ -391,7 +391,7 @@ class Handler(BaseHTTPRequestHandler):
             )
             return None
         record = self.gw.users.record(session.user)
-        if record is None or not record.enabled or not record.is_admin:
+        if record is None or not record.enabled or record.pending or not record.is_admin:
             # A munkamenet szerepkörét/aktív állapotát minden admin-kérésnél
             # a friss felhasználói nyilvántartásból ellenőrizzük, nem a
             # belépéskori pillanatképből. Elavult munkamenet nem maradhat.
@@ -511,8 +511,13 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(value, str) or not value.strip():
                 raise gateway.GroupStoreError("érvénytelen felhasználónév")
             value = value.strip()
-            if self.gw.users.record(value) is None:
+            record = self.gw.users.record(value)
+            if record is None:
                 raise gateway.GroupStoreError(f"ismeretlen felhasználó: {value}")
+            if record.pending:
+                raise gateway.GroupStoreError(
+                    "a jóváhagyásra váró fiók nem rendelhető csoporthoz"
+                )
             if value not in out:
                 out.append(value)
         return out
@@ -622,25 +627,36 @@ class Handler(BaseHTTPRequestHandler):
         }
 
     def _status(self) -> None:
+        registration_enabled = bool(
+            self.gw.settings.snapshot().get("registration_enabled", False)
+        )
         session = self._session()
         if session is None:
             # A legutóbbi lezárás okát is megadjuk, hogy a felület meg tudja
             # mondani, miért esett ki a felhasználó a countdown közben.
             last_end = self.gw.sessions.last_end(self._client_ip())
-            payload = {"ok": True, "authenticated": False}
+            payload = {
+                "ok": True,
+                "authenticated": False,
+                "registration_enabled": registration_enabled,
+            }
             if last_end is not None:
                 payload["last_end"] = last_end
             payload.update(self._ban_fields())
             self._json(200, payload)
             return
         record = self.gw.users.record(session.user)
-        if record is None or not record.enabled:
+        if record is None or not record.enabled or record.pending:
             self.gw.sessions.logout(
                 session.token, session.ip,
                 reason="disabled" if record is not None else "revoked",
             )
             last_end = self.gw.sessions.last_end(self._client_ip())
-            payload = {"ok": True, "authenticated": False}
+            payload = {
+                "ok": True,
+                "authenticated": False,
+                "registration_enabled": registration_enabled,
+            }
             if last_end is not None:
                 payload["last_end"] = last_end
             payload.update(self._ban_fields())
@@ -658,6 +674,7 @@ class Handler(BaseHTTPRequestHandler):
             "expires_in": session.expires_in,
             "limits": self._limits(),
             "rules": [self._rule_payload(rule) for rule in rules],
+            "registration_enabled": registration_enabled,
         }
         if session.authorized:
             payload["rule"] = session.rule
@@ -884,6 +901,33 @@ class Handler(BaseHTTPRequestHandler):
         if data is None:
             return self._json(400, {"ok": False, "error": "hibás kérés"})
         action = str(data.get("action", "")).strip().lower()
+        if action == "registration_enabled":
+            # Portálkezelés: nem megy át az nftables-előkészítésen és
+            # -alkalmazáson, ezért külön ágban kezeljük.
+            value = data.get("enabled", data.get("registration_enabled"))
+            if not isinstance(value, bool):
+                self._json(
+                    400,
+                    {
+                        "ok": False,
+                        "error": "a registration_enabled mező igaz/hamis "
+                                 "érték kell",
+                    },
+                )
+                return
+            with self.gw.admin_lock:
+                self.gw.settings.set_registration_enabled(value)
+                self._audit(
+                    "admin_settings_changed",
+                    user=session.user,
+                    action="registration_enabled",
+                    target="registration_enabled",
+                    registration_enabled=value,
+                )
+            payload = self._admin_state()
+            payload["message"] = "A fiókkérés beállítása mentve."
+            self._json(200, payload)
+            return
         kind = str(data.get("kind", "")).strip().lower()
         entry_id = data.get("id", "")
         if entry_id is None:
@@ -1047,6 +1091,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         self._body_read = False
         path = urllib.parse.urlsplit(self.path).path
+        if path == "/api/register":
+            return self._register()
         if path == "/api/login":
             return self._login()
         if path == "/api/login/totp":
@@ -1075,6 +1121,152 @@ class Handler(BaseHTTPRequestHandler):
             return self._admin_fail2ban_action()
         self._discard_body()
         self._json(404, {"ok": False, "error": "ismeretlen végpont"})
+
+    def _register(self) -> None:
+        """Nyilvános fiókkérés: jóváhagyásra váró felhasználó létrehozása."""
+        ip = self._client_ip()
+        data = self._read_json()
+        if data is None:
+            return self._json(400, {"ok": False, "error": "hibás kérés"})
+        if not self._origin_ok():
+            return self._json(403, {"ok": False, "error": "érvénytelen kérés-eredet"})
+        if not gateway.is_ipv4(ip):
+            return self._json(
+                400, {"ok": False, "error": "A kapu csak IPv4-címmel érhető el."}
+            )
+        if not bool(self.gw.settings.snapshot().get("registration_enabled", False)):
+            self._audit(
+                "registration_failed", reason="a fiókkérés ki van kapcsolva"
+            )
+            return self._json(
+                403,
+                {
+                    "ok": False,
+                    "error": "A fiókkérés nem engedélyezett.",
+                    "code": "registration_disabled",
+                },
+            )
+        if not self.gw.register_rate.allow(ip):
+            self._audit("registration_failed", reason="túl sok próbálkozás")
+            return self._json(
+                429,
+                {"ok": False, "error": "Túl sok fiókkérés. Próbáld újra később."},
+                headers={"Retry-After": "600"},
+            )
+
+        user = data.get("user", data.get("name"))
+        password = data.get("pass", data.get("password"))
+        email = data.get("email")
+        captcha = data.get("captcha")
+        if (
+            not isinstance(user, str)
+            or not isinstance(password, str)
+            or not isinstance(email, str)
+            or not isinstance(captcha, dict)
+        ):
+            self._audit("registration_failed", reason="hiányos adatok")
+            return self._json(400, {"ok": False, "error": "hiányos adatok"})
+        user = user.strip()
+        if len(user) > 32 or not gateway.USERNAME_RE.match(user):
+            self._audit(
+                "registration_failed", reason="érvénytelen felhasználónév"
+            )
+            return self._json(
+                400,
+                {
+                    "ok": False,
+                    "error": "a felhasználónév 1–32 karakter lehet: betű, "
+                             "szám, pont, kötőjel, aláhúzás",
+                },
+            )
+        if not (
+            gateway.UserStore.MIN_PASSWORD
+            <= len(password)
+            <= gateway.UserStore.MAX_PASSWORD
+        ):
+            self._audit(
+                "registration_failed", user=user, reason="érvénytelen jelszóhossz"
+            )
+            return self._json(
+                400,
+                {
+                    "ok": False,
+                    "error": f"a jelszó {gateway.UserStore.MIN_PASSWORD}–"
+                             f"{gateway.UserStore.MAX_PASSWORD} karakter legyen",
+                },
+            )
+        try:
+            email = gateway.normalize_email(email, strict=True)
+        except ValueError:
+            self._audit(
+                "registration_failed", user=user, reason="érvénytelen e-mail-cím"
+            )
+            return self._json(
+                400, {"ok": False, "error": "Érvénytelen e-mail-cím."}
+            )
+
+        if gateway.TURNSTILE_ON:
+            ok, why = gateway.verify_turnstile(str(captcha.get("token", "")), ip)
+        else:
+            ok, why = gateway.verify_pow(captcha)
+        if not ok:
+            self._audit(
+                "registration_failed", user=user, reason=f"captcha: {why}"
+            )
+            return self._json(403, {"ok": False, "error": f"Captcha: {why}"})
+
+        if self.gw.users.record(user) is not None:
+            self._audit("registration_failed", user=user, reason="foglalt név")
+            return self._json(
+                409,
+                {
+                    "ok": False,
+                    "error": "Ez a bejelentkezési név már foglalt.",
+                    "code": "username_taken",
+                },
+            )
+        try:
+            # A jelszót és az e-mail-címet kizárólag a felhasználótároló
+            # kapja meg; naplóba és auditba egyik sem kerülhet.
+            self.gw.users.add(
+                user,
+                password,
+                role=gateway.ROLE_USER,
+                enabled=False,
+                rules=(),
+                pending=True,
+                email=email,
+                must_change_password=False,
+            )
+        except gateway.UserStoreError as exc:
+            if "már létezik" in str(exc):
+                self._audit(
+                    "registration_failed", user=user, reason="foglalt név"
+                )
+                return self._json(
+                    409,
+                    {
+                        "ok": False,
+                        "error": "Ez a bejelentkezési név már foglalt.",
+                        "code": "username_taken",
+                    },
+                )
+            self._audit(
+                "registration_failed",
+                user=user,
+                reason="a felhasználó létrehozása nem sikerült",
+            )
+            return self._json(400, {"ok": False, "error": str(exc)})
+        self._audit("registration_requested", target=user)
+        print(f"[{ip}] fiókkérés rögzítve: {user!r}", flush=True)
+        self._json(
+            200,
+            {
+                "ok": True,
+                "message": "Kérelmedet rögzítettük. Az admin jóváhagyása "
+                           "után beléphetsz.",
+            },
+        )
 
     def _login(self) -> None:
         ip = self._client_ip()
@@ -1184,6 +1376,22 @@ class Handler(BaseHTTPRequestHandler):
             )
 
         record = self.gw.users.record(user)
+        if record is not None and record.pending:
+            # A helyes jelszó ellenére sem jön létre munkamenet vagy 2FA-jegy,
+            # és a fail2bant sem terheljük: ez nem hibás belépési kísérlet.
+            self._audit(
+                "login_failed", user=user, reason="a fiók jóváhagyásra vár"
+            )
+            return self._json(
+                403,
+                {
+                    "ok": False,
+                    "error": "A fiók jóváhagyásra vár. Az admin jóváhagyása "
+                             "után beléphetsz.",
+                    "code": "pending_approval",
+                    "pending": True,
+                },
+            )
         if record is None or not record.enabled:
             self._audit("login_failed", user=user, reason="letiltott felhasználó")
             try:
@@ -1487,6 +1695,7 @@ class Handler(BaseHTTPRequestHandler):
         if (
             record is None
             or not record.enabled
+            or record.pending
             or not record.totp_required
             or not record.totp_secret
             or not hmac.compare_digest(
@@ -1527,6 +1736,7 @@ class Handler(BaseHTTPRequestHandler):
         if (
             record is None
             or not record.enabled
+            or record.pending
             or not record.totp_required
             or record.totp_secret
             or not hmac.compare_digest(
@@ -1557,7 +1767,7 @@ class Handler(BaseHTTPRequestHandler):
                 },
             )
         record = self.gw.users.record(ticket.username)
-        if record is None or not record.enabled:
+        if record is None or not record.enabled or record.pending:
             return self._json(
                 400,
                 {
@@ -1606,6 +1816,7 @@ class Handler(BaseHTTPRequestHandler):
         if (
             record is None
             or not record.enabled
+            or record.pending
             or not record.totp_required
             or not record.totp_secret
             or not hmac.compare_digest(
@@ -1673,7 +1884,7 @@ class Handler(BaseHTTPRequestHandler):
                 400, {"ok": False, "error": "érvénytelen vagy lejárt munkamenet"}
             )
         record = self.gw.users.record(current.user)
-        if record is None or not record.enabled:
+        if record is None or not record.enabled or record.pending:
             self.gw.sessions.logout(token, ip)
             self._audit(
                 "access_denied", user=current.user,
@@ -1830,7 +2041,7 @@ class Handler(BaseHTTPRequestHandler):
                 401, {"ok": False, "error": "érvénytelen vagy lejárt munkamenet"}
             )
         record = self.gw.users.record(session.user)
-        if record is None or not record.enabled:
+        if record is None or not record.enabled or record.pending:
             self.gw.sessions.logout(
                 token, ip,
                 reason="disabled" if record is not None else "revoked",
@@ -1920,6 +2131,7 @@ class Handler(BaseHTTPRequestHandler):
         if session is None:
             return
         action = str(data.get("action", "")).strip()
+        message = ""
         try:
             if action == "create":
                 self._admin_user_create(data)
@@ -1927,6 +2139,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._admin_user_update(data)
             elif action == "delete":
                 self._admin_user_delete(data)
+            elif action == "approve":
+                self._admin_user_approve(data)
+                message = "A fiókkérés jóváhagyva."
+            elif action == "reject":
+                self._admin_user_reject(data)
+                message = "A fiókkérés elutasítva."
             elif action == "totp_reset":
                 self._admin_user_totp_reset(data, session)
                 # A reset-ág maga küldi a választ; ne legyen második.
@@ -1937,7 +2155,10 @@ class Handler(BaseHTTPRequestHandler):
                 gateway.RuleStoreError, gateway.AccessError, ValueError) as exc:
             self._admin_action_error(f"user_{action}", exc)
             return self._json(400, {"ok": False, "error": str(exc)})
-        self._json(200, self._admin_state())
+        payload = self._admin_state()
+        if message:
+            payload["message"] = message
+        self._json(200, payload)
 
     def _admin_user_create(self, data: dict) -> None:
         name = data.get("name")
@@ -1982,6 +2203,59 @@ class Handler(BaseHTTPRequestHandler):
             totp_required=totp_required,
         )
 
+    def _admin_user_approve(self, data: dict) -> None:
+        """Fiókkérés jóváhagyása: szabály és csoport nélkül engedélyezés."""
+        name = data.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise gateway.UserStoreError("hiányzó felhasználónév")
+        name = name.strip()
+        session = self._session()
+        with self.gw.admin_lock:
+            record = self.gw.users.record(name)
+            if record is None or not record.pending:
+                raise gateway.UserStoreError(
+                    "ez a felhasználó nem jóváhagyásra váró kérelem"
+                )
+            if not self.gw.users.approve_user(name):
+                raise gateway.UserStoreError(
+                    "ez a felhasználó nem jóváhagyásra váró kérelem"
+                )
+            self._audit(
+                "registration_approved",
+                target=name,
+                user=session.user if session is not None else "",
+            )
+
+    def _admin_user_reject(self, data: dict) -> None:
+        """Fiókkérés elutasítása: a kérelem és minden maradéka törlődik."""
+        name = data.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise gateway.UserStoreError("hiányzó felhasználónév")
+        name = name.strip()
+        session = self._session()
+        with self.gw.admin_lock:
+            record = self.gw.users.record(name)
+            if record is None:
+                raise gateway.UserStoreError(f"nincs ilyen felhasználó: {name}")
+            if not record.pending:
+                raise gateway.UserStoreError(
+                    "csak jóváhagyásra váró kérelem utasítható el"
+                )
+            if not self.gw.users.reject_user(name):
+                raise gateway.UserStoreError(
+                    "csak jóváhagyásra váró kérelem utasítható el"
+                )
+            self.gw.groups.remove_member_everywhere(name)
+            revoked = self.gw.sessions.revoke_user(name)
+            tickets = LOGIN_TICKETS.revoke_user(name)
+            self._audit(
+                "registration_rejected",
+                target=name,
+                user=session.user if session is not None else "",
+                sessions_revoked=revoked,
+                tickets_revoked=tickets,
+            )
+
     def _admin_user_update(self, data: dict) -> None:
         # Az utolsó admin ellenőrzése és a módosítás egy zár alatt fut, hogy
         # két párhuzamos kérés ne tudja egyszerre lefokozni/letiltani az
@@ -1997,6 +2271,13 @@ class Handler(BaseHTTPRequestHandler):
         record = self.gw.users.record(name)
         if record is None:
             raise gateway.UserStoreError(f"nincs ilyen felhasználó: {name}")
+        if record.pending:
+            # A jóváhagyásra váró kérelem nem szerkeszthető: így nem kerülhet
+            # rá szabály vagy csoport a jóváhagyás előtt.
+            raise gateway.UserStoreError(
+                "a jóváhagyásra váró fiók nem szerkeszthető; használd a "
+                "jóváhagyás vagy az elutasítás műveletet"
+            )
         role = data.get("role", record.role)
         if role not in (gateway.ROLE_USER, gateway.ROLE_ADMIN):
             raise gateway.UserStoreError("érvénytelen szerepkör")

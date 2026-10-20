@@ -2,8 +2,9 @@
 
 **Date:** 2026-10-20
 
-**Status:** implemented, committed as `8f46da3` and deployed to the test VM
-on 2026-10-20.
+**Status:** implemented and committed as `8f46da3`, deployed to the test VM
+on 2026-10-20. The QR-code enrollment addition described below is not
+committed or deployed yet.
 
 This document is the technical reference for the optional per-user TOTP 2FA
 in the portal. It describes the behavior, state, API surface and limitations.
@@ -27,10 +28,15 @@ access rule and TTL and authorize the grant. TOTP never opens firewall
 access by itself.
 
 When `totp_required` is true but the user has no TOTP secret yet, the first
-sign-in starts enrollment. The portal shows a base32 secret and an
-`otpauth://totp/...` URI for manual entry into Google Authenticator; this MVP
-does not render a QR code. After the user confirms the first code, the
-portal session is created and 10 recovery codes are displayed exactly once.
+sign-in starts enrollment. The portal renders a scannable QR code in the
+browser from the `otpauth://totp/...` URI returned by `/api/login`. The QR
+generator is Nayuki's `qrcodegen.js` (MIT-licensed), vendored inline in
+`index.html`; it runs offline and makes no CDN or other network request. The
+manual base32 secret and the `otpauth://` URI remain available under the
+collapsed fallback **Nem működik a QR? Írd be kézzel** (QR not working? Enter
+it manually). After the user confirms the first code, the portal session is
+created and 10 recovery codes are displayed exactly once. The QR is cleared
+from the DOM on back-to-login and after successful enrollment.
 Each recovery code can replace a 6-digit code once. Losing both the
 authenticator and the recovery codes requires an admin reset (or the CLI
 reset described below).
@@ -74,7 +80,9 @@ existing login flow; TOTP adds the second-factor steps.
 | Admin `totp_reset` action | Admin user-management action. Clears the secret, step counter and recovery hashes, keeps `totp_required`, revokes the user's sessions and pending tickets, and audits `admin_totp_reset`. |
 
 The session cookie is never sent before the second factor succeeds. Pending
-tickets are not cookies and are not accepted as a portal session.
+tickets are not cookies and are not accepted as a portal session. The QR code
+is rendered client-side from `otpauth_uri`; the server generates no image and
+the ticket is never placed in a URL.
 
 ## Ticket semantics
 
@@ -142,13 +150,13 @@ and the session must be revoked immediately.
 ## Security and limitations
 
 - **Plain HTTP.** The portal has no HTTPS listener. The base32 secret and
-  `otpauth://` URI are displayed and transmitted in cleartext, and the 6-digit
-  and recovery codes are sent in request bodies. Anyone able to sniff the LAN
-  can capture and replay them. `HV_COOKIE_SECURE=1` protects only the cookie;
-  it does not encrypt the page or API bodies. Restrict `HV_PORTAL_NET` to a
-  trusted network. Integrated HTTPS termination is a follow-up, not part of
-  the current implementation; the plan is in
-  [`docs/caddy-proxy-terv.md`](caddy-proxy-terv.md).
+  `otpauth://` URI are transmitted and displayed in cleartext, the QR code
+  encodes the same secret, and the 6-digit and recovery codes are sent in
+  request bodies. Anyone able to sniff the LAN can capture and replay them.
+  `HV_COOKIE_SECURE=1` protects only the cookie; it does not encrypt the page
+  or API bodies. Restrict `HV_PORTAL_NET` to a trusted network. Integrated
+  HTTPS termination is a follow-up, not part of the current implementation;
+  the plan is in [`docs/caddy-proxy-terv.md`](caddy-proxy-terv.md).
 - **Seeds at rest.** TOTP seeds are stored unencrypted in `users.json` (mode
   `0600`) inside the state volume. Protect the volume and any backups; a
   backup contains the seeds and the recovery-code hashes.
@@ -158,8 +166,11 @@ and the session must be revoked immediately.
 - **Recovery codes.** Only lowercase SHA-256 hashes are stored. The plaintext
   is shown once at enrollment and cannot be recovered later. Losing both the
   authenticator and the recovery codes requires an admin or CLI reset.
-- **No QR code.** Enrollment requires manual entry of the base32 secret or
-  the `otpauth://` URI into the authenticator app.
+- **QR code.** The QR is generated entirely in the browser from the
+  `otpauth://` URI with the vendored Nayuki `qrcodegen.js` library (MIT).
+  There is no CDN or runtime network request. The QR encodes the TOTP secret,
+  so anyone who can see or screenshot the enrollment screen can add the
+  account. The manual base32/URI fallback remains available.
 - **CLI session limitation.** The CLI reset works with the server running, but
   it cannot revoke an already-open in-memory session. The admin UI action is
   required for immediate revocation.

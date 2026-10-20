@@ -241,8 +241,39 @@ TOTP_WINDOW = 1
 _TOTP_RECOVERY_RE = re.compile(r"^[0-9a-f]{64}$")
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,32}$")
+# E-mail-cím a fiók-kéréshez. A 254 karakter az RFC 5321 gyakorlati felső
+# határa; a minta egyszerű, de a nyilvánvalóan hibás alakokat kiszűri.
+MAX_EMAIL = 254
+EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 _NFT_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,31}$")
 _SERVICE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+
+
+def normalize_email(raw, strict=True) -> str:
+    """Az e-mail-cím egységes alakja: körbevágott, kisbetűs.
+
+    ``strict`` esetén hibás bemenetre ``ValueError``-t dob; különben üres
+    sztringet ad vissza, hogy a hívó fail-safe módon kezelhesse.
+    """
+    if not isinstance(raw, str):
+        if strict:
+            raise ValueError("érvénytelen e-mail-cím")
+        return ""
+    value = raw.strip().lower()
+    if not value:
+        if strict:
+            raise ValueError("az e-mail-cím kötelező")
+        return ""
+    if (
+        len(value) > MAX_EMAIL
+        or any(ord(char) < 32 or ord(char) == 127 for char in value)
+        or not EMAIL_RE.match(value)
+    ):
+        if strict:
+            raise ValueError("érvénytelen e-mail-cím")
+        return ""
+    return value
+
 
 _log_lock = threading.Lock()
 
@@ -1314,6 +1345,8 @@ class RuleStore:
         viszont semmit nem kap, amíg az admin nem rendel hozzá.
         """
         self._load()
+        if getattr(user, "pending", False):
+            return []
         user_groups = [
             group for group in groups
             if user.name in group.members
@@ -2924,6 +2957,8 @@ class UserRecord:
     totp_required: bool = False
     totp_last_step: int = -1
     totp_recovery: tuple[str, ...] = ()
+    pending: bool = False
+    email: str = ""
 
     @property
     def is_admin(self) -> bool:
@@ -2946,6 +2981,8 @@ class UserRecord:
             "must_change_password": self.must_change_password,
             "totp_required": self.totp_required,
             "totp_enrolled": self.totp_enrolled,
+            "pending": self.pending,
+            "email": self.email,
         }
 
 
@@ -3033,6 +3070,15 @@ class UserStore:
                     )
                 else:
                     totp_recovery = ()
+                # Hiányzó kulcs = nem függő fiók. Bármilyen hibás érték
+                # viszont függőnek számít (fail closed), akárcsak a
+                # totp_required esetében.
+                if "pending" not in item:
+                    pending = False
+                else:
+                    pending_raw = item["pending"]
+                    pending = pending_raw if isinstance(pending_raw, bool) else True
+                email = normalize_email(item.get("email", ""), strict=False)
                 rules_raw = item.get("rules", ())
                 if not isinstance(rules_raw, list):
                     rules_raw = ()
@@ -3058,6 +3104,8 @@ class UserStore:
                     totp_required=totp_required,
                     totp_last_step=totp_last_step,
                     totp_recovery=totp_recovery,
+                    pending=pending,
+                    email=email,
                 )
             except (KeyError, TypeError, ValueError):
                 log(f"[felhasználók] kihagyott hibás bejegyzés: {name!r}")
@@ -3072,7 +3120,9 @@ class UserStore:
         except UserStoreError as exc:
             log(f"[felhasználók] {exc}")
             return False
-        if record is None or not record.enabled:
+        # A függő fiók is bizonyíthassa a jelszavát, hogy a HTTP-réteg
+        # megkülönböztetett választ adhasson neki.
+        if record is None or (not record.enabled and not record.pending):
             digest = hashlib.pbkdf2_hmac(
                 "sha256", password.encode("utf-8"), self._dummy_salt, self.iterations
             )
@@ -3105,7 +3155,17 @@ class UserStore:
         return sorted(self._load().values(), key=lambda rec: rec.name)
 
     def admin_count(self) -> int:
-        return sum(1 for rec in self._load().values() if rec.is_admin and rec.enabled)
+        return sum(
+            1 for rec in self._load().values()
+            if rec.is_admin and rec.enabled and not rec.pending
+        )
+
+    def pending_records(self) -> list[UserRecord]:
+        """A jóváhagyásra váró fiókok névsor szerint."""
+        return sorted(
+            (rec for rec in self._load().values() if rec.pending),
+            key=lambda rec: rec.name,
+        )
 
     # -- írás ------------------------------------------------------------------
 
@@ -3173,6 +3233,8 @@ class UserStore:
         rules: tuple[str, ...] | None = None,
         created: int | None = None,
         must_change_password: bool = False,
+        pending: bool = False,
+        email: str = "",
     ) -> dict:
         salt = secrets.token_bytes(16)
         digest = hashlib.pbkdf2_hmac(
@@ -3187,6 +3249,8 @@ class UserStore:
             "role": role,
             "enabled": bool(enabled),
             "must_change_password": bool(must_change_password),
+            "pending": bool(pending),
+            "email": email,
         }
         if rules is not None:
             record["rules"] = list(rules)
@@ -3201,8 +3265,22 @@ class UserStore:
         enabled: bool = True,
         rules: tuple[str, ...] | None = None,
         must_change_password: bool = False,
+        pending: bool = False,
+        email: str = "",
     ) -> None:
         self._check_credentials(name, password)
+        normalized_email = normalize_email(email, strict=False)
+        if pending:
+            # A függő fiók jóváhagyásig nem aktív, és nem kap szabályokat;
+            # a hívó által esetleg átadott értékektől függetlenül.
+            role = ROLE_USER
+            enabled = False
+            rules = ()
+            must_change_password = False
+            if not normalized_email:
+                raise UserStoreError(
+                    "a függő fiókhoz e-mail-cím kötelező"
+                )
         if role not in (ROLE_USER, ROLE_ADMIN):
             raise UserStoreError("érvénytelen szerepkör")
         with self._locked():
@@ -3212,8 +3290,44 @@ class UserStore:
             data[name] = self._new_record(
                 name, password, role=role, enabled=enabled, rules=rules,
                 must_change_password=must_change_password,
+                pending=pending, email=normalized_email,
             )
             self._write_raw(data)
+
+    def approve_user(self, name: str) -> bool:
+        """Függő fiók aktiválása.
+
+        A jelszó-hash, a szabályok, az e-mail, a szerepkör és a létrehozási
+        idő változatlan marad; szabályt ez a metódus nem rendel. Ismeretlen
+        felhasználónál ``False``.
+        """
+        if not isinstance(name, str):
+            return False
+        with self._lock, self._locked():
+            data = self._read_raw()
+            item = data.get(name)
+            if not isinstance(item, dict):
+                return False
+            item["pending"] = False
+            item["enabled"] = True
+            data[name] = item
+            self._write_raw(data)
+            return True
+
+    def reject_user(self, name: str) -> bool:
+        """Függő fiók elutasítása: a bejegyzés törlése.
+
+        Ismeretlen felhasználónál ``False``.
+        """
+        if not isinstance(name, str):
+            return False
+        with self._lock, self._locked():
+            data = self._read_raw()
+            if not isinstance(data.get(name), dict):
+                return False
+            del data[name]
+            self._write_raw(data)
+            return True
 
     def set_password(
         self,
@@ -4327,6 +4441,8 @@ class Gateway:
         self.login_rate = (
             rate_limiter if rate_limiter is not None else RateLimiter()
         )
+        # A fiók-kérések saját korlátja: a belépési keretet ne fogyassza.
+        self.register_rate = RateLimiter(window=600, maximum=3)
         # Külön korlát a jelszóváltásnak, hogy a belépési próbákat ne
         # fogyassza, és fordítva.
         self.password_rate = RateLimiter(window=300, maximum=10)
@@ -4347,7 +4463,7 @@ class Gateway:
     def _rule_available(self, user_name: str, rule: Rule) -> bool:
         """A szabály a döntés pillanatában is a felhasználóhoz tartozik-e."""
         record = self.users.record(user_name)
-        if record is None or not record.enabled:
+        if record is None or not record.enabled or record.pending:
             return False
         try:
             current = self.rules.resolve_for(

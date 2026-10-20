@@ -16,6 +16,8 @@ import http.client
 import ipaddress
 import json
 import os
+import re
+import shutil
 import socket
 import stat
 import struct
@@ -864,6 +866,190 @@ class UserStoreTests(unittest.TestCase):
         self.assertEqual(self.store.provisioned_from("admin"), "jelolo-1")
         self.assertIsNotNone(self.store.record("admin"))
         self.assertEqual(self.store.record("admin").role, gateway.ROLE_ADMIN)
+
+
+class UserStoreAccountRequestTests(unittest.TestCase):
+    """A fiókkérés (pending) adatmodellje, jóváhagyása és elutasítása."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmp.name, "users.json")
+        self.store = gateway.UserStore(self.path, iterations=10_000)
+        self.rules = gateway.RuleStore(
+            os.path.join(self.tmp.name, "rules.json"),
+            catalog=CATALOG, logger=lambda *_: None,
+        )
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _raw(self) -> dict:
+        return json.loads(Path(self.path).read_text(encoding="utf-8"))
+
+    def _write_raw(self, data: dict) -> None:
+        Path(self.path).write_text(json.dumps(data), encoding="utf-8")
+
+    def _fresh(self) -> gateway.UserStore:
+        return gateway.UserStore(self.path, iterations=10_000)
+
+    def test_add_defaults_are_active_user_without_email(self) -> None:
+        self.store.add("alice", "hosszu-jelszo-1")
+        record = self.store.record("alice")
+        self.assertIsNotNone(record)
+        self.assertFalse(record.pending)
+        self.assertEqual(record.email, "")
+        self.assertTrue(record.enabled)
+        self.assertEqual(record.rules, ())
+        self.assertFalse(record.rules_set)
+        self.assertFalse(record.must_change_password)
+        self.assertEqual(record.role, gateway.ROLE_USER)
+
+    def test_add_pending_normalizes_and_forces_safe_defaults(self) -> None:
+        self.store.add(
+            "alice", "hosszu-jelszo-1",
+            role=gateway.ROLE_ADMIN, enabled=True, rules=("browse",),
+            must_change_password=True, pending=True, email="  A@B.CO ",
+        )
+        record = self.store.record("alice")
+        self.assertIsNotNone(record)
+        self.assertTrue(record.pending)
+        self.assertEqual(record.email, "a@b.co")
+        self.assertFalse(record.enabled)
+        self.assertEqual(record.rules, ())
+        self.assertTrue(record.rules_set)
+        self.assertFalse(record.must_change_password)
+        self.assertEqual(record.role, gateway.ROLE_USER)
+        self.assertEqual(self.rules.effective_for(record, []), [])
+
+    def test_pending_requires_valid_normalized_email(self) -> None:
+        for email in (
+            "", "   ", "nem-email", "a@b", "@b.co", "a b@c.co", None, 123,
+        ):
+            with self.subTest(email=email):
+                with self.assertRaises(gateway.UserStoreError):
+                    self.store.add(
+                        "bob", "hosszu-jelszo-1", pending=True, email=email
+                    )
+        self.assertEqual(self.store.names(), [])
+        self.assertFalse(Path(self.path).exists())
+
+    def test_public_and_verify_include_pending(self) -> None:
+        self.store.add(
+            "alice", "hosszu-jelszo-1", pending=True, email="a@b.co"
+        )
+        record = self.store.record("alice")
+        public = record.public(["staff"])
+        self.assertIs(public["pending"], True)
+        self.assertEqual(public["email"], "a@b.co")
+        self.assertEqual(public["groups"], ["staff"])
+        self.assertFalse(public["enabled"])
+        self.assertEqual(public["rules"], [])
+        self.assertTrue(self.store.verify("alice", "hosszu-jelszo-1"))
+        self.assertFalse(self.store.verify("alice", "rossz-jelszo"))
+
+    def test_effective_rules_are_empty_for_pending_without_rules_key(self) -> None:
+        # Ellenőrző eset: a rules mező nélküli aktív (örökölt) felhasználó
+        # továbbra is minden szabályt megkap, tehát a régi ág él.
+        self.store.add("legacy", "hosszu-jelszo-1")
+        self.store.add(
+            "pending", "hosszu-jelszo-1", pending=True, email="p@e.co"
+        )
+        data = self._raw()
+        self.assertNotIn("rules", data["legacy"])
+        self.assertIn("rules", data["pending"])
+        del data["pending"]["rules"]
+        self._write_raw(data)
+        fresh = self._fresh()
+        legacy = fresh.record("legacy")
+        pending = fresh.record("pending")
+        self.assertFalse(legacy.rules_set)
+        self.assertTrue(self.rules.effective_for(legacy, []))
+        self.assertFalse(pending.rules_set)
+        self.assertEqual(self.rules.effective_for(pending, []), [])
+        # Admin szerepkörű, de még függő fiók sem kap szabályt.
+        data["pending"]["role"] = gateway.ROLE_ADMIN
+        data["pending"]["enabled"] = True
+        self._write_raw(data)
+        admin_pending = self._fresh().record("pending")
+        self.assertEqual(admin_pending.role, gateway.ROLE_ADMIN)
+        self.assertTrue(admin_pending.pending)
+        self.assertEqual(self.rules.effective_for(admin_pending, []), [])
+
+    def test_approve_activates_and_preserves_details(self) -> None:
+        self.store.add(
+            "alice", "hosszu-jelszo-1", pending=True, email="a@b.co"
+        )
+        data = self._raw()
+        data["alice"]["rules"] = ["browse"]
+        self._write_raw(data)
+        self.assertTrue(self.store.approve_user("alice"))
+        fresh = self._fresh()
+        record = fresh.record("alice")
+        self.assertIsNotNone(record)
+        self.assertFalse(record.pending)
+        self.assertTrue(record.enabled)
+        self.assertEqual(record.email, "a@b.co")
+        self.assertEqual(record.rules, ("browse",))
+        self.assertTrue(record.rules_set)
+        self.assertTrue(fresh.verify("alice", "hosszu-jelszo-1"))
+        self.assertFalse(fresh.verify("alice", "rossz-jelszo"))
+        self.assertEqual(fresh.pending_records(), [])
+        self.assertFalse(self.store.approve_user("nincs-ilyen"))
+
+    def test_reject_removes_record_and_pending_listing(self) -> None:
+        self.store.add(
+            "bob", "hosszu-jelszo-1", pending=True, email="b@c.co"
+        )
+        self.assertEqual(
+            [record.name for record in self.store.pending_records()], ["bob"]
+        )
+        self.assertTrue(self.store.reject_user("bob"))
+        fresh = self._fresh()
+        self.assertIsNone(fresh.record("bob"))
+        self.assertEqual(fresh.names(), [])
+        self.assertEqual(fresh.pending_records(), [])
+        self.assertFalse(self.store.reject_user("bob"))
+        self.assertFalse(self.store.reject_user("nincs-ilyen"))
+
+    def test_malformed_pending_flag_fails_closed(self) -> None:
+        self.store.add("alice", "hosszu-jelszo-1")
+        base = self._raw()["alice"]
+        cases = (
+            ("missing", None),
+            ("string", "yes"),
+            ("number", 1),
+            ("null", None),
+            ("false-string", "false"),
+            ("list", []),
+        )
+        for label, value in cases:
+            with self.subTest(case=label):
+                data = self._raw()
+                item = dict(base)
+                if label == "missing":
+                    item.pop("pending", None)
+                else:
+                    item["pending"] = value
+                data["alice"] = item
+                self._write_raw(data)
+                record = self._fresh().record("alice")
+                self.assertIsNotNone(record)
+                self.assertIs(record.pending, label != "missing", label)
+
+    def test_admin_count_excludes_pending_admin(self) -> None:
+        self.store.add("root", "root-jelszo-1", role=gateway.ROLE_ADMIN)
+        self.store.add(
+            "alice", "hosszu-jelszo-1", pending=True, email="a@b.co"
+        )
+        data = self._raw()
+        data["alice"]["role"] = gateway.ROLE_ADMIN
+        data["alice"]["enabled"] = True
+        self._write_raw(data)
+        fresh = self._fresh()
+        self.assertEqual(fresh.admin_count(), 1)
+        self.assertEqual(
+            [record.name for record in fresh.pending_records()], ["alice"]
+        )
 
 
 # ------------------------------------------------------------------------ TOTP
@@ -2849,6 +3035,428 @@ class HttpTests(unittest.TestCase):
             self.assertNotIn(hidden, body, hidden)
 
 
+class RegistrationHttpTests(unittest.TestCase):
+    """Nyilvános fiókkérés: külön, izolált alkalmazás saját beállításfájllal."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.tools = FakeTools(self.tmp.name)
+        self._globals = (
+            ("CONNTRACK_BIN", gateway.CONNTRACK_BIN),
+            ("POW_DIFFICULTY", gateway.POW_DIFFICULTY),
+            ("PORTAL_URL", gateway.PORTAL_URL),
+            ("HOST_SSH_MODE", gateway.HOST_SSH_MODE),
+        )
+        gateway.CONNTRACK_BIN = str(self.tools.conntrack)
+        gateway.POW_DIFFICULTY = 2
+        gateway.PORTAL_URL = ""
+        gateway.HOST_SSH_MODE = "off"
+
+        self.users = gateway.UserStore(
+            os.path.join(self.tmp.name, "users.json"), iterations=10_000
+        )
+        self.rules = gateway.RuleStore(
+            os.path.join(self.tmp.name, "rules.json"),
+            catalog=CATALOG, logger=lambda *_: None,
+        )
+        self.rules.create("web-only", {
+            "label": "Csak web", "tcp": [80, 443], "udp": [443],
+            "default_ttl": 3600, "max_ttl": gateway.MAX_TTL,
+        })
+        self.groups = gateway.GroupStore(
+            os.path.join(self.tmp.name, "groups.json"),
+            logger=lambda *_: None,
+        )
+        self.audit = gateway.AuditLog(
+            os.path.join(self.tmp.name, "audit.jsonl"),
+            logger=lambda *_: None,
+        )
+        self.settings = gateway.settings_store.SettingsStore(
+            os.path.join(self.tmp.name, "firewall-settings.json"),
+            logger=lambda *_: None, default_host_ssh="off",
+        )
+        self.fw = gateway.Firewall(
+            binary=str(self.tools.nft), logger=lambda *_: None
+        )
+        self.fail2ban = fail2ban_mod.Fail2ban(
+            self.fw,
+            path=os.path.join(self.tmp.name, "fail2ban.json"),
+            audit=self.audit,
+            logger=lambda *_: None,
+        )
+        self.gw = gateway.Gateway(
+            users=self.users, firewall=self.fw, catalog=CATALOG,
+            rules=self.rules, groups=self.groups, audit=self.audit,
+            settings=self.settings,
+            rate_limiter=gateway.RateLimiter(window=60, maximum=1000),
+            fail2ban=self.fail2ban,
+        )
+        self.server = server.AppServer(("127.0.0.1", 0), self.gw)
+        self.thread = threading.Thread(
+            target=self.server.serve_forever, daemon=True
+        )
+        self.thread.start()
+        self.port = self.server.server_address[1]
+
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=5)
+        for name, value in self._globals:
+            setattr(gateway, name, value)
+        self.tmp.cleanup()
+
+    def get(self, path: str, headers: dict | None = None):
+        conn = http.client.HTTPConnection(
+            "127.0.0.1", self.port, timeout=10
+        )
+        conn.request("GET", path, headers=headers or {})
+        resp = conn.getresponse()
+        body = resp.read()
+        out = (resp.status, dict(resp.getheaders()), body)
+        conn.close()
+        return out
+
+    def post_json(
+        self, path: str, obj: dict, cookie: str = "",
+        extra_headers: dict | None = None,
+    ):
+        conn = http.client.HTTPConnection(
+            "127.0.0.1", self.port, timeout=10
+        )
+        headers = {"Content-Type": "application/json"}
+        if extra_headers:
+            headers.update(extra_headers)
+        if cookie:
+            headers["Cookie"] = cookie
+        conn.request("POST", path, body=json.dumps(obj), headers=headers)
+        resp = conn.getresponse()
+        body = resp.read()
+        out = (resp.status, dict(resp.getheaders()), body)
+        conn.close()
+        return out
+
+    def captcha(self) -> dict:
+        status, _, body = self.get("/api/challenge")
+        self.assertEqual(status, 200, body)
+        return solve(json.loads(body))
+
+    def register(self, user, password, email, captcha=None):
+        return self.post_json(
+            "/api/register",
+            {
+                "user": user,
+                "pass": password,
+                "email": email,
+                "captcha": self.captcha() if captcha is None else captcha,
+            },
+        )
+
+    def register_raw(self, obj: dict):
+        return self.post_json("/api/register", obj)
+
+    def login(self, user: str, password: str, captcha: dict | None = None):
+        return self.post_json(
+            "/api/login",
+            {
+                "user": user,
+                "pass": password,
+                "captcha": self.captcha() if captcha is None else captcha,
+            },
+        )
+
+    def enable(self) -> None:
+        self.settings.set_registration_enabled(True)
+        self.assertIs(
+            self.settings.snapshot()["registration_enabled"], True
+        )
+
+    def audit_rows(self, event: str) -> list[dict]:
+        return [
+            row for row in self.audit.read(limit=2000)
+            if row.get("event") == event
+        ]
+
+    def audit_text(self) -> str:
+        path = os.path.join(self.tmp.name, "audit.jsonl")
+        if not os.path.exists(path):
+            return ""
+        return Path(path).read_text(encoding="utf-8")
+
+    def test_registration_disabled_by_default(self) -> None:
+        self.assertIs(
+            self.settings.snapshot()["registration_enabled"], False
+        )
+        status, headers, body = self.register(
+            "alice", "hosszu-jelszo-1", "a@b.co", captcha={}
+        )
+        self.assertEqual(status, 403, body)
+        data = json.loads(body)
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["code"], "registration_disabled")
+        self.assertIn("nem engedélyezett", data["error"])
+        self.assertNotIn("Set-Cookie", headers)
+        self.assertIsNone(self.users.record("alice"))
+        self.assertEqual(self.users.pending_records(), [])
+        self.assertEqual(
+            [row.get("reason") for row in self.audit_rows(
+                "registration_failed"
+            )],
+            ["a fiókkérés ki van kapcsolva"],
+        )
+
+    def test_valid_registration_creates_pending_user_without_session(self) -> None:
+        self.enable()
+        password = "Hosszu-Jelszo-42"
+        status, headers, body = self.register(
+            "alice", password, "  A@B.CO "
+        )
+        self.assertEqual(status, 200, body)
+        data = json.loads(body)
+        self.assertTrue(data["ok"])
+        self.assertIn("jóváhagyás", data["message"])
+        self.assertNotIn("Set-Cookie", headers)
+        self.assertNotIn("token", data)
+
+        record = self.users.record("alice")
+        self.assertIsNotNone(record)
+        self.assertTrue(record.pending)
+        self.assertFalse(record.enabled)
+        self.assertEqual(record.email, "a@b.co")
+        self.assertEqual(record.rules, ())
+        self.assertTrue(record.rules_set)
+        self.assertFalse(record.totp_required)
+        self.assertFalse(record.must_change_password)
+        self.assertEqual(record.role, gateway.ROLE_USER)
+        self.assertTrue(self.users.verify("alice", password))
+        self.assertEqual([item.name for item in self.users.pending_records()], ["alice"])
+        self.assertEqual(self.gw.effective_rules("alice"), [])
+
+        rows = self.audit_rows("registration_requested")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].get("target"), "alice")
+        text = self.audit_text()
+        self.assertNotIn("a@b.co", text)
+        self.assertNotIn("A@B.CO", text)
+        self.assertNotIn(password, text)
+
+    def test_registration_rejects_invalid_fields(self) -> None:
+        self.enable()
+        # A közös üzenetküldő tesztek miatt bő keret kell: a korlát a
+        # captcha és a mezőellenőrzés előtt fogy.
+        self.gw.register_rate = gateway.RateLimiter(window=600, maximum=1000)
+        cases = (
+            ({}, "hiányos adatok"),
+            ({"user": "dave", "pass": "hosszu-jelszo-1"}, "hiányos adatok"),
+            ({"user": "dave", "pass": "hosszu-jelszo-1",
+              "email": "nem-email", "captcha": None}, "Érvénytelen e-mail-cím."),
+            ({"user": "dave", "pass": "rovid",
+              "email": "d@e.co", "captcha": None}, "a jelszó"),
+            ({"user": "nincs itt!", "pass": "hosszu-jelszo-1",
+              "email": "d@e.co", "captcha": None}, "felhasználónév"),
+        )
+        for obj, expected in cases:
+            with self.subTest(obj=obj):
+                body = dict(obj)
+                if body.get("captcha", "missing") is None:
+                    body["captcha"] = self.captcha()
+                status, headers, response = self.register_raw(body)
+                self.assertEqual(status, 400, response)
+                data = json.loads(response)
+                self.assertFalse(data["ok"])
+                self.assertIn(expected, data["error"])
+                self.assertNotIn("Set-Cookie", headers)
+                self.assertIsNone(self.users.record("dave"))
+        self.assertEqual(self.users.pending_records(), [])
+
+    def test_registration_rejects_captcha(self) -> None:
+        self.enable()
+        self.gw.register_rate = gateway.RateLimiter(window=600, maximum=1000)
+        wrong = {"challenge": "nem-letezo", "salt": "x"}
+        status, headers, body = self.register(
+            "dave", "hosszu-jelszo-1", "d@e.co", captcha=wrong
+        )
+        self.assertEqual(status, 403, body)
+        self.assertIn("Captcha", json.loads(body)["error"])
+        self.assertNotIn("Set-Cookie", headers)
+        # A captcha kulcs hiánya hiányos adatnak számít (400), az üres
+        # csomag viszont érvénytelen captcha (403) -- egyik sem hoz létre
+        # fiókot.
+        status, _, body = self.register_raw(
+            {"user": "dave", "pass": "hosszu-jelszo-1", "email": "d@e.co"}
+        )
+        self.assertEqual(status, 400, body)
+        status, _, body = self.register_raw(
+            {"user": "dave", "pass": "hosszu-jelszo-1",
+             "email": "d@e.co", "captcha": {}}
+        )
+        self.assertEqual(status, 403, body)
+        self.assertIsNone(self.users.record("dave"))
+        self.assertEqual(self.users.pending_records(), [])
+
+    def test_registration_duplicate_username_conflicts(self) -> None:
+        self.enable()
+        self.gw.register_rate = gateway.RateLimiter(window=600, maximum=1000)
+        self.users.add("alice", "hosszu-jelszo-1")
+        status, _, body = self.register("alice", "uj-jelszo-12", "a@b.co")
+        self.assertEqual(status, 409, body)
+        self.assertEqual(json.loads(body)["code"], "username_taken")
+        self.assertFalse(self.users.record("alice").pending)
+
+        status, _, body = self.register("bob", "hosszu-jelszo-2", "b@c.co")
+        self.assertEqual(status, 200, body)
+        status, _, body = self.register("bob", "mas-jelszo-34", "b2@c.co")
+        self.assertEqual(status, 409, body)
+        self.assertEqual(json.loads(body)["code"], "username_taken")
+        pending = self.users.pending_records()
+        self.assertEqual([item.name for item in pending], ["bob"])
+        self.assertEqual(pending[0].email, "b@c.co")
+
+    def test_registration_rejects_foreign_origin(self) -> None:
+        self.enable()
+        status, headers, body = self.post_json(
+            "/api/register",
+            {"user": "alice", "pass": "hosszu-jelszo-1",
+             "email": "a@b.co", "captcha": {}},
+            extra_headers={"Origin": "http://evil.example"},
+        )
+        self.assertEqual(status, 403, body)
+        self.assertIn(
+            "érvénytelen kérés-eredet", json.loads(body)["error"]
+        )
+        self.assertNotIn("Set-Cookie", headers)
+        self.assertIsNone(self.users.record("alice"))
+        self.assertEqual(self.users.pending_records(), [])
+
+    def test_registration_accepts_alternate_field_names(self) -> None:
+        self.enable()
+        status, headers, body = self.post_json(
+            "/api/register",
+            {
+                "name": "alice", "password": "hosszu-jelszo-1",
+                "email": "  Alt@Example.CO ",
+                "captcha": self.captcha(),
+            },
+        )
+        self.assertEqual(status, 200, body)
+        self.assertTrue(json.loads(body)["ok"])
+        self.assertNotIn("Set-Cookie", headers)
+        record = self.users.record("alice")
+        self.assertTrue(record.pending)
+        self.assertFalse(record.enabled)
+        self.assertEqual(record.email, "alt@example.co")
+        self.assertEqual(
+            [item.name for item in self.users.pending_records()], ["alice"]
+        )
+        self.assertEqual(
+            [row.get("target") for row in
+             self.audit_rows("registration_requested")],
+            ["alice"],
+        )
+
+    def test_registration_requires_ipv4(self) -> None:
+        self.enable()
+        # A valódi, szigorú IPv4-ellenőrzést csak a kérés idejére cseréljük.
+        with mock.patch.object(gateway, "is_ipv4", return_value=False):
+            status, _, body = self.post_json(
+                "/api/register",
+                {"user": "alice", "pass": "hosszu-jelszo-1",
+                 "email": "a@b.co", "captcha": {}},
+            )
+        self.assertEqual(status, 400, body)
+        self.assertIn("csak IPv4", json.loads(body)["error"])
+        self.assertIsNone(self.users.record("alice"))
+        # A mock nem szivárgott ki: a valódi ellenőrzés és a regisztráció él.
+        self.assertTrue(gateway.is_ipv4("127.0.0.1"))
+        status, _, body = self.register(
+            "alice", "hosszu-jelszo-1", "a@b.co"
+        )
+        self.assertEqual(status, 200, body)
+        self.assertTrue(self.users.record("alice").pending)
+
+    def test_duplicate_email_is_allowed_without_oracle(self) -> None:
+        self.enable()
+        status1, headers1, body1 = self.register(
+            "alice", "hosszu-jelszo-1", "Shared@Example.COM"
+        )
+        status2, headers2, body2 = self.register(
+            "bob", "hosszu-jelszo-2", "shared@example.com"
+        )
+        self.assertEqual(status1, 200, body1)
+        self.assertEqual(status2, 200, body2)
+        self.assertEqual(body1, body2)
+        self.assertNotIn("Set-Cookie", headers1)
+        self.assertNotIn("Set-Cookie", headers2)
+        records = {item.name: item for item in self.users.pending_records()}
+        self.assertEqual(sorted(records), ["alice", "bob"])
+        self.assertEqual(records["alice"].email, "shared@example.com")
+        self.assertEqual(records["bob"].email, "shared@example.com")
+        self.assertNotIn("shared@example.com", self.audit_text())
+
+    def test_registration_rate_limit_is_dedicated(self) -> None:
+        self.enable()
+        self.assertEqual(self.gw.register_rate.window, 600)
+        self.assertEqual(self.gw.register_rate.maximum, 3)
+        self.assertIsNot(self.gw.register_rate, self.gw.login_rate)
+        for _ in range(3):
+            status, _, body = self.register_raw({})
+            self.assertEqual(status, 400, body)
+        status, headers, body = self.register(
+            "alice", "hosszu-jelszo-1", "a@b.co"
+        )
+        self.assertEqual(status, 429, body)
+        self.assertEqual(headers.get("Retry-After"), "600")
+        self.assertIn("Túl sok fiókkérés", json.loads(body)["error"])
+        self.assertIsNone(self.users.record("alice"))
+        self.assertEqual(self.users.pending_records(), [])
+
+    def test_pending_login_is_rejected_until_approved(self) -> None:
+        self.enable()
+        status, _, body = self.register(
+            "alice", "hosszu-jelszo-1", "a@b.co"
+        )
+        self.assertEqual(status, 200, body)
+
+        status, headers, body = self.login("alice", "hosszu-jelszo-1")
+        self.assertEqual(status, 403, body)
+        data = json.loads(body)
+        self.assertFalse(data["ok"])
+        self.assertEqual(data["code"], "pending_approval")
+        self.assertIs(data["pending"], True)
+        self.assertIn("jóváhagyás", data["error"])
+        self.assertIn("vár", data["error"])
+        self.assertNotIn("Set-Cookie", headers)
+        self.assertNotIn("token", data)
+        self.assertNotIn("ticket", data)
+        self.assertEqual(self.gw.effective_rules("alice"), [])
+        # A helyes jelszó nem számít hibás belépésnek: nincs fail2ban-tétel.
+        pending_bans = [
+            row for row in self.gw.fail2ban.snapshot()["pending"]
+            if row["ip"] == "127.0.0.1"
+        ]
+        self.assertEqual(pending_bans, [])
+        self.assertEqual(
+            [row.get("reason") for row in self.audit_rows("login_failed")
+             if row.get("user") == "alice"],
+            ["a fiók jóváhagyásra vár"],
+        )
+        # Munkamenet nélkül a hozzáférés-kérés sem működik.
+        status, _, body = self.post_json(
+            "/api/access", {"rule": "web-only", "ttl": 60}
+        )
+        self.assertEqual(status, 400, body)
+        self.assertIn("munkamenet", json.loads(body)["error"])
+
+        status, _, body = self.login("alice", "rossz-jelszo-99")
+        self.assertEqual(status, 403, body)
+        data = json.loads(body)
+        self.assertNotIn("code", data)
+        self.assertNotIn("pending", data)
+        self.assertEqual(
+            data["error"], "Hibás felhasználónév vagy jelszó."
+        )
+
+
 class RuleGroupStoreTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -4565,6 +5173,365 @@ class AdminHttpTests(unittest.TestCase):
         self.assertEqual(status, 200, body)
         self.assertTrue(json.loads(body)["ok"])
 
+    # -- fiókkérések (pending) -------------------------------------------------
+
+    def test_admin_registration_setting_toggle_without_nft(self) -> None:
+        admin = self.admin_cookie()
+        before = list(self.tools.lines())
+        started = time.time()
+
+        status, _, body = self.post(
+            "/api/admin/settings",
+            {"action": "registration_enabled", "enabled": True},
+            cookie=admin, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+        data = json.loads(body)
+        self.assertTrue(data["ok"])
+        self.assertIs(data["settings"]["registration_enabled"], True)
+        self.assertEqual(data["message"], "A fiókkérés beállítása mentve.")
+        # A beállítás nem megy át az nftables-en.
+        self.assertEqual(self.tools.lines(), before)
+
+        reloaded = gateway.settings_store.SettingsStore(
+            self.settings.path, logger=lambda *_: None
+        )
+        snapshot = reloaded.snapshot()
+        self.assertIs(snapshot["registration_enabled"], True)
+        self.assertEqual(snapshot["host_ssh"], "any")
+        self.assertEqual(snapshot["preauth"], [])
+        self.assertEqual(snapshot["block"], [])
+
+        status, _, body = self.post(
+            "/api/admin/settings",
+            {"action": "registration_enabled", "enabled": False},
+            cookie=admin, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+        self.assertIs(
+            json.loads(body)["settings"]["registration_enabled"], False
+        )
+        reloaded = gateway.settings_store.SettingsStore(
+            self.settings.path, logger=lambda *_: None
+        )
+        self.assertIs(reloaded.snapshot()["registration_enabled"], False)
+
+        for value in ("yes", 1, None):
+            with self.subTest(value=value):
+                status, _, body = self.post(
+                    "/api/admin/settings",
+                    {"action": "registration_enabled", "enabled": value},
+                    cookie=admin, source="127.0.0.5",
+                )
+                self.assertEqual(status, 400, body)
+                self.assertIn("igaz/hamis", json.loads(body)["error"])
+                self.assertIs(
+                    self.settings.snapshot()["registration_enabled"], False
+                )
+        self.assertEqual(self.tools.lines(), before)
+
+        rows = [
+            row for row in audit_since(self.audit, started)
+            if row.get("event") == "admin_settings_changed"
+            and row.get("action") == "registration_enabled"
+        ]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(
+            {row.get("registration_enabled") for row in rows},
+            {True, False},
+        )
+        for row in rows:
+            self.assertEqual(row.get("user"), "root")
+            self.assertEqual(row.get("target"), "registration_enabled")
+
+    def test_public_status_only_exposes_registration_flag(self) -> None:
+        status, _, body = self.get("/api/status")
+        self.assertEqual(status, 200, body)
+        data = json.loads(body)
+        self.assertIs(data["registration_enabled"], False)
+        for hidden in ("preauth", "block", "host_ssh", "settings", "users",
+                       "email"):
+            self.assertNotIn(hidden, data)
+            self.assertNotIn(hidden.encode(), body)
+
+        self.settings.set_registration_enabled(True)
+        status, _, body = self.get("/api/status")
+        self.assertEqual(status, 200, body)
+        self.assertTrue(json.loads(body)["registration_enabled"])
+        for hidden in ("preauth", "block", "host_ssh", "settings", "users",
+                       "email"):
+            self.assertNotIn(hidden.encode(), body)
+
+    def test_admin_state_and_approve_pending_request(self) -> None:
+        admin = self.admin_cookie()
+        name = "pendingalice"
+        password = "pending-jelszo-1"
+        email = "pending@example.co"
+        self.addCleanup(self.drop_totp_user, name)
+        self.users.add(
+            name, password, pending=True, email="  Pending@Example.CO "
+        )
+        record = self.users.record(name)
+        self.assertEqual(record.email, email)
+        self.assertFalse(record.enabled)
+        self.assertTrue(record.rules_set)
+
+        # Nyers pending admin: szerepköre admin és enabled, mégsem aktív admin.
+        admin_name = "pendingadmin"
+        self.addCleanup(self.drop_totp_user, admin_name)
+        self.users.add(
+            admin_name, "pendingadmin-jelszo-1",
+            pending=True, email="pendingadmin@example.co",
+        )
+        self.users.set_metadata(
+            admin_name, role=gateway.ROLE_ADMIN, enabled=True
+        )
+        self.assertEqual(self.users.admin_count(), 1)
+
+        status, _, body = self.get(
+            "/api/admin/state", cookie=admin, source="127.0.0.5"
+        )
+        self.assertEqual(status, 200, body)
+        state = json.loads(body)
+        item = next(u for u in state["users"] if u["name"] == name)
+        self.assertTrue(item["pending"])
+        self.assertFalse(item["enabled"])
+        self.assertEqual(item["email"], email)
+        self.assertEqual(item["rules"], [])
+        self.assertEqual(item["effective_rules"], [])
+        admin_item = next(
+            u for u in state["users"] if u["name"] == admin_name
+        )
+        self.assertEqual(admin_item["role"], gateway.ROLE_ADMIN)
+        self.assertTrue(admin_item["enabled"])
+        self.assertTrue(admin_item["pending"])
+        self.assertEqual(admin_item["effective_rules"], [])
+        active_admins = [
+            u["name"] for u in state["users"]
+            if u["role"] == gateway.ROLE_ADMIN and u["enabled"]
+            and not u["pending"]
+        ]
+        self.assertEqual(active_admins, ["root"])
+
+        # Az e-mail-cím nem szivárog a nyilvános végpontokra.
+        for path in ("/api/status", "/api/challenge"):
+            status, _, payload = self.get(path)
+            self.assertEqual(status, 200, payload)
+            self.assertNotIn(email.encode(), payload)
+            self.assertNotIn(b"email", payload)
+
+        started = time.time()
+        status, _, body = self.post(
+            "/api/admin/users",
+            {"action": "approve", "name": name},
+            cookie=admin, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+        payload = json.loads(body)
+        self.assertEqual(payload["message"], "A fiókkérés jóváhagyva.")
+        item = next(u for u in payload["users"] if u["name"] == name)
+        self.assertFalse(item["pending"])
+        self.assertTrue(item["enabled"])
+        self.assertEqual(item["email"], email)
+        self.assertEqual(item["rules"], [])
+        self.assertEqual(item["effective_rules"], [])
+
+        record = self.users.record(name)
+        self.assertFalse(record.pending)
+        self.assertTrue(record.enabled)
+        self.assertFalse(record.must_change_password)
+        self.assertEqual(record.email, email)
+        self.assertEqual(record.rules, ())
+        self.assertTrue(self.users.verify(name, password))
+        self.assertEqual(
+            [item.name for item in self.users.pending_records()],
+            [admin_name],
+        )
+        self.assertEqual(self.gw.effective_rules(name), [])
+
+        rows = audit_since(self.audit, started)
+        approved = [
+            row for row in rows
+            if row.get("event") == "registration_approved"
+        ]
+        self.assertEqual(len(approved), 1)
+        self.assertEqual(approved[0]["target"], name)
+        self.assertEqual(approved[0]["user"], "root")
+        dump = json.dumps(rows, ensure_ascii=False)
+        self.assertNotIn(email, dump)
+        self.assertNotIn(password, dump)
+
+        # Jóváhagyás után jelszó + captcha munkamenetet ad, szabály nélkül.
+        user_cookie, login_data = self.login(
+            name, password, source="127.0.0.2"
+        )
+        self.assertTrue(user_cookie)
+        self.assertTrue(login_data["authenticated"])
+        self.assertFalse(login_data["admin"])
+        self.assertEqual(login_data["role"], gateway.ROLE_USER)
+        self.assertEqual(login_data["rules"], [])
+
+        status, _, body = self.post(
+            "/api/admin/users",
+            {"action": "approve", "name": "alice"},
+            cookie=admin, source="127.0.0.5",
+        )
+        self.assertEqual(status, 400, body)
+        self.assertIn("nem jóváhagyásra váró", json.loads(body)["error"])
+
+    def test_reject_pending_request_cleans_up(self) -> None:
+        admin = self.admin_cookie()
+        name = "pendingreject"
+        password = "pendingreject-jelszo-1"
+        email = "reject@example.co"
+        group_id = "pending-reject-grp"
+        self.addCleanup(self.drop_totp_user, name)
+        self.addCleanup(
+            lambda: self.groups.delete(group_id)
+            if self.groups.get(group_id) is not None else None
+        )
+        self.groups.create(group_id, {
+            "label": "Elutasítandó kérelem", "rules": [], "members": [],
+        })
+        self.users.add(name, password, pending=True, email=email)
+        # A csoporttagságot közvetlenül állítjuk be, hogy az elutasítás
+        # takarítását vizsgálhassuk (a HTTP-úton ezt a guard tiltja).
+        self.groups.set_memberships(name, [group_id])
+        self.assertEqual(
+            [group.id for group in self.groups.groups_for(name)], [group_id]
+        )
+        started = time.time()
+
+        status, _, body = self.post(
+            "/api/admin/users",
+            {"action": "reject", "name": name},
+            cookie=admin, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+        payload = json.loads(body)
+        self.assertEqual(payload["message"], "A fiókkérés elutasítva.")
+        self.assertIsNone(self.users.record(name))
+        self.assertNotIn(name, [u["name"] for u in payload["users"]])
+        self.assertEqual(self.groups.groups_for(name), [])
+        self.assertEqual(self.users.pending_records(), [])
+
+        rejected = [
+            row for row in audit_since(self.audit, started)
+            if row.get("event") == "registration_rejected"
+        ]
+        self.assertEqual(len(rejected), 1)
+        self.assertEqual(rejected[0]["target"], name)
+        self.assertEqual(rejected[0]["user"], "root")
+        dump = json.dumps(rejected, ensure_ascii=False)
+        self.assertNotIn(email, dump)
+        self.assertNotIn(password, dump)
+
+        status, _, body = self.post(
+            "/api/admin/users",
+            {"action": "reject", "name": "alice"},
+            cookie=admin, source="127.0.0.5",
+        )
+        self.assertEqual(status, 400, body)
+        self.assertIn("csak jóváhagyásra váró", json.loads(body)["error"])
+        self.assertIsNotNone(self.users.record("alice"))
+
+    def test_pending_request_cannot_be_edited_or_grouped(self) -> None:
+        admin = self.admin_cookie()
+        name = "pendingedit"
+        password = "pendingedit-jelszo-1"
+        group_id = "pending-edit-grp"
+        self.addCleanup(self.drop_totp_user, name)
+        self.addCleanup(
+            lambda: self.groups.delete(group_id)
+            if self.groups.get(group_id) is not None else None
+        )
+        self.users.add(
+            name, password, pending=True, email="edit@example.co"
+        )
+
+        status, _, body = self.post(
+            "/api/admin/users",
+            {
+                "action": "update", "name": name, "role": "admin",
+                "enabled": True, "rules": ["web-only"],
+            },
+            cookie=admin, source="127.0.0.5",
+        )
+        self.assertEqual(status, 400, body)
+        self.assertIn("nem szerkeszthető", json.loads(body)["error"])
+        record = self.users.record(name)
+        self.assertTrue(record.pending)
+        self.assertFalse(record.enabled)
+        self.assertEqual(record.role, gateway.ROLE_USER)
+        self.assertEqual(record.rules, ())
+
+        status, _, body = self.post(
+            "/api/admin/groups",
+            {
+                "action": "create", "id": group_id,
+                "label": "Függő kérelem csoport", "rules": [], "members": [],
+            },
+            cookie=admin, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+        status, _, body = self.post(
+            "/api/admin/groups",
+            {"action": "update", "id": group_id, "members": [name]},
+            cookie=admin, source="127.0.0.5",
+        )
+        self.assertEqual(status, 400, body)
+        self.assertIn(
+            "nem rendelhető csoporthoz", json.loads(body)["error"]
+        )
+        self.assertEqual(self.groups.get(group_id).members, ())
+        self.assertEqual(self.groups.groups_for(name), [])
+        self.assertTrue(self.users.record(name).pending)
+
+    def test_admin_create_and_last_admin_guard_ignore_pending_admin(self) -> None:
+        admin = self.admin_cookie()
+        name = "aktivuj"
+        password = "aktivuj-jelszo-1"
+        self.addCleanup(self.drop_totp_user, name)
+        status, _, body = self.create_user(admin, name, password)
+        self.assertEqual(status, 200, body)
+        record = self.users.record(name)
+        self.assertFalse(record.pending)
+        self.assertEqual(record.email, "")
+        self.assertTrue(record.enabled)
+        self.assertTrue(record.must_change_password)
+
+        pending_admin = "pendingroot"
+        self.addCleanup(self.drop_totp_user, pending_admin)
+        self.users.add(
+            pending_admin, "pendingroot-jelszo-1",
+            pending=True, email="pendingroot@example.co",
+        )
+        self.users.set_metadata(
+            pending_admin, role=gateway.ROLE_ADMIN, enabled=True
+        )
+        pending_record = self.users.record(pending_admin)
+        self.assertTrue(pending_record.is_admin)
+        self.assertTrue(pending_record.enabled)
+        self.assertTrue(pending_record.pending)
+        self.assertEqual(self.users.admin_count(), 1)
+
+        for payload in (
+            {"action": "update", "name": "root", "role": "user"},
+            {"action": "update", "name": "root", "enabled": False},
+        ):
+            with self.subTest(payload=payload):
+                status, _, body = self.post(
+                    "/api/admin/users", payload,
+                    cookie=admin, source="127.0.0.5",
+                )
+                self.assertEqual(status, 400, body)
+                self.assertIn(
+                    "utolsó aktív admin", json.loads(body)["error"]
+                )
+        root = self.users.record("root")
+        self.assertEqual(root.role, gateway.ROLE_ADMIN)
+        self.assertTrue(root.enabled)
+
 
 class RateLimitHttpTests(unittest.TestCase):
     def test_second_attempt_is_429(self) -> None:
@@ -4738,6 +5705,193 @@ class TotpCliTests(unittest.TestCase):
         self.assertEqual(
             stat.S_IMODE(os.stat(self.users_path).st_mode), 0o600
         )
+
+
+class StaticUiTests(unittest.TestCase):
+    """A fiókkérés és a QR-beiratkozás statikus frontend-jelölői."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.source = (ROOT / "index.html").read_text(encoding="utf-8")
+
+    def test_registration_markup_and_text_present(self) -> None:
+        for token in (
+            'id="register-view"',
+            'id="register-link"',
+            'id="reg-email"',
+            'data-i18n="Fiók kérése"',
+        ):
+            self.assertIn(token, self.source, token)
+        # Az admin beállítás jelölőnégyzete JS-ben épül: id: 'registration-enabled'.
+        self.assertRegex(
+            self.source,
+            r"""id\s*[:=]\s*["']registration-enabled["']""",
+        )
+        for text in (
+            "Fiókkérelmek engedélyezése",
+            "Függő fiókkérelmek",
+            "Jóváhagyás",
+            "Elutasítás",
+        ):
+            self.assertIn(text, self.source, text)
+
+    def test_qr_markup_and_inline_library_present(self) -> None:
+        for token in (
+            "qrcodegen",
+            "Project Nayuki",
+            "MIT License",
+            "https://www.nayuki.io/page/qr-code-generator-library",
+            'id="totp-qr"',
+            "renderTotpQr",
+            "clearTotpQr",
+            "Nem működik a QR? Írd be kézzel",
+        ):
+            self.assertIn(token, self.source, token)
+        # A kézi titok a QR-tartalék egy <details> blokkban van.
+        self.assertIsNotNone(
+            re.search(
+                r"<details\b[^>]*>.*?Nem működik a QR\? Írd be kézzel.*?</details>",
+                self.source, re.S,
+            )
+        )
+        # Nincs külső QR-CDN vagy qrcode-ra mutató script-forrás.
+        self.assertNotIn("cdn.", self.source.lower())
+        self.assertIsNone(
+            re.search(
+                r"""src\s*=\s*["'][^"']*qrcode""",
+                self.source, re.IGNORECASE,
+            )
+        )
+
+    def _i18n_sections(self) -> tuple[str, str, str, str]:
+        i18n_start = self.source.index("const I18N = {")
+        patterns_start = self.source.index("const I18N_PATTERNS")
+        tr_start = self.source.index("function tr(text)")
+        i18n = self.source[i18n_start:patterns_start]
+        en_start = i18n.index("en: {")
+        de_start = i18n.index("de: {")
+        patterns = self.source[patterns_start:tr_start]
+        pen_start = patterns.index("en: [")
+        pde_start = patterns.index("de: [")
+        return (
+            i18n[en_start:de_start],
+            i18n[de_start:],
+            patterns[pen_start:pde_start],
+            patterns[pde_start:],
+        )
+
+    def test_new_ui_strings_are_translated(self) -> None:
+        en, de, pen, pde = self._i18n_sections()
+        sources = (
+            "Fiók kérése",
+            "Kérj fiókot. Az admin jóváhagyása után beléphetsz.",
+            "Bejelentkezési név",
+            "E-mail-cím",
+            "Jelszó újra",
+            "Kérelem elküldése",
+            "Fiókkérelmek",
+            "A jóváhagyásra váró fiók captcha-védett, e-mail-címet tárol "
+            "(nem küld e-mailt), és csak admin jóváhagyás után léphet be.",
+            "Fiókkérelmek engedélyezése",
+            "Függő fiókkérelmek",
+            "Jóváhagyás",
+            "Elutasítás",
+            "Nem működik a QR? Írd be kézzel",
+            "2FA QR-kód beolvasása",
+        )
+        for text in sources:
+            with self.subTest(text=text):
+                self.assertIn(text, en, f"hiányzó angol fordítás: {text}")
+                self.assertIn(text, de, f"hiányzó német fordítás: {text}")
+        # Dinamikus darabszám és elutasítás-megerősítés mintája.
+        for section in (pen, pde):
+            self.assertIn("függő kérelem", section)
+            self.assertIn("Elutasítod:", section)
+
+
+class TotpQrCodegenTests(unittest.TestCase):
+    """A beágyazott qrcodegen valódi mátrixot állít elő (node-dal)."""
+
+    URI = (
+        "otpauth://totp/Dropjak:alice?"
+        "secret=JBSWY3DPEHPK3PXP&issuer=Dropjak"
+    )
+    EXPECTED_SIZE = 37
+    EXPECTED_VERSION = 5
+    EXPECTED_MASK = 4
+    EXPECTED_CANONICAL_LENGTH = 1405
+    EXPECTED_SHA256 = (
+        "c750fdc37790a33c5b9b1bf7ab86f502"
+        "515bb2f497b44076afe4e11dcb51a5e6"
+    )
+
+    @unittest.skipUnless(shutil.which("node"), "node nem érhető el")
+    def test_embedded_qrcodegen_matrix(self) -> None:
+        source = (ROOT / "index.html").read_text(encoding="utf-8")
+        start_marker = (
+            "/*\n * QR Code generator library (compiled from TypeScript)"
+        )
+        start = source.index(start_marker)
+        i18n_start = source.index(
+            "/* ============================================================ i18n",
+            start,
+        )
+        end_marker = "})(qrcodegen || (qrcodegen = {}));"
+        end = source.rindex(end_marker, start, i18n_start) + len(end_marker)
+        library = source[start:end]
+        self.assertIn("Project Nayuki", library)
+        self.assertIn("MIT License", library)
+        self.assertIn("qrcodegen.QrCode", library)
+
+        script = r"""
+const fs = require('fs');
+const crypto = require('crypto');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const qrcodegen = new Function(src + '\nreturn qrcodegen;')();
+const qr = qrcodegen.QrCode.encodeText(
+  process.argv[3], qrcodegen.QrCode.Ecc.MEDIUM);
+const rows = [];
+for (let y = 0; y < qr.size; y++) {
+  let row = '';
+  for (let x = 0; x < qr.size; x++)
+    row += qr.getModule(x, y) ? '1' : '0';
+  rows.push(row);
+}
+const canonical = rows.join('\n');
+process.stdout.write(JSON.stringify({
+  size: qr.size,
+  version: qr.version,
+  mask: qr.mask,
+  canonical_length: canonical.length,
+  sha256: crypto.createHash('sha256').update(canonical, 'utf8').digest('hex'),
+  rows: rows
+}));
+"""
+        # Az idézett index.html-ből kinyert könyvtár és a futtató szkript
+        # külön, a repón kívüli ideiglenes könyvtárba kerül.
+        with tempfile.TemporaryDirectory(prefix="hv-qr-") as tmp:
+            lib_path = os.path.join(tmp, "qrcodegen.js")
+            script_path = os.path.join(tmp, "encode.js")
+            Path(lib_path).write_text(library, encoding="utf-8")
+            Path(script_path).write_text(script, encoding="utf-8")
+            result = subprocess.run(
+                [shutil.which("node"), script_path, lib_path, self.URI],
+                cwd=tmp, capture_output=True, text=True, timeout=60,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data["size"], self.EXPECTED_SIZE)
+        self.assertEqual(data["version"], self.EXPECTED_VERSION)
+        self.assertEqual(data["mask"], self.EXPECTED_MASK)
+        self.assertEqual(
+            data["canonical_length"], self.EXPECTED_CANONICAL_LENGTH
+        )
+        self.assertEqual(data["sha256"], self.EXPECTED_SHA256)
+        rows = data["rows"]
+        self.assertEqual(len(rows), self.EXPECTED_SIZE)
+        for row in rows:
+            self.assertEqual(len(row), self.EXPECTED_SIZE)
+            self.assertEqual(set(row) - {"0", "1"}, set())
 
 
 # ---------------------------------------------------- drop log és beállítások
@@ -5195,6 +6349,74 @@ class SettingsStoreTests(unittest.TestCase):
             self.path, logger=lambda *_: None
         )
         self.assertEqual(fresh.snapshot()["host_ssh"], "admin")
+
+    def test_registration_enabled_default_and_validation(self) -> None:
+        self.assertIs(self.store.snapshot()["registration_enabled"], False)
+        self.assertIs(
+            gateway.settings_store.validate_state(
+                {"registration_enabled": True}
+            )["registration_enabled"],
+            True,
+        )
+        self.assertIs(
+            gateway.settings_store.validate_state({})["registration_enabled"],
+            False,
+        )
+        for value in ("yes", 1, None, [], "true"):
+            with self.subTest(value=value):
+                with self.assertRaises(gateway.settings_store.SettingsError):
+                    gateway.settings_store.validate_state(
+                        {"registration_enabled": value}
+                    )
+
+    def test_set_registration_enabled_persists_and_toggles(self) -> None:
+        preauth = self.store.prepare(
+            "create", "preauth",
+            entry={"label": "Kiosk", "dst": "192.168.50.10",
+                   "proto": "tcp", "ports": [443]},
+        )
+        blocked = self.store.prepare(
+            "create", "block",
+            entry={"label": "Minden DNS", "proto": "udp", "ports": [53]},
+        )
+        self.store.commit(blocked)
+        self.store.commit(preauth)
+        before = self.store.snapshot()
+        self.assertEqual(before["host_ssh"], "off")
+        self.assertIs(before["registration_enabled"], False)
+
+        result = self.store.set_registration_enabled(True)
+        self.assertIs(result["registration_enabled"], True)
+        self.assertIs(self.store.snapshot()["registration_enabled"], True)
+        raw = json.loads(Path(self.path).read_text(encoding="utf-8"))
+        self.assertIs(raw["registration_enabled"], True)
+        self.assertEqual(
+            stat.S_IMODE(os.stat(self.path).st_mode), 0o600
+        )
+
+        reloaded = gateway.settings_store.SettingsStore(
+            self.path, logger=lambda *_: None
+        )
+        after = reloaded.snapshot()
+        self.assertIs(after["registration_enabled"], True)
+        self.assertEqual(after["host_ssh"], before["host_ssh"])
+        self.assertEqual(after["preauth"], before["preauth"])
+        self.assertEqual(after["block"], before["block"])
+        self.assertEqual(after["error"], "")
+
+        self.store.set_registration_enabled(False)
+        self.assertIs(self.store.snapshot()["registration_enabled"], False)
+        self.assertIs(
+            gateway.settings_store.SettingsStore(
+                self.path, logger=lambda *_: None
+            ).snapshot()["registration_enabled"],
+            False,
+        )
+        for value in ("yes", 1, None):
+            with self.subTest(value=value):
+                with self.assertRaises(gateway.settings_store.SettingsError):
+                    self.store.set_registration_enabled(value)
+        self.assertIs(self.store.snapshot()["registration_enabled"], False)
 
 
 class FirewallCustomTests(unittest.TestCase):

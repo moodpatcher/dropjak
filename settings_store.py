@@ -170,7 +170,17 @@ def validate_state(data) -> dict:
         raise SettingsError(
             "a host SSH szabály értéke admin, any vagy off lehet"
         )
-    result = {"host_ssh": host_ssh, "preauth": [], "block": []}
+    registration_enabled = data.get("registration_enabled", False)
+    if not isinstance(registration_enabled, bool):
+        raise SettingsError(
+            "a registration_enabled mező igaz/hamis érték kell"
+        )
+    result = {
+        "host_ssh": host_ssh,
+        "registration_enabled": registration_enabled,
+        "preauth": [],
+        "block": [],
+    }
     for kind in ("preauth", "block"):
         raw_list = data.get(kind, [])
         if not isinstance(raw_list, list):
@@ -215,6 +225,7 @@ class SettingsStore:
         self._lock = threading.Lock()
         self._data = {
             "host_ssh": self.default_host_ssh,
+            "registration_enabled": False,
             "preauth": [],
             "block": [],
         }
@@ -224,6 +235,7 @@ class SettingsStore:
     def _defaults(self) -> dict:
         return {
             "host_ssh": self.default_host_ssh,
+            "registration_enabled": False,
             "preauth": [],
             "block": [],
         }
@@ -364,3 +376,17 @@ class SettingsStore:
             self._data = copy.deepcopy(checked)
             self._error = ""
         return copy.deepcopy(checked)
+
+    def set_registration_enabled(self, enabled: bool) -> dict:
+        """A regisztráció (fiók-kérés) engedélyezése vagy tiltása.
+
+        Csak a beállításfájlt írja atomikusan; az nftables-hez nem nyúl.
+        """
+        if not isinstance(enabled, bool):
+            raise SettingsError(
+                "a registration_enabled mező igaz/hamis érték kell"
+            )
+        with self._lock:
+            data = self._copy_locked()
+        data["registration_enabled"] = enabled
+        return self.commit(data)
