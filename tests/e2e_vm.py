@@ -246,7 +246,7 @@ def client_main(argv: list[str]) -> int:
             "rules": 'id="rules"' in body,
             "admin_panel": 'id="admin-panel"' in body,
             "ttl": 'id="ttl"' in body,
-            "ttl_unit": 'id="ttl-unit"' in body,
+            "ttl_unit_absent": 'id="ttl-unit"' not in body,
             "rules_api": "/api/admin/rules" in body,
             "access_api": "/api/access" in body,
             "password_view": 'id="password-view"' in body,
@@ -385,7 +385,7 @@ def main() -> int:
         check("szabályválasztó a felületen", bool(page.get("rules")))
         check("admin panel a felületen", bool(page.get("admin_panel")))
         check("TTL mező a felületen", bool(page.get("ttl")))
-        check("óra/perc TTL választó a felületen", bool(page.get("ttl_unit")))
+        check("nincs óra/perc TTL választó a felületen", bool(page.get("ttl_unit_absent")))
         check("admin szabály API a felületen", bool(page.get("rules_api")))
         check("/api/access hívás a felületen", bool(page.get("access_api")))
         check("jelszócsere nézet a felületen", bool(page.get("password_view")))

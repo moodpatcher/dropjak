@@ -318,6 +318,12 @@ class CatalogTests(unittest.TestCase):
             with self.assertRaises(gateway.AccessError):
                 gateway.validate_ttl(bad)
 
+    def test_format_duration(self) -> None:
+        self.assertEqual(gateway.format_duration(3600), "1 óra")
+        self.assertEqual(gateway.format_duration(7200), "2 óra")
+        self.assertEqual(gateway.format_duration(5400), "90 perc")
+        self.assertEqual(gateway.format_duration(90), "90 másodperc")
+
     def test_invalid_catalogs_rejected(self) -> None:
         bad_catalogs = [
             {},
@@ -6803,21 +6809,63 @@ class StaticUiTests(unittest.TestCase):
             self.assertIn(text, self.source, text)
 
     def test_access_ttl_defaults_to_hours_and_allows_long_grants(self) -> None:
-        # A hozzáférési szabály kiválasztásakor az óra az alapértelmezett.
-        self.assertIn('<option value="hour" selected', self.source)
-        self.assertIn("let ttlUnit = 'hour'", self.source)
-        self.assertGreaterEqual(self.source.count("setTtlUnit('hour')"), 2)
+        # A hozzáférés hosszát mindig egész órában adjuk meg: nincs
+        # mértékegység-választó, és a perc-alapú ágak eltűntek.
+        self.assertNotIn('id="ttl-unit"', self.source)
+        self.assertNotIn('<option value="min"', self.source)
+        self.assertNotIn("ttlUnit", self.source)
+        self.assertNotIn("ttlUnitFactor", self.source)
+        self.assertNotIn("setTtlUnit", self.source)
         # A régi 1440 perces (24 órás) felső korlát eltűnt; az admin űrlap
         # a szerveroldali limitet követi, így egy hét is beállítható.
         self.assertNotIn('max="1440"', self.source)
         self.assertNotIn("1440 perc = 24 óra", self.source)
         self.assertIn("max_ttl: 2592000", self.source)
-        self.assertIn("max: maxTtlMinutes", self.source)
+        # Az admin szabályűrlap egész órában kérdez, a tárolt érték másodperc.
+        self.assertIn("max: maxTtlHours", self.source)
+        self.assertIn('Alapértelmezett idő (óra)', self.source)
+        self.assertIn('Maximális idő (óra)', self.source)
+        self.assertNotIn('Alapértelmezett idő (perc)', self.source)
+        self.assertNotIn('Maximális idő (perc)', self.source)
+        self.assertIn("Math.round(defaultHours * 3600)", self.source)
+        self.assertIn("Math.round(maxHours * 3600)", self.source)
+        self.assertIn("Math.round(rawTtl * 3600)", self.source)
+        self.assertIn("ttlDurationLabel", self.source)
+        self.assertIn("ttlHours", self.source)
+        self.assertIn("return '< 1 óra'", self.source)
+        # A régi, egy óránál rövidebb szabály külön üzenetet ad, kérés nélkül.
+        self.assertIn("Number(rule.max_ttl) < 3600", self.source)
+        self.assertIn("ttlEl.disabled = unavailable", self.source)
+        self.assertIn("grantBtn.disabled = unavailable", self.source)
+        # A régi, perces megjelenítés nem maradt a szabályűrlapon.
+        self.assertNotIn("Math.round(rule.default_ttl / 60)", self.source)
+        self.assertNotIn("Math.round(rule.max_ttl / 60)", self.source)
         # Az óra egész számú: nincs törtszámos lépés, és a beküldés is ellenőrzi.
         self.assertIn("ttlEl.step = '1'", self.source)
         self.assertIn("ttlEl.inputMode = 'numeric'", self.source)
         self.assertIn("!Number.isInteger(rawTtl)", self.source)
         self.assertIn("Az időtartam csak egész óra lehet.", self.source)
+        self.assertIn(
+            'Ez a szabály legalább 1 órás időtartamot igényel.',
+            self.source,
+        )
+        # Az EN/DE fordítások ismerik az új órás alakokat.
+        for token in (
+            r"Legfeljebb (< 1|[0-9.,]+) óra",
+            r"([0-9.,]+) óra$",
+            "'< 1 óra': '< 1 hour'",
+            "'< 1 óra': '< 1 Std.'",
+        ):
+            self.assertIn(token, self.source, token)
+        # A szerveroldali üzenetek is a formázott időtartamot használják.
+        gateway_source = (ROOT / "gateway.py").read_text(encoding="utf-8")
+        server_source = (ROOT / "server.py").read_text(encoding="utf-8")
+        self.assertIn("def format_duration(seconds)", gateway_source)
+        self.assertIn("format_duration(rule.max_ttl)", gateway_source)
+        self.assertIn("format_duration(MIN_TTL)", gateway_source)
+        self.assertIn('"Hozzáférés engedélyezve: "', server_source)
+        self.assertIn("gateway.format_duration(ttl)", server_source)
+        self.assertIn("gateway.format_duration(gateway.MAX_TTL)", server_source)
 
     def test_qr_markup_and_inline_library_present(self) -> None:
         for token in (

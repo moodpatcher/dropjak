@@ -83,7 +83,7 @@ kereshető listában történik (nincs sok kis jelölőnégyzet). A **Szabályok
 űrlapon a TCP- és UDP-portokat vesszővel vagy szóközzel elválasztva kell
 megadni; egy szabály több portot is tartalmazhat, és adhat ICMP-t vagy
 teljes hozzáférést. Docker által publikált konténerhez a host portját kell
-beírni. Az időtartam a portálon percben vagy órában adható meg.
+beírni. Az időtartam a portálon egész órában adható meg.
 
 A **Naplók** fülön minden esemény szűrhető, a **Munkamenetek** fülön
 pedig a nyitott munkamenetek és a hátralévő idő látható; ott a

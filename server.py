@@ -1929,7 +1929,6 @@ class Handler(BaseHTTPRequestHandler):
         )
         if gateway.COOKIE_SECURE:
             cookie += "; Secure"
-        minutes = max(1, (session.expires_in + 59) // 60)
         self._audit(
             "access_modified" if current.authorized else "access_granted",
             user=session.user,
@@ -1947,7 +1946,8 @@ class Handler(BaseHTTPRequestHandler):
         )
         print(
             f"[{ip}] hozzáférés engedélyezve: {session.user!r}, "
-            f"{rule.id} ({session.ports.label()}), {minutes} perc",
+            f"{rule.id} ({session.ports.label()}), "
+            f"{gateway.format_duration(ttl)}",
             flush=True,
         )
         self._json(
@@ -1968,8 +1968,10 @@ class Handler(BaseHTTPRequestHandler):
                     self._rule_payload(item)
                     for item in self.gw.effective_rules(session.user)
                 ],
-                "message": f"Hozzáférés engedélyezve {minutes} percre "
-                           f"({rule.label}).",
+                "message": (
+                    "Hozzáférés engedélyezve: "
+                    f"{gateway.format_duration(ttl)} ({rule.label})."
+                ),
             },
             headers={"Set-Cookie": cookie},
         )
@@ -2839,9 +2841,9 @@ def _serve() -> int:
     )
     print(f"Napló: {gw.audit.path}", flush=True)
     print(
-        f"Választható hozzáférés: {(gateway.MIN_TTL + 59) // 60}–"
-        f"{gateway.MAX_TTL // 60} perc; alapértelmezett: "
-        f"{gw.sessions.ttl // 60} perc",
+        f"Választható hozzáférés: {gateway.format_duration(gateway.MIN_TTL)}–"
+        f"{gateway.format_duration(gateway.MAX_TTL)}; alapértelmezett: "
+        f"{gateway.format_duration(gw.sessions.ttl)}",
         flush=True,
     )
     if gateway.PORTAL_URL:

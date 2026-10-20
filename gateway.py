@@ -920,15 +920,24 @@ class ServiceCatalog:
         return self._udp_ports
 
 
+def format_duration(seconds) -> str:
+    """A másodpercben megadott időtartam emberi alakja."""
+    value = max(0, int(seconds))
+    if value > 0 and value % 3600 == 0:
+        return f"{value // 3600} óra"
+    if value % 60 == 0:
+        return f"{value // 60} perc"
+    return f"{value} másodperc"
+
+
 def validate_ttl(raw) -> int:
     """A választott hozzáférési idő ellenőrzése (másodperc)."""
     if isinstance(raw, bool) or not isinstance(raw, int):
         raise AccessError("a hozzáférés hossza egész másodperc kell legyen")
     if raw < MIN_TTL or raw > MAX_TTL:
-        low = (MIN_TTL + 59) // 60
-        high = MAX_TTL // 60
         raise AccessError(
-            f"a hozzáférés hossza {low} és {high} perc között lehet"
+            f"a hozzáférés hossza {format_duration(MIN_TTL)} és "
+            f"{format_duration(MAX_TTL)} között lehet"
         )
     return raw
 
@@ -1660,7 +1669,8 @@ class RuleStore:
                 raise RuleStoreError(f"{name}: egész másodperc kell")
             if not (MIN_TTL <= value <= MAX_TTL):
                 raise RuleStoreError(
-                    f"{name}: {(MIN_TTL + 59) // 60}–{MAX_TTL // 60} perc lehet"
+                    f"{name}: {format_duration(MIN_TTL)}–"
+                    f"{format_duration(MAX_TTL)} lehet"
                 )
         if default_ttl > max_ttl:
             raise RuleStoreError(
@@ -4331,7 +4341,8 @@ class SessionManager:
         ttl = validate_ttl(ttl)
         if ttl > rule.max_ttl:
             raise AccessError(
-                f"ez a szabály legfeljebb {rule.max_ttl // 60} percet engedélyez"
+                f"ez a szabály legfeljebb {format_duration(rule.max_ttl)} "
+                "időtartamra engedélyez"
             )
         now = time.time()
         flushed = False
@@ -4941,8 +4952,8 @@ class Gateway:
         )
         log(
             "[hozzáférés] választható idő: "
-            f"{(MIN_TTL + 59) // 60}–{MAX_TTL // 60} perc; "
-            f"alapértelmezett: {self.sessions.ttl // 60} perc"
+            f"{format_duration(MIN_TTL)}–{format_duration(MAX_TTL)}; "
+            f"alapértelmezett: {format_duration(self.sessions.ttl)}"
         )
         if FLUSH_ON_START:
             try:
