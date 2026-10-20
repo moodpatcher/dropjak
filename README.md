@@ -12,7 +12,9 @@ and a TTL (1 minute to 24 hours). Only the ports and services allowed by that
 rule are opened for the client's IP address. Logout or expiry revokes access
 immediately.
 
-The portal is available in Hungarian, English and German.
+The portal is available in Hungarian, English and German. It follows the
+system light/dark preference and the theme can be switched manually in the
+bottom-right corner.
 
 ## How it works
 

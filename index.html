@@ -6,14 +6,37 @@
 <meta name="robots" content="noindex, nofollow">
 <title>Dropjak</title>
 <link rel="icon" href="icon.png">
+<meta name="theme-color" content="#f4f4f2">
+<script>
+  /* A témát még a stíluslap előtt állítjuk be, hogy ne villanjon fel
+     a világos háttér sötét témán. Ha nincs mentett választás, a rendszer
+     beállítását követjük. */
+  try {
+    const savedTheme = localStorage.getItem('hv_theme');
+    const theme = savedTheme === 'light' || savedTheme === 'dark'
+      ? savedTheme
+      : (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    document.documentElement.setAttribute('data-theme', theme);
+  } catch (e) { /* localStorage nem elérhető */ }
+</script>
 <style>
   :root{
+    color-scheme:light;
     --bg:#f4f4f2; --card:#fff; --ink:#1b1b1b; --muted:#777;
     --line:#e0e0dc; --line-strong:#d6d6d2; --soft:#f8f8f6;
     --green:#2f7d32; --green-bg:#eef6ee; --green-line:#cfe4cf;
     --amber:#8a5a00; --amber-bg:#fdf7e9; --amber-line:#ecdcb4;
     --red:#8a2a2a; --red-bg:#fbeeee; --red-line:#eccfcf;
     --blue:#265a88; --blue-bg:#eef4fa; --blue-line:#cbdcf0;
+  }
+  :root[data-theme="dark"]{
+    color-scheme:dark;
+    --bg:#0f1318; --card:#171b21; --ink:#e9e9e4; --muted:#9b9d99;
+    --line:#2a2f37; --line-strong:#3b414b; --soft:#1c2128;
+    --green:#7ecf8e; --green-bg:#13261a; --green-line:#2c4b35;
+    --amber:#e7bb6b; --amber-bg:#282112; --amber-line:#4b3d21;
+    --red:#ee8b8b; --red-bg:#2a1517; --red-line:#4c282c;
+    --blue:#8ab9e8; --blue-bg:#131f2c; --blue-line:#294056;
   }
   *{box-sizing:border-box}
   [hidden]{display:none!important}
@@ -523,6 +546,200 @@
     .drop-status-path{display:none}
     .drop-table-wrap{max-height:none}
   }
+
+  /* ---------------------------------------------------------- ikonok */
+  .nav-ico,.btn-ico,.head-ico,.tab-ico{
+    display:inline-flex;
+    flex:0 0 auto;
+    align-items:center;
+    justify-content:center;
+    line-height:0;
+  }
+  .nav-ico{width:15px;height:15px;opacity:.82}
+  .btn-ico{width:14px;height:14px}
+  .head-ico{width:17px;height:17px;color:var(--muted)}
+  .tab-ico{width:13px;height:13px;opacity:.85}
+  .nav-ico svg,.btn-ico svg,.head-ico svg,.tab-ico svg{display:block;width:100%;height:100%}
+  .main-tabs button,.admin-nav button,.fw-views button,
+  .topbar > button.logout{display:inline-flex;align-items:center;gap:7px}
+  .admin-nav button{justify-content:flex-start}
+  .admin-head h2{display:flex;align-items:center;gap:8px}
+  .admin-head button{display:inline-flex;align-items:center;gap:7px}
+  button.block{display:inline-flex;align-items:center;justify-content:center;gap:8px}
+  button.block .btn-ico{width:16px;height:16px}
+
+  /* ---------------------------------------------------------- téma */
+  .foot-meta{display:flex;align-items:center;gap:8px}
+  .theme-toggle{
+    display:inline-flex;
+    align-items:center;
+    justify-content:center;
+    width:32px;height:32px;
+    padding:0;
+    color:var(--ink);
+    background:transparent;
+    border:1px solid var(--line-strong);
+    border-radius:999px;
+    box-shadow:none;
+    cursor:pointer;
+  }
+  .theme-toggle:hover{background:var(--soft);border-color:#b5b5b0}
+  .theme-toggle:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+  .theme-toggle svg{display:block;width:15px;height:15px}
+
+  /* ---------------------------------------------------------- sötét téma */
+  :root[data-theme="dark"] body{background:var(--bg)}
+  :root[data-theme="dark"] .card{box-shadow:0 10px 34px rgba(0,0,0,.5)}
+  :root[data-theme="dark"] .wordmark::after{
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 92 9'%3E%3Cpath d='M0 4.5h33M59 4.5h33' stroke='%23e07878' stroke-width='1'/%3E%3Cpath d='M46 1.5 49 4.5 46 7.5 43 4.5Z' fill='%23e07878'/%3E%3C/svg%3E");
+  }
+  :root[data-theme="dark"] label{color:#b7b9bb}
+  :root[data-theme="dark"] input,
+  :root[data-theme="dark"] select,
+  :root[data-theme="dark"] textarea{
+    color:var(--ink);background:#11151a;border-color:var(--line-strong);
+  }
+  :root[data-theme="dark"] input:disabled,
+  :root[data-theme="dark"] select:disabled{background:#1a1f25;color:#6f747a}
+  :root[data-theme="dark"] input::placeholder{color:#6f747a}
+  :root[data-theme="dark"] button{color:#101318;background:#e6e6e1;border-color:#e6e6e1}
+  :root[data-theme="dark"] button:hover{background:#fff;border-color:#fff}
+  :root[data-theme="dark"] button:disabled{color:#9aa0a6;background:#3a4048;border-color:#3a4048}
+  :root[data-theme="dark"] button.ghost{color:var(--ink);background:#20262e;border-color:var(--line-strong)}
+  :root[data-theme="dark"] button.ghost:hover{background:#272d35;border-color:#4a515b}
+  :root[data-theme="dark"] button.danger{color:#f2a0a0;background:transparent;border-color:var(--red-line)}
+  :root[data-theme="dark"] button.danger:hover{background:var(--red-bg)}
+  :root[data-theme="dark"] .theme-toggle{color:var(--ink);background:transparent;border-color:var(--line-strong)}
+  :root[data-theme="dark"] .theme-toggle:hover{background:#242a33;border-color:#4a515b}
+  :root[data-theme="dark"] .captcha{background:#14181e;border-color:var(--line-strong)}
+  :root[data-theme="dark"] .captcha-loading{color:#9b9d99}
+  :root[data-theme="dark"] .box{background:#11151a;border-color:#5a616a}
+  :root[data-theme="dark"] .captcha-text{color:#d6d8da}
+  :root[data-theme="dark"] .captcha-brand{color:#81878d}
+  :root[data-theme="dark"] .captcha-brand b{color:#aab0b6}
+  :root[data-theme="dark"] .bar{background:#242a31}
+  :root[data-theme="dark"] .spinner{border-color:#343b44;border-top-color:#c9cdd2}
+  :root[data-theme="dark"] .lang-toggle{
+    color:var(--ink);background:rgba(23,27,33,.96);border-color:var(--line-strong);
+    box-shadow:0 6px 18px rgba(0,0,0,.45);
+  }
+  :root[data-theme="dark"] .lang-toggle:hover{
+    background:#20262e;border-color:#4a515b;box-shadow:0 8px 20px rgba(0,0,0,.5);
+  }
+  :root[data-theme="dark"] .lang-menu{
+    background:#20262e;border-color:var(--line-strong);box-shadow:0 12px 30px rgba(0,0,0,.55);
+  }
+  :root[data-theme="dark"] .lang-option{color:var(--ink);background:transparent}
+  :root[data-theme="dark"] .lang-option:hover,
+  :root[data-theme="dark"] .lang-option:focus-visible{background:var(--soft)}
+  :root[data-theme="dark"] .lang-option[aria-selected="true"]{background:var(--soft)}
+  :root[data-theme="dark"] .lang-chevron{color:#8f949a}
+  :root[data-theme="dark"] .version{color:#7f8489}
+  :root[data-theme="dark"] .topbar{background:var(--card)}
+  :root[data-theme="dark"] .main-tabs button{color:#a9adb2;background:transparent}
+  :root[data-theme="dark"] .main-tabs button:hover{background:#242a33;color:var(--ink)}
+  :root[data-theme="dark"] .main-tabs button.active{
+    background:#242a33;color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.4);
+  }
+  :root[data-theme="dark"] .topbar > button.logout{
+    color:var(--ink);background:#20262e;border-color:var(--line-strong);
+  }
+  :root[data-theme="dark"] .status-pill.pending .dot{background:var(--amber)}
+  :root[data-theme="dark"] .rule-card{background:var(--card);border-color:var(--line-strong)}
+  :root[data-theme="dark"] .rule-card:hover{background:var(--soft);border-color:#4a515b}
+  :root[data-theme="dark"] .rule-card.active{
+    background:var(--soft);border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink);
+  }
+  :root[data-theme="dark"] .rule-card .check{background:var(--ink);color:#101318}
+  :root[data-theme="dark"] .chip{color:#a9d9b2}
+  :root[data-theme="dark"] .chip.neutral{color:#b9bdc2}
+  :root[data-theme="dark"] .rule-meta{color:#8f949a}
+  :root[data-theme="dark"] .ttl-box label{color:#b7b9bb}
+  :root[data-theme="dark"] .ttl-unit{color:#b7b9bb;background:#11151a;border-color:var(--line-strong)}
+  :root[data-theme="dark"] .stat span{color:#8f949a}
+  :root[data-theme="dark"] .hint{color:#8f949a}
+  :root[data-theme="dark"] .admin-nav button{color:#a9adb2;background:transparent;border-color:transparent}
+  :root[data-theme="dark"] .admin-nav button:hover{background:#242a33;color:var(--ink)}
+  :root[data-theme="dark"] .admin-nav button.active{
+    background:#242a33;color:var(--ink);border-color:var(--line-strong);
+    box-shadow:0 1px 2px rgba(0,0,0,.4);
+  }
+  :root[data-theme="dark"] .admin-flash{color:#c4c8cc}
+  :root[data-theme="dark"] .picker{background:var(--card)}
+  :root[data-theme="dark"] .picker-search{color:var(--ink);background:#11151a}
+  :root[data-theme="dark"] .picker-search:focus{background:var(--soft)}
+  :root[data-theme="dark"] .picker-item{color:var(--ink);background:transparent}
+  :root[data-theme="dark"] .picker-item:hover{background:var(--soft)}
+  :root[data-theme="dark"] .picker-item.selected{color:#a9d9b2}
+  :root[data-theme="dark"] .port-checks label{color:#b7b9bb}
+  :root[data-theme="dark"] th,
+  :root[data-theme="dark"] td{border-bottom-color:#262c34}
+  :root[data-theme="dark"] th{background:#1a1f26;color:#9b9d99}
+  :root[data-theme="dark"] .pill{color:#b9bdc2}
+  :root[data-theme="dark"] .log-tools label{color:#9b9d99}
+  :root[data-theme="dark"] .log-tools .auto{color:#b7b9bb}
+  :root[data-theme="dark"] .log-detail summary{color:#9b9d99}
+  :root[data-theme="dark"] .log-detail pre{background:#11151a;border-color:var(--line);color:#c9cdd2}
+  :root[data-theme="dark"] .drop-status{color:#a9c4b0;background:var(--green-bg);border-color:var(--green-line)}
+  :root[data-theme="dark"] .drop-status.err{background:var(--red-bg)}
+  :root[data-theme="dark"] .drop-status-sep{color:#4a515b}
+  :root[data-theme="dark"] .drop-stat{background:linear-gradient(135deg,var(--tint,#1c2128),var(--card) 74%)}
+  :root[data-theme="dark"] .drop-stat > span{color:#8f949a}
+  :root[data-theme="dark"] .drop-card{background:linear-gradient(180deg,var(--tint,#1c2128),var(--card) 46%)}
+  :root[data-theme="dark"] .chart-grid{stroke:#262c34}
+  :root[data-theme="dark"] .chart-axis{fill:#8f949a}
+  :root[data-theme="dark"] .drop-legend{color:#a9adb2}
+  :root[data-theme="dark"] .drop-legend b{color:#d6d8da}
+  :root[data-theme="dark"] .drop-src-ip{color:#d6d8da}
+  :root[data-theme="dark"] .drop-filters{
+    background:linear-gradient(180deg,#18212c,var(--card) 58%);border-color:#2b3b4d;
+  }
+  :root[data-theme="dark"] .drop-filter-field label{color:#8f949a}
+  :root[data-theme="dark"] .drop-auto{color:#b7b9bb}
+  :root[data-theme="dark"] .drop-filter-actions{border-top-color:#262c34}
+  :root[data-theme="dark"] .drop-filter-actions button:not(.ghost){
+    color:#0e1720;background:var(--blue);border-color:var(--blue);
+  }
+  :root[data-theme="dark"] .drop-filter-actions button:not(.ghost):hover{
+    background:#a7cbf0;border-color:#a7cbf0;
+  }
+  :root[data-theme="dark"] .drop-table-wrap{border-color:#2b3b4d}
+  :root[data-theme="dark"] .drop-table thead th{background:#1a2430;color:#a9bac9}
+  :root[data-theme="dark"] .drop-table tbody tr:hover{background:var(--row-tint,#1a2129)}
+  :root[data-theme="dark"] .drop-route-arrow{color:#7c93aa}
+  :root[data-theme="dark"] .drop-iface,
+  :root[data-theme="dark"] .drop-facts{color:#9b9d99}
+  :root[data-theme="dark"] .reason-pill{color:var(--rc-ink,#d6d8da)}
+  :root[data-theme="dark"] .fw-legend .accept i{background:#7ecf8e}
+  :root[data-theme="dark"] .fw-legend .drop i{background:#f08a8a}
+  :root[data-theme="dark"] .fw-legend .jump i{background:#c0a3ee}
+  :root[data-theme="dark"] .fw-legend .nat i{background:#8ab9e8}
+  :root[data-theme="dark"] .fw-legend span{background:#20262e;border-color:var(--line)}
+  :root[data-theme="dark"] .port-pill{color:var(--blue)}
+  :root[data-theme="dark"] .fw-chain{background:var(--card)}
+  :root[data-theme="dark"] .fw-chain-head{background:var(--soft)}
+  :root[data-theme="dark"] .fw-badge{color:#b9bdc2;background:#20262e;border-color:var(--line-strong)}
+  :root[data-theme="dark"] .fw-rule{border-top-color:#232931}
+  :root[data-theme="dark"] .fw-rule:hover{background:#1b2128}
+  :root[data-theme="dark"] .fw-rule-no{color:#6f747a}
+  :root[data-theme="dark"] .fw-tok{color:#c4c8cc;background:#20262e;border-color:#2f3640}
+  :root[data-theme="dark"] .fw-tok.iface{color:#a9d9b2}
+  :root[data-theme="dark"] .fw-tok.proto,
+  :root[data-theme="dark"] .fw-tok.port{color:var(--blue)}
+  :root[data-theme="dark"] .fw-tok.addr{color:#e2c98f;background:#2a2415;border-color:#4a3f20}
+  :root[data-theme="dark"] .fw-tok.state{color:#b9bdc2;background:#242a33;border-color:#343b45}
+  :root[data-theme="dark"] .fw-tok.set{color:#c8aef2;background:#241a35;border-color:#443460}
+  :root[data-theme="dark"] .fw-tok.mark{color:var(--amber)}
+  :root[data-theme="dark"] .fw-tok.limit,
+  :root[data-theme="dark"] .fw-tok.log{color:#9b9d99;background:#1d2229;border-color:#2c333c}
+  :root[data-theme="dark"] .fw-verdict{color:#b9bdc2;background:#242a33;border-color:#343b45}
+  :root[data-theme="dark"] .fw-verdict.return{color:#b0b4b9;background:#20262e;border-color:#2f3640}
+  :root[data-theme="dark"] .fw-verdict.jump{color:#c8aef2;background:#241a35;border-color:#443460}
+  :root[data-theme="dark"] .fw-views button{color:#a9adb2;background:transparent}
+  :root[data-theme="dark"] .fw-views button:hover{background:#242a33;color:var(--ink)}
+  :root[data-theme="dark"] .fw-views button.active{
+    background:#242a33;color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.4);
+  }
 </style>
 </head>
 <body>
@@ -543,7 +760,7 @@
 
       <div id="captcha-slot"><div class="captcha-loading" data-i18n="Biztonsági ellenőrzés betöltése…">Biztonsági ellenőrzés betöltése…</div></div>
 
-      <button id="submit" class="block" type="submit" data-i18n="Belépés">Belépés</button>
+      <button id="submit" class="block" type="submit"><span class="btn-ico" data-icon="login" aria-hidden="true"></span><span data-i18n="Belépés">Belépés</span></button>
       <p class="msg" id="msg" role="alert" aria-live="polite"></p>
     </form>
   </div>
@@ -559,10 +776,10 @@
       <span class="role-pill" id="who-role" data-i18n="felhasználó">felhasználó</span>
     </div>
     <nav class="main-tabs" id="main-tabs">
-      <button type="button" data-main="access" class="active" data-i18n="Hozzáférés">Hozzáférés</button>
-      <button type="button" data-main="admin" id="admin-tab" hidden>Admin</button>
+      <button type="button" data-main="access" class="active"><span class="nav-ico" data-icon="access" aria-hidden="true"></span><span data-i18n="Hozzáférés">Hozzáférés</span></button>
+      <button type="button" data-main="admin" id="admin-tab" hidden><span class="nav-ico" data-icon="admin" aria-hidden="true"></span><span>Admin</span></button>
     </nav>
-    <button type="button" class="logout" id="top-logout" data-i18n="Kilépés">Kilépés</button>
+    <button type="button" class="logout" id="top-logout"><span class="nav-ico" data-icon="logout" aria-hidden="true"></span><span data-i18n="Kilépés">Kilépés</span></button>
   </header>
 
   <!-- ------------------------------------------------ belépve: választás -->
@@ -652,14 +869,14 @@
   <section class="app-view" id="admin-view">
     <div class="admin-layout">
       <aside class="admin-nav" id="admin-nav">
-        <button type="button" data-admin="users" class="active" data-i18n="Felhasználók">Felhasználók</button>
-        <button type="button" data-admin="groups" data-i18n="Csoportok">Csoportok</button>
-        <button type="button" data-admin="rules" data-i18n="Szabályok">Szabályok</button>
-        <button type="button" data-admin="sessions" data-i18n="Munkamenetek">Munkamenetek</button>
-        <button type="button" data-admin="firewall" data-i18n="Tűzfal">Tűzfal</button>
-        <button type="button" data-admin="drops" data-i18n="Drop napló">Drop napló</button>
-        <button type="button" data-admin="logs" data-i18n="Naplók">Naplók</button>
-        <button type="button" data-admin="settings" data-i18n="Beállítások">Beállítások</button>
+        <button type="button" data-admin="users" class="active"><span class="nav-ico" data-icon="users" aria-hidden="true"></span><span data-i18n="Felhasználók">Felhasználók</span></button>
+        <button type="button" data-admin="groups"><span class="nav-ico" data-icon="groups" aria-hidden="true"></span><span data-i18n="Csoportok">Csoportok</span></button>
+        <button type="button" data-admin="rules"><span class="nav-ico" data-icon="rules" aria-hidden="true"></span><span data-i18n="Szabályok">Szabályok</span></button>
+        <button type="button" data-admin="sessions"><span class="nav-ico" data-icon="sessions" aria-hidden="true"></span><span data-i18n="Munkamenetek">Munkamenetek</span></button>
+        <button type="button" data-admin="firewall"><span class="nav-ico" data-icon="firewall" aria-hidden="true"></span><span data-i18n="Tűzfal">Tűzfal</span></button>
+        <button type="button" data-admin="drops"><span class="nav-ico" data-icon="drops" aria-hidden="true"></span><span data-i18n="Drop napló">Drop napló</span></button>
+        <button type="button" data-admin="logs"><span class="nav-ico" data-icon="logs" aria-hidden="true"></span><span data-i18n="Naplók">Naplók</span></button>
+        <button type="button" data-admin="settings"><span class="nav-ico" data-icon="settings" aria-hidden="true"></span><span data-i18n="Beállítások">Beállítások</span></button>
       </aside>
       <div class="admin-panel" id="admin-panel"></div>
     </div>
@@ -668,7 +885,10 @@
   <!-- ------------------------------------------------ panel alja -->
   <div class="card-foot">
     <div class="lang-dock" id="lang-dock" role="group" aria-label="Nyelv" data-i18n-aria-label="Nyelv"></div>
-    <span class="version" aria-label="Verzió">v2.0</span>
+    <div class="foot-meta">
+      <button type="button" class="theme-toggle" id="theme-toggle"></button>
+      <span class="version" aria-label="Verzió">v2.0</span>
+    </div>
   </div>
 </div>
 
@@ -713,6 +933,44 @@ const FLAG_SVGS = {
   </svg>`,
 };
 
+/* A felület apró vonalas ikonjai. Mindegyik a szövegszínt örökli
+   (currentColor), így a világos és a sötét témában is illeszkedik. */
+const ICON_SVGS = {
+  access: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="7.5" cy="15.5" r="4.5"/><path d="M10.8 12.2 21 2m-4 4 3 3m-6-1 2.5 2.5"/></svg>`,
+  admin: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>`,
+  logout: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>`,
+  users: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`,
+  groups: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>`,
+  rules: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>`,
+  sessions: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/></svg>`,
+  firewall: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>`,
+  drops: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>`,
+  logs: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>`,
+  settings: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`,
+  login: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="3" y1="12" x2="15" y2="12"/></svg>`,
+  plus: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`,
+  sun: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32 1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>`,
+  moon: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>`,
+  overview: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>`,
+  code: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>`,
+};
+
+function iconSvg(name) {
+  return ICON_SVGS[name] || '';
+}
+function uiIcon(name, cls = 'ui-ico') {
+  return el('span', {
+    class: cls,
+    'aria-hidden': 'true',
+    html: iconSvg(name)
+  });
+}
+function hydrateStaticIcons() {
+  for (const node of document.querySelectorAll('[data-icon]')) {
+    node.innerHTML = iconSvg(node.dataset.icon);
+  }
+}
+
 function detectLang() {
   try {
     const query = new URLSearchParams(location.search).get('lang');
@@ -744,6 +1002,8 @@ const I18N = {
     'Azonosítsd magad!': 'Identify yourself!',
     'Állj! · Azonosítsd magad!': 'Stop! · Identify yourself!',
     'Nyelv': 'Language',
+    'Sötét téma bekapcsolása': 'Switch to dark theme',
+    'Világos téma bekapcsolása': 'Switch to light theme',
     'Felhasználónév': 'Username',
     'Jelszó': 'Password',
     'Biztonsági ellenőrzés betöltése…': 'Loading security check…',
@@ -1193,6 +1453,8 @@ const I18N = {
     'Azonosítsd magad!': 'Identifiziere dich!',
     'Állj! · Azonosítsd magad!': 'Halt! · Identifiziere dich!',
     'Nyelv': 'Sprache',
+    'Sötét téma bekapcsolása': 'Dunkles Design einschalten',
+    'Világos téma bekapcsolása': 'Helles Design einschalten',
     'Felhasználónév': 'Benutzername',
     'Jelszó': 'Passwort',
     'Biztonsági ellenőrzés betöltése…': 'Sicherheitsprüfung wird geladen…',
@@ -1934,8 +2196,74 @@ function setLang(value) {
   }
 }
 
+/* ============================================================ téma
+   Alapértelmezésben a rendszer beállítását követjük; a kapcsolóval
+   kiválasztott téma a böngészőben marad meg. A témát a <html>
+   data-theme attribútuma vezérli, így a CSS-változók azonnal váltanak. */
+const THEME_KEY = 'hv_theme';
+
+function currentTheme() {
+  return document.documentElement.getAttribute('data-theme') === 'dark'
+    ? 'dark' : 'light';
+}
+
+function applyTheme(theme, persist) {
+  const dark = theme === 'dark';
+  document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+  if (persist) {
+    try { localStorage.setItem(THEME_KEY, dark ? 'dark' : 'light'); } catch (e) { /* nincs localStorage */ }
+  }
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', dark ? '#0f1318' : '#f4f4f2');
+}
+
+function buildThemeToggle() {
+  const button = document.getElementById('theme-toggle');
+  if (!button) return;
+  const media = window.matchMedia
+    ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+
+  const render = () => {
+    const dark = currentTheme() === 'dark';
+    button.innerHTML = iconSvg(dark ? 'sun' : 'moon');
+    const label = tr(dark ? 'Világos téma bekapcsolása' : 'Sötét téma bekapcsolása');
+    button.title = label;
+    button.setAttribute('aria-label', label);
+    button.setAttribute('aria-pressed', dark ? 'true' : 'false');
+  };
+
+  const refreshTintedViews = () => {
+    /* A drop napló színei JS-ben, a háttérhez keverve készülnek. */
+    if (activeView === 'admin' && adminTabName === 'drops') renderAdminPanel();
+  };
+
+  button.addEventListener('click', () => {
+    applyTheme(currentTheme() === 'dark' ? 'light' : 'dark', true);
+    render();
+    refreshTintedViews();
+  });
+
+  if (media) {
+    const onChange = event => {
+      let stored = null;
+      try { stored = localStorage.getItem(THEME_KEY); } catch (e) { /* nincs localStorage */ }
+      if (stored !== 'light' && stored !== 'dark') {
+        applyTheme(event.matches ? 'dark' : 'light', false);
+        render();
+        refreshTintedViews();
+      }
+    };
+    if (media.addEventListener) media.addEventListener('change', onChange);
+    else if (media.addListener) media.addListener(onChange);
+  }
+
+  render();
+}
+
 applyStaticI18n();
+hydrateStaticIcons();
 buildLangDock();
+buildThemeToggle();
 
 /* ============================================================ SHA-256
    A proof-of-work számításhoz kell. Nem használunk crypto.subtle-t,
@@ -2708,14 +3036,31 @@ function adminNotice() {
     text: tr(adminFlash.text)
   });
 }
+const ADMIN_HEAD_ICONS = {
+  'Felhasználók': 'users',
+  'Csoportok': 'groups',
+  'Szabályok': 'rules',
+  'Munkamenetek': 'sessions',
+  'Tűzfal-nézet': 'firewall',
+  'Tűzfal testreszabása': 'settings',
+  'Eldobott csomagok': 'drops',
+  'Naplók': 'logs',
+};
 function adminHead(title, subtitle, actionLabel, action) {
   const head = el('div', { class: 'admin-head' },
     el('div', {},
-      el('h2', { text: tr(title) }),
+      el('h2', {},
+        ADMIN_HEAD_ICONS[title] ? uiIcon(ADMIN_HEAD_ICONS[title], 'head-ico') : null,
+        el('span', { text: tr(title) })
+      ),
       el('p', { text: tr(subtitle) })
     )
   );
-  if (actionLabel) head.append(el('button', { type: 'button', onclick: action }, tr(actionLabel)));
+  if (actionLabel) {
+    head.append(el('button', { type: 'button', onclick: action },
+      uiIcon('plus', 'btn-ico'), el('span', { text: tr(actionLabel) })
+    ));
+  }
   return head;
 }
 function picker(items, selected, name, valueOf, labelOf, placeholder) {
@@ -3492,12 +3837,31 @@ function dropMix(hex, target, ratio) {
     Math.round(value + (to[index] - value) * ratio).toString(16).padStart(2, '0')
   ).join('');
 }
+function dropIsDark() {
+  return document.documentElement.getAttribute('data-theme') === 'dark';
+}
 function dropToneStyle(base, tint = 0.92) {
+  if (dropIsDark()) {
+    /* Sötét háttéren a színt a kártya felületéhez keverjük, a szöveget
+       pedig a fehér felé világosítjuk, hogy olvasható maradjon. */
+    return `--accent:${dropMix(base, '#ffffff', 0.18)};` +
+      `--accent-ink:${dropMix(base, '#ffffff', 0.48)};` +
+      `--tint:${dropMix(base, '#171b21', tint)};` +
+      `--tint-line:${dropMix(base, '#3b414b', 0.62)}`;
+  }
   return `--accent:${base};--accent-ink:${dropMix(base, '#000000', 0.22)};` +
     `--tint:${dropMix(base, '#ffffff', tint)};--tint-line:${dropMix(base, '#ffffff', 0.76)}`;
 }
 function dropReasonTone(reason) {
   const base = dropReasonColor(reason);
+  if (dropIsDark()) {
+    return {
+      base,
+      bg: dropMix(base, '#171b21', 0.82),
+      line: dropMix(base, '#3b414b', 0.62),
+      ink: dropMix(base, '#ffffff', 0.5)
+    };
+  }
   return {
     base,
     bg: dropMix(base, '#ffffff', 0.88),
@@ -3669,7 +4033,10 @@ function dropLegend(model) {
     legend.append(el('span', { class: 'drop-legend-item' },
       el('i', { class: 'drop-legend-swatch', style: `background:${color}` }),
       el('span', { text: label }),
-      el('b', { text: String(count), style: `color:${dropMix(color, '#000000', 0.18)}` })
+      el('b', {
+        text: String(count),
+        style: `color:${dropMix(color, dropIsDark() ? '#ffffff' : '#000000', 0.3)}`
+      })
     ));
   }
   return legend;
@@ -3948,7 +4315,9 @@ function renderDrops() {
   for (const entry of dropRows) {
     const reason = entry.reason || 'unknown';
     const tone = dropReasonTone(reason);
-    body.append(el('tr', { style: `--row-tint:${dropMix(tone.base, '#ffffff', 0.94)}` },
+    body.append(el('tr', {
+      style: `--row-tint:${dropMix(tone.base, dropIsDark() ? '#171b21' : '#ffffff', 0.9)}`
+    },
       el('td', {}, dropTimeCell(entry)),
       el('td', {}, el('span', {
         class: 'reason-pill',
@@ -4394,18 +4763,17 @@ async function loadSessions() {
 
 function fwViewTabs() {
   const bar = el('div', { class: 'fw-views', role: 'tablist' });
-  for (const [key, label] of [
-    ['overview', 'Áttekintés'],
-    ['raw', 'Nyers szabályok'],
+  for (const [key, label, icon] of [
+    ['overview', 'Áttekintés', 'overview'],
+    ['raw', 'Nyers szabályok', 'code'],
   ]) {
     bar.append(el('button', {
       type: 'button',
       role: 'tab',
       class: firewallView === key ? 'active' : '',
       'aria-selected': firewallView === key ? 'true' : 'false',
-      text: tr(label),
       onclick: () => setFirewallView(key),
-    }));
+    }, uiIcon(icon, 'tab-ico'), el('span', { text: tr(label) })));
   }
   return bar;
 }
