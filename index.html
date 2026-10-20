@@ -280,15 +280,81 @@
   button.danger:hover{background:var(--red-bg)}
   button.small{padding:6px 9px;font-size:12px;border-radius:6px;min-height:32px}
   button.block{width:100%;margin-top:4px;font-size:15px}
+  /* auth űrlapok: az egymás alatti gombok egységes térköze */
+  #f button.block ~ button.block,
+  #register-form button.block ~ button.block,
+  #totp-form button.block ~ button.block,
+  #totp-enroll-form button.block ~ button.block,
+  #totp-recovery-form button.block ~ button.block{margin-top:10px}
   .msg{display:none;margin:14px 0 0;font-size:13px;line-height:1.45;color:var(--red)}
   .msg.show{display:block}
   .msg.ok{color:var(--green)}
   .smsg{display:none;margin:10px 0 0;font-size:12.5px;line-height:1.45;color:var(--red)}
   .smsg.show{display:block}
 
-  /* kétfaktoros belépés: csak az olvasható titok- és kódblokkok elrendezése */
-  .qr-code{display:inline-block;max-width:100%;margin:2px 0 16px;background:#fff}
+  /* kétfaktoros belépés: QR-kártya, fióksor és kézi tartalék elrendezése */
+  .qr-code{
+    display:block;
+    width:min(100%,246px);
+    max-width:100%;
+    margin:0 auto 18px;
+    padding:12px;
+    background:#fff;
+    border:1px solid var(--line-strong);
+    border-radius:12px;
+    box-shadow:0 1px 2px rgba(0,0,0,.05);
+  }
   .qr-code svg{display:block;max-width:100%;height:auto}
+  .totp-account{
+    margin:-6px 0 18px;
+    font-size:var(--fs-sm);
+    line-height:1.45;
+    text-align:center;
+    overflow-wrap:anywhere;
+  }
+  .totp-account b{color:var(--ink);font-weight:700}
+  .totp-manual{
+    width:100%;
+    margin:0 auto 20px;
+    padding:0 14px;
+    font-size:var(--fs-sm);
+    color:var(--ink);
+    background:var(--soft);
+    border:1px solid var(--line);
+    border-radius:10px;
+  }
+  .totp-manual summary{
+    position:relative;
+    padding:12px 22px 12px 0;
+    font-weight:600;
+    color:var(--ink);
+    list-style:none;
+    cursor:pointer;
+  }
+  .totp-manual summary::-webkit-details-marker{display:none}
+  .totp-manual summary::after{
+    content:"";
+    position:absolute;
+    top:50%;
+    right:3px;
+    width:7px;
+    height:7px;
+    margin-top:-4px;
+    border-right:1.5px solid var(--muted);
+    border-bottom:1.5px solid var(--muted);
+    transform:rotate(45deg);
+    transition:transform .15s;
+  }
+  .totp-manual[open] summary{
+    padding-bottom:12px;
+    margin-bottom:14px;
+    border-bottom:1px solid var(--line);
+  }
+  .totp-manual[open] summary::after{transform:rotate(-135deg)}
+  .totp-manual[open]{padding-bottom:14px}
+  .totp-manual label{margin-bottom:6px;font-size:12.5px;font-weight:600;color:var(--muted)}
+  .totp-manual .totp-secret{margin-bottom:14px}
+  .totp-manual .totp-uri{margin-bottom:0}
   .totp-secret{display:flex;align-items:flex-start;gap:8px;margin:0 0 16px}
   .totp-secret code{
     flex:1 1 auto;min-width:0;padding:10px 12px;
@@ -934,7 +1000,7 @@
     <div class="view" id="totp-enroll">
       <h1 data-i18n="Kétfaktoros azonosítás beállítása">Kétfaktoros azonosítás beállítása</h1>
       <p class="subtitle" data-i18n="Olvasd be a QR-kódot a Google Authenticator alkalmazással, majd írd be a 6 jegyű kódot.">Olvasd be a QR-kódot a Google Authenticator alkalmazással, majd írd be a 6 jegyű kódot.</p>
-      <p class="subtitle"><span data-i18n="Fiók">Fiók</span>: <b id="totp-account"></b></p>
+      <p class="subtitle totp-account"><span data-i18n="Fiók">Fiók</span>: <b id="totp-account"></b></p>
       <div id="totp-qr" class="qr-code" role="img" aria-label="2FA QR-kód beolvasása" data-i18n-aria-label="2FA QR-kód beolvasása"></div>
       <details class="totp-manual">
         <summary data-i18n="Nem működik a QR? Írd be kézzel">Nem működik a QR? Írd be kézzel</summary>
