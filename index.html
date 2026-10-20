@@ -364,8 +364,8 @@
   .log-detail pre{margin:4px 0 0;padding:6px;background:#f7f7f5;border:1px solid var(--line);border-radius:5px;font-size:10px;white-space:pre-wrap;word-break:break-word;max-height:160px;overflow:auto}
   .log-table td{font-size:11.5px}
   /* drop napló — áttekintés */
-  .drop-status{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin:0 0 10px;padding:7px 10px;font-size:11px;color:#555;background:var(--soft);border:1px solid var(--line);border-radius:8px}
-  .drop-status b{font-size:11.5px;color:var(--ink)}
+  .drop-status{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin:0 0 10px;padding:7px 10px;font-size:11px;color:#52605a;background:linear-gradient(90deg,var(--green-bg),#fbfdfb 62%);border:1px solid var(--green-line);border-radius:8px}
+  .drop-status b{font-size:11.5px;color:var(--green)}
   .drop-status.err{border-color:var(--red-line);background:var(--red-bg)}
   .drop-status.err b{color:var(--red)}
   .drop-dot{flex:0 0 auto;width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 0 3px var(--green-bg)}
@@ -374,14 +374,16 @@
   .drop-status-path{margin-left:auto;max-width:46%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:9.5px;color:var(--muted)}
   .drop-status-error{color:var(--red);font-size:10.5px}
   .drop-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-bottom:10px}
-  .drop-stat{padding:8px 11px;background:#fff;border:1px solid var(--line);border-radius:9px;min-width:0}
+  .drop-stat{position:relative;overflow:hidden;padding:8px 11px 8px 14px;background:linear-gradient(135deg,var(--tint,#fff),#fff 74%);border:1px solid var(--tint-line,var(--line));border-radius:9px;min-width:0}
+  .drop-stat::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--accent,#d6d6d2)}
   .drop-stat > span{display:block;font-size:9.5px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#8a8a85}
-  .drop-stat b{display:block;margin-top:2px;font-size:15px;line-height:1.25;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .drop-stat b{display:block;margin-top:2px;font-size:15px;line-height:1.25;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--accent-ink,var(--ink))}
   .drop-stat small{display:block;margin-top:1px;font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .drop-dashboard{display:grid;grid-template-columns:minmax(0,1.7fr) minmax(225px,.9fr);gap:10px;margin-bottom:12px}
-  .drop-card{min-width:0;padding:11px 13px 10px;background:#fff;border:1px solid var(--line);border-radius:10px}
+  .drop-card{min-width:0;padding:11px 13px 10px;background:linear-gradient(180deg,var(--tint,#fff),#fff 46%);border:1px solid var(--line);border-radius:10px}
   .drop-card-head{display:flex;align-items:flex-start;gap:8px;justify-content:space-between;margin-bottom:6px}
-  .drop-card-head h3{margin:0;font-size:12.5px}
+  .drop-card-head h3{display:flex;align-items:center;gap:6px;margin:0;font-size:12.5px}
+  .drop-card-head h3::before{content:"";flex:0 0 auto;width:3px;height:12px;border-radius:2px;background:var(--accent,#c9c9c4)}
   .drop-card-sub{margin:2px 0 0;font-size:10px;color:var(--muted)}
   .drop-chart{display:block;width:100%;height:auto;overflow:visible}
   .chart-grid{stroke:#ececea;stroke-width:1;vector-effect:non-scaling-stroke}
@@ -394,14 +396,16 @@
   .drop-legend b{font-weight:600;color:#3f3f3b}
   .drop-top-src{display:flex;flex-direction:column;gap:7px;margin-top:8px}
   .drop-src-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:2px 8px;font-size:11px}
-  .drop-src-ip{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#3f3f3b}
-  .drop-src-count{font-size:10px;font-weight:600;color:#777;font-variant-numeric:tabular-nums}
+  .drop-src-ip{display:flex;align-items:center;gap:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#3f3f3b}
+  .drop-src-ip::before{content:"";flex:0 0 auto;width:5px;height:5px;border-radius:50%;background:var(--bar,#9a9a95)}
+  .drop-src-count{font-size:10px;font-weight:600;color:var(--bar,#777);font-variant-numeric:tabular-nums}
   .drop-src-bar{grid-column:1/-1;height:4px;background:var(--soft);border-radius:999px;overflow:hidden}
-  .drop-src-bar i{display:block;height:100%;background:var(--blue);border-radius:999px;min-width:3px}
+  .drop-src-bar i{display:block;height:100%;background:var(--bar,var(--blue));border-radius:999px;min-width:3px}
   .drop-empty-small{margin:10px 0 2px;font-size:11px;color:var(--muted)}
-  .drop-filters{margin:0 0 12px;padding:10px 12px 11px;background:#fff;border:1px solid var(--line);border-radius:10px}
+  .drop-filters{margin:0 0 12px;padding:10px 12px 11px;background:linear-gradient(180deg,#f6f9fd,#fff 58%);border:1px solid #dce7f3;border-radius:10px}
   .drop-filter-head{display:flex;align-items:center;gap:8px;margin-bottom:8px}
-  .drop-filter-head b{font-size:12px}
+  .drop-filter-head b{display:flex;align-items:center;gap:6px;font-size:12px}
+  .drop-filter-head b::before{content:"";width:3px;height:12px;border-radius:2px;background:var(--blue)}
   .drop-filter-count{padding:1px 6px;font-size:9.5px;font-weight:600;color:var(--blue);background:var(--blue-bg);border:1px solid var(--blue-line);border-radius:999px}
   .drop-auto{display:flex;align-items:center;gap:5px;margin:0 0 0 auto;font-size:10.5px;font-weight:400;color:#666;cursor:pointer}
   .drop-auto input{width:14px;height:14px;margin:0;padding:0;flex:0 0 auto}
@@ -411,16 +415,19 @@
   .drop-filter-field input,.drop-filter-field select{width:100%;margin:0;padding:6px 8px;font-size:11.5px;border-radius:7px}
   .drop-filter-actions{display:flex;justify-content:flex-end;gap:6px;margin-top:9px;padding-top:9px;border-top:1px solid #f0f0ed}
   .drop-filter-actions button{padding:6px 10px;font-size:11.5px}
-  .drop-table-wrap{max-height:min(58vh,620px)}
+  .drop-filter-actions button:not(.ghost){background:var(--blue);border-color:var(--blue)}
+  .drop-filter-actions button:not(.ghost):hover{background:#1e4a70;border-color:#1e4a70}
+  .drop-table-wrap{max-height:min(58vh,620px);border-color:#dce6f1}
+  .drop-table thead th{background:linear-gradient(180deg,#f0f5fb,#f8fafd);color:#5d6f82}
   .drop-table td{font-size:11.5px;vertical-align:middle}
-  .drop-table tbody tr:hover{background:#fbfbf9}
+  .drop-table tbody tr:hover{background:var(--row-tint,#f6f9fd)}
   .drop-time .t{display:block;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;font-variant-numeric:tabular-nums;white-space:nowrap}
   .drop-time .d{display:block;font-size:9.5px;color:var(--muted);white-space:nowrap}
-  .reason-pill{display:inline-flex;align-items:center;gap:5px;padding:2px 7px;font-size:10.5px;font-weight:600;color:#3f3f3b;background:var(--soft);border:1px solid var(--line);border-radius:999px;white-space:nowrap}
-  .reason-pill i{flex:0 0 auto;width:6px;height:6px;border-radius:50%}
+  .reason-pill{display:inline-flex;align-items:center;gap:5px;padding:2px 7px;font-size:10.5px;font-weight:600;color:var(--rc-ink,#3f3f3b);background:var(--rc-bg,var(--soft));border:1px solid var(--rc-line,var(--line));border-radius:999px;white-space:nowrap}
+  .reason-pill i{flex:0 0 auto;width:6px;height:6px;border-radius:50%;background:var(--rc,#9a9a95)}
   .drop-route{display:flex;align-items:baseline;gap:6px;white-space:nowrap}
-  .drop-route-arrow{color:#b0b0aa}
-  .port-pill{display:inline-block;padding:2px 6px;font-size:10px;font-weight:600;color:#4a4a45;background:var(--soft);border:1px solid var(--line-strong);border-radius:5px;white-space:nowrap}
+  .drop-route-arrow{color:#8fa6bd}
+  .port-pill{display:inline-block;padding:2px 6px;font-size:10px;font-weight:600;color:var(--blue);background:var(--blue-bg);border:1px solid var(--blue-line);border-radius:5px;white-space:nowrap}
   .drop-iface{font-size:10px;color:#777;white-space:nowrap}
   .drop-facts{font-size:10px;color:#777;margin-bottom:2px}
   .fw-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:10px}
@@ -3279,28 +3286,53 @@ function dropTimeText(entry) {
   }
 }
 const DROP_REASON_COLORS = {
-  'no-grant': '#265a88',
-  'wan-drop': '#a05a2c',
-  'spoof-lan': '#6b4a86',
-  'spoof-wan': '#8c5a9e',
-  'mac': '#2f6f6a',
-  'input-lan': '#b07a12',
-  'input-wan': '#8a5a00',
-  'block': '#8a2a2a',
-  'docker-guard': '#3d6b3d',
-  'dns-revoked': '#4f6d8a',
-  'ssh-revoked': '#6f86a0',
-  'container-spoof': '#7a3d6b',
-  'container-pivot': '#8c4f7c',
-  'ipv6': '#6f6f6a',
-  'unknown': '#9a9a95'
+  'no-grant': '#2563eb',
+  'wan-drop': '#dc2626',
+  'spoof-lan': '#7c3aed',
+  'spoof-wan': '#c026d3',
+  'mac': '#0d9488',
+  'input-lan': '#ca8a04',
+  'input-wan': '#ea580c',
+  'block': '#be123c',
+  'docker-guard': '#16a34a',
+  'dns-revoked': '#0891b2',
+  'ssh-revoked': '#4f46e5',
+  'container-spoof': '#9333ea',
+  'container-pivot': '#db2777',
+  'ipv6': '#64748b',
+  'unknown': '#94a3b8'
 };
-const DROP_FALLBACK_COLORS = ['#356c8a', '#7d6b3f', '#5d6f4a', '#7a5568', '#4a6f85', '#8a6a4a'];
+const DROP_FALLBACK_COLORS = ['#0ea5e9', '#f59e0b', '#10b981', '#8b5cf6', '#ec4899', '#14b8a6'];
 function dropReasonColor(reason) {
   if (DROP_REASON_COLORS[reason]) return DROP_REASON_COLORS[reason];
   let hash = 0;
   for (const ch of String(reason || '')) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
   return DROP_FALLBACK_COLORS[hash % DROP_FALLBACK_COLORS.length];
+}
+function dropMix(hex, target, ratio) {
+  const parse = value => {
+    const text = String(value).replace('#', '');
+    const full = text.length === 3 ? text.split('').map(ch => ch + ch).join('') : text;
+    return [0, 2, 4].map(index => parseInt(full.slice(index, index + 2), 16) || 0);
+  };
+  const from = parse(hex);
+  const to = parse(target);
+  return '#' + from.map((value, index) =>
+    Math.round(value + (to[index] - value) * ratio).toString(16).padStart(2, '0')
+  ).join('');
+}
+function dropToneStyle(base, tint = 0.92) {
+  return `--accent:${base};--accent-ink:${dropMix(base, '#000000', 0.22)};` +
+    `--tint:${dropMix(base, '#ffffff', tint)};--tint-line:${dropMix(base, '#ffffff', 0.76)}`;
+}
+function dropReasonTone(reason) {
+  const base = dropReasonColor(reason);
+  return {
+    base,
+    bg: dropMix(base, '#ffffff', 0.88),
+    line: dropMix(base, '#ffffff', 0.68),
+    ink: dropMix(base, '#000000', 0.22)
+  };
 }
 function dropFmtTime(ts, withSeconds) {
   return new Date(ts * 1000).toLocaleTimeString(LOCALES[lang], {
@@ -3391,7 +3423,7 @@ function dropChartModel(analysis) {
       if (!stackSet.has(reason)) other += count;
     }
     if (other) {
-      segments.push({ reason: '__other', count: other, color: '#a3a39e' });
+      segments.push({ reason: '__other', count: other, color: '#94a3b8' });
       otherTotal += other;
     }
     bucket.segments = segments;
@@ -3462,13 +3494,11 @@ function dropLegend(model) {
   const legend = el('div', { class: 'drop-legend' });
   for (const [reason, count] of entries) {
     const label = reason === '__other' ? tr('Egyéb') : tr(reason);
+    const color = reason === '__other' ? '#94a3b8' : dropReasonColor(reason);
     legend.append(el('span', { class: 'drop-legend-item' },
-      el('i', {
-        class: 'drop-legend-swatch',
-        style: `background:${reason === '__other' ? '#a3a39e' : dropReasonColor(reason)}`
-      }),
+      el('i', { class: 'drop-legend-swatch', style: `background:${color}` }),
       el('span', { text: label }),
-      el('b', { text: String(count) })
+      el('b', { text: String(count), style: `color:${dropMix(color, '#000000', 0.18)}` })
     ));
   }
   return legend;
@@ -3476,7 +3506,10 @@ function dropLegend(model) {
 function dropChartCard(chart) {
   const analysis = chart.analysis;
   const sub = `${tr(`${analysis.valid.length} csomag`)} · ${dropFmtShort(analysis.first)} – ${dropFmtShort(analysis.last)}`;
-  const card = el('section', { class: 'drop-card' },
+  const card = el('section', {
+    class: 'drop-card drop-card-chart',
+    style: dropToneStyle('#4f46e5', 0.945)
+  },
     el('div', { class: 'drop-card-head' },
       el('div', {},
         el('h3', { text: tr('Eldobások időben') }),
@@ -3489,7 +3522,10 @@ function dropChartCard(chart) {
   return card;
 }
 function dropSourcesCard(analysis) {
-  const card = el('section', { class: 'drop-card' },
+  const card = el('section', {
+    class: 'drop-card drop-card-sources',
+    style: dropToneStyle('#0d9488', 0.95)
+  },
     el('div', { class: 'drop-card-head' },
       el('div', {},
         el('h3', { text: tr('Legaktívabb források') }),
@@ -3502,21 +3538,23 @@ function dropSourcesCard(analysis) {
     return card;
   }
   const max = analysis.sources[0][1] || 1;
+  const colors = ['#2563eb', '#ea580c', '#16a34a', '#9333ea', '#db2777'];
   const list = el('div', { class: 'drop-top-src' });
-  for (const [src, count] of analysis.sources) {
-    list.append(el('div', { class: 'drop-src-row', title: `${src} · ${count}` },
+  analysis.sources.forEach(([src, count], index) => {
+    const color = colors[index % colors.length];
+    list.append(el('div', { class: 'drop-src-row', style: `--bar:${color}`, title: `${src} · ${count}` },
       el('span', { class: 'drop-src-ip mono', text: src }),
       el('span', { class: 'drop-src-count', text: String(count) }),
       el('span', { class: 'drop-src-bar' },
         el('i', { style: `width:${Math.max(3, (count / max) * 100)}%` })
       )
     ));
-  }
+  });
   card.append(list);
   return card;
 }
-function dropStat(label, value, sub) {
-  return el('div', { class: 'drop-stat' },
+function dropStat(label, value, sub, accent = '#2563eb') {
+  return el('div', { class: 'drop-stat', style: dropToneStyle(accent, 0.93) },
     el('span', { text: tr(label) }),
     el('b', { text: value, title: value }),
     el('small', { text: sub || '—', title: sub || '' })
@@ -3532,10 +3570,11 @@ function dropStatsRow(analysis) {
     : '—';
   const topSource = analysis.sources.length ? analysis.sources[0][0] : '—';
   return el('div', { class: 'drop-stats' },
-    dropStat('Találat', String(analysis.rows.length), tr('a szűrt találatok alapján')),
-    dropStat('Időtartam', dropDurationText(analysis.span), range),
-    dropStat('Leggyakoribb ok', top ? tr(top[0]) : '—', topSub),
-    dropStat('Egyedi forrás', String(analysis.uniqueSources), topSource)
+    dropStat('Találat', String(analysis.rows.length), tr('a szűrt találatok alapján'), '#2563eb'),
+    dropStat('Időtartam', dropDurationText(analysis.span), range, '#0d9488'),
+    dropStat('Leggyakoribb ok', top ? tr(top[0]) : '—', topSub,
+      top ? dropReasonColor(top[0]) : '#64748b'),
+    dropStat('Egyedi forrás', String(analysis.uniqueSources), topSource, '#7c3aed')
   );
 }
 function dropStatusLine() {
@@ -3737,10 +3776,14 @@ function renderDrops() {
   const body = el('tbody');
   for (const entry of dropRows) {
     const reason = entry.reason || 'unknown';
-    body.append(el('tr', {},
+    const tone = dropReasonTone(reason);
+    body.append(el('tr', { style: `--row-tint:${dropMix(tone.base, '#ffffff', 0.94)}` },
       el('td', {}, dropTimeCell(entry)),
-      el('td', {}, el('span', { class: 'reason-pill' },
-        el('i', { style: `background:${dropReasonColor(reason)}` }),
+      el('td', {}, el('span', {
+        class: 'reason-pill',
+        style: `--rc:${tone.base};--rc-bg:${tone.bg};--rc-line:${tone.line};--rc-ink:${tone.ink}`
+      },
+        el('i'),
         tr(reason)
       )),
       el('td', {}, dropRouteNode(entry)),
