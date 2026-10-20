@@ -165,6 +165,14 @@ docker compose ps
 docker compose logs -f hatarvedelem
 ```
 
+The **Firewall** admin tab has two views: a per-IP overview of the kernel
+grants and portal sessions, and **Raw rules**, a read-only
+`iptables -L -n`-style dump of the live nftables chains. The raw view includes
+the `preauth`, `block`, `preauth_nat` and `block_nat` chains, so the effective
+pre-auth and block rules can be inspected exactly as the kernel sees them. It
+refreshes on demand and omits dynamic set contents (those are shown in the
+overview).
+
 The **Drop log** admin tab shows packets the firewall dropped, with filters
 for source/destination, protocol, port, reason and free-text search. Entries
 are written to `drops.jsonl` in the state volume and rotate at 10 MiB (5

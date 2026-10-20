@@ -445,6 +445,20 @@
   .fw-session:first-child{padding-top:0;border-top:0}
   .fw-warn{margin-top:8px;padding:6px 8px;font-size:11px;line-height:1.4;border-radius:7px;background:var(--amber-bg);border:1px solid var(--amber-line);color:var(--amber)}
   .fw-warn.err{background:var(--red-bg);border-color:var(--red-line);color:var(--red)}
+  .fw-views{display:inline-flex;gap:4px;padding:3px;margin:0 0 12px;background:var(--soft);border:1px solid var(--line);border-radius:9px}
+  .fw-views button{padding:6px 12px;font-size:12px;color:#555;background:transparent;border:0;border-radius:6px}
+  .fw-views button:hover{background:#fff;color:var(--ink)}
+  .fw-views button.active{background:#fff;color:var(--ink);box-shadow:0 1px 2px rgba(0,0,0,.08)}
+  .fw-raw-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:0 0 8px;font-size:11.5px;color:var(--muted)}
+  .fw-raw-toolbar .mono{font-size:11.5px;color:var(--ink)}
+  .fw-raw-toolbar button{margin-left:0;padding:6px 10px;font-size:11.5px}
+  .fw-raw-toolbar button.refresh{margin-left:auto}
+  .fw-raw{max-height:62vh;overflow:auto;margin:0;padding:13px 15px;background:#0f172a;color:#dbe4f0;border:1px solid #1e293b;border-radius:10px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11.5px;line-height:1.55;tab-size:8;white-space:pre}
+  .fw-raw .ln{display:block;min-height:1.55em;white-space:pre}
+  .fw-raw .chain{color:#93c5fd;font-weight:600}
+  .fw-raw .accept{color:#86efac;font-weight:600}
+  .fw-raw .drop{color:#fca5a5;font-weight:600}
+  .fw-copy-area{position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0}
 
   @media (max-width:900px){
     .drop-dashboard{grid-template-columns:1fr}
@@ -836,6 +850,24 @@ const I18N = {
     'a kerneloldali halmazok 5 másodpercenként frissülnek': 'kernel sets refresh every 5 seconds',
     'DRY-RUN mód: a tűzfal-halmazok valós tartalma nem olvasható.': 'DRY-RUN mode: the actual contents of the firewall sets cannot be read.',
     'Halmazolvasási hiba: ': 'Set read error: ',
+    'Áttekintés': 'Overview',
+    'Nyers szabályok': 'Raw rules',
+    'a kernelben élő nftables szabályok, mint az iptables -L -n': 'live nftables rules from the kernel, like iptables -L -n',
+    'generálva: ': 'generated: ',
+    'Láncok: ': 'Chains: ',
+    'Betöltés…': 'Loading…',
+    'Másolás': 'Copy',
+    'A nyers szabályok a vágólapra kerültek.': 'The raw rules were copied to the clipboard.',
+    'A vágólapra másolás nem sikerült.': 'Copying to the clipboard failed.',
+    'DRY-RUN mód: a nyers szabályok nem olvashatók.': 'DRY-RUN mode: the raw rules cannot be read.',
+    'Szabályolvasási hiba: ': 'Rule read error: ',
+    'A nyers szabályok még nem töltődtek be.': 'The raw rules have not been loaded yet.',
+    'A tűzfal-tábla még nem létezik.': 'The firewall table does not exist yet.',
+    'Nincs megjeleníthető szabály.': 'There are no rules to display.',
+    'Nyers nftables szabályok': 'Raw nftables rules',
+    'a nyers szabályok nem olvashatók': 'the raw rules could not be read',
+    'A nyers szabályok betöltése nem sikerült.': 'Failed to load the raw rules.',
+    'A nézet a kernelben élő nftables láncokat mutatja, a dinamikus halmazok tartalma nélkül. A pre-auth és a blokk szabályai a preauth, block, preauth_nat és block_nat láncokban láthatók.': 'This view shows the live nftables chains in the kernel without the contents of dynamic sets. Pre-auth and block rules are shown in the preauth, block, preauth_nat and block_nat chains.',
     'Jelenleg nincs engedélyezett IP-cím a tűzfalban.': 'There are currently no allowed IP addresses in the firewall.',
     'nincs munkamenet': 'no session',
     'szinkronban': 'in sync',
@@ -1252,6 +1284,24 @@ const I18N = {
     'a kerneloldali halmazok 5 másodpercenként frissülnek': 'die Kernel-Sets werden alle 5 Sekunden aktualisiert',
     'DRY-RUN mód: a tűzfal-halmazok valós tartalma nem olvasható.': 'DRY-RUN-Modus: Der tatsächliche Inhalt der Firewall-Sets kann nicht gelesen werden.',
     'Halmazolvasási hiba: ': 'Fehler beim Lesen der Sets: ',
+    'Áttekintés': 'Übersicht',
+    'Nyers szabályok': 'Rohregeln',
+    'a kernelben élő nftables szabályok, mint az iptables -L -n': 'die im Kernel aktiven nftables-Regeln, wie iptables -L -n',
+    'generálva: ': 'erstellt: ',
+    'Láncok: ': 'Ketten: ',
+    'Betöltés…': 'Wird geladen…',
+    'Másolás': 'Kopieren',
+    'A nyers szabályok a vágólapra kerültek.': 'Die Rohregeln wurden in die Zwischenablage kopiert.',
+    'A vágólapra másolás nem sikerült.': 'Das Kopieren in die Zwischenablage ist fehlgeschlagen.',
+    'DRY-RUN mód: a nyers szabályok nem olvashatók.': 'DRY-RUN-Modus: Die Rohregeln können nicht gelesen werden.',
+    'Szabályolvasási hiba: ': 'Fehler beim Lesen der Regeln: ',
+    'A nyers szabályok még nem töltődtek be.': 'Die Rohregeln wurden noch nicht geladen.',
+    'A tűzfal-tábla még nem létezik.': 'Die Firewall-Tabelle existiert noch nicht.',
+    'Nincs megjeleníthető szabály.': 'Es gibt keine anzuzeigenden Regeln.',
+    'Nyers nftables szabályok': 'Rohe nftables-Regeln',
+    'a nyers szabályok nem olvashatók': 'die Rohregeln konnten nicht gelesen werden',
+    'A nyers szabályok betöltése nem sikerült.': 'Die Rohregeln konnten nicht geladen werden.',
+    'A nézet a kernelben élő nftables láncokat mutatja, a dinamikus halmazok tartalma nélkül. A pre-auth és a blokk szabályai a preauth, block, preauth_nat és block_nat láncokban láthatók.': 'Diese Ansicht zeigt die im Kernel aktiven nftables-Ketten ohne den Inhalt der dynamischen Sets. Die Pre-auth- und Block-Regeln stehen in den Ketten preauth, block, preauth_nat und block_nat.',
     'Jelenleg nincs engedélyezett IP-cím a tűzfalban.': 'Derzeit sind keine IP-Adressen in der Firewall freigegeben.',
     'nincs munkamenet': 'keine Sitzung',
     'szinkronban': 'synchron',
@@ -1560,6 +1610,7 @@ const I18N_PATTERNS = {
     [/^TCP: (.+)$/, m => `TCP: ${tr(m[1])}`],
     [/^UDP: (.+)$/, m => `UDP: ${tr(m[1])}`],
     [/^a tűzfal állapota nem olvasható: (.+)$/, m => `the firewall state could not be read: ${m[1]}`],
+    [/^a nyers szabályok nem olvashatók: (.+)$/, m => `the raw rules could not be read: ${m[1]}`],
     [/^a hozzáférés hossza (\d+) és (\d+) perc között lehet$/, m => `access duration must be between ${m[1]} and ${m[2]} minutes`],
     [/^ez a szabály legfeljebb (\d+) percet engedélyez$/, m => `this rule allows at most ${m[1]} minutes`],
     [/^már létezik ilyen szabály: (.+)$/, m => `a rule with this ID already exists: ${m[1]}`],
@@ -1619,6 +1670,7 @@ const I18N_PATTERNS = {
     [/^TCP: (.+)$/, m => `TCP: ${tr(m[1])}`],
     [/^UDP: (.+)$/, m => `UDP: ${tr(m[1])}`],
     [/^a tűzfal állapota nem olvasható: (.+)$/, m => `der Firewall-Status konnte nicht gelesen werden: ${m[1]}`],
+    [/^a nyers szabályok nem olvashatók: (.+)$/, m => `die Rohregeln konnten nicht gelesen werden: ${m[1]}`],
     [/^a hozzáférés hossza (\d+) és (\d+) perc között lehet$/, m => `die Zugriffsdauer muss zwischen ${m[1]} und ${m[2]} Minuten liegen`],
     [/^ez a szabály legfeljebb (\d+) percet engedélyez$/, m => `diese Regel erlaubt höchstens ${m[1]} Minuten`],
     [/^már létezik ilyen szabály: (.+)$/, m => `eine Regel mit dieser ID existiert bereits: ${m[1]}`],
@@ -1939,6 +1991,10 @@ let sessionsState = null;
 let sessionClockTimer = null;
 let sessionPollTimer = null;
 let firewallState = null;
+let firewallView = 'overview';        // 'overview' | 'raw'
+let firewallRulesState = null;
+let firewallRulesError = '';
+let firewallRulesLoading = false;
 let firewallClockTimer = null;
 let firewallPollTimer = null;
 
@@ -2529,7 +2585,12 @@ function adminSetTab(name) {
   if (name === 'logs') loadLogs();
   else if (name === 'drops') loadDrops();
   else if (name === 'sessions') loadSessions();
-  else if (name === 'firewall') loadFirewall();
+  else if (name === 'firewall') {
+    if (firewallView === 'raw') {
+      renderAdminPanel();
+      loadFirewallRules();
+    } else loadFirewall();
+  }
   else loadAdminState();
 }
 function adminNotice() {
@@ -4245,6 +4306,196 @@ function fwChip(label, entry) {
   if (left) chip.append(left);
   return chip;
 }
+function fwViewTabs() {
+  const bar = el('div', { class: 'fw-views', role: 'tablist' });
+  for (const [key, label] of [
+    ['overview', 'Áttekintés'],
+    ['raw', 'Nyers szabályok'],
+  ]) {
+    bar.append(el('button', {
+      type: 'button',
+      role: 'tab',
+      class: firewallView === key ? 'active' : '',
+      'aria-selected': firewallView === key ? 'true' : 'false',
+      text: tr(label),
+      onclick: () => setFirewallView(key),
+    }));
+  }
+  return bar;
+}
+function fwRawLine(text) {
+  const line = el('span', { class: 'ln' });
+  if (!text) {
+    line.append(document.createTextNode(' '));
+    return line;
+  }
+  const pattern = /(chain\s+[A-Za-z0-9_.-]+|\bpolicy drop\b|\baccept\b|\bdrop\b)/g;
+  let last = 0;
+  let match;
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > last) {
+      line.append(document.createTextNode(text.slice(last, match.index)));
+    }
+    const token = match[0];
+    let cls = 'drop';
+    if (token.startsWith('chain ')) cls = 'chain';
+    else if (token === 'accept') cls = 'accept';
+    line.append(el('span', { class: cls, text: token }));
+    last = match.index + token.length;
+  }
+  if (last < text.length) {
+    line.append(document.createTextNode(text.slice(last)));
+  }
+  return line;
+}
+async function copyRawRules() {
+  const text = (firewallRulesState && firewallRulesState.text) || '';
+  if (!text) return;
+  let ok = false;
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    }
+  } catch (err) {
+    ok = false;
+  }
+  if (!ok) {
+    const area = el('textarea', { class: 'fw-copy-area' });
+    area.value = text;
+    document.body.append(area);
+    area.select();
+    try { ok = document.execCommand('copy'); } catch (err) { ok = false; }
+    area.remove();
+  }
+  adminFlash = {
+    text: ok ? 'A nyers szabályok a vágólapra kerültek.'
+             : 'A vágólapra másolás nem sikerült.',
+    kind: ok ? 'ok' : 'err'
+  };
+  renderAdminPanel();
+}
+function renderFirewallRaw() {
+  const state = firewallRulesState;
+  const toolbar = el('div', { class: 'fw-raw-toolbar' });
+  const info = [el('span', {
+    class: 'mono',
+    text: 'inet ' + ((state && state.table) || 'hatarvedelem')
+  })];
+  if (state && state.generated) {
+    info.push(el('span', {
+      text: tr('generálva: ') + clockTime(state.generated)
+    }));
+  }
+  if (state && state.chains && state.chains.length) {
+    info.push(el('span', {
+      text: tr('Láncok: ') + state.chains.join(', ')
+    }));
+  }
+  info.forEach((node, index) => {
+    if (index) toolbar.append(el('span', { class: 'muted', text: '·' }));
+    toolbar.append(node);
+  });
+  toolbar.append(el('button', {
+    type: 'button',
+    class: 'ghost refresh',
+    disabled: firewallRulesLoading,
+    text: firewallRulesLoading ? tr('Betöltés…') : tr('Frissítés'),
+    onclick: () => loadFirewallRules(),
+  }));
+  if (state && state.text) {
+    toolbar.append(el('button', {
+      type: 'button',
+      class: 'ghost',
+      text: tr('Másolás'),
+      onclick: copyRawRules,
+    }));
+  }
+  adminPanel.append(toolbar);
+  if (firewallRulesError) {
+    adminPanel.append(el('div', {
+      class: 'fw-warn err',
+      text: firewallRulesError
+    }));
+  }
+  if (state && state.dry_run) {
+    adminPanel.append(el('div', {
+      class: 'fw-warn',
+      text: tr('DRY-RUN mód: a nyers szabályok nem olvashatók.')
+    }));
+    return;
+  }
+  if (state && state.errors && state.errors.length) {
+    adminPanel.append(el('div', {
+      class: 'fw-warn err',
+      text: tr('Szabályolvasási hiba: ') + state.errors.join(' · ')
+    }));
+  }
+  if (!state) {
+    adminPanel.append(el('div', {
+      class: 'empty-box',
+      text: firewallRulesLoading
+        ? tr('Betöltés…')
+        : tr('A nyers szabályok még nem töltődtek be.')
+    }));
+    return;
+  }
+  if (!state.text) {
+    adminPanel.append(el('div', {
+      class: 'empty-box',
+      text: state.missing && state.missing.length && !(state.chains || []).length
+        ? tr('A tűzfal-tábla még nem létezik.')
+        : tr('Nincs megjeleníthető szabály.')
+    }));
+    return;
+  }
+  const pre = el('pre', {
+    class: 'fw-raw',
+    tabindex: '0',
+    'aria-label': tr('Nyers nftables szabályok')
+  });
+  for (const line of state.text.split('\n')) pre.append(fwRawLine(line));
+  adminPanel.append(pre);
+  adminPanel.append(el('p', {
+    class: 'hint',
+    text: tr('A nézet a kernelben élő nftables láncokat mutatja, a dinamikus halmazok tartalma nélkül. A pre-auth és a blokk szabályai a preauth, block, preauth_nat és block_nat láncokban láthatók.')
+  }));
+}
+function setFirewallView(view) {
+  if (firewallView === view) return;
+  firewallView = view;
+  firewallRulesError = '';
+  if (view === 'raw') {
+    stopFirewallTimers();
+    renderAdminPanel();
+    loadFirewallRules();
+  } else {
+    loadFirewall();
+  }
+}
+let firewallRulesSeq = 0;
+async function loadFirewallRules() {
+  const seq = ++firewallRulesSeq;
+  firewallRulesLoading = true;
+  firewallRulesError = '';
+  renderAdminPanel();
+  try {
+    const res = await fetch('/api/admin/firewall-rules', { cache: 'no-store' });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      throw new Error(data.error || 'a nyers szabályok nem olvashatók');
+    }
+    if (seq !== firewallRulesSeq) return;
+    firewallRulesState = data;
+  } catch (err) {
+    if (seq !== firewallRulesSeq) return;
+    firewallRulesError = err.message || 'A nyers szabályok betöltése nem sikerült.';
+  }
+  firewallRulesLoading = false;
+  if (activeView === 'admin' && adminTabName === 'firewall' && firewallView === 'raw') {
+    renderAdminPanel();
+  }
+}
 function renderFirewall() {
   const rows = (firewallState && firewallState.ips) || [];
   const counts = (firewallState && firewallState.counts) || {};
@@ -4257,10 +4508,17 @@ function renderFirewall() {
   if (counts.mismatched) bits.push(tr(`${counts.mismatched} eltérés`));
   adminPanel.append(adminHead(
     'Tűzfal-nézet',
-    bits.join(' · ') + ' · ' + tr('a kerneloldali halmazok 5 másodpercenként frissülnek'),
+    firewallView === 'raw'
+      ? tr('a kernelben élő nftables szabályok, mint az iptables -L -n')
+      : bits.join(' · ') + ' · ' + tr('a kerneloldali halmazok 5 másodpercenként frissülnek'),
     null, null
   ));
+  adminPanel.append(fwViewTabs());
   const notice = adminNotice(); if (notice) adminPanel.append(notice);
+  if (firewallView === 'raw') {
+    renderFirewallRaw();
+    return;
+  }
   if (firewallState && firewallState.dry_run) {
     adminPanel.append(el('div', {
       class: 'fw-warn',
@@ -4431,7 +4689,7 @@ async function loadFirewall() {
     };
     renderAdminPanel();
   }
-  if (activeView === 'admin' && adminTabName === 'firewall') {
+  if (activeView === 'admin' && adminTabName === 'firewall' && firewallView === 'overview') {
     tickFirewallClocks();
     firewallClockTimer = setInterval(tickFirewallClocks, 1000);
     firewallPollTimer = setInterval(loadFirewall, 5000);

@@ -144,6 +144,36 @@ if not re.match(r"^0x[0-9a-f]{1,8}$", FWD_MARK):
 # hogy a portál-átirányítás ne térítse el. Ez nem hozzáférési jelölés.
 PREAUTH_CT_MARK = "0x50524541"
 CUSTOM_CHAINS = ("preauth", "block", "preauth_nat", "block_nat")
+# Az admin Tűzfal nézet nyers (iptables -L -n jellegű) kiírásában megjelenő
+# láncok sorrendje. A custom láncok a forward után következnek, hogy a
+# pre-auth és a blokk szabályai egy helyen, olvasható sorrendben legyenek.
+RULESET_CHAINS = (
+    "forward",
+    "input",
+    "prerouting",
+    "postrouting",
+    "preauth",
+    "block",
+    "preauth_nat",
+    "block_nat",
+    "breakglass",
+)
+
+
+def _enabled_custom_entries(entries) -> list[dict]:
+    """Csak az engedélyezett, jól formált pre-auth/blokk bejegyzések.
+
+    A felületen kikapcsolt (``enabled: false``) bejegyzés nem kerülhet a
+    kernelbe: a kapcsoló a szabály tényleges eltávolítását jelenti, nem
+    csak a felületi elrejtését. A nem szótár alakú elemek kimaradnak, mert
+    azokat az nft szabály-összeállítás úgysem tudná értelmezni.
+    """
+    return [
+        entry for entry in entries
+        if isinstance(entry, dict) and entry.get("enabled", True)
+    ]
+
+
 _LAN_IF_RE = re.compile(r"^[A-Za-z0-9_.:@+-]{1,15}$")
 DRY_RUN = os.environ.get("HV_DRY_RUN", "0") == "1"
 FLUSH_ON_START = os.environ.get("HV_FLUSH_ON_START", "1") == "1"
@@ -1801,8 +1831,11 @@ class Firewall:
         A pre-auth cél üresen minden célra érvényes. A LAN felől a megadott
         célra/portra nyit; a WAN felől csak DNAT-olt (publikált) forgalomra,
         így nem válik nyílt továbbítóvá. A blokk a LAN felől induló forgalmat
-        dobja el, a 80-as TCP-portnál a portál-átirányítás előtt is.
+        dobja el, a 80-as TCP-portnál a portál-átirányítás előtt is. A
+        kikapcsolt (``enabled: false``) bejegyzések kimaradnak.
         """
+        block = _enabled_custom_entries(block)
+        preauth = _enabled_custom_entries(preauth)
         if preauth and not self.lan_if:
             raise FirewallError(
                 "pre-auth szabály csak ismert LAN interfésszel alkalmazható"
@@ -2338,6 +2371,87 @@ class Firewall:
             "sets": sets,
             "errors": errors,
         }
+
+    def ruleset(self) -> dict:
+        """A láncok nyers nftables kiírása az admin Tűzfal nézethez.
+
+        Csak olvas, ezért az admin nézet biztonságosan hívhatja. A dinamikus
+        halmazok tartalmát szándékosan nem tartalmazza (azokat a snapshot()
+        mutatja); így a kimenet az ``iptables -L -n``-hez hasonló, rövid
+        szabálylista marad. A hiányzó lánc nem hiba: a tábla a telepítés
+        előtt még nem létezhet.
+        """
+        if self.dry_run:
+            return {
+                "table": self.table,
+                "generated": time.time(),
+                "dry_run": True,
+                "text": "",
+                "chains": [],
+                "missing": [],
+                "errors": [],
+            }
+        chunks: list[str] = []
+        shown: list[str] = []
+        missing: list[str] = []
+        errors: list[str] = []
+        with self._lock:
+            for chain in RULESET_CHAINS:
+                result = self._run(
+                    ["list", "chain", "inet", self.table, chain],
+                    check=False,
+                )
+                if result.returncode != 0:
+                    detail = result.stderr.decode("utf-8", "replace").strip()
+                    if (
+                        "No such file or directory" in detail
+                        or "does not exist" in detail
+                    ):
+                        missing.append(chain)
+                    else:
+                        errors.append(
+                            f"{chain}: "
+                            f"{detail or 'az nft nem tudta listázni a láncot'}"
+                        )
+                    continue
+                text = self._strip_chain_wrapper(
+                    result.stdout.decode("utf-8", "replace").strip()
+                )
+                if text:
+                    chunks.append(text)
+                    shown.append(chain)
+        return {
+            "table": self.table,
+            "generated": time.time(),
+            "dry_run": False,
+            "text": "\n\n".join(chunks),
+            "chains": shown,
+            "missing": missing,
+            "errors": errors,
+        }
+
+    @staticmethod
+    def _strip_chain_wrapper(text: str) -> str:
+        """Eltávolítja az ``nft list chain`` körüli tábla-burkot.
+
+        Az újabb nft verziók a láncot is ``table inet <név> { ... }`` blokkba
+        ágyazva írják ki. A nézetben a tábla csak egyszer szerepeljen, ezért
+        a burkot levágjuk, és a plusz behúzást is megszüntetjük.
+        """
+        lines = text.splitlines()
+        if (
+            lines
+            and lines[0].strip().startswith("table ")
+            and lines[0].rstrip().endswith("{")
+        ):
+            lines = lines[1:]
+            if lines and lines[-1].strip() == "}":
+                lines = lines[:-1]
+            lines = [
+                line[1:] if line.startswith("\t") else line
+                for line in lines
+            ]
+        return "\n".join(lines).strip()
 
     def healthy(self) -> tuple[bool, str]:
         try:
@@ -3887,9 +4001,11 @@ class Gateway:
                 f"nem sikerült: {exc}"
             )
             raise
+        active_preauth = _enabled_custom_entries(snapshot.get("preauth", []))
+        active_block = _enabled_custom_entries(snapshot.get("block", []))
         log(
-            f"[beállítások] {len(snapshot.get('preauth', []))} pre-auth, "
-            f"{len(snapshot.get('block', []))} blokk bejegyzés; "
+            f"[beállítások] {len(active_preauth)} pre-auth, "
+            f"{len(active_block)} blokk bejegyzés; "
             f"host SSH: {snapshot.get('host_ssh', HOST_SSH_MODE)}"
         )
 

@@ -336,6 +336,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._admin_sessions()
         if path == "/api/admin/firewall":
             return self._admin_firewall()
+        if path == "/api/admin/firewall-rules":
+            return self._admin_firewall_rules()
         if path == "/api/admin/drops":
             return self._admin_drops()
         if path == "/api/admin/settings":
@@ -471,6 +473,24 @@ class Handler(BaseHTTPRequestHandler):
         payload = gateway.group_firewall_snapshot(
             snapshot, self.gw.sessions.active_sessions()
         )
+        payload["ok"] = True
+        self._json(200, payload)
+
+    def _admin_firewall_rules(self) -> None:
+        """A kernelben élő nftables láncok nyers szöveges kiírása."""
+        if self._admin_guard() is None:
+            return
+        try:
+            payload = self.gw.firewall.ruleset()
+        except gateway.FirewallError as exc:
+            self._json(
+                503,
+                {
+                    "ok": False,
+                    "error": f"a nyers szabályok nem olvashatók: {exc}",
+                },
+            )
+            return
         payload["ok"] = True
         self._json(200, payload)
 

@@ -85,6 +85,8 @@ class FakeTools:
         self.fail = self.dir / "fail.txt"
         self.json_dir = self.dir / "json"
         self.json_dir.mkdir(exist_ok=True)
+        self.chain_dir = self.dir / "chains"
+        self.chain_dir.mkdir(exist_ok=True)
         self.nft = self.dir / "nft"
         self.conntrack = self.dir / "conntrack"
         self.nft.write_text(
@@ -106,6 +108,16 @@ class FakeTools:
             "  exit 0\n"
             "fi\n"
             f'if [ -f "{self.fail}" ]; then cat "{self.fail}" >&2; exit 1; fi\n'
+            'if [ "$1" = "list" ] && [ "$2" = "chain" ]; then\n'
+            '  last=""\n'
+            '  for arg in "$@"; do last="$arg"; done\n'
+            f'  if [ -f "{self.chain_dir}/$last.txt" ]; then\n'
+            f'    cat "{self.chain_dir}/$last.txt"\n'
+            "    exit 0\n"
+            "  fi\n"
+            '  echo "Error: No such file or directory" >&2\n'
+            "  exit 1\n"
+            "fi\n"
             "exit 0\n",
             encoding="utf-8",
         )
@@ -166,6 +178,14 @@ class FakeTools:
 
     def clear_json(self) -> None:
         for path in self.json_dir.glob("*.json"):
+            path.unlink()
+
+    def chain_text(self, chain: str, text: str) -> None:
+        """A ``nft list chain`` hamis kimenetének beállítása."""
+        (self.chain_dir / f"{chain}.txt").write_text(text, encoding="utf-8")
+
+    def clear_chains(self) -> None:
+        for path in self.chain_dir.glob("*.txt"):
             path.unlink()
 
 
@@ -266,6 +286,7 @@ class FirewallTests(unittest.TestCase):
         self.tools.clear()
         self.tools.clear_fail()
         self.tools.clear_json()
+        self.tools.clear_chains()
         self.fw = gateway.Firewall(
             table="hatarvedelem", set_name="allowed_v4",
             binary=str(self.tools.nft), dry_run=False,
@@ -455,6 +476,59 @@ class FirewallTests(unittest.TestCase):
         self.assertEqual(snapshot["sets"]["allowed_tcp"], [])
         self.assertEqual(len(snapshot["errors"]), 1)
         self.assertIn("allowed_tcp", snapshot["errors"][0])
+
+    def test_ruleset_lists_chains_without_sets(self) -> None:
+        # Az újabb nft a list chain kimenetét table blokkba ágyazza; a
+        # preauth ág a régebbi, burkolat nélküli formátumot modellezi.
+        self.tools.chain_text(
+            "forward",
+            "table inet hatarvedelem {\n"
+            "\tchain forward {\n"
+            "\t\ttype filter hook forward priority -10; policy drop;\n"
+            "\t}\n"
+            "}",
+        )
+        self.tools.chain_text(
+            "preauth",
+            "chain preauth {\n"
+            '\tiifname "eth1" meta l4proto tcp '
+            "ct original proto-dst 25565 accept\n"
+            "}",
+        )
+        result = self.fw.ruleset()
+        self.assertFalse(result["dry_run"])
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(result["chains"], ["forward", "preauth"])
+        self.assertTrue(result["text"].startswith("chain forward {"), result["text"])
+        self.assertIn("chain preauth {", result["text"])
+        self.assertNotIn("table inet", result["text"])
+        self.assertIn("\ttype filter hook forward priority -10; policy drop;",
+                      result["text"])
+        self.assertIn("ct original proto-dst 25565 accept", result["text"])
+        self.assertNotIn("allowed_tcp", result["text"])
+        listed = [
+            line for line in self.tools.lines()
+            if line.startswith("nft list chain inet hatarvedelem ")
+        ]
+        self.assertEqual(len(listed), len(gateway.RULESET_CHAINS))
+        self.assertIn("preauth_nat", result["missing"])
+        self.assertNotIn("preauth_nat", result["chains"])
+
+    def test_ruleset_reports_nft_errors(self) -> None:
+        self.tools.make_fail("boom")
+        result = self.fw.ruleset()
+        self.assertEqual(result["text"], "")
+        self.assertTrue(result["errors"])
+        self.assertIn("forward", result["errors"][0])
+
+    def test_ruleset_dry_run_does_not_execute(self) -> None:
+        fw = gateway.Firewall(
+            binary="/nonexistent/nft", dry_run=True, logger=lambda *_: None
+        )
+        result = fw.ruleset()
+        self.assertTrue(result["dry_run"])
+        self.assertEqual(result["text"], "")
+        self.assertEqual(self.tools.lines(), [])
 
     def test_group_snapshot_marks_orphans_and_mismatches(self) -> None:
         snapshot = {
@@ -2042,6 +2116,7 @@ class AdminHttpTests(unittest.TestCase):
         self.tools.clear()
         self.tools.clear_fail()
         self.tools.clear_json()
+        self.tools.clear_chains()
         # A beállítások és a drop napló közös a tesztek között; minden teszt
         # ismert, üres állapotból induljon.
         self.gw.settings.commit(
@@ -2121,6 +2196,8 @@ class AdminHttpTests(unittest.TestCase):
         self.assertEqual(status, 403, body)
         status, _, body = self.get("/api/admin/firewall", cookie=cookie)
         self.assertEqual(status, 403, body)
+        status, _, body = self.get("/api/admin/firewall-rules", cookie=cookie)
+        self.assertEqual(status, 403, body)
         status, _, body = self.post(
             "/api/admin/sessions", {"action": "terminate", "id": "x"},
             cookie=cookie,
@@ -2176,6 +2253,37 @@ class AdminHttpTests(unittest.TestCase):
         self.assertEqual(row["rules"][0]["label"], "Csak web")
         self.assertEqual(row["sessions"][0]["user"], "alice")
         self.assertTrue(row["sessions"][0]["authorized"])
+
+    def test_admin_firewall_rules_endpoint_returns_raw_chains(self) -> None:
+        cookie = self.admin_cookie()
+        self.tools.chain_text(
+            "forward",
+            "chain forward {\n"
+            "\ttype filter hook forward priority -10; policy drop;\n"
+            "}",
+        )
+        self.tools.chain_text(
+            "preauth",
+            "chain preauth {\n"
+            '\tiifname "eth1" meta l4proto tcp '
+            "ct original proto-dst 25565 accept\n"
+            "}",
+        )
+        try:
+            status, _, body = self.get(
+                "/api/admin/firewall-rules", cookie=cookie, source="127.0.0.5"
+            )
+            data = json.loads(body)
+            self.assertEqual(status, 200, body)
+            self.assertTrue(data["ok"])
+            self.assertFalse(data["dry_run"])
+            self.assertEqual(data["table"], "hatarvedelem")
+            self.assertEqual(data["chains"], ["forward", "preauth"])
+            self.assertIn("chain forward", data["text"])
+            self.assertIn("ct original proto-dst 25565 accept", data["text"])
+            self.assertEqual(data["errors"], [])
+        finally:
+            self.tools.clear_chains()
 
     def test_admin_sessions_endpoint_lists_open_sessions(self) -> None:
         cookie = self.admin_cookie()
@@ -3301,6 +3409,44 @@ class FirewallCustomTests(unittest.TestCase):
         # Cél nélkül nincs széles related szabály.
         self.assertFalse(
             any("ct state related" in line for line in preauth_lines)
+        )
+
+    def test_disabled_entries_are_not_installed(self) -> None:
+        self.fw.apply_custom(
+            preauth=[
+                {"dst": "", "proto": "tcp", "ports": [25565],
+                 "enabled": True},
+                {"dst": "", "proto": "tcp", "ports": [25566],
+                 "enabled": False},
+            ],
+            block=[
+                {"dst": "10.0.0.0/24", "proto": "tcp", "ports": [443],
+                 "enabled": True},
+                {"dst": "10.9.9.0/24", "proto": "tcp", "ports": [8443],
+                 "enabled": False},
+            ],
+        )
+        script = "\n".join(self.tools.script())
+        self.assertIn("ct original proto-dst 25565", script)
+        self.assertNotIn("25566", script)
+        self.assertIn("ct original ip daddr 10.0.0.0/24", script)
+        self.assertNotIn("10.9.9.0/24", script)
+        self.assertNotIn("8443", script)
+
+    def test_only_disabled_preauth_does_not_require_lan_interface(self) -> None:
+        no_lan = gateway.Firewall(
+            binary=str(self.tools.nft), logger=lambda *_: None,
+            lan_if="", lan_network=None,
+        )
+        no_lan.apply_custom(
+            preauth=[{"dst": "192.168.50.10", "proto": "tcp",
+                      "ports": [80], "enabled": False}]
+        )
+        self.assertFalse(
+            any(
+                "inet hatarvedelem preauth " in line
+                for line in self.tools.script()
+            )
         )
 
     def test_preauth_requires_lan_interface(self) -> None:
