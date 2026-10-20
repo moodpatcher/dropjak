@@ -556,6 +556,11 @@ class DropLogListener:
         self._received = 0
         self._written = 0
         self._write_errors = 0
+        self.on_drop = None
+
+    def set_on_drop(self, callback) -> None:
+        """Visszahívás minden egyes rögzített drop eseményhez."""
+        self.on_drop = callback
 
     def _count_packet(self, record: dict) -> None:
         with self._lock:
@@ -570,6 +575,12 @@ class DropLogListener:
         else:
             with self._lock:
                 self._written += 1
+        callback = self.on_drop
+        if callback is not None:
+            try:
+                callback(record)
+            except Exception as exc:  # a visszahívás ne állítsa meg a figyelőt
+                self.log(f"[drop log] drop-feldolgozás nem sikerült: {exc}")
 
     def _handle(self, data: bytes) -> None:
         for item in parse_netlink_buffer(data):
@@ -746,6 +757,9 @@ class DropLogService:
         self.listener = DropLogListener(
             self.store, group=group, enabled=enabled, logger=logger
         )
+
+    def set_on_drop(self, callback) -> None:
+        self.listener.set_on_drop(callback)
 
     def start(self) -> bool:
         return self.listener.start()

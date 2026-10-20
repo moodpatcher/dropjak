@@ -8,6 +8,12 @@ csúszóablakban. Ha egy IP eléri a beállított küszöböt, a tűzfal a
 host input láncában is eldobódnak. A portál és a DHCP kivétel: a tiltott
 kliens még látja a tiltás okát, és a címe nem veszik el.
 
+Ugyanez a számláló a bejelentkezés nélküli, engedély nélküli TCP-forgalmat
+is figyeli (``record_drop``). A portszkennerek és botok így akkor is
+tiltás alá kerülnek, ha soha nem próbálnak belépni: a tiltás a csúszóablakban
+összegyűlt eldobott csomagok száma vagy a különböző célportok száma alapján
+indul. A DNS és a portál forgalma nem számít.
+
 A tiltás a beállított ideig tart; a kernel timeoutja akkor is lejáratja,
 ha a portál közben leáll. A tiltások a state-kötetben, 0600 jogosultságú
 JSON-fájlban maradnak meg, és induláskor visszatöltődnek. A folyamatban
@@ -42,8 +48,17 @@ MIN_WINDOW = 30
 MAX_WINDOW = 24 * 60 * 60
 MIN_BAN = 60
 MAX_BAN = 30 * 24 * 60 * 60
+MIN_DROP_MAX = 1
+# A számláló legfeljebb MAX_DROP_EVENTS eseményt tárol IP-nként; ennél
+# nagyobb küszöböt nem lehet elérni, ezért a maximum ugyanaz.
+MAX_DROP_MAX = 10000
+MIN_DROP_PORTS = 1
+MAX_DROP_PORTS = 4096
+MIN_DROP_WINDOW = 30
+MAX_DROP_WINDOW = 24 * 60 * 60
 MAX_BANS = 4096
 MAX_TRACKED_IPS = 4096
+MAX_DROP_EVENTS = 10000
 
 
 def _env_int(name: str, default: int, minimum: int = 0) -> int:
@@ -81,6 +96,26 @@ DEFAULT_WINDOW = _clamp(
 )
 DEFAULT_BAN = _clamp(
     _env_int("HV_FAIL2BAN_BAN", 3600, MIN_BAN), MIN_BAN, MAX_BAN
+)
+# Hálózati forgalom alapú tiltás: a portál a drop logból számolja az
+# engedély nélküli csomagokat. A küszöböt vagy a különböző portok számát
+# elérve az IP bekerül a banned_v4 halmazba. A portszám-alapú feltétel a
+# portszkennereket fogja meg, a darabszám-alapú az ismételt próbálkozásokat.
+DEFAULT_DROP_ENABLED = _env_bool("HV_FAIL2BAN_DROP", True)
+DEFAULT_DROP_MAX = _clamp(
+    _env_int("HV_FAIL2BAN_DROP_MAX", 120, MIN_DROP_MAX),
+    MIN_DROP_MAX,
+    MAX_DROP_MAX,
+)
+DEFAULT_DROP_PORTS = _clamp(
+    _env_int("HV_FAIL2BAN_DROP_PORTS", 12, MIN_DROP_PORTS),
+    MIN_DROP_PORTS,
+    MAX_DROP_PORTS,
+)
+DEFAULT_DROP_WINDOW = _clamp(
+    _env_int("HV_FAIL2BAN_DROP_WINDOW", 180, MIN_DROP_WINDOW),
+    MIN_DROP_WINDOW,
+    MAX_DROP_WINDOW,
 )
 
 # A portál saját, helyi forgalmát (healthcheck, helyi adminisztráció) nem
@@ -132,10 +167,17 @@ def validate_config(data, current: dict | None = None) -> dict:
         "max_attempts": DEFAULT_MAX_ATTEMPTS,
         "window_seconds": DEFAULT_WINDOW,
         "ban_seconds": DEFAULT_BAN,
+        "drop_enabled": DEFAULT_DROP_ENABLED,
+        "drop_max": DEFAULT_DROP_MAX,
+        "drop_ports": DEFAULT_DROP_PORTS,
+        "drop_window_seconds": DEFAULT_DROP_WINDOW,
     }
     enabled = data.get("enabled", current["enabled"])
     if not isinstance(enabled, bool):
         raise Fail2banError("az enabled mező igaz/hamis érték kell")
+    drop_enabled = data.get("drop_enabled", current["drop_enabled"])
+    if not isinstance(drop_enabled, bool):
+        raise Fail2banError("a drop_enabled mező igaz/hamis érték kell")
 
     def integer(name: str, label: str, minimum: int, maximum: int) -> int:
         raw = data.get(name, current[name])
@@ -158,11 +200,27 @@ def validate_config(data, current: dict | None = None) -> dict:
         "ban_seconds": integer(
             "ban_seconds", "a tiltás hossza", MIN_BAN, MAX_BAN
         ),
+        "drop_enabled": drop_enabled,
+        "drop_max": integer(
+            "drop_max", "a hálózati küszöb", MIN_DROP_MAX, MAX_DROP_MAX
+        ),
+        "drop_ports": integer(
+            "drop_ports", "a különböző portok száma",
+            MIN_DROP_PORTS, MAX_DROP_PORTS,
+        ),
+        "drop_window_seconds": integer(
+            "drop_window_seconds", "a hálózati időablak",
+            MIN_DROP_WINDOW, MAX_DROP_WINDOW,
+        ),
     }
 
 
 def _ban_view(record: dict, now: float | None = None) -> dict:
     now = time.time() if now is None else now
+    manual = bool(record.get("manual", False))
+    source = record.get("source")
+    if source not in ("manual", "login", "drop"):
+        source = "manual" if manual else "login"
     return {
         "ip": record["ip"],
         "since": int(record["since"]),
@@ -170,8 +228,10 @@ def _ban_view(record: dict, now: float | None = None) -> dict:
         "remaining": max(0, int(record["until"] - now)),
         "attempts": int(record.get("attempts", 0)),
         "user": record.get("user", ""),
-        "manual": bool(record.get("manual", False)),
-        "reason": "manual" if record.get("manual") else "auto",
+        "manual": manual,
+        "source": source,
+        "detail": record.get("detail", ""),
+        "reason": "manual" if manual else "auto",
     }
 
 
@@ -188,6 +248,10 @@ class Fail2ban:
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         window_seconds: int = DEFAULT_WINDOW,
         ban_seconds: int = DEFAULT_BAN,
+        drop_enabled: bool = DEFAULT_DROP_ENABLED,
+        drop_max: int = DEFAULT_DROP_MAX,
+        drop_ports: int = DEFAULT_DROP_PORTS,
+        drop_window_seconds: int = DEFAULT_DROP_WINDOW,
         on_ban=None,
     ) -> None:
         self.firewall = firewall
@@ -201,9 +265,19 @@ class Fail2ban:
             "max_attempts": _clamp(max_attempts, MIN_ATTEMPTS, MAX_ATTEMPTS),
             "window_seconds": _clamp(window_seconds, MIN_WINDOW, MAX_WINDOW),
             "ban_seconds": _clamp(ban_seconds, MIN_BAN, MAX_BAN),
+            "drop_enabled": bool(drop_enabled),
+            "drop_max": _clamp(drop_max, MIN_DROP_MAX, MAX_DROP_MAX),
+            "drop_ports": _clamp(drop_ports, MIN_DROP_PORTS, MAX_DROP_PORTS),
+            "drop_window_seconds": _clamp(
+                drop_window_seconds, MIN_DROP_WINDOW, MAX_DROP_WINDOW
+            ),
         }
         # IP -> {"times": [timestamp, ...], "user": str}; nem perzisztált.
         self._attempts: dict[str, dict] = {}
+        # IP -> {"events": [(timestamp, "proto/port"), ...], "reason": str};
+        # nem perzisztált, mint a belépési próbálkozások.
+        self._drop_events: dict[str, dict] = {}
+        self._drop_event_count = 0
         # IP -> ban rekord; perzisztált.
         self._bans: dict[str, dict] = {}
         self._error = ""
@@ -317,13 +391,22 @@ class Fail2ban:
         user = item.get("user", "")
         if not isinstance(user, str):
             user = ""
+        manual = bool(item.get("manual", False))
+        source = item.get("source", "")
+        if source not in ("manual", "login", "drop"):
+            source = "manual" if manual else "login"
+        detail = item.get("detail", "")
+        if not isinstance(detail, str):
+            detail = ""
         return {
             "ip": ip,
             "since": since,
             "until": min(until, now + MAX_BAN),
             "attempts": max(0, attempts),
             "user": user[:64],
-            "manual": bool(item.get("manual", False)),
+            "manual": manual,
+            "source": source,
+            "detail": detail[:64],
         }
 
     def _payload_locked(self) -> dict:
@@ -338,6 +421,8 @@ class Fail2ban:
                     "attempts": record["attempts"],
                     "user": record["user"],
                     "manual": record["manual"],
+                    "source": record.get("source", ""),
+                    "detail": record.get("detail", ""),
                 }
                 for record in sorted(
                     self._bans.values(), key=lambda row: row["since"]
@@ -427,6 +512,32 @@ class Fail2ban:
             for ip, _ in ordered[: len(self._attempts) - MAX_TRACKED_IPS]:
                 del self._attempts[ip]
 
+    def _prune_drop_events_locked(
+        self, now: float, only: str | None = None
+    ) -> None:
+        """A hálózati események csúszóablakának karbantartása."""
+        window = self._config["drop_window_seconds"]
+        targets = [only] if only is not None else list(self._drop_events)
+        for ip in targets:
+            entry = self._drop_events.get(ip)
+            if entry is None:
+                continue
+            events = [
+                event for event in entry["events"]
+                if now - event[0] <= window
+            ]
+            if events:
+                entry["events"] = events
+            else:
+                del self._drop_events[ip]
+        if only is None and len(self._drop_events) > MAX_TRACKED_IPS:
+            ordered = sorted(
+                self._drop_events.items(),
+                key=lambda pair: pair[1]["events"][-1][0],
+            )
+            for ip, _ in ordered[: len(self._drop_events) - MAX_TRACKED_IPS]:
+                del self._drop_events[ip]
+
     def _notify(self, record: dict) -> None:
         if self._on_ban is None:
             return
@@ -472,7 +583,95 @@ class Fail2ban:
                 manual=False,
                 user=user,
                 attempts=len(times),
+                source="login",
             )
+            view = _ban_view(record, time.time())
+        self._notify(view)
+        return view
+
+    def record_drop(
+        self,
+        ip: str,
+        *,
+        proto: str = "",
+        dport=None,
+        reason: str = "",
+        count_total: bool = True,
+    ) -> dict | None:
+        """Egy engedély nélküli/gyanús csomag rögzítése.
+
+        A portál a drop logból hívja minden olyan eldobott csomagra, amely
+        nem a portál saját forgalma. A tiltás akkor indul, ha az IP a
+        beállított időablakban eléri a csomagszám-küszöböt, vagy elegendő
+        különböző célportot próbál elérni (portszkennelés).
+
+        A ``count_total=False`` események csak a különböző portok számához
+        járulnak hozzá. A LAN-felőli ``no-grant``/``input-lan`` forgalomnál
+        ez a helyes: egy kijelentkezett böngésző is sok TCP-próbát indít,
+        de jellemzően csak néhány célporton.
+        """
+        try:
+            address = normalize_ip(ip)
+        except Fail2banError:
+            return None
+        if address in _AUTO_EXEMPT:
+            return None
+        proto = str(proto or "").strip().lower()[:16]
+        port = 0
+        if not isinstance(dport, bool):
+            try:
+                port = int(dport)
+            except (TypeError, ValueError):
+                port = 0
+        if port < 1 or port > 65535:
+            port = 0
+        key = f"{proto}/{port}" if port else (proto or "?")
+        reason = str(reason or "").strip()[:32] or "drop"
+        with self._lock:
+            self._refresh_locked()
+            if not self._config["enabled"] or not self._config["drop_enabled"]:
+                return None
+            now = time.time()
+            existing = self._bans.get(address)
+            if existing is not None:
+                if existing["until"] > now:
+                    return None
+                del self._bans[address]
+            self._prune_drop_events_locked(now, only=address)
+            entry = self._drop_events.get(address) or {
+                "events": [], "reason": "",
+            }
+            events = entry["events"]
+            events.append((now, key, bool(count_total)))
+            cap = min(
+                max(self._config["drop_max"] + 1, 512), MAX_DROP_EVENTS
+            )
+            if len(events) > cap:
+                del events[:-cap]
+            entry["reason"] = reason
+            self._drop_events[address] = entry
+            self._drop_event_count += 1
+            if self._drop_event_count % 256 == 0:
+                self._prune_drop_events_locked(now)
+            ports = {
+                event_key for _, event_key, _ in events if "/" in event_key
+            }
+            total = sum(1 for _, _, counted in events if counted)
+            if (
+                total < self._config["drop_max"]
+                and len(ports) < self._config["drop_ports"]
+            ):
+                return None
+            record = self._ban_locked(
+                address,
+                self._config["ban_seconds"],
+                manual=False,
+                user="",
+                attempts=len(events),
+                source="drop",
+                detail=reason,
+            )
+            self._drop_events.pop(address, None)
             view = _ban_view(record, time.time())
         self._notify(view)
         return view
@@ -511,6 +710,8 @@ class Fail2ban:
         manual: bool,
         user: str = "",
         attempts: int = 0,
+        source: str = "",
+        detail: str = "",
     ) -> dict:
         seconds = _clamp(int(seconds), MIN_BAN, MAX_BAN)
         now = time.time()
@@ -522,13 +723,24 @@ class Fail2ban:
             ) from exc
         existing = self._bans.get(address)
         since = existing["since"] if existing is not None else now
+        is_manual = bool(manual or (existing or {}).get("manual", False))
+        if is_manual:
+            source = "manual"
+        elif source not in ("login", "drop"):
+            source = (existing or {}).get("source") or "login"
+        if source == "manual":
+            detail = ""
+        elif not detail:
+            detail = (existing or {}).get("detail", "")
         record = {
             "ip": address,
             "since": since,
             "until": now + seconds,
             "attempts": max(int(attempts or 0), (existing or {}).get("attempts", 0)),
             "user": (user or (existing or {}).get("user", ""))[:64],
-            "manual": bool(manual or (existing or {}).get("manual", False)),
+            "manual": is_manual,
+            "source": source,
+            "detail": str(detail or "")[:64],
         }
         if len(self._bans) >= MAX_BANS and address not in self._bans:
             oldest = min(
@@ -621,10 +833,19 @@ class Fail2ban:
             self._refresh_locked()
             new_config = validate_config(data, self._config)
             was_enabled = self._config["enabled"]
+            was_drop = self._config["drop_enabled"]
             released: list[dict] = []
-            if was_enabled and not new_config["enabled"]:
+            release_all = was_enabled and not new_config["enabled"]
+            release_drop = (
+                was_drop
+                and not new_config["drop_enabled"]
+                and not release_all
+            )
+            if release_all or release_drop:
                 for address, record in list(self._bans.items()):
                     if record["manual"]:
+                        continue
+                    if release_drop and record.get("source") != "drop":
                         continue
                     try:
                         self.firewall.unban(address)
@@ -653,6 +874,9 @@ class Fail2ban:
                 raise
             if not new_config["enabled"]:
                 self._attempts.clear()
+            if not new_config["enabled"] or not new_config["drop_enabled"]:
+                self._drop_events.clear()
+                self._drop_event_count = 0
             return self.snapshot()
 
     # -- indulás és nézet ------------------------------------------------------
@@ -697,6 +921,7 @@ class Fail2ban:
             for address in expired:
                 del self._bans[address]
             self._prune_attempts_locked(now)
+            self._prune_drop_events_locked(now)
             bans = [
                 _ban_view(record, now)
                 for record in sorted(
@@ -723,12 +948,50 @@ class Fail2ban:
                 )
             pending.sort(key=lambda row: row["count"], reverse=True)
             config = dict(self._config)
+            config_drop_max = config["drop_max"]
+            config_drop_ports = config["drop_ports"]
+            config_drop_window = config["drop_window_seconds"]
+            drop_pending = []
+            for address, entry in self._drop_events.items():
+                events = entry.get("events") or []
+                if not events:
+                    continue
+                ports = [
+                    event_key.split("/", 1)[1]
+                    for _, event_key, _ in events
+                    if "/" in event_key
+                ]
+                distinct = sorted({int(port) for port in ports})
+                drop_pending.append(
+                    {
+                        "ip": address,
+                        "count": sum(1 for _, _, counted in events if counted),
+                        "events": len(events),
+                        "distinct_ports": len(set(distinct)),
+                        "ports": distinct[:24],
+                        "reason": entry.get("reason", ""),
+                        "first_at": int(events[0][0]),
+                        "expires_at": int(
+                            events[0][0] + config_drop_window
+                        ),
+                        "max_drops": config_drop_max,
+                        "max_ports": config_drop_ports,
+                    }
+                )
+            drop_pending.sort(
+                key=lambda row: (row["count"], row["distinct_ports"]),
+                reverse=True,
+            )
             error = self._error
         return {
             "enabled": config["enabled"],
             "max_attempts": config["max_attempts"],
             "window_seconds": config["window_seconds"],
             "ban_seconds": config["ban_seconds"],
+            "drop_enabled": config["drop_enabled"],
+            "drop_max": config["drop_max"],
+            "drop_ports": config["drop_ports"],
+            "drop_window_seconds": config["drop_window_seconds"],
             "limits": {
                 "min_attempts": MIN_ATTEMPTS,
                 "max_attempts": MAX_ATTEMPTS,
@@ -736,10 +999,17 @@ class Fail2ban:
                 "max_window": MAX_WINDOW,
                 "min_ban": MIN_BAN,
                 "max_ban": MAX_BAN,
+                "min_drop_max": MIN_DROP_MAX,
+                "max_drop_max": MAX_DROP_MAX,
+                "min_drop_ports": MIN_DROP_PORTS,
+                "max_drop_ports": MAX_DROP_PORTS,
+                "min_drop_window": MIN_DROP_WINDOW,
+                "max_drop_window": MAX_DROP_WINDOW,
             },
             "bans": bans,
             "banned_count": len(bans),
             "pending": pending,
+            "drop_pending": drop_pending,
             "server_time": now,
             "error": error,
         }
@@ -754,5 +1024,10 @@ class Fail2ban:
             "max_attempts": snapshot["max_attempts"],
             "window_seconds": snapshot["window_seconds"],
             "ban_seconds": snapshot["ban_seconds"],
+            "drop_enabled": snapshot["drop_enabled"],
+            "drop_pending": len(snapshot["drop_pending"]),
+            "drop_max": snapshot["drop_max"],
+            "drop_ports": snapshot["drop_ports"],
+            "drop_window_seconds": snapshot["drop_window_seconds"],
             "error": snapshot["error"],
         }

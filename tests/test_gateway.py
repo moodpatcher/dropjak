@@ -31,6 +31,7 @@ sys.path.insert(0, str(ROOT))
 
 import gateway  # noqa: E402
 import server    # noqa: E402
+import droplog   # noqa: E402
 import fail2ban as fail2ban_mod  # noqa: E402
 
 
@@ -3085,6 +3086,8 @@ class AdminHttpTests(unittest.TestCase):
         self.assertTrue(status_data["banned"])
         self.assertTrue(595 <= status_data["remaining"] <= 600)
         self.assertGreater(status_data["ban_until"], 0)
+        self.assertEqual(status_data["ban_source"], "login")
+        self.assertEqual(status_data["ban_attempts"], 3)
 
         # A tiltott IP a helyes jelszóval is elutasításra kerül.
         _, _, challenge_body = self.get("/api/challenge", source=source)
@@ -3122,6 +3125,52 @@ class AdminHttpTests(unittest.TestCase):
             source=source,
         )
         self.assertEqual(status, 200, body)
+
+    def test_drop_ban_is_reflected_in_status_and_login(self) -> None:
+        source = "127.0.0.10"
+        self.gw.fail2ban.configure({
+            "drop_max": 2, "drop_ports": 10, "drop_window_seconds": 60,
+        })
+        self.assertIsNone(self.gw.fail2ban.record_drop(
+            source, proto="tcp", dport=22, reason="input-wan"
+        ))
+        view = self.gw.fail2ban.record_drop(
+            source, proto="tcp", dport=23, reason="input-wan"
+        )
+        self.assertIsNotNone(view)
+        self.assertEqual(view["source"], "drop")
+
+        status, _, body = self.get("/api/status", source=source)
+        self.assertEqual(status, 200, body)
+        data = json.loads(body)
+        self.assertTrue(data["banned"])
+        self.assertEqual(data["ban_source"], "drop")
+        self.assertEqual(data["ban_detail"], "input-wan")
+        self.assertEqual(data["ban_attempts"], 2)
+
+        _, _, challenge_body = self.get("/api/challenge", source=source)
+        status, _, body = self.post(
+            "/api/login",
+            {"user": "alice", "pass": "alice-jelszo-1",
+             "captcha": solve(json.loads(challenge_body))},
+            source=source,
+        )
+        self.assertEqual(status, 403, body)
+        data = json.loads(body)
+        self.assertTrue(data["banned"])
+        self.assertEqual(data["ban_source"], "drop")
+        self.assertIn("gyanús hálózati forgalmat", data["error"])
+
+        cookie = self.admin_cookie()
+        snapshot = self.fail2ban_state(cookie)
+        self.assertEqual(snapshot["bans"][0]["source"], "drop")
+        self.assertEqual(snapshot["bans"][0]["detail"], "input-wan")
+        self.assertEqual(snapshot["drop_pending"], [])
+        self.assertIn("drop_enabled", snapshot)
+        self.assertIn("drop_max", snapshot)
+        self.assertIn("drop_ports", snapshot)
+        self.assertIn("drop_window_seconds", snapshot)
+        self.assertEqual(snapshot["limits"]["max_drop_max"], 10000)
 
 
 class RateLimitHttpTests(unittest.TestCase):
@@ -3763,6 +3812,10 @@ class Fail2banTests(unittest.TestCase):
             "max_attempts": 3,
             "window_seconds": 60,
             "ban_seconds": 120,
+            "drop_enabled": True,
+            "drop_max": 5,
+            "drop_ports": 4,
+            "drop_window_seconds": 60,
         }
         options.update(kwargs)
         return fail2ban_mod.Fail2ban(
@@ -3975,12 +4028,267 @@ class Fail2banTests(unittest.TestCase):
         self.assertIsNotNone(view)
         self.assertEqual(view["attempts"], 4)
 
+    def test_drop_threshold_bans_with_source_and_detail(self) -> None:
+        ip = "192.0.2.60"
+        manager = self.make_manager(drop_max=3, drop_ports=10)
+        self.assertIsNone(manager.record_drop(
+            ip, proto="tcp", dport=80, reason="input-wan"
+        ))
+        self.assertIsNone(manager.record_drop(
+            ip, proto="tcp", dport=80, reason="input-wan"
+        ))
+        view = manager.record_drop(
+            ip, proto="tcp", dport=80, reason="wan-drop"
+        )
+        self.assertIsNotNone(view)
+        self.assertEqual(view["source"], "drop")
+        self.assertEqual(view["detail"], "wan-drop")
+        self.assertEqual(view["attempts"], 3)
+        self.assertFalse(view["manual"])
+        self.assertIn(("ban", ip, 120), self.fw.calls)
+
+        snapshot = manager.snapshot()
+        self.assertEqual(snapshot["drop_pending"], [])
+        ban = snapshot["bans"][0]
+        self.assertEqual(ban["source"], "drop")
+        self.assertEqual(ban["detail"], "wan-drop")
+        self.assertEqual(snapshot["drop_max"], 3)
+
+        # A forrás és a részlet a mentésből is visszatöltődik.
+        reloaded = self.make_manager()
+        ban = reloaded.snapshot()["bans"][0]
+        self.assertEqual(ban["source"], "drop")
+        self.assertEqual(ban["detail"], "wan-drop")
+
+    def test_drop_distinct_ports_detect_port_scan(self) -> None:
+        ip = "192.0.2.61"
+        manager = self.make_manager(drop_max=1000, drop_ports=4)
+        for port in (22, 22, 80, 443):
+            self.assertIsNone(manager.record_drop(
+                ip, proto="tcp", dport=port, reason="input-wan"
+            ), port)
+        view = manager.record_drop(
+            ip, proto="tcp", dport=8080, reason="input-wan"
+        )
+        self.assertIsNotNone(view)
+        self.assertEqual(view["source"], "drop")
+        self.assertEqual(view["attempts"], 5)
+        self.assertIn(("ban", ip, 120), self.fw.calls)
+
+    def test_drop_count_threshold_with_same_port(self) -> None:
+        ip = "192.0.2.62"
+        manager = self.make_manager(drop_max=3, drop_ports=10)
+        for _ in range(2):
+            self.assertIsNone(manager.record_drop(
+                ip, proto="tcp", dport=443, reason="no-grant"
+            ))
+        view = manager.record_drop(
+            ip, proto="tcp", dport=443, reason="no-grant"
+        )
+        self.assertIsNotNone(view)
+        self.assertEqual(view["attempts"], 3)
+        self.assertIn(("ban", ip, 120), self.fw.calls)
+
+    def test_drop_window_prunes_old_events(self) -> None:
+        ip = "192.0.2.63"
+        manager = self.make_manager(drop_max=3, drop_ports=10)
+        manager.record_drop(ip, proto="tcp", dport=22, reason="input-wan")
+        # A régi esemény kívül kerül az időablakon, ezért nem számít.
+        manager._drop_events[ip]["events"][0] = (
+            time.time() - manager._config["drop_window_seconds"] - 5,
+            "tcp/22",
+            True,
+        )
+        for port in (80, 443):
+            self.assertIsNone(manager.record_drop(
+                ip, proto="tcp", dport=port, reason="input-wan"
+            ), port)
+        pending = manager.snapshot()["drop_pending"]
+        self.assertEqual(pending[0]["count"], 2)
+        self.assertEqual(pending[0]["distinct_ports"], 2)
+
+    def test_drop_pending_lists_threshold_progress(self) -> None:
+        ip = "192.0.2.64"
+        manager = self.make_manager(drop_max=10, drop_ports=6)
+        manager.record_drop(ip, proto="tcp", dport=22, reason="input-lan")
+        manager.record_drop(ip, proto="tcp", dport=80, reason="input-lan")
+        pending = manager.snapshot()["drop_pending"]
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["ip"], ip)
+        self.assertEqual(pending[0]["count"], 2)
+        self.assertEqual(pending[0]["distinct_ports"], 2)
+        self.assertEqual(pending[0]["ports"], [22, 80])
+        self.assertEqual(pending[0]["max_drops"], 10)
+        self.assertEqual(pending[0]["max_ports"], 6)
+        self.assertEqual(pending[0]["reason"], "input-lan")
+
+    def test_lan_events_do_not_reach_the_packet_threshold(self) -> None:
+        # Egy kijelentkezett böngésző sok azonos portú próbát indít; ezek
+        # csak a portdiverzitáshoz számítanak, a csomagküszöbhöz nem.
+        manager = self.make_manager(drop_max=2, drop_ports=10)
+        ip = "192.0.2.71"
+        for _ in range(5):
+            self.assertIsNone(manager.record_drop(
+                ip, proto="tcp", dport=443, reason="no-grant",
+                count_total=False,
+            ))
+        pending = manager.snapshot()["drop_pending"][0]
+        self.assertEqual(pending["count"], 0)
+        self.assertEqual(pending["events"], 5)
+        # A WAN-felőli események viszont a csomagküszöbhöz is számítanak.
+        self.assertIsNone(manager.record_drop(
+            ip, proto="tcp", dport=443, reason="input-wan"
+        ))
+        view = manager.record_drop(
+            ip, proto="tcp", dport=443, reason="input-wan"
+        )
+        self.assertIsNotNone(view)
+        self.assertEqual(view["attempts"], 7)
+
+    def test_drop_disabled_and_exempt_addresses_are_ignored(self) -> None:
+        manager = self.make_manager(drop_max=1, drop_ports=1)
+        for ip in ("127.0.0.1", "0.0.0.0", "::1", "nem-ip"):
+            self.assertIsNone(manager.record_drop(
+                ip, proto="tcp", dport=22, reason="input-wan"
+            ), ip)
+        self.assertEqual(manager.snapshot()["drop_pending"], [])
+        self.assertFalse(self.fw.calls)
+
+        manager.configure({"drop_enabled": False})
+        self.assertIsNone(manager.record_drop(
+            "192.0.2.65", proto="tcp", dport=22, reason="input-wan"
+        ))
+        self.assertEqual(manager.snapshot()["drop_pending"], [])
+
+    def test_disabling_drop_releases_only_drop_bans(self) -> None:
+        manager = self.make_manager(drop_max=1, drop_ports=1)
+        drop_ip = "192.0.2.66"
+        login_ip = "192.0.2.67"
+        self.assertIsNotNone(manager.record_drop(
+            drop_ip, proto="tcp", dport=22, reason="input-wan"
+        ))
+        for _ in range(3):
+            manager.record_failure(login_ip, "alice")
+        manager.ban("192.0.2.68", 600, manual=True)
+        self.fw.calls.clear()
+
+        snapshot = manager.configure({"drop_enabled": False})
+        self.assertFalse(snapshot["drop_enabled"])
+        self.assertIn(("unban", drop_ip), self.fw.calls)
+        bans = {row["ip"] for row in snapshot["bans"]}
+        self.assertEqual(bans, {login_ip, "192.0.2.68"})
+
+        # Újra bekapcsolva a drop-számlálás ismét tilt.
+        manager.configure({"drop_enabled": True})
+        self.assertIsNotNone(manager.record_drop(
+            "192.0.2.69", proto="tcp", dport=22, reason="input-wan"
+        ))
+
+    def test_drop_ban_survives_restart_and_expires(self) -> None:
+        manager = self.make_manager(drop_max=1, drop_ports=1)
+        ip = "192.0.2.70"
+        self.assertIsNotNone(manager.record_drop(
+            ip, proto="tcp", dport=22, reason="input-wan"
+        ))
+        self.assertIsNotNone(manager.banned(ip))
+        manager._bans[ip]["until"] = time.time() - 1
+        self.assertIsNone(manager.banned(ip))
+
     def test_corrupt_state_file_fails_closed(self) -> None:
         Path(self.path).write_text("{", encoding="utf-8")
         manager = self.make_manager()
         snapshot = manager.snapshot()
         self.assertEqual(snapshot["bans"], [])
         self.assertTrue(snapshot["error"])
+
+
+class DropBanWiringTests(unittest.TestCase):
+    """A drop log és a fail2ban közötti szűrés."""
+
+    class CaptureFail2ban:
+        def __init__(self) -> None:
+            self.calls: list[tuple] = []
+
+        def record_drop(self, ip, **kwargs):
+            self.calls.append((ip, kwargs))
+
+    def make_gateway(self):
+        gw = object.__new__(gateway.Gateway)
+        gw.fail2ban = self.CaptureFail2ban()
+        return gw
+
+    def record(self, **overrides):
+        row = {
+            "src": "192.0.2.80",
+            "proto": "tcp",
+            "dport": 22,
+            "reason": "input-wan",
+        }
+        row.update(overrides)
+        return row
+
+    def test_scanner_reasons_are_forwarded(self) -> None:
+        gw = self.make_gateway()
+        for reason in ("no-grant", "wan-drop", "input-wan", "input-lan"):
+            gw._on_drop(self.record(reason=reason, dport=1000 + len(reason)))
+        self.assertEqual(len(gw.fail2ban.calls), 4)
+        self.assertEqual(
+            gw.fail2ban.calls[0],
+            ("192.0.2.80", {
+                "proto": "tcp", "dport": 1008, "reason": "no-grant",
+                "count_total": False,
+            }),
+        )
+        self.assertTrue(gw.fail2ban.calls[1][1]["count_total"])  # wan-drop
+        self.assertTrue(gw.fail2ban.calls[2][1]["count_total"])  # input-wan
+        self.assertFalse(gw.fail2ban.calls[3][1]["count_total"])  # input-lan
+
+    def test_non_scanning_events_are_ignored(self) -> None:
+        gw = self.make_gateway()
+        # Nem támadási okok: MAC/spoof/ipv6/fail2ban/DNS/SSH visszavonás.
+        for reason in (
+            "mac", "spoof-lan", "spoof-wan", "ipv6", "fail2ban",
+            "ssh-revoked", "dns-revoked", "container-spoof",
+            "container-pivot", "ismeretlen", "",
+        ):
+            gw._on_drop(self.record(reason=reason))
+        # UDP-háttérzaj (mDNS, LLMNR, NetBIOS, DNS) nem számít.
+        gw._on_drop(self.record(proto="udp", dport=5353, reason="input-lan"))
+        gw._on_drop(self.record(proto="udp", dport=53, reason="input-lan"))
+        gw._on_drop(self.record(proto="icmp", dport=None, reason="input-wan"))
+        # A DNS és a portál TCP-portja kimarad.
+        gw._on_drop(self.record(proto="tcp", dport=53, reason="input-lan"))
+        gw._on_drop(self.record(proto="tcp", dport=gateway.PORT,
+                                reason="input-lan"))
+        # Forrás nélküli esemény.
+        gw._on_drop(self.record(src=""))
+        self.assertEqual(gw.fail2ban.calls, [])
+
+    def test_callback_error_does_not_break_the_listener(self) -> None:
+        class FakeStore:
+            path = "drops.jsonl"
+
+            def __init__(self) -> None:
+                self.written = []
+
+            def write(self, record) -> None:
+                self.written.append(record)
+
+        store = FakeStore()
+        listener = droplog.DropLogListener(store, logger=lambda *_: None)
+        seen = []
+        listener.set_on_drop(seen.append)
+        listener._count_packet({"src": "192.0.2.81", "reason": "input-wan"})
+        self.assertEqual(seen, [{"src": "192.0.2.81", "reason": "input-wan"}])
+        self.assertEqual(len(store.written), 1)
+
+        def boom(_record):
+            raise RuntimeError("callback hiba")
+
+        listener.set_on_drop(boom)
+        # A visszahívás hibája nem szakítja meg az NFLOG feldolgozást.
+        listener._count_packet({"src": "192.0.2.82", "reason": "input-wan"})
+        self.assertEqual(len(store.written), 2)
 
 
 if __name__ == "__main__":

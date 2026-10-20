@@ -119,6 +119,15 @@
     margin:0 auto 10px;
   }
   .ban-view .subtitle{margin-bottom:14px}
+  .ban-detail{
+    margin:-6px 0 14px;
+    font-size:11.5px;
+    line-height:1.45;
+    color:var(--muted);
+    text-align:center;
+    font-variant-numeric:tabular-nums;
+  }
+  .ban-detail[hidden]{display:none}
   .ban-count{
     display:flex;
     flex-direction:column;
@@ -810,7 +819,8 @@
   <div class="view ban-view" id="ban-view">
     <img class="ban-art" src="blocked.png" alt="" width="1140" height="1380" decoding="async">
     <h1 data-i18n="IP-cím letiltva">IP-cím letiltva</h1>
-    <p class="subtitle" data-i18n="Ez az IP-cím fail2ban tiltás alatt áll a túl sok sikertelen belépés miatt. Próbáld újra később.">Ez az IP-cím fail2ban tiltás alatt áll a túl sok sikertelen belépés miatt. Próbáld újra később.</p>
+    <p class="subtitle" id="ban-subtitle" data-i18n="Ez az IP-cím fail2ban tiltás alatt áll a túl sok sikertelen belépés miatt. Próbáld újra később.">Ez az IP-cím fail2ban tiltás alatt áll a túl sok sikertelen belépés miatt. Próbáld újra később.</p>
+    <p class="ban-detail" id="ban-detail" hidden></p>
     <div class="ban-count">
       <span class="ban-label" data-i18n="Hátralévő tiltás">Hátralévő tiltás</span>
       <b class="ban-timer" id="ban-timer" role="timer">--:--</b>
@@ -1540,10 +1550,32 @@ const I18N = {
     'Várakozó próbálkozások': 'Pending attempts',
     'Nincs várakozó sikertelen belépés az időablakban.': 'No pending failed sign-ins in the window.',
     'A sikertelen jelszavas belépések számítanak, a captcha- és a kérésgyakorisági hibák nem. A tiltott IP csomagjait a tűzfal dobja el; a portál és a DHCP kivétel, hogy a kliens értesülhessen a tiltásról. A tiltások újraindítás után is megmaradnak, és a lejárat után a kernel automatikusan feloldja őket.': 'Failed password sign-ins count; captcha and rate-limit failures do not. The firewall drops packets from a banned IP; the portal and DHCP are exempt so the client can be told about the ban. Bans survive a restart, and the kernel lifts them automatically when they expire.',
+    'Sikertelen belépések és gyanús forgalom tiltása forrás-IP szerint · a lista 5 másodpercenként frissül': 'Banning failed sign-ins and suspicious traffic by source IP · the list refreshes every 5 seconds',
+    'Drop-alapú tiltás': 'Drop-based banning',
+    'bejelentkezés nélküli portszkennerek tiltása': 'ban port scanners that never sign in',
+    'Eldobott csomag a tiltásig': 'Dropped packets before a ban',
+    'Különböző célport a tiltásig': 'Distinct destination ports before a ban',
+    'Drop időablak (perc)': 'Drop window (minutes)',
+    'Várakozó drop': 'Pending drops',
+    'a drop-alapú tiltás kikapcsolva': 'drop-based banning is disabled',
+    'Várakozó drop-események': 'Pending drop events',
+    'Nincs várakozó drop-alapú esemény az időablakban.': 'No pending drop-based events in the window.',
+    'Eldobott csomag': 'Dropped packets',
+    'Különböző port': 'Distinct ports',
+    'Eseményszám': 'Event count',
+    'A bejelentkezés nélküli, engedély nélküli TCP-forgalmat is figyeli: ha egy IP az időablakban eléri a csomagszám-küszöböt, vagy ennyi különböző célportot próbál elérni, tiltás alá kerül. Így a portszkennerek és botok akkor is kiszűrődnek, ha soha nem próbálnak belépni. A DNS és a portál forgalma nem számít; a szabályos UDP-háttérzaj (mDNS, LLMNR, NetBIOS) sem.': 'It also watches unauthorized TCP traffic from clients that never sign in: when an IP reaches the packet threshold or this many distinct destination ports within the window, it is banned. This catches port scanners and bots even if they never attempt a sign-in. DNS and portal traffic do not count, and neither does normal UDP background noise (mDNS, LLMNR, NetBIOS).',
+    'A sikertelen jelszavas belépések mellett a bejelentkezés nélküli, engedély nélküli TCP-forgalom is számít: a portszkennerek és botok a csomagszám- vagy a különböző célportok küszöbe alapján tiltás alá kerülnek. A captcha- és a kérésgyakorisági hibák nem számítanak. A tiltott IP csomagjait a tűzfal dobja el; a portál és a DHCP kivétel, hogy a kliens értesülhessen a tiltásról. A tiltások újraindítás után is megmaradnak, és a lejárat után a kernel automatikusan feloldja őket.': 'Besides failed password sign-ins, unauthorized TCP traffic without a sign-in also counts: port scanners and bots are banned based on the packet-count or distinct-destination-port threshold. Captcha and rate-limit failures do not count. The firewall drops packets from a banned IP; the portal and DHCP are exempt so the client can be told about the ban. Bans survive a restart, and the kernel lifts them automatically when they expire.',
     'Fail2ban tiltás': 'Fail2ban ban',
     'lejárat': 'expires',
     'fail2ban': 'fail2ban ban',
     'Ez az IP-cím fail2ban tiltás alatt áll a túl sok sikertelen belépés miatt. Próbáld újra később.': 'This IP address is banned by fail2ban because of too many failed sign-ins. Try again later.',
+    'Ez az IP-cím fail2ban tiltás alatt áll, mert a tűzfal gyanús hálózati forgalmat (például portvizsgálatot) észlelt. Próbáld újra később.': 'This IP address is banned by fail2ban because the firewall detected suspicious network traffic (for example a port scan). Try again later.',
+    'Ok:': 'Reason:',
+    'eldobott csomag': 'dropped packets',
+    'engedély nélküli forgalom': 'unauthorized traffic',
+    'WAN felőli vizsgálat': 'probe from the WAN side',
+    'portvizsgálat a WAN felől': 'port scan from the WAN side',
+    'portvizsgálat a LAN felől': 'port scan from the LAN side',
     'IP-cím letiltva': 'IP address blocked',
     'Hátralévő tiltás': 'Ban expires in',
     'Újrapróbálás': 'Try again',
@@ -2050,6 +2082,28 @@ const I18N = {
     'Várakozó próbálkozások': 'Ausstehende Versuche',
     'Nincs várakozó sikertelen belépés az időablakban.': 'Keine ausstehenden fehlgeschlagenen Anmeldungen im Zeitfenster.',
     'A sikertelen jelszavas belépések számítanak, a captcha- és a kérésgyakorisági hibák nem. A tiltott IP csomagjait a tűzfal dobja el; a portál és a DHCP kivétel, hogy a kliens értesülhessen a tiltásról. A tiltások újraindítás után is megmaradnak, és a lejárat után a kernel automatikusan feloldja őket.': 'Fehlgeschlagene Passwort-Anmeldungen zählen; Captcha- und Ratenlimit-Fehler nicht. Die Firewall verwirft Pakete einer gesperrten IP; Portal und DHCP sind ausgenommen, damit der Client über die Sperre informiert werden kann. Sperren überleben einen Neustart und werden nach Ablauf automatisch vom Kernel aufgehoben.',
+    'Sikertelen belépések és gyanús forgalom tiltása forrás-IP szerint · a lista 5 másodpercenként frissül': 'Sperre fehlgeschlagener Anmeldungen und verdächtigen Verkehrs nach Quell-IP · die Liste aktualisiert sich alle 5 Sekunden',
+    'Drop-alapú tiltás': 'Drop-basierte Sperre',
+    'bejelentkezés nélküli portszkennerek tiltása': 'Portscanner ohne Anmeldung sperren',
+    'Eldobott csomag a tiltásig': 'Verworfene Pakete bis zur Sperre',
+    'Különböző célport a tiltásig': 'Verschiedene Zielports bis zur Sperre',
+    'Drop időablak (perc)': 'Drop-Zeitfenster (Minuten)',
+    'Várakozó drop': 'Ausstehende Drops',
+    'a drop-alapú tiltás kikapcsolva': 'die drop-basierte Sperre ist deaktiviert',
+    'Várakozó drop-események': 'Ausstehende Drop-Ereignisse',
+    'Nincs várakozó drop-alapú esemény az időablakban.': 'Keine ausstehenden drop-basierten Ereignisse im Zeitfenster.',
+    'Eldobott csomag': 'Verworfene Pakete',
+    'Különböző port': 'Verschiedene Ports',
+    'Eseményszám': 'Ereignisanzahl',
+    'A bejelentkezés nélküli, engedély nélküli TCP-forgalmat is figyeli: ha egy IP az időablakban eléri a csomagszám-küszöböt, vagy ennyi különböző célportot próbál elérni, tiltás alá kerül. Így a portszkennerek és botok akkor is kiszűrődnek, ha soha nem próbálnak belépni. A DNS és a portál forgalma nem számít; a szabályos UDP-háttérzaj (mDNS, LLMNR, NetBIOS) sem.': 'Überwacht auch nicht autorisierten TCP-Verkehr von Clients, die sich nie anmelden: Erreicht eine IP im Zeitfenster die Paketschwelle oder diese Anzahl verschiedener Zielports, wird sie gesperrt. So werden Portscanner und Bots auch dann erfasst, wenn sie nie eine Anmeldung versuchen. DNS- und Portal-Verkehr zählen nicht, ebenso wenig normaler UDP-Hintergrundverkehr (mDNS, LLMNR, NetBIOS).',
+    'A sikertelen jelszavas belépések mellett a bejelentkezés nélküli, engedély nélküli TCP-forgalom is számít: a portszkennerek és botok a csomagszám- vagy a különböző célportok küszöbe alapján tiltás alá kerülnek. A captcha- és a kérésgyakorisági hibák nem számítanak. A tiltott IP csomagjait a tűzfal dobja el; a portál és a DHCP kivétel, hogy a kliens értesülhessen a tiltásról. A tiltások újraindítás után is megmaradnak, és a lejárat után a kernel automatikusan feloldja őket.': 'Neben fehlgeschlagenen Passwort-Anmeldungen zählt auch nicht autorisierter TCP-Verkehr ohne Anmeldung: Portscanner und Bots werden anhand der Paket- oder der Zielport-Schwelle gesperrt. Captcha- und Ratenlimit-Fehler zählen nicht. Die Firewall verwirft Pakete einer gesperrten IP; Portal und DHCP sind ausgenommen, damit der Client über die Sperre informiert werden kann. Sperren überleben einen Neustart und werden nach Ablauf automatisch vom Kernel aufgehoben.',
+    'Ez az IP-cím fail2ban tiltás alatt áll, mert a tűzfal gyanús hálózati forgalmat (például portvizsgálatot) észlelt. Próbáld újra később.': 'Diese IP-Adresse ist durch Fail2ban gesperrt, weil die Firewall verdächtigen Netzwerkverkehr (zum Beispiel einen Portscan) erkannt hat. Versuche es später erneut.',
+    'Ok:': 'Grund:',
+    'eldobott csomag': 'verworfene Pakete',
+    'engedély nélküli forgalom': 'nicht autorisierter Verkehr',
+    'WAN felőli vizsgálat': 'Sondierung von der WAN-Seite',
+    'portvizsgálat a WAN felől': 'Portscan von der WAN-Seite',
+    'portvizsgálat a LAN felől': 'Portscan von der LAN-Seite',
     'Fail2ban tiltás': 'Fail2ban-Sperre',
     'lejárat': 'Ablauf',
     'fail2ban': 'Fail2ban-Sperre',
@@ -2571,6 +2625,8 @@ const msg         = document.getElementById('msg');
 const slot        = document.getElementById('captcha-slot');
 const loginView   = document.getElementById('login-view');
 const banView     = document.getElementById('ban-view');
+const banSubtitle = document.getElementById('ban-subtitle');
+const banDetail   = document.getElementById('ban-detail');
 const banTimerEl  = document.getElementById('ban-timer');
 const banRetry    = document.getElementById('ban-retry');
 const topbar      = document.getElementById('topbar');
@@ -2711,10 +2767,41 @@ function updateBanCountdown() {
 /* A tiltott IP-cím a normál belépőfelület helyett ezt a képernyőt látja.
    Amíg tart a tiltás, a visszaszámláló ketyeg, és a felület figyeli, hogy
    a tiltás lejárt-e vagy egy adminisztrátor feloldotta-e. */
+const BAN_SUBTITLE_LOGIN = 'Ez az IP-cím fail2ban tiltás alatt áll a túl sok sikertelen belépés miatt. Próbáld újra később.';
+const BAN_SUBTITLE_DROP = 'Ez az IP-cím fail2ban tiltás alatt áll, mert a tűzfal gyanús hálózati forgalmat (például portvizsgálatot) észlelt. Próbáld újra később.';
+const BAN_REASON_KEYS = {
+  'no-grant': 'engedély nélküli forgalom',
+  'wan-drop': 'WAN felőli vizsgálat',
+  'input-wan': 'portvizsgálat a WAN felől',
+  'input-lan': 'portvizsgálat a LAN felől'
+};
 function showBan(data) {
   const until = Number(data && data.ban_until);
   if (Number.isFinite(until) && until > 0) banUntil = until * 1000;
   if (activeView !== 'ban') setView('ban');
+  const drop = !!data && data.ban_source === 'drop';
+  if (banSubtitle) {
+    const key = drop ? BAN_SUBTITLE_DROP : BAN_SUBTITLE_LOGIN;
+    if (banSubtitle.dataset.i18n !== key) {
+      banSubtitle.dataset.i18n = key;
+      banSubtitle.textContent = tr(key);
+    }
+  }
+  if (banDetail) {
+    const reason = String((data && data.ban_detail) || '');
+    const attempts = Number(data && data.ban_attempts);
+    if (drop && reason) {
+      const parts = [tr('Ok:') + ' ' + tr(BAN_REASON_KEYS[reason] || reason)];
+      if (Number.isFinite(attempts) && attempts > 0) {
+        parts.push(attempts + ' ' + tr('eldobott csomag'));
+      }
+      banDetail.textContent = parts.join(' · ');
+      banDetail.hidden = false;
+    } else {
+      banDetail.textContent = '';
+      banDetail.hidden = true;
+    }
+  }
   show('');
   showAccessMsg('');
   showSessionMsg('');
@@ -5100,17 +5187,23 @@ function tickFail2banClocks() {
 function fail2banStatusCards(fb) {
   const bans = fb.bans || [];
   const pending = fb.pending || [];
-  const auto = bans.filter(row => !row.manual).length;
-  const manual = bans.length - auto;
+  const dropPending = fb.drop_pending || [];
+  const auto = bans.filter(row => !row.manual && row.source !== 'drop').length;
+  const drop = bans.filter(row => !row.manual && row.source === 'drop').length;
+  const manual = bans.filter(row => row.manual).length;
   const running = fb.enabled !== false;
+  const dropRunning = running && fb.drop_enabled !== false;
   return el('div', { class: 'drop-stats' },
     dropStat('Fail2ban állapot', tr(running ? 'aktív' : 'kikapcsolva'),
       tr(running ? 'az automatikus tiltás bekapcsolva' : 'az automatikus tiltás kikapcsolva'),
       running ? '#16a34a' : '#dc2626'),
     dropStat('Tiltott IP', String(bans.length),
-      `${auto} ${tr('automatikus')} · ${manual} ${tr('kézi')}`, '#b91c1c'),
+      `${auto} ${tr('automatikus')} · ${drop} ${tr('drop')} · ${manual} ${tr('kézi')}`, '#b91c1c'),
     dropStat('Várakozó próbálkozás', String(pending.length),
       tr('a küszöb elérése előtt'), '#ca8a04'),
+    dropStat('Várakozó drop', String(dropPending.length),
+      tr(dropRunning ? 'a küszöb elérése előtt' : 'a drop-alapú tiltás kikapcsolva'),
+      dropRunning ? '#ca8a04' : '#6b7280'),
     dropStat('Küszöb', `${fb.max_attempts ?? '—'} ${tr('kísérlet')}`,
       `${minutesOf(fb.window_seconds || 0)} ${tr('perc')} · ${tr('tiltás')}: ${minutesOf(fb.ban_seconds || 0)} ${tr('perc')}`,
       '#2563eb')
@@ -5124,15 +5217,23 @@ function fail2banConfigForm(fb) {
     const maxAttempts = Number(formValue(box, 'max_attempts'));
     const windowMinutes = Number(formValue(box, 'window_minutes'));
     const banMinutes = Number(formValue(box, 'ban_minutes'));
-    if (!Number.isFinite(maxAttempts) || !Number.isFinite(windowMinutes) || !Number.isFinite(banMinutes)) {
-      return fail2banDraftError('Adj meg érvényes számokat a küszöbhöz és az időtartamokhoz.');
+    const dropMax = Number(formValue(box, 'drop_max'));
+    const dropPorts = Number(formValue(box, 'drop_ports'));
+    const dropWindowMinutes = Number(formValue(box, 'drop_window_minutes'));
+    if (![maxAttempts, windowMinutes, banMinutes, dropMax, dropPorts, dropWindowMinutes]
+        .every(Number.isFinite)) {
+      return fail2banDraftError('Adj meg érvényes számokat a küszöbökhöz és az időtartamokhoz.');
     }
     adminSend('/api/admin/fail2ban', {
       action: 'config',
       enabled: boolValue(box, 'enabled'),
       max_attempts: Math.round(maxAttempts),
       window_seconds: Math.round(windowMinutes * 60),
-      ban_seconds: Math.round(banMinutes * 60)
+      ban_seconds: Math.round(banMinutes * 60),
+      drop_enabled: boolValue(box, 'drop_enabled'),
+      drop_max: Math.round(dropMax),
+      drop_ports: Math.round(dropPorts),
+      drop_window_seconds: Math.round(dropWindowMinutes * 60)
     });
   }});
   box.append(el('h3', { text: tr('Beállítások') }));
@@ -5175,10 +5276,50 @@ function fail2banConfigForm(fb) {
       value: fail2banDraftValue('config', 'ban_minutes', minutesOf(fb.ban_seconds || 3600))
     })
   ));
+  grid.append(el('div', { class: 'field' },
+    el('label', { text: tr('Drop-alapú tiltás') }),
+    el('label', { style: 'display:flex;gap:7px;align-items:center;margin-top:9px' },
+      el('input', {
+        type: 'checkbox', name: 'drop_enabled',
+        checked: !!fail2banDraftValue('config', 'drop_enabled', fb.drop_enabled !== false)
+      }),
+      tr('bejelentkezés nélküli portszkennerek tiltása')
+    )
+  ));
+  grid.append(el('div', { class: 'field' },
+    el('label', { text: tr('Eldobott csomag a tiltásig') }),
+    el('input', {
+      type: 'number', name: 'drop_max', required: true,
+      min: limits.min_drop_max ?? 1, max: limits.max_drop_max ?? 10000, step: 1,
+      value: fail2banDraftValue('config', 'drop_max', fb.drop_max ?? 120)
+    })
+  ));
+  grid.append(el('div', { class: 'field' },
+    el('label', { text: tr('Különböző célport a tiltásig') }),
+    el('input', {
+      type: 'number', name: 'drop_ports', required: true,
+      min: limits.min_drop_ports ?? 1, max: limits.max_drop_ports ?? 4096, step: 1,
+      value: fail2banDraftValue('config', 'drop_ports', fb.drop_ports ?? 12)
+    })
+  ));
+  grid.append(el('div', { class: 'field' },
+    el('label', { text: tr('Drop időablak (perc)') }),
+    el('input', {
+      type: 'number', name: 'drop_window_minutes', required: true,
+      min: Math.ceil((limits.min_drop_window ?? 30) / 60),
+      max: Math.floor((limits.max_drop_window ?? 86400) / 60),
+      step: 1,
+      value: fail2banDraftValue('config', 'drop_window_minutes', minutesOf(fb.drop_window_seconds || 180))
+    })
+  ));
   box.append(grid);
   box.append(el('p', {
     class: 'port-hint',
     text: tr('A küszöb elérésekor a forrás IP bekerül a banned_v4 halmazba, és a tűzfal eldobja a csomagjait. A portál és a DHCP kivétel, hogy a kliens lássa a tiltás okát, és ne veszítse el az IP-címét. A tiltás a megadott idő után automatikusan lejár; a kézi tiltások megmaradnak, ha az automatikus tiltást kikapcsolod.')
+  }));
+  box.append(el('p', {
+    class: 'port-hint',
+    text: tr('A bejelentkezés nélküli, engedély nélküli TCP-forgalmat is figyeli: ha egy IP az időablakban eléri a csomagszám-küszöböt, vagy ennyi különböző célportot próbál elérni, tiltás alá kerül. Így a portszkennerek és botok akkor is kiszűrődnek, ha soha nem próbálnak belépni. A DNS és a portál forgalma nem számít; a szabályos UDP-háttérzaj (mDNS, LLMNR, NetBIOS) sem.')
   }));
   box.append(el('div', { class: 'form-actions' },
     el('button', { type: 'submit' }, tr('Mentés'))
@@ -5232,12 +5373,28 @@ function fail2banBannedTable(bans) {
   table.append(el('thead', {}, el('tr', {},
     el('th', { text: tr('IP-cím') }), el('th', { text: tr('Típus') }),
     el('th', { text: tr('Kezdete') }), el('th', { text: tr('Hátralévő idő') }),
-    el('th', { text: tr('Kísérletek') }), el('th', { text: tr('Felhasználó') }),
+    el('th', { text: tr('Eseményszám') }), el('th', { text: tr('Felhasználó') }),
     el('th', { text: '' })
   )));
   const body = el('tbody');
   for (const row of bans) {
     const deadline = Number(row.until) * 1000;
+    const source = row.source || (row.manual ? 'manual' : 'login');
+    const label = source === 'drop' ? 'drop'
+      : source === 'manual' ? 'kézi' : 'automatikus';
+    const pillClass = source === 'drop' ? 'off'
+      : source === 'manual' ? 'admin' : '';
+    const typeCell = el('td', {}, el('span', {
+      class: 'pill ' + pillClass,
+      text: tr(label)
+    }));
+    if (source === 'drop' && row.detail) {
+      typeCell.append(el('div', {
+        class: 'muted',
+        style: 'margin-top:3px;font-size:10.5px',
+        text: tr(BAN_REASON_KEYS[row.detail] || row.detail)
+      }));
+    }
     const actions = el('td', { class: 'actions' },
       el('button', {
         type: 'button', class: 'ghost small',
@@ -5246,10 +5403,7 @@ function fail2banBannedTable(bans) {
     );
     body.append(el('tr', {},
       el('td', { class: 'mono' }, el('b', { text: row.ip })),
-      el('td', {}, el('span', {
-        class: 'pill ' + (row.manual ? 'admin' : 'off'),
-        text: tr(row.manual ? 'kézi' : 'automatikus')
-      })),
+      typeCell,
       el('td', { class: 'mono', text: clockTime(row.since) }),
       el('td', {
         class: 'mono timer-cell', 'data-ban-deadline': String(deadline)
@@ -5286,6 +5440,34 @@ function fail2banPendingTable(pending) {
   wrap.append(table);
   return wrap;
 }
+function fail2banDropPendingTable(pending) {
+  const wrap = el('div', { class: 'table-wrap' });
+  const table = el('table');
+  table.append(el('thead', {}, el('tr', {},
+    el('th', { text: tr('IP-cím') }), el('th', { text: tr('Eldobott csomag') }),
+    el('th', { text: tr('Különböző port') }), el('th', { text: tr('Ok') }),
+    el('th', { text: tr('Időablak vége') })
+  )));
+  const body = el('tbody');
+  for (const row of pending) {
+    const deadline = Number(row.expires_at) * 1000;
+    const ports = Array.isArray(row.ports) ? row.ports : [];
+    const portText = `${row.distinct_ports || 0} / ${row.max_ports || 0}`
+      + (ports.length ? ` (${ports.slice(0, 6).join(', ')}${ports.length > 6 ? '…' : ''})` : '');
+    body.append(el('tr', {},
+      el('td', { class: 'mono', text: row.ip }),
+      el('td', { class: 'mono', text: `${row.count} / ${row.max_drops}` }),
+      el('td', { class: 'mono', text: portText }),
+      el('td', { class: 'mono', text: tr(BAN_REASON_KEYS[row.reason] || row.reason || '—') }),
+      el('td', {
+        class: 'mono timer-cell', 'data-attempt-deadline': String(deadline)
+      }, fmtRemaining(Math.max(0, Math.round((deadline - Date.now()) / 1000))))
+    ));
+  }
+  table.append(body);
+  wrap.append(table);
+  return wrap;
+}
 async function fail2banUnban(ip) {
   if (!confirm(tr(`Feloldod ${ip} tiltását? A csomagjai ismét áthaladhatnak, ha van érvényes hozzáférésük.`))) return;
   await adminSend('/api/admin/fail2ban', { action: 'unban', ip });
@@ -5300,7 +5482,7 @@ function renderFail2ban() {
   const pending = fb.pending || [];
   adminPanel.append(adminHead(
     'Fail2ban',
-    'Sikertelen belépések tiltása forrás-IP szerint · a lista 5 másodpercenként frissül',
+    'Sikertelen belépések és gyanús forgalom tiltása forrás-IP szerint · a lista 5 másodpercenként frissül',
     null, null
   ));
   if (fb.error) {
@@ -5341,9 +5523,20 @@ function renderFail2ban() {
   } else {
     adminPanel.append(fail2banPendingTable(pending));
   }
+
+  const dropPending = fb.drop_pending || [];
+  adminPanel.append(el('h3', { text: tr('Várakozó drop-események') }));
+  if (!dropPending.length) {
+    adminPanel.append(el('div', {
+      class: 'empty-box',
+      text: tr('Nincs várakozó drop-alapú esemény az időablakban.')
+    }));
+  } else {
+    adminPanel.append(fail2banDropPendingTable(dropPending));
+  }
   adminPanel.append(el('p', {
     class: 'hint',
-    text: tr('A sikertelen jelszavas belépések számítanak, a captcha- és a kérésgyakorisági hibák nem. A tiltott IP csomagjait a tűzfal dobja el; a portál és a DHCP kivétel, hogy a kliens értesülhessen a tiltásról. A tiltások újraindítás után is megmaradnak, és a lejárat után a kernel automatikusan feloldja őket.')
+    text: tr('A sikertelen jelszavas belépések mellett a bejelentkezés nélküli, engedély nélküli TCP-forgalom is számít: a portszkennerek és botok a csomagszám- vagy a különböző célportok küszöbe alapján tiltás alá kerülnek. A captcha- és a kérésgyakorisági hibák nem számítanak. A tiltott IP csomagjait a tűzfal dobja el; a portál és a DHCP kivétel, hogy a kliens értesülhessen a tiltásról. A tiltások újraindítás után is megmaradnak, és a lejárat után a kernel automatikusan feloldja őket.')
   }));
 }
 async function loadFail2ban() {

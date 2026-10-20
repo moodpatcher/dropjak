@@ -145,6 +145,15 @@ if not re.match(r"^0x[0-9a-f]{1,8}$", FWD_MARK):
 # hogy a portál-átirányítás ne térítse el. Ez nem hozzáférési jelölés.
 PREAUTH_CT_MARK = "0x50524541"
 CUSTOM_CHAINS = ("preauth", "block", "preauth_nat", "block_nat")
+
+# Drop-alapú fail2ban: csak a valódi, engedély nélküli TCP-forgalom számít.
+# A MAC/spoof/ipv6/fail2ban/dns/ssh okok kimaradnak (hamis forrás-IP vagy
+# szabályos, lejárt munkamenet), és a szabályos kliens UDP-háttérzaja
+# (mDNS, LLMNR, NetBIOS, DNS) sem tiltás.
+DROP_BAN_REASONS = frozenset(
+    {"no-grant", "wan-drop", "input-wan", "input-lan"}
+)
+DROP_BAN_SKIP_TCP_PORTS = frozenset({53})
 # Az admin Tűzfal nézet nyers (iptables -L -n jellegű) kiírásában megjelenő
 # láncok sorrendje. A custom láncok a forward után következnek, hogy a
 # pre-auth és a blokk szabályai egy helyen, olvasható sorrendben legyenek.
@@ -3967,6 +3976,11 @@ class Gateway:
         )
         if self.fail2ban.audit is None:
             self.fail2ban.audit = self.audit
+        # A drop log minden rögzített csomagját átadjuk a fail2bannak; az
+        # dönti el, hogy az adott ok/protokoll alapján tiltás jár-e.
+        setter = getattr(self.drops, "set_on_drop", None)
+        if setter is not None:
+            setter(self._on_drop)
         self.login_rate = (
             rate_limiter if rate_limiter is not None else RateLimiter()
         )
@@ -4007,6 +4021,39 @@ class Gateway:
         groups = [group.id for group in self.groups.groups_for(name)]
         return record.public(groups)
 
+    def _on_drop(self, record: dict) -> None:
+        """Egy eldobott csomag átadása a fail2bannak.
+
+        Csak az engedély nélküli TCP-forgalmat számoljuk. A portszkennerek
+        és botok jellemzően TCP-n próbálkoznak; a szabályos kliens UDP-
+        háttérzaja (mDNS, LLMNR, NetBIOS, DNS) nem eredményez tiltást.
+        A DNS és a portál saját portja kimarad.
+        """
+        reason = str(record.get("reason") or "").strip()
+        if reason not in DROP_BAN_REASONS:
+            return
+        if str(record.get("proto") or "").strip().lower() != "tcp":
+            return
+        try:
+            dport = int(record.get("dport") or 0)
+        except (TypeError, ValueError):
+            dport = 0
+        if dport in DROP_BAN_SKIP_TCP_PORTS or dport == PORT:
+            return
+        src = str(record.get("src") or "").strip()
+        if not src:
+            return
+        try:
+            # A WAN-felőli forgalom számít a csomagszám-küszöbhöz is; a
+            # LAN-felőli no-grant/input-lan csak a portdiverzitáshoz, mert
+            # egy kijelentkezett böngésző is sok TCP-próbát indít.
+            self.fail2ban.record_drop(
+                src, proto="tcp", dport=dport, reason=reason,
+                count_total=reason in ("wan-drop", "input-wan"),
+            )
+        except Exception as exc:
+            log(f"[fail2ban] a(z) {src} drop-alapú tiltása nem sikerült: {exc}")
+
     def _on_fail2ban_ban(self, record: dict) -> None:
         """Egy friss tiltás utókezelése.
 
@@ -4021,6 +4068,10 @@ class Gateway:
         attempts = int(record.get("attempts") or 0)
         user = str(record.get("user") or "")
         until = int(record.get("until") or 0)
+        source = str(record.get("source") or "")
+        if source not in ("manual", "login", "drop"):
+            source = "manual" if manual else "login"
+        detail = str(record.get("detail") or "")[:64]
         revoked = 0
         try:
             revoked = self.sessions.revoke_ip(ip, reason="fail2ban")
@@ -4033,6 +4084,8 @@ class Gateway:
             attempts=attempts,
             user=user,
             until=until,
+            source=source,
+            detail=detail,
             sessions_revoked=revoked,
         )
         try:
@@ -4047,12 +4100,19 @@ class Gateway:
                     "user": user,
                     "ban_until": until,
                     "manual": manual,
+                    "source": source,
+                    "detail": detail,
                 }
             )
         except Exception as exc:
             log(f"[fail2ban] a drop log bejegyzés nem sikerült: {exc}")
-        if manual:
+        if source == "manual":
             log(f"[fail2ban] kézi tiltás: {ip} ({until - int(time.time())} mp)")
+        elif source == "drop":
+            log(
+                f"[fail2ban] automatikus tiltás: {ip} "
+                f"({attempts} eldobott csomag, ok={detail or 'drop'})"
+            )
         else:
             log(
                 f"[fail2ban] automatikus tiltás: {ip} "

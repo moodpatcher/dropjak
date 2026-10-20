@@ -39,7 +39,11 @@ bottom-right corner.
   Docker cannot open a bypass.
 - Failed sign-ins are counted per source IP. When an IP reaches the
   configurable threshold within the time window, it is added to the
-  `banned_v4` set and its packets are dropped. The portal (and DHCP) remain
+  `banned_v4` set and its packets are dropped. The same counter also watches
+  unauthorized TCP traffic from clients that never sign in, so port scanners,
+  bots probing open ports and similar sources are banned as well: a source is
+  banned when it reaches the dropped-packet threshold, or when it tries enough
+  distinct destination ports within the window. The portal (and DHCP) remain
   reachable so the client can see why it was banned and does not lose its IP
   address. Bans are persisted in `fail2ban.json` and survive a restart; manual
   bans can be created and lifted in the admin UI.
@@ -188,18 +192,32 @@ files kept). The log is captured through NFLOG (`nfnetlink_log`) on group 5;
 the kernel must support NFLOG, and the group must not be used by another
 process. Only packet headers are stored, never payloads.
 
-The **Fail2ban** admin tab protects the portal login. Failed passwords are
-counted per source IP; after the configured number of attempts within the
-window, the IP is banned for the configured duration. The tab shows the
-status, the active bans with a live countdown, and the pending attempts. Any
-IP can also be banned or unbanned manually, and a ban can be lifted before it
-expires. While a ban is active, the portal replaces the sign-in screen for
-that IP with a ban notice and a live countdown; the normal screen returns
-when the ban expires or is lifted. The threshold, window and ban duration
-are editable at runtime; the `HV_FAIL2BAN*` variables only provide the
-initial defaults. Bans are written to `fail2ban.json` (mode `0600`) and
-restored on start, and every ban is also recorded in the drop log with
-reason `fail2ban`.
+The **Fail2ban** admin tab protects the portal login and the network edge.
+Failed passwords are counted per source IP; after the configured number of
+attempts within the window, the IP is banned for the configured duration.
+The tab shows the status, the active bans with a live countdown, and the
+pending attempts. Any IP can also be banned or unbanned manually, and a ban
+can be lifted before it expires. While a ban is active, the portal replaces
+the sign-in screen for that IP with a ban notice and a live countdown; the
+normal screen returns when the ban expires or is lifted. The threshold,
+window and ban duration are editable at runtime; the `HV_FAIL2BAN*`
+variables only provide the initial defaults. Bans are written to
+`fail2ban.json` (mode `0600`) and restored on start, and every ban is also
+recorded in the drop log with reason `fail2ban`.
+
+Drop-based banning covers clients that never attempt a sign-in. The portal
+consumes the NFLOG drop events and counts unauthorized TCP traffic per source
+IP. An IP is banned when, within the drop window, it reaches the dropped-
+packet threshold or tries the configured number of distinct destination
+ports. WAN-side traffic (`wan-drop`, `input-wan`) counts toward both tests;
+LAN-side traffic (`no-grant`, `input-lan`) counts only toward the distinct-
+port test, so a signed-out browser retrying a few connections is not banned.
+DNS (TCP 53) and the portal port are ignored. Drop banning has its own
+enable switch, thresholds and window (`drop_enabled`, `drop_max`,
+`drop_ports`, `drop_window_seconds`, or `HV_FAIL2BAN_DROP*`), all editable
+in the admin tab; it reuses the login ban duration. The pending drop events
+are listed separately, and a drop-based ban is marked `drop` in the ban
+list and on the ban screen.
 
 If the admin UI is unreachable, the ban list can be managed from the CLI:
 
@@ -277,11 +295,15 @@ deletes the volume; without `-v` it is kept.
   protected. The block list overrides pre-auth rules.
 - Fail2ban bans every packet from the source IP except traffic to the portal
   and DHCP, so a banned client loses all network access, including SSH, until
-  the ban expires. A manual ban can lock out your own management IP; the
-  portal stays reachable from that IP so you can sign in and lift the ban,
-  and the CLI commands above work from the host console. Treat the threshold
-  and ban duration as a trade-off: a very low threshold makes it easy to lock
-  out legitimate clients behind a shared NAT address.
+  the ban expires. The portal stays reachable from a banned IP, but only to
+  show the ban screen: sign-in is refused while the ban is active, so you
+  cannot lift your own ban from the portal. A manual ban can lock out your own
+  management IP; lift it from the host console with the CLI commands above, or
+  use the **breakglass** rule described below. Treat the thresholds and ban
+  duration as a trade-off: a very low threshold makes it easy to lock out
+  legitimate clients behind a shared NAT address. Drop banning deliberately
+  ignores LAN packet counts and counts only distinct ports, but a port scanner
+  behind the same NAT address can still get the whole address banned.
 - The `breakglass` nftables chain is intentionally not flushed when the rules
   are reloaded, so an emergency SSH rule survives a restart. Keep it empty;
   remove the temporary rule as soon as the deployment is reachable.

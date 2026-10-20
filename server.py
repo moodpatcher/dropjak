@@ -415,6 +415,9 @@ class Handler(BaseHTTPRequestHandler):
             "banned": True,
             "ban_until": banned.get("until", 0),
             "remaining": int(banned.get("remaining", 0)),
+            "ban_source": banned.get("source", "login"),
+            "ban_detail": banned.get("detail", ""),
+            "ban_attempts": int(banned.get("attempts", 0)),
         }
 
     def _status(self) -> None:
@@ -771,6 +774,8 @@ class Handler(BaseHTTPRequestHandler):
                         for key in (
                             "enabled", "max_attempts",
                             "window_seconds", "ban_seconds",
+                            "drop_enabled", "drop_max",
+                            "drop_ports", "drop_window_seconds",
                         )
                         if key in data
                     }
@@ -890,23 +895,36 @@ class Handler(BaseHTTPRequestHandler):
         banned = self.gw.fail2ban.banned(ip)
         if banned is not None:
             remaining = int(banned.get("remaining", 0))
+            source = str(banned.get("source") or "login")
             self._audit(
                 "login_failed",
                 reason="fail2ban tiltás alatt",
+                source=source,
                 ban_until=banned.get("until", 0),
                 remaining=remaining,
             )
+            if source == "drop":
+                error = (
+                    "Ez az IP-cím fail2ban tiltás alatt áll, mert a tűzfal "
+                    "gyanús hálózati forgalmat (például portvizsgálatot) "
+                    "észlelt. Próbáld újra később."
+                )
+            else:
+                error = (
+                    "Ez az IP-cím fail2ban tiltás alatt áll a túl sok "
+                    "sikertelen belépés miatt. Próbáld újra később."
+                )
             return self._json(
                 403,
                 {
                     "ok": False,
-                    "error": (
-                        "Ez az IP-cím fail2ban tiltás alatt áll a túl sok "
-                        "sikertelen belépés miatt. Próbáld újra később."
-                    ),
+                    "error": error,
                     "banned": True,
                     "ban_until": banned.get("until", 0),
                     "remaining": remaining,
+                    "ban_source": source,
+                    "ban_detail": banned.get("detail", ""),
+                    "ban_attempts": int(banned.get("attempts", 0)),
                 },
                 headers={"Retry-After": str(max(1, min(remaining, 86400)))},
             )
@@ -1772,10 +1790,17 @@ def _fail2ban_cli(argv: list[str]) -> int:
         if args.action == "list":
             snapshot = manager.snapshot()
             state = "aktív" if snapshot["enabled"] else "kikapcsolva"
+            drop_state = "aktív" if snapshot["drop_enabled"] else "kikapcsolva"
             print(
                 f"Fail2ban: {state}; küszöb: {snapshot['max_attempts']} "
                 f"próbálkozás / {snapshot['window_seconds']} mp; "
                 f"tiltás: {snapshot['ban_seconds']} mp"
+            )
+            print(
+                f"Drop-alapú tiltás: {drop_state}; küszöb: "
+                f"{snapshot['drop_max']} csomag vagy "
+                f"{snapshot['drop_ports']} különböző port / "
+                f"{snapshot['drop_window_seconds']} mp"
             )
             if snapshot["error"]:
                 print(f"FIGYELEM: {snapshot['error']}")
@@ -1785,10 +1810,20 @@ def _fail2ban_cli(argv: list[str]) -> int:
                 return 0
             print(f"Tiltott IP-k ({len(bans)}):")
             for ban in bans:
-                kind = "kézi" if ban["manual"] else "automatikus"
+                source = ban.get("source") or (
+                    "manual" if ban["manual"] else "login"
+                )
+                kind = {
+                    "manual": "kézi",
+                    "drop": "drop",
+                    "login": "login",
+                }.get(source, source)
+                detail = ban.get("detail") or ""
+                if source == "drop" and detail:
+                    kind = f"drop/{detail}"
                 print(
                     f"  {ban['ip']:<15}  hátralévő: {ban['remaining']:>6} mp  "
-                    f"{kind:<12}  {ban['attempts']} próbálkozás  "
+                    f"{kind:<16}  {ban['attempts']} esemény  "
                     f"user={ban['user'] or '-'}"
                 )
             return 0
