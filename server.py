@@ -18,12 +18,17 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import hashlib
+import hmac
 import json
 import os
+import secrets
 import signal
 import sys
+import threading
 import time
 import urllib.parse
+from dataclasses import dataclass
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -52,6 +57,165 @@ CONTENT_SECURITY_POLICY = (
 
 def _log_fail2ban_error(ip: str, exc: Exception) -> None:
     print(f"[{ip}] fail2ban: a tiltás nem sikerült: {exc}", flush=True)
+
+
+# --------------------------------------------------- kétfaktoros belépőjegyek
+
+LOGIN_TICKET_TTL = 300
+LOGIN_TICKET_MAX_ATTEMPTS = 5
+# A jegy a felhasználói rekord pillanatképéhez kötődik. A só folyamatonként
+# új, így a memóriában tárolt ujjlenyomat külsőleg nem visszafejthető.
+_TICKET_FP_SALT = secrets.token_bytes(32)
+
+
+@dataclass
+class LoginTicket:
+    """Rövid életű, egyszer használatos jegy a jelszó utáni 2FA-lépéshez."""
+
+    token: str
+    purpose: str  # "verify" vagy "enroll"
+    username: str
+    ip: str
+    fingerprint: str
+    secret: str = ""
+    attempts: int = 0
+    expires_at: float = 0.0
+
+
+class LoginTicketStore:
+    """Memóriabeli jégytár szálbiztos, atomikus műveletekkel.
+
+    A jegyet csak ugyanaz az IP-cím használhatja, mint amelyik kiváltotta.
+    A sikertelen kódpróbákat a jegyhez számoljuk; a limit elérésével a jegy
+    megszűnik, így a kliensnek elölről kell kezdenie a belépést.
+    """
+
+    def __init__(
+        self,
+        ttl: int = LOGIN_TICKET_TTL,
+        max_attempts: int = LOGIN_TICKET_MAX_ATTEMPTS,
+        clock=None,
+    ) -> None:
+        self._ttl = int(ttl)
+        self._max_attempts = int(max_attempts)
+        self._clock = clock or time.time
+        self._lock = threading.Lock()
+        self._tickets: dict[str, LoginTicket] = {}
+
+    def _purge_locked(self, now: float | None = None) -> None:
+        now = self._clock() if now is None else now
+        expired = [
+            token
+            for token, ticket in self._tickets.items()
+            if ticket.expires_at <= now
+        ]
+        for token in expired:
+            del self._tickets[token]
+
+    def issue(
+        self,
+        purpose: str,
+        username: str,
+        ip: str,
+        fingerprint: str,
+        secret: str = "",
+    ) -> str:
+        token = secrets.token_urlsafe(32)
+        ticket = LoginTicket(
+            token=token,
+            purpose=purpose,
+            username=username,
+            ip=ip,
+            fingerprint=fingerprint,
+            secret=secret,
+            attempts=0,
+            expires_at=self._clock() + self._ttl,
+        )
+        with self._lock:
+            self._purge_locked()
+            self._tickets[token] = ticket
+        return token
+
+    def peek(self, token: str, ip: str) -> LoginTicket | None:
+        """A jegy olvasása fogyasztás nélkül; érvénytelen esetén None."""
+        with self._lock:
+            now = self._clock()
+            self._purge_locked(now)
+            ticket = self._tickets.get(token)
+            if ticket is None:
+                return None
+            if ticket.expires_at <= now:
+                del self._tickets[token]
+                return None
+            if ticket.ip != ip or ticket.attempts >= self._max_attempts:
+                return None
+            return ticket
+
+    def consume(self, token: str, ip: str) -> LoginTicket | None:
+        """Atomikus ellenőrzés és törlés: egy jegy csak egyszer használható."""
+        with self._lock:
+            now = self._clock()
+            self._purge_locked(now)
+            ticket = self._tickets.get(token)
+            if ticket is None:
+                return None
+            if (
+                ticket.expires_at <= now
+                or ticket.ip != ip
+                or ticket.attempts >= self._max_attempts
+            ):
+                return None
+            del self._tickets[token]
+            return ticket
+
+    def fail(self, token: str, ip: str) -> int:
+        """Sikertelen próba rögzítése; a hátralévő próbák száma (0 = nincs)."""
+        with self._lock:
+            now = self._clock()
+            self._purge_locked(now)
+            ticket = self._tickets.get(token)
+            if ticket is None or ticket.ip != ip:
+                return 0
+            ticket.attempts += 1
+            if ticket.attempts >= self._max_attempts:
+                del self._tickets[token]
+                return 0
+            return self._max_attempts - ticket.attempts
+
+    def revoke_user(self, username: str) -> int:
+        with self._lock:
+            self._purge_locked()
+            tokens = [
+                token
+                for token, ticket in self._tickets.items()
+                if ticket.username == username
+            ]
+            for token in tokens:
+                del self._tickets[token]
+            return len(tokens)
+
+    def revoke_all(self) -> None:
+        with self._lock:
+            self._tickets.clear()
+
+    def purge(self) -> None:
+        with self._lock:
+            self._purge_locked()
+
+
+LOGIN_TICKETS = LoginTicketStore()
+
+
+def _record_fingerprint(record: gateway.UserRecord) -> str:
+    """A jegyhez kötött felhasználói pillanatkép ujjlenyomata."""
+    digest = hashlib.sha256()
+    digest.update(_TICKET_FP_SALT)
+    digest.update(record.digest)
+    digest.update(b"\x00")
+    digest.update(record.totp_secret.encode("utf-8"))
+    digest.update(b"\x00")
+    digest.update(b"1" if record.totp_required else b"0")
+    return digest.hexdigest()
 
 
 # -------------------------------------------------------------------- HTTP réteg
@@ -885,6 +1049,12 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlsplit(self.path).path
         if path == "/api/login":
             return self._login()
+        if path == "/api/login/totp":
+            return self._login_totp()
+        if path == "/api/login/totp/enroll":
+            return self._login_totp_enroll()
+        if path == "/api/login/recovery":
+            return self._login_recovery()
         if path == "/api/access":
             return self._access()
         if path == "/api/logout":
@@ -1024,16 +1194,66 @@ class Handler(BaseHTTPRequestHandler):
                 403, {"ok": False, "error": "Hibás felhasználónév vagy jelszó."}
             )
 
+        if record.totp_required:
+            fingerprint = _record_fingerprint(record)
+            if not record.totp_secret:
+                # Első 2FA-belépés: a titkot még nem tároltuk. A jegyhez
+                # kötjük, hogy csak ugyanaz az IP és felhasználói állapot
+                # fejezhesse be a regisztrációt.
+                secret = gateway.generate_totp_secret()
+                ticket = LOGIN_TICKETS.issue(
+                    "enroll", record.name, ip, fingerprint, secret=secret
+                )
+                return self._json(
+                    200,
+                    {
+                        "ok": True,
+                        "totp_required": True,
+                        "totp_enroll_required": True,
+                        "ticket": ticket,
+                        "secret": secret,
+                        "otpauth_uri": gateway.build_otpauth_uri(
+                            record.name, secret
+                        ),
+                        "issuer": gateway.TOTP_ISSUER,
+                    },
+                )
+            ticket = LOGIN_TICKETS.issue(
+                "verify", record.name, ip, fingerprint
+            )
+            return self._json(
+                200,
+                {
+                    "ok": True,
+                    "totp_required": True,
+                    "ticket": ticket,
+                    "mode": "verify",
+                },
+            )
+
         self.gw.fail2ban.record_success(ip)
+        self._login_session_response(record)
+
+    def _login_session_response(
+        self,
+        record: gateway.UserRecord,
+        method: str | None = None,
+        extra: dict | None = None,
+    ) -> None:
+        """A jelszó vagy a 2FA lépés utáni közös munkamenet-válasz."""
+        ip = self._client_ip()
         try:
             session = self.gw.sessions.login(
-                user, ip, role=record.role, ua=self._ua()
+                record.name, ip, role=record.role, ua=self._ua()
             )
         except gateway.FirewallError as exc:
             self._audit(
-                "login_failed", user=user, reason=f"tűzfal hiba: {exc}"
+                "login_failed", user=record.name, reason=f"tűzfal hiba: {exc}"
             )
-            print(f"[{ip}] a régi hozzáférés visszavonása nem sikerült: {exc}", flush=True)
+            print(
+                f"[{ip}] a régi hozzáférés visszavonása nem sikerült: {exc}",
+                flush=True,
+            )
             return self._json(
                 503,
                 {
@@ -1049,46 +1269,368 @@ class Handler(BaseHTTPRequestHandler):
         )
         if gateway.COOKIE_SECURE:
             cookie += "; Secure"
-        self._audit(
-            "login_success",
-            user=user,
-            role=record.role,
-            admin=record.is_admin,
-            session=session.token[:10],
-            pending_ttl=self.gw.sessions.pending_ttl,
-            must_change_password=record.must_change_password,
-        )
+        audit_fields = {
+            "user": record.name,
+            "role": record.role,
+            "admin": record.is_admin,
+            "session": session.token[:10],
+            "pending_ttl": self.gw.sessions.pending_ttl,
+            "must_change_password": record.must_change_password,
+        }
+        if method is not None:
+            audit_fields["method"] = method
+        self._audit("login_success", **audit_fields)
         print(
-            f"[{ip}] hitelesítve: {user!r}; hozzáférés-választásra vár",
+            f"[{ip}] hitelesítve: {record.name!r}; hozzáférés-választásra vár",
             flush=True,
         )
-        self._json(
-            200,
-            {
-                "ok": True,
-                "authenticated": True,
-                "authorized": False,
-                "pending": True,
-                "user": session.user,
-                "role": record.role,
-                "admin": record.is_admin,
-                "must_change_password": record.must_change_password,
-                "expires_in": session.expires_in,
-                "limits": self._limits(),
-                "rules": [
-                    self._rule_payload(rule)
-                    for rule in self.gw.effective_rules(user)
-                ],
-                "message": (
-                    "Sikeres belépés. Első belépésnél le kell cserélned a "
-                    "kezdetleges jelszavad."
-                    if record.must_change_password else
-                    "Sikeres belépés. Válaszd ki a hozzáférési szabályt "
-                    "és azt, mennyi ideig szeretnéd használni a hálózatot."
-                ),
-            },
-            headers={"Set-Cookie": cookie},
+        payload = {
+            "ok": True,
+            "authenticated": True,
+            "authorized": False,
+            "pending": True,
+            "user": session.user,
+            "role": record.role,
+            "admin": record.is_admin,
+            "must_change_password": record.must_change_password,
+            "expires_in": session.expires_in,
+            "limits": self._limits(),
+            "rules": [
+                self._rule_payload(rule)
+                for rule in self.gw.effective_rules(record.name)
+            ],
+            "message": (
+                "Sikeres belépés. Első belépésnél le kell cserélned a "
+                "kezdetleges jelszavad."
+                if record.must_change_password else
+                "Sikeres belépés. Válaszd ki a hozzáférési szabályt "
+                "és azt, mennyi ideig szeretnéd használni a hálózatot."
+            ),
+        }
+        if extra:
+            payload.update(extra)
+        self._json(200, payload, headers={"Set-Cookie": cookie})
+
+    def _totp_ban_guard(self, ip: str) -> bool:
+        """A 2FA-végpontok közös fail2ban tiltás-ellenőrzése."""
+        banned = self.gw.fail2ban.banned(ip)
+        if banned is None:
+            return False
+        remaining = int(banned.get("remaining", 0))
+        source = str(banned.get("source") or "login")
+        self._audit(
+            "login_failed",
+            reason="fail2ban tiltás alatt",
+            source=source,
+            ban_until=banned.get("until", 0),
+            remaining=remaining,
         )
+        if source == "drop":
+            error = (
+                "Ez az IP-cím fail2ban tiltás alatt áll, mert a tűzfal "
+                "gyanús hálózati forgalmat (például portvizsgálatot) "
+                "észlelt. Próbáld újra később."
+            )
+        else:
+            error = (
+                "Ez az IP-cím fail2ban tiltás alatt áll a túl sok "
+                "sikertelen belépés miatt. Próbáld újra később."
+            )
+        self._json(
+            403,
+            {
+                "ok": False,
+                "error": error,
+                "banned": True,
+                "ban_until": banned.get("until", 0),
+                "remaining": remaining,
+                "ban_source": source,
+                "ban_detail": banned.get("detail", ""),
+                "ban_attempts": int(banned.get("attempts", 0)),
+            },
+            headers={"Retry-After": str(max(1, min(remaining, 86400)))},
+        )
+        return True
+
+    def _record_login_failure(self, ip: str, user: str) -> dict | None:
+        try:
+            return self.gw.fail2ban.record_failure(ip, user)
+        except fail2ban_mod.Fail2banError as exc:
+            _log_fail2ban_error(ip, exc)
+            return None
+
+    def _totp_prelude(self) -> tuple[str, dict] | None:
+        """JSON, IPv4, eredet, sebességkorlát és tiltás ellenőrzése."""
+        ip = self._client_ip()
+        data = self._read_json()
+        if data is None:
+            self._audit("login_failed", reason="hibás kérés")
+            self._json(
+                400,
+                {"ok": False, "error": "hibás kérés", "code": "bad_request"},
+            )
+            return None
+        if not gateway.is_ipv4(ip):
+            self._audit("login_failed", reason="nem IPv4 cím")
+            self._json(
+                400, {"ok": False, "error": "A kapu csak IPv4-címmel érhető el."}
+            )
+            return None
+        if not self._origin_ok():
+            self._audit("login_failed", reason="érvénytelen kérés-eredet")
+            self._json(
+                403, {"ok": False, "error": "érvénytelen kérés-eredet"}
+            )
+            return None
+        if not self.gw.login_rate.allow(ip):
+            self._audit("login_failed", reason="túl sok próbálkozás")
+            self._json(
+                429,
+                {"ok": False, "error": "Túl sok próbálkozás. Várj egy percet."},
+                headers={"Retry-After": str(gateway.RATE_WINDOW)},
+            )
+            return None
+        if self._totp_ban_guard(ip):
+            return None
+        return ip, data
+
+    @staticmethod
+    def _ticket_credentials(data: dict) -> tuple[str, str] | None:
+        ticket = data.get("ticket")
+        code = data.get("code")
+        if not isinstance(ticket, str) or not ticket:
+            return None
+        if not isinstance(code, str):
+            return None
+        code = code.strip()
+        if not code:
+            return None
+        return ticket, code
+
+    def _ticket_invalid(self) -> None:
+        # Ugyanaz a válasz jár a hiányzó, lejárt és elhasznált jegyre is.
+        self._json(
+            403,
+            {
+                "ok": False,
+                "code": "ticket_invalid",
+                "error": "Érvénytelen vagy lejárt bejelentkezés. Kezdd újra.",
+            },
+        )
+
+    def _totp_failure(
+        self, ip: str, token: str, username: str, recovery: bool = False
+    ) -> None:
+        """Hibás 2FA-kód: jegypróba, fail2ban és a megfelelő hibaüzenet."""
+        remaining = LOGIN_TICKETS.fail(token, ip)
+        ban = self._record_login_failure(ip, username)
+        if ban is not None:
+            retry_after = max(1, min(int(ban.get("remaining", 0)), 86400))
+            return self._json(
+                403,
+                {
+                    "ok": False,
+                    "error": (
+                        "Túl sok sikertelen belépés: az IP-címedet a "
+                        "tűzfal letiltotta. Próbáld újra később."
+                    ),
+                    "banned": True,
+                    "ban_until": ban.get("until", 0),
+                    "remaining": ban.get("remaining", 0),
+                },
+                headers={"Retry-After": str(retry_after)},
+            )
+        if recovery:
+            code = "recovery_invalid" if remaining > 0 else "ticket_locked"
+            error = (
+                f"Hibás recovery kód. Még {remaining} próbálkozás."
+                if remaining > 0 else
+                "Túl sok hibás kód. Kezdd újra a belépést."
+            )
+        else:
+            code = "totp_invalid" if remaining > 0 else "ticket_locked"
+            error = (
+                f"Hibás kód. Még {remaining} próbálkozás."
+                if remaining > 0 else
+                "Túl sok hibás kód. Kezdd újra a belépést."
+            )
+        self._json(
+            403,
+            {
+                "ok": False,
+                "code": code,
+                "error": error,
+                "remaining": remaining,
+            },
+        )
+
+    def _login_totp(self) -> None:
+        """A jelszó utáni TOTP-kód ellenőrzése és a munkamenet létrehozása."""
+        prelude = self._totp_prelude()
+        if prelude is None:
+            return
+        ip, data = prelude
+        credentials = self._ticket_credentials(data)
+        if credentials is None:
+            return self._json(
+                400,
+                {"ok": False, "error": "hibás kérés", "code": "bad_request"},
+            )
+        token, code = credentials
+        ticket = LOGIN_TICKETS.peek(token, ip)
+        if ticket is None:
+            return self._ticket_invalid()
+        if ticket.purpose != "verify":
+            return self._ticket_invalid()
+        # A felhasználót kizárólag a szerveroldali jegy választja ki.
+        record = self.gw.users.record(ticket.username)
+        if (
+            record is None
+            or not record.enabled
+            or not record.totp_required
+            or not record.totp_secret
+            or not hmac.compare_digest(
+                _record_fingerprint(record), ticket.fingerprint
+            )
+        ):
+            LOGIN_TICKETS.consume(token, ip)
+            return self._ticket_invalid()
+        if not self.gw.users.verify_totp(ticket.username, code):
+            return self._totp_failure(ip, token, ticket.username)
+        if LOGIN_TICKETS.consume(token, ip) is None:
+            return self._ticket_invalid()
+        try:
+            self.gw.fail2ban.record_success(ip)
+        except fail2ban_mod.Fail2banError as exc:
+            _log_fail2ban_error(ip, exc)
+        self._login_session_response(record, method="totp")
+
+    def _login_totp_enroll(self) -> None:
+        """Az első 2FA-beállítás: titok megerősítése és recovery kódok."""
+        prelude = self._totp_prelude()
+        if prelude is None:
+            return
+        ip, data = prelude
+        credentials = self._ticket_credentials(data)
+        if credentials is None:
+            return self._json(
+                400,
+                {"ok": False, "error": "hibás kérés", "code": "bad_request"},
+            )
+        token, code = credentials
+        ticket = LOGIN_TICKETS.peek(token, ip)
+        if ticket is None:
+            return self._ticket_invalid()
+        if ticket.purpose != "enroll":
+            return self._ticket_invalid()
+        record = self.gw.users.record(ticket.username)
+        if (
+            record is None
+            or not record.enabled
+            or not record.totp_required
+            or record.totp_secret
+            or not hmac.compare_digest(
+                _record_fingerprint(record), ticket.fingerprint
+            )
+        ):
+            LOGIN_TICKETS.consume(token, ip)
+            return self._ticket_invalid()
+        matched = gateway.totp_match(ticket.secret, code)
+        if matched is None:
+            return self._totp_failure(ip, token, ticket.username)
+        if LOGIN_TICKETS.consume(token, ip) is None:
+            return self._ticket_invalid()
+        codes = gateway.generate_recovery_codes(10)
+        hashes = [gateway.hash_recovery_code(value) for value in codes]
+        if not self.gw.users.enroll_totp(
+            ticket.username, ticket.secret, hashes, last_step=matched
+        ):
+            return self._json(
+                400,
+                {
+                    "ok": False,
+                    "code": "enroll_failed",
+                    "error": (
+                        "A kétfaktoros beállítás nem sikerült. "
+                        "Próbáld újra."
+                    ),
+                },
+            )
+        record = self.gw.users.record(ticket.username)
+        if record is None or not record.enabled:
+            return self._json(
+                400,
+                {
+                    "ok": False,
+                    "code": "enroll_failed",
+                    "error": (
+                        "A kétfaktoros beállítás nem sikerült. "
+                        "Próbáld újra."
+                    ),
+                },
+            )
+        try:
+            self.gw.fail2ban.record_success(ip)
+        except fail2ban_mod.Fail2banError as exc:
+            _log_fail2ban_error(ip, exc)
+        self._audit(
+            "totp_enrolled",
+            target=record.name,
+            user=record.name,
+            recovery_codes=len(codes),
+        )
+        # A nyílt recovery kódok kizárólag ebben a válaszban jelennek meg.
+        self._login_session_response(
+            record, method="totp_enroll", extra={"recovery_codes": codes}
+        )
+
+    def _login_recovery(self) -> None:
+        """Belépés egy egyszer használatos recovery kóddal."""
+        prelude = self._totp_prelude()
+        if prelude is None:
+            return
+        ip, data = prelude
+        credentials = self._ticket_credentials(data)
+        if credentials is None:
+            return self._json(
+                400,
+                {"ok": False, "error": "hibás kérés", "code": "bad_request"},
+            )
+        token, code = credentials
+        ticket = LOGIN_TICKETS.peek(token, ip)
+        if ticket is None:
+            return self._ticket_invalid()
+        if ticket.purpose != "verify":
+            return self._ticket_invalid()
+        record = self.gw.users.record(ticket.username)
+        if (
+            record is None
+            or not record.enabled
+            or not record.totp_required
+            or not record.totp_secret
+            or not hmac.compare_digest(
+                _record_fingerprint(record), ticket.fingerprint
+            )
+        ):
+            LOGIN_TICKETS.consume(token, ip)
+            return self._ticket_invalid()
+        if not self.gw.users.verify_recovery(ticket.username, code):
+            return self._totp_failure(
+                ip, token, ticket.username, recovery=True
+            )
+        if LOGIN_TICKETS.consume(token, ip) is None:
+            return self._ticket_invalid()
+        try:
+            self.gw.fail2ban.record_success(ip)
+        except fail2ban_mod.Fail2banError as exc:
+            _log_fail2ban_error(ip, exc)
+        self._audit(
+            "totp_recovery_used",
+            target=record.name,
+            user=record.name,
+            method="recovery",
+        )
+        self._login_session_response(record, method="recovery")
 
     def _access(self) -> None:
         ip = self._client_ip()
@@ -1374,7 +1916,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"ok": False, "error": "hibás kérés"})
         if not self._origin_ok():
             return self._json(403, {"ok": False, "error": "érvénytelen kérés-eredet"})
-        if self._admin_guard() is None:
+        session = self._admin_guard()
+        if session is None:
             return
         action = str(data.get("action", "")).strip()
         try:
@@ -1384,6 +1927,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._admin_user_update(data)
             elif action == "delete":
                 self._admin_user_delete(data)
+            elif action == "totp_reset":
+                self._admin_user_totp_reset(data, session)
+                # A reset-ág maga küldi a választ; ne legyen második.
+                return
             else:
                 raise gateway.UserStoreError("ismeretlen művelet")
         except (gateway.UserStoreError, gateway.GroupStoreError,
@@ -1404,6 +1951,9 @@ class Handler(BaseHTTPRequestHandler):
         enabled = data.get("enabled", True)
         if not isinstance(enabled, bool):
             raise gateway.UserStoreError("az enabled mező logikai érték kell legyen")
+        totp_required = data.get("totp_required", False)
+        if not isinstance(totp_required, bool):
+            raise gateway.UserStoreError("érvénytelen totp_required")
         rules = self._rule_ids(data)
         if rules is not None:
             self._validate_rule_ids(rules)
@@ -1415,6 +1965,8 @@ class Handler(BaseHTTPRequestHandler):
         )
         try:
             self.gw.groups.set_memberships(name, group_ids)
+            if totp_required:
+                self.gw.users.set_totp_required(name, True)
         except Exception:
             self.gw.users.remove(name)
             raise
@@ -1427,6 +1979,7 @@ class Handler(BaseHTTPRequestHandler):
             rules=",".join(rule_ids),
             groups=",".join(group_ids),
             must_change_password=True,
+            totp_required=totp_required,
         )
 
     def _admin_user_update(self, data: dict) -> None:
@@ -1468,6 +2021,9 @@ class Handler(BaseHTTPRequestHandler):
             raise gateway.UserStoreError(
                 "a must_change_password mező logikai érték kell legyen"
             )
+        totp_required = data.get("totp_required")
+        if "totp_required" in data and not isinstance(totp_required, bool):
+            raise gateway.UserStoreError("érvénytelen totp_required")
         password_changed = bool(isinstance(password, str) and password)
         if password_changed:
             # Az admin által beállított (ideiglenes) jelszót az érintett
@@ -1478,7 +2034,7 @@ class Handler(BaseHTTPRequestHandler):
             must_change = True
         self.gw.users.set_metadata(
             name, role=role, enabled=enabled, rules=rules,
-            must_change_password=must_change,
+            must_change_password=must_change, totp_required=totp_required,
         )
         if group_ids is not None:
             self.gw.groups.set_memberships(name, group_ids)
@@ -1500,7 +2056,41 @@ class Handler(BaseHTTPRequestHandler):
                 updated.must_change_password if updated is not None
                 else bool(must_change)
             ),
+            totp_required=(
+                (updated.totp_required if updated is not None else totp_required)
+                if totp_required is not None else "(változatlan)"
+            ),
             sessions_revoked=revoked,
+        )
+
+    def _admin_user_totp_reset(
+        self, data: dict, session: gateway.Session
+    ) -> None:
+        """A 2FA-titok és recovery kódok törlése; a kötelező jelző marad."""
+        name = data.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise gateway.UserStoreError("hiányzó felhasználónév")
+        name = name.strip()
+        with self.gw.admin_lock:
+            if self.gw.users.record(name) is None:
+                raise gateway.UserStoreError(f"nincs ilyen felhasználó: {name}")
+            if not self.gw.users.reset_totp(name):
+                raise gateway.UserStoreError(f"nincs ilyen felhasználó: {name}")
+            revoked = self.gw.sessions.revoke_user(name, reason="totp_reset")
+            tickets = LOGIN_TICKETS.revoke_user(name)
+            self._audit(
+                "admin_totp_reset",
+                target=name,
+                user=session.user,
+                sessions_revoked=revoked,
+                tickets_revoked=tickets,
+            )
+        self._json(
+            200,
+            {
+                **self._admin_state(),
+                "message": f"{name} 2FA beállítása alaphelyzetbe állítva.",
+            },
         )
 
     def _admin_user_delete(self, data: dict) -> None:
@@ -1748,6 +2338,11 @@ def _user_cli(argv: list[str]) -> int:
     p_del = sub.add_parser("del", help="felhasználó törlése")
     p_del.add_argument("name")
 
+    p_totp = sub.add_parser(
+        "totp-reset", help="kétfaktoros azonosítás alaphelyzetbe állítása"
+    )
+    p_totp.add_argument("name")
+
     sub.add_parser("list", help="felhasználók listája")
 
     args = parser.parse_args(argv)
@@ -1787,6 +2382,12 @@ def _user_cli(argv: list[str]) -> int:
         elif args.action == "del":
             if store.remove(args.name):
                 print(f"Felhasználó törölve: {args.name}")
+            else:
+                print(f"Nincs ilyen felhasználó: {args.name}")
+                return 1
+        elif args.action == "totp-reset":
+            if store.reset_totp(args.name):
+                print(f"2FA alaphelyzetbe állítva: {args.name}")
             else:
                 print(f"Nincs ilyen felhasználó: {args.name}")
                 return 1

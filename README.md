@@ -157,6 +157,50 @@ printf '%s\n' '<password>' | docker compose run --rm -T hatarvedelem \
 
 CLI-created users get the `user` role; promote them in **Admin → Users**.
 
+### Two-factor authentication
+
+TOTP 2FA is optional and configured per user. An admin can enable it with
+the `totp_required` option when creating or editing a user in
+**Admin → Users**; new users default to disabled. Enrolled users sign in
+with two steps: password and captcha first, then a 6-digit code from an
+authenticator app or a one-time recovery code. No session cookie is issued
+until the second factor succeeds.
+
+The first sign-in of a user who is required to use 2FA but is not enrolled
+shows a base32 secret and an `otpauth://totp/...` URI for manual entry into
+Google Authenticator (this MVP has no QR code). After the first code is
+confirmed, 10 recovery codes are shown exactly once. Each recovery code can
+be used once in place of the 6-digit code. Store them offline: if both the
+authenticator and the recovery codes are lost, an admin must reset 2FA.
+
+Second-factor tickets are kept in memory for 300 seconds, are bound to the
+client IP, are single-use and allow at most 5 attempts. Wrong TOTP and
+recovery codes count toward fail2ban exactly like wrong passwords.
+
+**2FA reset** in **Admin → Users** clears the secret, the TOTP state
+(`totp_last_step`) and the recovery-code hashes, but keeps the account
+required to use 2FA. It revokes the user's sessions and records an
+`admin_totp_reset` audit entry. The user enrolls again at the next sign-in.
+
+If the admin UI is unavailable, reset 2FA from the host:
+
+```bash
+docker compose exec hatarvedelem python3 /opt/hatarvedelem/server.py \
+  user totp-reset alice
+```
+
+The command works while the server is running (it updates `users.json` under
+the file lock) and prints only a status line, never secrets. It does not
+revoke an already-open in-memory session, because the running server owns
+session state; use the admin UI while the server is up.
+
+The `otpauth://` issuer/label defaults to `Dropjak`; set `HV_TOTP_ISSUER` to
+change it (see `.env.example`).
+
+TOTP only creates the portal session. Network access still requires the
+second phase: select an access rule and TTL, then authorize the grant. The
+second factor alone does not open the firewall.
+
 ## Operations
 
 ### Update
@@ -294,6 +338,15 @@ deletes the volume; without `-v` it is kept.
   `HV_COOKIE_SECURE=1`; otherwise restrict `HV_PORTAL_NET` to a trusted
   management network. HTTP-only exposure allows credentials and session
   cookies to be sniffed.
+- TOTP 2FA does not make the plain-HTTP portal confidential. The base32
+  secret and `otpauth://` URI are displayed and transmitted in cleartext, and
+  6-digit and recovery codes are sent in request bodies; anyone who can sniff
+  the LAN can capture them. `HV_COOKIE_SECURE=1` protects only the cookie.
+  Restrict `HV_PORTAL_NET` to a trusted network. Integrated HTTPS termination
+  is still a follow-up, not part of the current implementation; the plan is in
+  [docs/caddy-proxy-terv.md](docs/caddy-proxy-terv.md).
+- TOTP secrets are stored unencrypted in `users.json` (mode `0600`) in the
+  state volume. Protect the volume and its backups accordingly.
 - MAC binding blocks source-IP spoofing and DHCP lease takeover, but MAC
   addresses are not authenticated. An attacker on the same layer-2 segment
   can clone an authorized client's IP and MAC, or ARP-spoof the gateway.

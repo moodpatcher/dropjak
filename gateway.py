@@ -13,6 +13,7 @@ hálózati hozzáférés CSAK akkor jön létre, ha az nftables-szabály tényle
 
 from __future__ import annotations
 
+import base64
 import fcntl
 import hashlib
 import hmac
@@ -231,6 +232,13 @@ TURNSTILE_SITEKEY = os.environ.get("TURNSTILE_SITEKEY", "").strip()
 TURNSTILE_SECRET = os.environ.get("TURNSTILE_SECRET", "").strip()
 TURNSTILE_ON = bool(TURNSTILE_SITEKEY and TURNSTILE_SECRET)
 TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+
+# Időalapú egyszeri jelszó (TOTP, RFC 6238) a kétfaktoros belépéshez.
+TOTP_ISSUER = os.environ.get("HV_TOTP_ISSUER", "").strip() or "Dropjak"
+TOTP_PERIOD = 30
+TOTP_DIGITS = 6
+TOTP_WINDOW = 1
+_TOTP_RECOVERY_RE = re.compile(r"^[0-9a-f]{64}$")
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,32}$")
 _NFT_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,31}$")
@@ -2772,6 +2780,128 @@ def group_firewall_snapshot(
     }
 
 
+# ------------------------------------------------------------------------ TOTP
+
+# A base32 ábécé a helyreállítási kódokhoz (nincs 0/1/8/9, hogy ne
+# lehessen összetéveszteni őket betűkkel).
+_BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+_RECOVERY_CODE_LENGTH = 10
+
+
+def generate_totp_secret() -> str:
+    """20 bájtos, padding nélküli base32 TOTP-titok (32 nagybetű)."""
+    return base64.b32encode(secrets.token_bytes(20)).decode("ascii").rstrip("=")
+
+
+def _totp_key(secret: str) -> bytes:
+    """A base32 titokból képzett HMAC-kulcs; hibás titoknál ValueError."""
+    if not isinstance(secret, str):
+        raise ValueError("érvénytelen TOTP-titok")
+    raw = secret.strip().replace(" ", "").upper()
+    if not raw:
+        raise ValueError("üres TOTP-titok")
+    padding = "=" * ((8 - len(raw) % 8) % 8)
+    try:
+        key = base64.b32decode(raw + padding, casefold=True)
+    except (ValueError, TypeError) as exc:
+        raise ValueError("érvénytelen TOTP-titok") from exc
+    if not key:
+        raise ValueError("üres TOTP-titok")
+    return key
+
+
+def hotp_code(secret: str, counter: int) -> str:
+    """RFC 4226 HOTP-kód (HMAC-SHA1, 6 számjegy, nullával kipótolva)."""
+    key = _totp_key(secret)
+    try:
+        counter = int(counter)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("érvénytelen számláló") from exc
+    if counter < 0:
+        raise ValueError("érvénytelen számláló")
+    digest = hmac.new(key, counter.to_bytes(8, "big"), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    value = int.from_bytes(digest[offset:offset + 4], "big") & 0x7FFFFFFF
+    return f"{value % (10 ** TOTP_DIGITS):0{TOTP_DIGITS}d}"
+
+
+def totp_code(secret: str, now: float | None = None) -> str:
+    """Az aktuális (vagy megadott időponthoz tartozó) TOTP-kód."""
+    current = time.time() if now is None else float(now)
+    return hotp_code(secret, int(current // TOTP_PERIOD))
+
+
+def totp_match(secret: str, code: str, now: float | None = None) -> int | None:
+    """A kódhoz tartozó számláló, ha érvényes; különben ``None``.
+
+    Pontosan 6 ASCII számjegyet fogad el, és a ``TOTP_WINDOW`` szerinti
+    szomszédos lépéseket is ellenőrzi (óra-eltérés miatt). A visszatérési
+    érték a ténylegesen egyező számláló, amit a hívó a visszajátszás
+    kiszűrésére használhat.
+    """
+    if (
+        not isinstance(code, str)
+        or len(code) != 6
+        or not code.isascii()
+        or not code.isdigit()
+    ):
+        return None
+    current = int((time.time() if now is None else float(now)) // TOTP_PERIOD)
+    try:
+        for offset in range(-TOTP_WINDOW, TOTP_WINDOW + 1):
+            counter = current + offset
+            if counter < 0:
+                continue
+            if hmac.compare_digest(hotp_code(secret, counter), code):
+                return counter
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return None
+
+
+def build_otpauth_uri(username: str, secret: str) -> str:
+    """Authentikátor-alkalmazásnak átadható ``otpauth://`` URI."""
+    label = urllib.parse.quote(f"{TOTP_ISSUER}:{username}", safe="")
+    query = urllib.parse.urlencode(
+        {
+            "secret": secret,
+            "issuer": TOTP_ISSUER,
+            "algorithm": "SHA1",
+            "digits": str(TOTP_DIGITS),
+            "period": str(TOTP_PERIOD),
+        }
+    )
+    return f"otpauth://totp/{label}?{query}"
+
+
+def normalize_recovery_code(code: str) -> str:
+    """A helyreállítási kód egységes alakja: nagybetű, szóköz/kötőjel nélkül."""
+    if not isinstance(code, str):
+        return ""
+    return code.upper().replace(" ", "").replace("\t", "").replace("-", "")
+
+
+def hash_recovery_code(code: str) -> str:
+    """A helyreállítási kód SHA-256 hash-e (kisbetűs hex)."""
+    normalized = normalize_recovery_code(code)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def generate_recovery_codes(count: int = 10) -> list[str]:
+    """Egyszer használatos, egyedi helyreállítási kódok listája."""
+    codes: list[str] = []
+    seen: set[str] = set()
+    while len(codes) < max(0, int(count)):
+        candidate = "".join(
+            secrets.choice(_BASE32_ALPHABET) for _ in range(_RECOVERY_CODE_LENGTH)
+        )
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        codes.append(candidate)
+    return codes
+
+
 # --------------------------------------------------------------- felhasználók
 
 class UserStoreError(RuntimeError):
@@ -2790,10 +2920,19 @@ class UserRecord:
     rules: tuple[str, ...] = ()
     rules_set: bool = False
     must_change_password: bool = False
+    totp_secret: str = ""
+    totp_required: bool = False
+    totp_last_step: int = -1
+    totp_recovery: tuple[str, ...] = ()
 
     @property
     def is_admin(self) -> bool:
         return self.role == ROLE_ADMIN
+
+    @property
+    def totp_enrolled(self) -> bool:
+        """Van-e beállított TOTP-titok (a kötelező jelzőtől függetlenül)."""
+        return bool(self.totp_secret)
 
     def public(self, groups: list[str] | tuple[str, ...] = ()) -> dict:
         return {
@@ -2805,6 +2944,8 @@ class UserRecord:
             "groups": list(groups),
             "created": self.created,
             "must_change_password": self.must_change_password,
+            "totp_required": self.totp_required,
+            "totp_enrolled": self.totp_enrolled,
         }
 
 
@@ -2864,6 +3005,34 @@ class UserStore:
                 must_change = item.get("must_change_password", False)
                 if not isinstance(must_change, bool):
                     must_change = bool(must_change)
+                # Hiányzó kulcs = örökölt, nem kötelező beállítás. Bármilyen
+                # hibás érték viszont kötelezővé tesz (fail closed), hogy egy
+                # elrontott fájl ne kapcsolhassa ki észrevétlenül a 2FA-t.
+                if "totp_required" not in item:
+                    totp_required = False
+                else:
+                    required_raw = item["totp_required"]
+                    totp_required = (
+                        required_raw if isinstance(required_raw, bool) else True
+                    )
+                totp_secret_raw = item.get("totp_secret", "")
+                totp_secret = (
+                    totp_secret_raw if isinstance(totp_secret_raw, str) else ""
+                )
+                try:
+                    totp_last_step = int(item.get("totp_last_step", -1))
+                except (TypeError, ValueError, OverflowError):
+                    totp_last_step = -1
+                recovery_raw = item.get("totp_recovery", ())
+                if isinstance(recovery_raw, list):
+                    totp_recovery = tuple(
+                        value.lower()
+                        for value in recovery_raw
+                        if isinstance(value, str)
+                        and _TOTP_RECOVERY_RE.match(value.lower())
+                    )
+                else:
+                    totp_recovery = ()
                 rules_raw = item.get("rules", ())
                 if not isinstance(rules_raw, list):
                     rules_raw = ()
@@ -2885,6 +3054,10 @@ class UserStore:
                     rules=rules,
                     rules_set="rules" in item,
                     must_change_password=must_change,
+                    totp_secret=totp_secret,
+                    totp_required=totp_required,
+                    totp_last_step=totp_last_step,
+                    totp_recovery=totp_recovery,
                 )
             except (KeyError, TypeError, ValueError):
                 log(f"[felhasználók] kihagyott hibás bejegyzés: {name!r}")
@@ -3080,6 +3253,7 @@ class UserStore:
         rules: tuple[str, ...] | list[str] | None = None,
         must_change_password: bool | None = None,
         provisioned_from: str | None = None,
+        totp_required: bool | None = None,
     ) -> None:
         if role is not None and role not in (ROLE_USER, ROLE_ADMIN):
             raise UserStoreError("érvénytelen szerepkör")
@@ -3096,6 +3270,10 @@ class UserStore:
                 item["must_change_password"] = bool(must_change_password)
             if provisioned_from is not None:
                 item["provisioned_from"] = str(provisioned_from)
+            if totp_required is not None:
+                # Csak a jelzőt írjuk: a titokhoz és a helyreállítási
+                # kódokhoz kizárólag a dedikált metódusok nyúlnak.
+                item["totp_required"] = bool(totp_required)
             if rules is not None:
                 clean: list[str] = []
                 for value in rules:
@@ -3107,6 +3285,161 @@ class UserStore:
                 item["rules"] = clean
             data[name] = item
             self._write_raw(data)
+
+    # -- kétfaktoros azonosítás ------------------------------------------------
+
+    def set_totp_required(self, name: str, required: bool) -> bool:
+        """A kétfaktoros belépés kötelezővé tétele vagy feloldása.
+
+        A titkot, a számlálót és a helyreállítási kódokat nem érinti.
+        Ismeretlen felhasználónál ``False``, egyébként ``True``.
+        """
+        with self._lock, self._locked():
+            data = self._read_raw()
+            item = data.get(name)
+            if not isinstance(item, dict):
+                return False
+            item["totp_required"] = bool(required)
+            data[name] = item
+            self._write_raw(data)
+            return True
+
+    def enroll_totp(
+        self,
+        name: str,
+        secret: str,
+        recovery_hashes: list[str] | tuple[str, ...],
+        last_step: int | None = None,
+    ) -> bool:
+        """TOTP-titok és helyreállítási kód-hashek rögzítése.
+
+        A korábbi ``totp_required`` jelzőt megtartja. Érvényes, nem negatív
+        egész ``last_step`` esetén a belépéskor már elfogadott időlépést
+        rögzíti, így a beiratkozást megerősítő kód később nem játszható
+        vissza; egyébként a számláló -1 lesz. A helyreállítási hasheket
+        kanonikus (kisbetűs, 64 hex) alakban tároljuk; a nem megfelelő
+        elemek kimaradnak. Ismeretlen felhasználónál ``False``.
+        """
+        if not isinstance(secret, str) or not secret:
+            return False
+        if (
+            isinstance(last_step, bool)
+            or not isinstance(last_step, int)
+            or last_step < 0
+        ):
+            last_step = -1
+        with self._lock, self._locked():
+            data = self._read_raw()
+            item = data.get(name)
+            if not isinstance(item, dict):
+                return False
+            recovery: list[str] = []
+            for value in recovery_hashes:
+                if not isinstance(value, str):
+                    continue
+                value = value.lower()
+                if _TOTP_RECOVERY_RE.match(value) and value not in recovery:
+                    recovery.append(value)
+            item["totp_secret"] = secret
+            item["totp_last_step"] = last_step
+            item["totp_recovery"] = recovery
+            data[name] = item
+            self._write_raw(data)
+            return True
+
+    def verify_totp(
+        self, name: str, code: str, now: float | None = None
+    ) -> bool:
+        """TOTP-kód ellenőrzése visszajátszás elleni védelemmel.
+
+        Az olvasás, az ellenőrzés és az írás egyetlen zárolt szakaszban fut,
+        így két párhuzamos kérés közül legfeljebb az egyik fogadhatja el
+        ugyanazt az időlépést. A meglévőnél nem nagyobb lépés érvénytelen.
+        A ``totp_required`` jelzőt ez a metódus nem vizsgálja; azt a hívó
+        (a HTTP-réteg) kényszeríti ki.
+        """
+        try:
+            with self._lock, self._locked():
+                data = self._read_raw()
+                item = data.get(name)
+                if not isinstance(item, dict) or not item.get("enabled", True):
+                    return False
+                secret = item.get("totp_secret", "")
+                if not isinstance(secret, str) or not secret:
+                    return False
+                matched = totp_match(secret, code, now=now)
+                if matched is None:
+                    return False
+                try:
+                    last_step = int(item.get("totp_last_step", -1))
+                except (TypeError, ValueError, OverflowError):
+                    last_step = -1
+                if matched <= last_step:
+                    return False
+                item["totp_last_step"] = matched
+                data[name] = item
+                self._write_raw(data)
+                return True
+        except UserStoreError as exc:
+            log(f"[felhasználók] {exc}")
+            return False
+
+    def verify_recovery(self, name: str, code: str) -> bool:
+        """Helyreállítási kód ellenőrzése és egyszer használatos törlése.
+
+        A kódot normalizáljuk, hash-eljük, majd állandó idejű összehasonlítással
+        keressük a tárolt hashek között. Sikertelen kísérlet nem fogyasztja
+        a kódot. Ismeretlen vagy kikapcsolt felhasználónál ``False``.
+        """
+        digest = hash_recovery_code(code)
+        try:
+            with self._lock, self._locked():
+                data = self._read_raw()
+                item = data.get(name)
+                if not isinstance(item, dict) or not item.get("enabled", True):
+                    return False
+                stored = item.get("totp_recovery", [])
+                if not isinstance(stored, list):
+                    return False
+                matched = -1
+                # Végigmegyünk az összes elemen, hogy a futásidő ne árulja
+                # el, hányadik hash egyezett (a törlés a végén történik).
+                for index, value in enumerate(stored):
+                    if (
+                        isinstance(value, str)
+                        and _TOTP_RECOVERY_RE.match(value)
+                        and hmac.compare_digest(value, digest)
+                    ):
+                        matched = index
+                if matched < 0:
+                    return False
+                del stored[matched]
+                item["totp_recovery"] = stored
+                data[name] = item
+                self._write_raw(data)
+                return True
+        except UserStoreError as exc:
+            log(f"[felhasználók] {exc}")
+            return False
+
+    def reset_totp(self, name: str) -> bool:
+        """A TOTP-titok, a számláló és a helyreállítási kódok törlése.
+
+        A ``totp_required`` jelzőt szándékosan megtartja: az admin döntése
+        arról, hogy a belépéshez kétfaktoros azonosítás kell, nem változik.
+        Ismeretlen felhasználónál ``False``.
+        """
+        with self._lock, self._locked():
+            data = self._read_raw()
+            item = data.get(name)
+            if not isinstance(item, dict):
+                return False
+            item["totp_secret"] = ""
+            item["totp_last_step"] = -1
+            item["totp_recovery"] = []
+            data[name] = item
+            self._write_raw(data)
+            return True
 
     def remove_rule_everywhere(self, rule_id: str) -> int:
         with self._locked():

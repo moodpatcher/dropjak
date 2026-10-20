@@ -19,10 +19,13 @@ import os
 import socket
 import stat
 import struct
+import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
+import urllib.parse
 from pathlib import Path
 from unittest import mock
 
@@ -198,6 +201,62 @@ def solve(challenge: dict) -> dict:
         if hashlib.sha256(f'{challenge["salt"]}{n}'.encode()).hexdigest().startswith(zeros):
             return {**challenge, "number": n}
         n += 1
+
+
+def fresh_totp_code(secret: str, after_step: int | None = None) -> str:
+    """Aktuális TOTP-kód, az időlépés határától biztonságos távolságban.
+
+    Ha ``after_step`` meg van adva, a visszaadott kód egy annál későbbi
+    időlépéshez tartozik (a beiratkozási kód újrafelhasználásának
+    elkerülésére), de az aktuális ellenőrzési ablakon belül marad.
+    Ha közel vagyunk a 30 másodperces lépés végéhez, megvárjuk a következő
+    lépést, hogy a több kérést igénylő tesztek ne essenek szét határátlépéskor.
+    """
+    remaining = gateway.TOTP_PERIOD - (time.time() % gateway.TOTP_PERIOD)
+    if remaining < 5:
+        time.sleep(remaining + 0.2)
+    now = time.time()
+    if after_step is None:
+        return gateway.totp_code(secret, now=now)
+    current = int(now // gateway.TOTP_PERIOD)
+    for counter in range(
+        max(after_step + 1, current - gateway.TOTP_WINDOW),
+        current + gateway.TOTP_WINDOW + 1,
+    ):
+        code = gateway.hotp_code(secret, counter)
+        if gateway.totp_match(secret, code, now=now) == counter:
+            return code
+    raise AssertionError("nincs a megadott lépésnél későbbi érvényes kód")
+
+
+def wrong_totp_code(secret: str) -> str:
+    """Olyan 6 jegyű kód, amely egyik elfogadott időablakban sem érvényes."""
+    current = int(time.time() // gateway.TOTP_PERIOD)
+    accepted = {
+        gateway.hotp_code(secret, counter)
+        for counter in range(
+            max(0, current - gateway.TOTP_WINDOW),
+            current + gateway.TOTP_WINDOW + 1,
+        )
+    }
+    candidate = 0
+    while True:
+        code = f"{candidate:06d}"
+        if code not in accepted:
+            return code
+        candidate += 1
+
+
+def audit_since(audit, started: float) -> list[dict]:
+    """A ``started`` időpont után írt naplóbejegyzések (legújabb elöl)."""
+    rows: list[dict] = []
+    for row in audit.read(limit=2000):
+        try:
+            if float(row.get("ts", 0)) >= started:
+                rows.append(row)
+        except (TypeError, ValueError):
+            continue
+    return rows
 
 
 # ------------------------------------------------------------------ katalógus
@@ -805,6 +864,425 @@ class UserStoreTests(unittest.TestCase):
         self.assertEqual(self.store.provisioned_from("admin"), "jelolo-1")
         self.assertIsNotNone(self.store.record("admin"))
         self.assertEqual(self.store.record("admin").role, gateway.ROLE_ADMIN)
+
+
+# ------------------------------------------------------------------------ TOTP
+
+RFC_TOTP_SECRET = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+
+
+class TotpPrimitiveTests(unittest.TestCase):
+    def test_rfc6238_vector_and_window(self) -> None:
+        self.assertEqual(
+            (gateway.TOTP_PERIOD, gateway.TOTP_DIGITS, gateway.TOTP_WINDOW),
+            (30, 6, 1),
+        )
+        self.assertEqual(gateway.totp_code(RFC_TOTP_SECRET, now=59), "287082")
+        self.assertEqual(gateway.totp_match(RFC_TOTP_SECRET, "287082", now=59), 1)
+        # 90 másodpercnél a számláló 3; a ±1 ablak a 2., 3. és 4. lépést
+        # fogadja el, az ezen kívülieket nem.
+        for step in (2, 3, 4):
+            code = gateway.totp_code(
+                RFC_TOTP_SECRET, now=step * gateway.TOTP_PERIOD
+            )
+            self.assertEqual(
+                gateway.totp_match(RFC_TOTP_SECRET, code, now=90), step
+            )
+        for step in (1, 5):
+            code = gateway.totp_code(
+                RFC_TOTP_SECRET, now=step * gateway.TOTP_PERIOD
+            )
+            self.assertIsNone(gateway.totp_match(RFC_TOTP_SECRET, code, now=90))
+
+    def test_hotp_bad_secret_and_invalid_codes(self) -> None:
+        for secret in ("", "nem-base32!", "======"):
+            with self.subTest(secret=secret):
+                with self.assertRaises(ValueError):
+                    gateway.hotp_code(secret, 0)
+        for code in (
+            "", "12345", "1234567", "12345a", " 12345", "12345 ",
+            "12345²",
+        ):
+            with self.subTest(code=code):
+                self.assertIsNone(
+                    gateway.totp_match(RFC_TOTP_SECRET, code, now=59)
+                )
+        self.assertIsNone(gateway.totp_match(RFC_TOTP_SECRET, None, now=59))
+        self.assertIsNone(gateway.totp_match("", "287082", now=59))
+        self.assertIsNone(gateway.totp_match("nem-base32!", "287082", now=59))
+
+    def test_generated_secret(self) -> None:
+        secret = gateway.generate_totp_secret()
+        self.assertEqual(len(secret), 32)
+        self.assertEqual(secret, secret.upper())
+        self.assertNotIn("=", secret)
+        self.assertTrue(set(secret) <= set("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"))
+        self.assertNotEqual(secret, gateway.generate_totp_secret())
+        code = gateway.totp_code(secret, now=59)
+        self.assertEqual(gateway.totp_match(secret, code, now=59), 1)
+
+    def test_recovery_helpers(self) -> None:
+        self.assertEqual(
+            gateway.normalize_recovery_code(" ab-cd 2efg34\t"), "ABCD2EFG34"
+        )
+        self.assertEqual(gateway.normalize_recovery_code(None), "")
+        self.assertEqual(
+            gateway.hash_recovery_code(" ab-cd 2efg34\t"),
+            hashlib.sha256(b"ABCD2EFG34").hexdigest(),
+        )
+        codes = gateway.generate_recovery_codes()
+        self.assertEqual(len(codes), 10)
+        self.assertEqual(len(set(codes)), 10)
+        for code in codes:
+            self.assertEqual(len(code), 10)
+            self.assertTrue(
+                set(code) <= set("ABCDEFGHIJKLMNOPQRSTUVWXYZ234567")
+            )
+        self.assertEqual(gateway.generate_recovery_codes(0), [])
+
+    def test_otpauth_uri(self) -> None:
+        with mock.patch.object(gateway, "TOTP_ISSUER", "Teszt Kupac"):
+            uri = gateway.build_otpauth_uri("alice", RFC_TOTP_SECRET)
+        parsed = urllib.parse.urlparse(uri)
+        self.assertEqual(parsed.scheme, "otpauth")
+        self.assertEqual(parsed.netloc, "totp")
+        self.assertEqual(parsed.path, "/Teszt%20Kupac%3Aalice")
+        query = urllib.parse.parse_qs(parsed.query)
+        self.assertEqual(query["secret"], [RFC_TOTP_SECRET])
+        self.assertEqual(query["issuer"], ["Teszt Kupac"])
+        self.assertEqual(query["algorithm"], ["SHA1"])
+        self.assertEqual(query["digits"], ["6"])
+        self.assertEqual(query["period"], ["30"])
+
+
+class TotpUserStoreTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmp.name, "users.json")
+        self.store = gateway.UserStore(self.path, iterations=10_000)
+        self.store.add("alice", "hosszu-jelszo-1")
+        self.secret = gateway.generate_totp_secret()
+        self.base_item = json.loads(
+            Path(self.path).read_text(encoding="utf-8")
+        )["alice"]
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _enroll(self, recovery_codes=()) -> list[str]:
+        hashes = [gateway.hash_recovery_code(code) for code in recovery_codes]
+        self.assertTrue(self.store.enroll_totp("alice", self.secret, hashes))
+        return hashes
+
+    def _fresh_record(self) -> gateway.UserRecord:
+        return gateway.UserStore(self.path, iterations=10_000).record("alice")
+
+    def _write_alice(self, item: dict) -> None:
+        data = json.loads(Path(self.path).read_text(encoding="utf-8"))
+        data["alice"] = item
+        Path(self.path).write_text(json.dumps(data), encoding="utf-8")
+
+    def test_replay_rejected(self) -> None:
+        self._enroll()
+        now = 1_000_000.0
+        code = gateway.totp_code(self.secret, now=now)
+        self.assertTrue(self.store.verify_totp("alice", code, now=now))
+        self.assertFalse(self.store.verify_totp("alice", code, now=now))
+        record = self._fresh_record()
+        self.assertEqual(record.totp_last_step, int(now // gateway.TOTP_PERIOD))
+        # A kötelező jelző nélkül is működik; azt a szerver kényszeríti ki.
+        self.assertFalse(record.totp_required)
+
+    def test_enroll_records_step_and_rejects_replay(self) -> None:
+        now = 5_000_000.0
+        code = gateway.totp_code(self.secret, now=now)
+        matched = gateway.totp_match(self.secret, code, now=now)
+        self.assertIsNotNone(matched)
+        self.assertTrue(
+            self.store.enroll_totp("alice", self.secret, [], last_step=matched)
+        )
+        # A beiratkozást megerősítő kód ugyanabban az időlépésben már nem
+        # használható fel újra.
+        self.assertFalse(self.store.verify_totp("alice", code, now=now))
+        self.assertEqual(self._fresh_record().totp_last_step, matched)
+        # Csak a nem negatív egész (nem bool) érték kerül a számlálóba.
+        for value in (None, -1, True, False, "7", 3.5):
+            with self.subTest(last_step=value):
+                self.assertTrue(
+                    self.store.enroll_totp(
+                        "alice", self.secret, [], last_step=value
+                    )
+                )
+                self.assertEqual(self._fresh_record().totp_last_step, -1)
+
+    def test_concurrent_verify_single_success(self) -> None:
+        self._enroll()
+        now = 2_000_000.0
+        code = gateway.totp_code(self.secret, now=now)
+        barrier = threading.Barrier(2)
+        results: list[bool] = []
+        errors: list[BaseException] = []
+        result_lock = threading.Lock()
+
+        def worker() -> None:
+            try:
+                barrier.wait(timeout=10)
+                ok = self.store.verify_totp("alice", code, now=now)
+            except BaseException as exc:
+                with result_lock:
+                    errors.append(exc)
+                return
+            with result_lock:
+                results.append(ok)
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=15)
+        self.assertFalse(any(thread.is_alive() for thread in threads))
+        self.assertEqual(errors, [])
+        self.assertEqual(sorted(results), [False, True])
+
+    def test_recovery_codes_normalized_and_single_use(self) -> None:
+        codes = gateway.generate_recovery_codes(3)
+        self._enroll(codes)
+        first, second, third = codes
+        messy = f" {first[:5].lower()} - {first[5:].lower()} "
+        # A "0" nem szerepel a kódábécében, ezért biztosan nem egyezik.
+        self.assertFalse(self.store.verify_recovery("alice", "0000000000"))
+        self.assertTrue(self.store.verify_recovery("alice", messy))
+        self.assertFalse(self.store.verify_recovery("alice", messy))
+        self.assertEqual(len(self._fresh_record().totp_recovery), 2)
+        # A többi kódot a felhasználás nem érinti.
+        self.assertTrue(self.store.verify_recovery("alice", second))
+        self.assertTrue(self.store.verify_recovery("alice", third))
+        self.assertEqual(self._fresh_record().totp_recovery, ())
+        self.assertFalse(self.store.verify_recovery("alice", second))
+
+    def test_reset_and_enroll_preserve_required(self) -> None:
+        codes = gateway.generate_recovery_codes(2)
+        self._enroll(codes)
+        self.assertTrue(self.store.set_totp_required("alice", True))
+        record = self._fresh_record()
+        self.assertTrue(record.totp_required)
+        self.assertTrue(record.totp_enrolled)
+        self.assertTrue(self.store.reset_totp("alice"))
+        record = self._fresh_record()
+        self.assertTrue(record.totp_required)
+        self.assertFalse(record.totp_enrolled)
+        self.assertEqual(record.totp_secret, "")
+        self.assertEqual(record.totp_last_step, -1)
+        self.assertEqual(record.totp_recovery, ())
+        raw = json.loads(Path(self.path).read_text(encoding="utf-8"))["alice"]
+        self.assertEqual(raw["totp_last_step"], -1)
+        now = 3_000_000.0
+        self.assertFalse(
+            self.store.verify_totp(
+                "alice", gateway.totp_code(self.secret, now=now), now=now
+            )
+        )
+        # Az újrabelépés megőrzi a kötelező jelzőt.
+        self._enroll(codes)
+        record = self._fresh_record()
+        self.assertTrue(record.totp_required)
+        self.assertEqual(len(record.totp_recovery), 2)
+
+    def test_set_metadata_does_not_touch_totp_secret(self) -> None:
+        self._enroll(gateway.generate_recovery_codes(2))
+        before = self._fresh_record()
+        self.store.set_metadata("alice", totp_required=True)
+        after = self._fresh_record()
+        self.assertTrue(after.totp_required)
+        self.assertEqual(after.totp_secret, before.totp_secret)
+        self.assertEqual(after.totp_recovery, before.totp_recovery)
+        self.store.set_metadata("alice", role=gateway.ROLE_ADMIN)
+        again = self._fresh_record()
+        self.assertTrue(again.totp_required)
+        self.assertEqual(again.totp_secret, before.totp_secret)
+
+    def test_parsing_totp_required_fail_closed(self) -> None:
+        cases = (
+            ({}, False),
+            ({"totp_required": False}, False),
+            ({"totp_required": True}, True),
+            ({"totp_required": "yes"}, True),
+            ({"totp_required": 1}, True),
+            ({"totp_required": None}, True),
+            ({"totp_required": {}}, True),
+        )
+        for fields, expected in cases:
+            with self.subTest(fields=fields):
+                item = dict(self.base_item)
+                item.update(fields)
+                self._write_alice(item)
+                record = self._fresh_record()
+                self.assertIsNotNone(record)
+                self.assertIs(record.totp_required, expected)
+
+    def test_parsing_secret_step_and_recovery(self) -> None:
+        record = self._fresh_record()
+        self.assertEqual(
+            (
+                record.totp_secret, record.totp_required,
+                record.totp_last_step, record.totp_recovery,
+            ),
+            ("", False, -1, ()),
+        )
+        good = "a" * 64
+        item = dict(self.base_item)
+        item.update({
+            "totp_secret": "ABC234",
+            "totp_last_step": "7",
+            "totp_recovery": [good, "B" * 64, "nem-hash", 5, "C" * 63],
+        })
+        self._write_alice(item)
+        record = self._fresh_record()
+        self.assertEqual(record.totp_secret, "ABC234")
+        self.assertEqual(record.totp_last_step, 7)
+        self.assertEqual(record.totp_recovery, (good, "b" * 64))
+        self.assertTrue(record.totp_enrolled)
+
+        item = dict(self.base_item)
+        item.update({
+            "totp_secret": 123,
+            "totp_last_step": "nem-szam",
+            "totp_recovery": "nem-lista",
+        })
+        self._write_alice(item)
+        record = self._fresh_record()
+        self.assertEqual(record.totp_secret, "")
+        self.assertEqual(record.totp_last_step, -1)
+        self.assertEqual(record.totp_recovery, ())
+        self.assertFalse(record.totp_enrolled)
+
+    def test_public_hides_totp_internals(self) -> None:
+        self._enroll(gateway.generate_recovery_codes(2))
+        self.store.set_totp_required("alice", True)
+        record = self._fresh_record()
+        info = record.public()
+        self.assertIs(info["totp_required"], True)
+        self.assertIs(info["totp_enrolled"], True)
+        self.assertEqual(
+            {key for key in info if key.startswith("totp")},
+            {"totp_required", "totp_enrolled"},
+        )
+        for key in ("totp_secret", "totp_last_step", "totp_recovery"):
+            self.assertNotIn(key, info)
+        self.store.reset_totp("alice")
+        record = self._fresh_record()
+        self.assertFalse(record.totp_enrolled)
+        self.assertIs(record.public()["totp_enrolled"], False)
+
+    def test_unknown_and_disabled_users_rejected(self) -> None:
+        now = 4_000_000.0
+        code = gateway.totp_code(self.secret, now=now)
+        self.assertFalse(self.store.verify_totp("nobody", code, now=now))
+        self.assertFalse(self.store.verify_recovery("nobody", "ABCDEFGHIJ"))
+        self.assertFalse(self.store.set_totp_required("nobody", True))
+        self.assertFalse(self.store.enroll_totp("nobody", self.secret, []))
+        self.assertFalse(self.store.reset_totp("nobody"))
+        self._enroll(["ABCDEFGHIJ"])
+        self.store.set_metadata("alice", enabled=False)
+        self.assertFalse(self.store.verify_totp("alice", code, now=now))
+        self.assertFalse(self.store.verify_recovery("alice", "ABCDEFGHIJ"))
+
+    def test_verify_without_enrollment_rejected(self) -> None:
+        now = 5_000_000.0
+        code = gateway.totp_code(self.secret, now=now)
+        self.assertFalse(self.store.verify_totp("alice", code, now=now))
+
+
+class LoginTicketStoreTests(unittest.TestCase):
+    """A 2FA-belépőjegyek élettartama, IP-kötése és próbaszámlálása."""
+
+    def setUp(self) -> None:
+        self.now = 1000.0
+        self.store = server.LoginTicketStore(
+            ttl=5, max_attempts=3, clock=lambda: self.now
+        )
+        self.ip = "127.0.0.9"
+
+    def test_issue_fields_and_ip_binding(self) -> None:
+        token = self.store.issue(
+            "verify", "alice", self.ip, "fingerprint-1"
+        )
+        ticket = self.store.peek(token, self.ip)
+        self.assertIsNotNone(ticket)
+        self.assertEqual(ticket.token, token)
+        self.assertEqual(ticket.purpose, "verify")
+        self.assertEqual(ticket.username, "alice")
+        self.assertEqual(ticket.ip, self.ip)
+        self.assertEqual(ticket.fingerprint, "fingerprint-1")
+        self.assertEqual(ticket.secret, "")
+        self.assertEqual(ticket.attempts, 0)
+        self.assertEqual(ticket.expires_at, 1005.0)
+
+        # Idegen IP-ről a jegy nem olvasható, nem fogyasztható és nem
+        # számolható rá sikertelen próba.
+        self.assertIsNone(self.store.peek(token, "127.0.0.10"))
+        self.assertIsNone(self.store.consume(token, "127.0.0.10"))
+        self.assertEqual(self.store.fail(token, "127.0.0.10"), 0)
+        self.assertIsNotNone(self.store.peek(token, self.ip))
+        self.assertEqual(self.store.peek(token, self.ip).attempts, 0)
+
+    def test_ttl_expiry_with_injected_clock_and_purge(self) -> None:
+        token = self.store.issue("verify", "alice", self.ip, "fp")
+        self.now = 1004.0
+        self.assertIsNotNone(self.store.peek(token, self.ip))
+        self.now = 1005.0
+        self.assertIsNone(self.store.peek(token, self.ip))
+
+        # A purge a hozzáférés nélkül is eltakarítja a lejárt jegyeket.
+        fresh = self.store.issue("verify", "alice", self.ip, "fp")
+        self.assertIn(fresh, self.store._tickets)
+        self.now = 1011.0
+        self.store.purge()
+        self.assertNotIn(fresh, self.store._tickets)
+        self.assertIsNone(self.store.peek(fresh, self.ip))
+
+    def test_ticket_is_single_use(self) -> None:
+        token = self.store.issue("verify", "alice", self.ip, "fp")
+        ticket = self.store.consume(token, self.ip)
+        self.assertIsNotNone(ticket)
+        self.assertEqual(ticket.username, "alice")
+        self.assertIsNone(self.store.consume(token, self.ip))
+        self.assertIsNone(self.store.peek(token, self.ip))
+
+    def test_attempt_cap_invalidates_ticket(self) -> None:
+        token = self.store.issue("verify", "alice", self.ip, "fp")
+        self.assertEqual(self.store.fail(token, self.ip), 2)
+        self.assertEqual(self.store.fail(token, self.ip), 1)
+        self.assertIsNotNone(self.store.peek(token, self.ip))
+        self.assertEqual(self.store.fail(token, self.ip), 0)
+        self.assertIsNone(self.store.peek(token, self.ip))
+        self.assertIsNone(self.store.consume(token, self.ip))
+
+        # Egy friss jegy ettől függetlenül használható marad.
+        fresh = self.store.issue("verify", "alice", self.ip, "fp")
+        self.assertEqual(self.store.consume(fresh, self.ip).username, "alice")
+
+    def test_revoke_user_and_revoke_all(self) -> None:
+        first = self.store.issue("verify", "alice", self.ip, "fp")
+        bob = self.store.issue("verify", "bob", self.ip, "fp")
+        second = self.store.issue("enroll", "alice", self.ip, "fp")
+        self.assertEqual(self.store.revoke_user("alice"), 2)
+        self.assertIsNone(self.store.peek(first, self.ip))
+        self.assertIsNone(self.store.peek(second, self.ip))
+        self.assertIsNotNone(self.store.peek(bob, self.ip))
+
+        self.store.revoke_all()
+        self.assertIsNone(self.store.peek(bob, self.ip))
+        self.assertEqual(self.store._tickets, {})
+
+    def test_ticket_username_is_server_chosen(self) -> None:
+        token = self.store.issue("verify", "alice", self.ip, "fp")
+        ticket = self.store.peek(token, self.ip)
+        self.assertEqual(ticket.username, "alice")
+        # A kliens nem tud más felhasználót „beírni” a jegybe: a token csak
+        # a szerveroldali rekordot azonosítja.
+        self.assertNotEqual(ticket.username, "bob")
+        self.assertIsNone(self.store.peek("alice", self.ip))
 
 
 class AdminProvisionTests(unittest.TestCase):
@@ -1553,6 +2031,47 @@ class HttpTests(unittest.TestCase):
         raw = headers.get("Set-Cookie", "")
         return raw.split(";", 1)[0]
 
+    def login_from(self, user: str, password: str, source: str):
+        """Jelszavas belépés megadott forrás-IP-ről (a 2FA-jegyhez kell)."""
+        _, _, body = self.get("/api/challenge", source=source)
+        challenge = json.loads(body)
+        return self.post_json(
+            "/api/login",
+            {"user": user, "pass": password, "captcha": solve(challenge)},
+            source=source,
+        )
+
+    def require_totp(self, name: str) -> None:
+        """2FA kötelezővé tétele a teszt erejéig, biztos visszaállítással."""
+        self.users.reset_totp(name)
+        self.users.set_totp_required(name, True)
+        self.addCleanup(self._clear_totp, name)
+
+    def _clear_totp(self, name: str) -> None:
+        # A HttpTests felhasználói osztályszinten közösek, ezért a 2FA-t és a
+        # nyitva maradt jegyeket/munkameneteket minden érintett teszt végén
+        # vissza kell állítani.
+        server.LOGIN_TICKETS.revoke_all()
+        self.users.reset_totp(name)
+        self.users.set_totp_required(name, False)
+        self.gw.sessions.revoke_user(name)
+
+    def enroll_totp(self, user: str, password: str, source: str | None = None):
+        """Teljes első 2FA-beállítás; (secret, ticket, headers, válasz)."""
+        status, _, body = self.login_from(user, password, source or "127.0.0.1")
+        self.assertEqual(status, 200, body)
+        offer = json.loads(body)
+        self.assertTrue(offer.get("totp_enroll_required"), offer)
+        secret = offer["secret"]
+        ticket = offer["ticket"]
+        status, headers, body = self.post_json(
+            "/api/login/totp/enroll",
+            {"ticket": ticket, "code": gateway.totp_code(secret)},
+            source=source or "127.0.0.1",
+        )
+        self.assertEqual(status, 200, body)
+        return secret, ticket, headers, json.loads(body)
+
     def test_page_and_no_source_leak(self) -> None:
         for path in ("/", "/index.html", "/server.py", "/gateway.py", "/users.json"):
             status, headers, body = self.get(path)
@@ -1876,6 +2395,458 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(resp.status, 400)
         resp.read()
         conn.close()
+
+    # -- kétfaktoros belépés ---------------------------------------------------
+
+    def test_totp_required_enroll_offer_without_session(self) -> None:
+        self.require_totp("alice")
+        started = time.time()
+        status, headers, body = self.login("alice", "hosszu-jelszo-1")
+        self.assertEqual(status, 200, body)
+        data = json.loads(body)
+        self.assertTrue(data["ok"])
+        self.assertTrue(data["totp_required"])
+        self.assertTrue(data["totp_enroll_required"])
+        self.assertIsInstance(data["ticket"], str)
+        self.assertTrue(data["ticket"])
+        self.assertRegex(data["secret"], r"^[A-Z2-7]{32}$")
+        self.assertEqual(data["issuer"], gateway.TOTP_ISSUER)
+        self.assertIn("otpauth://totp/", data["otpauth_uri"])
+        self.assertIn(data["secret"], data["otpauth_uri"])
+        # A jelszó önmagában nem ad munkamenetet.
+        self.assertNotIn("Set-Cookie", headers)
+        status, _, status_body = self.get("/api/status")
+        self.assertEqual(status, 200)
+        self.assertFalse(json.loads(status_body)["authenticated"])
+
+        dump = json.dumps(audit_since(self.audit, started), ensure_ascii=False)
+        self.assertNotIn(data["secret"], dump)
+        self.assertNotIn(data["ticket"], dump)
+
+    def test_totp_enrollment_returns_codes_and_stores_hashes(self) -> None:
+        self.require_totp("alice")
+        started = time.time()
+        secret, ticket, headers, data = self.enroll_totp(
+            "alice", "hosszu-jelszo-1"
+        )
+        self.assertIn("Set-Cookie", headers)
+        cookie = self.cookie_from(headers)
+        self.assertTrue(cookie.startswith("hv_session="))
+        self.assertEqual(data["user"], "alice")
+        codes = data["recovery_codes"]
+        self.assertEqual(len(codes), 10)
+        self.assertEqual(len(set(codes)), 10)
+        for code in codes:
+            self.assertEqual(len(code), gateway._RECOVERY_CODE_LENGTH)
+            self.assertTrue(set(code) <= set(gateway._BASE32_ALPHABET), code)
+
+        record = self.users.record("alice")
+        self.assertEqual(record.totp_secret, secret)
+        self.assertTrue(record.totp_required)
+        self.assertGreaterEqual(
+            record.totp_last_step, int(started // gateway.TOTP_PERIOD)
+        )
+        self.assertEqual(len(record.totp_recovery), 10)
+        self.assertEqual(
+            set(record.totp_recovery),
+            {gateway.hash_recovery_code(code) for code in codes},
+        )
+        for digest in record.totp_recovery:
+            self.assertRegex(digest, r"^[0-9a-f]{64}$")
+
+        # A nyílt kódok és a titok se a naplóba, se a nyilvános állapotba
+        # nem szivároghatnak be.
+        public_dump = json.dumps(
+            [item.public() for item in self.users.details()],
+            ensure_ascii=False,
+        )
+        audit_dump = json.dumps(
+            audit_since(self.audit, started), ensure_ascii=False
+        )
+        self.assertNotIn(secret, public_dump)
+        self.assertNotIn(secret, audit_dump)
+        self.assertNotIn(ticket, audit_dump)
+        for code in codes:
+            self.assertNotIn(code, public_dump)
+            self.assertNotIn(code, audit_dump)
+        for digest in record.totp_recovery:
+            self.assertNotIn(digest, public_dump)
+            self.assertNotIn(digest, audit_dump)
+
+        # A regisztrációs jegy egyszer használatos.
+        status, headers, body = self.post_json(
+            "/api/login/totp/enroll",
+            {"ticket": ticket, "code": gateway.totp_code(secret)},
+        )
+        self.assertEqual(status, 403, body)
+        self.assertEqual(json.loads(body)["code"], "ticket_invalid")
+        self.assertNotIn("Set-Cookie", headers)
+
+    def test_totp_verify_wrong_then_correct_code(self) -> None:
+        self.require_totp("alice")
+        source = "127.0.0.20"
+        secret, _, _, _ = self.enroll_totp(
+            "alice", "hosszu-jelszo-1", source
+        )
+        status, headers, body = self.login_from(
+            "alice", "hosszu-jelszo-1", source
+        )
+        self.assertEqual(status, 200, body)
+        offer = json.loads(body)
+        self.assertEqual(offer["mode"], "verify")
+        self.assertTrue(offer["totp_required"])
+        self.assertTrue(offer["ticket"])
+        self.assertNotIn("Set-Cookie", headers)
+        ticket = offer["ticket"]
+
+        status, headers, body = self.post_json(
+            "/api/login/totp",
+            {"ticket": ticket, "code": wrong_totp_code(secret)},
+            source=source,
+        )
+        self.assertEqual(status, 403, body)
+        failure = json.loads(body)
+        self.assertEqual(failure["code"], "totp_invalid")
+        self.assertNotIn("Set-Cookie", headers)
+        pending = {
+            row["ip"]: row
+            for row in self.gw.fail2ban.snapshot()["pending"]
+        }
+        self.assertIn(source, pending)
+        self.assertEqual(pending[source]["count"], 1)
+        self.assertEqual(pending[source]["user"], "alice")
+
+        code = fresh_totp_code(
+            secret, after_step=self.users.record("alice").totp_last_step
+        )
+        status, headers, body = self.post_json(
+            "/api/login/totp", {"ticket": ticket, "code": code}, source=source
+        )
+        self.assertEqual(status, 200, body)
+        cookie = self.cookie_from(headers)
+        self.assertTrue(cookie.startswith("hv_session="))
+        status, _, body = self.get(
+            "/api/status", headers={"Cookie": cookie}, source=source
+        )
+        self.assertTrue(json.loads(body)["authenticated"])
+        pending = {
+            row["ip"]: row
+            for row in self.gw.fail2ban.snapshot()["pending"]
+        }
+        self.assertNotIn(source, pending)
+
+        # Ugyanaz a jegy nem használható újra.
+        status, headers, body = self.post_json(
+            "/api/login/totp", {"ticket": ticket, "code": code}, source=source
+        )
+        self.assertEqual(status, 403, body)
+        self.assertEqual(json.loads(body)["code"], "ticket_invalid")
+        self.assertNotIn("Set-Cookie", headers)
+
+    def test_totp_code_replay_with_fresh_ticket_rejected(self) -> None:
+        self.require_totp("alice")
+        source = "127.0.0.21"
+        secret, _, _, _ = self.enroll_totp(
+            "alice", "hosszu-jelszo-1", source
+        )
+        code = fresh_totp_code(
+            secret, after_step=self.users.record("alice").totp_last_step
+        )
+
+        status, _, body = self.login_from("alice", "hosszu-jelszo-1", source)
+        self.assertEqual(status, 200, body)
+        first_ticket = json.loads(body)["ticket"]
+        status, headers, body = self.post_json(
+            "/api/login/totp",
+            {"ticket": first_ticket, "code": code},
+            source=source,
+        )
+        self.assertEqual(status, 200, body)
+        self.assertIn("Set-Cookie", headers)
+
+        # Friss jegy, ugyanaz a még aktuális kód: a last_step replay-védelem
+        # miatt el kell utasítani (a jegy egyszer használata nem fedi el).
+        status, _, body = self.login_from("alice", "hosszu-jelszo-1", source)
+        self.assertEqual(status, 200, body)
+        second_ticket = json.loads(body)["ticket"]
+        self.assertNotEqual(first_ticket, second_ticket)
+        status, headers, body = self.post_json(
+            "/api/login/totp",
+            {"ticket": second_ticket, "code": code},
+            source=source,
+        )
+        self.assertEqual(status, 403, body)
+        self.assertEqual(json.loads(body)["code"], "totp_invalid")
+        self.assertNotIn("Set-Cookie", headers)
+
+    def test_totp_recovery_code_login_is_single_use(self) -> None:
+        self.require_totp("alice")
+        source = "127.0.0.22"
+        secret, _, _, enrolled = self.enroll_totp(
+            "alice", "hosszu-jelszo-1", source
+        )
+        self.assertEqual(len(enrolled["recovery_codes"]), 10)
+        first_code, second_code = enrolled["recovery_codes"][:2]
+        started = time.time()
+
+        status, _, body = self.login_from("alice", "hosszu-jelszo-1", source)
+        self.assertEqual(status, 200, body)
+        ticket = json.loads(body)["ticket"]
+        status, headers, body = self.post_json(
+            "/api/login/recovery",
+            {"ticket": ticket, "code": first_code},
+            source=source,
+        )
+        self.assertEqual(status, 200, body)
+        self.assertIn("Set-Cookie", headers)
+        self.assertTrue(json.loads(body)["authenticated"])
+        rows = audit_since(self.audit, started)
+        self.assertTrue(
+            any(
+                row.get("event") == "totp_recovery_used"
+                and row.get("target") == "alice"
+                for row in rows
+            ),
+            rows,
+        )
+
+        # Ugyanaz a recovery kód nem használható újra.
+        status, _, body = self.login_from("alice", "hosszu-jelszo-1", source)
+        self.assertEqual(status, 200, body)
+        ticket = json.loads(body)["ticket"]
+        status, headers, body = self.post_json(
+            "/api/login/recovery",
+            {"ticket": ticket, "code": first_code},
+            source=source,
+        )
+        self.assertEqual(status, 403, body)
+        self.assertEqual(json.loads(body)["code"], "recovery_invalid")
+        self.assertNotIn("Set-Cookie", headers)
+
+        # Egy másik kód viszont még egyszer működik.
+        status, _, body = self.login_from("alice", "hosszu-jelszo-1", source)
+        self.assertEqual(status, 200, body)
+        ticket = json.loads(body)["ticket"]
+        status, headers, body = self.post_json(
+            "/api/login/recovery",
+            {"ticket": ticket, "code": second_code},
+            source=source,
+        )
+        self.assertEqual(status, 200, body)
+        self.assertIn("Set-Cookie", headers)
+        self.assertEqual(len(self.users.record("alice").totp_recovery), 8)
+
+    def test_totp_ticket_is_bound_to_issuing_ip(self) -> None:
+        self.require_totp("alice")
+        secret, _, _, _ = self.enroll_totp("alice", "hosszu-jelszo-1")
+        issuer = "127.0.0.9"
+        other = "127.0.0.10"
+        status, _, body = self.login_from("alice", "hosszu-jelszo-1", issuer)
+        self.assertEqual(status, 200, body)
+        ticket = json.loads(body)["ticket"]
+        status, headers, body = self.post_json(
+            "/api/login/totp",
+            {"ticket": ticket, "code": gateway.totp_code(secret)},
+            source=other,
+        )
+        self.assertEqual(status, 403, body)
+        self.assertEqual(json.loads(body)["code"], "ticket_invalid")
+        self.assertNotIn("Set-Cookie", headers)
+
+    def test_totp_ticket_attempt_cap_locks_ticket(self) -> None:
+        self.require_totp("alice")
+        source = "127.0.0.30"
+        store = server.LoginTicketStore(max_attempts=3)
+        with mock.patch.object(server, "LOGIN_TICKETS", store):
+            # A fail2ban ne zavarja a jegy-próbaszámlálás determinisztikus
+            # ellenőrzését.
+            with mock.patch.object(
+                self.gw.fail2ban, "record_failure", return_value=None
+            ):
+                secret, _, _, _ = self.enroll_totp(
+                    "alice", "hosszu-jelszo-1", source
+                )
+                status, _, body = self.login_from(
+                    "alice", "hosszu-jelszo-1", source
+                )
+                self.assertEqual(status, 200, body)
+                ticket = json.loads(body)["ticket"]
+
+                for remaining in (2, 1, 0):
+                    status, headers, body = self.post_json(
+                        "/api/login/totp",
+                        {"ticket": ticket, "code": wrong_totp_code(secret)},
+                        source=source,
+                    )
+                    self.assertEqual(status, 403, body)
+                    failure = json.loads(body)
+                    self.assertEqual(failure["remaining"], remaining)
+                    if remaining:
+                        self.assertEqual(failure["code"], "totp_invalid")
+                    else:
+                        self.assertEqual(failure["code"], "ticket_locked")
+                    self.assertNotIn("Set-Cookie", headers)
+
+                self.assertIsNone(store.peek(ticket, source))
+                self.assertIsNone(store.consume(ticket, source))
+                status, headers, body = self.post_json(
+                    "/api/login/totp",
+                    {"ticket": ticket, "code": fresh_totp_code(secret)},
+                    source=source,
+                )
+                self.assertEqual(status, 403, body)
+                self.assertIn(
+                    json.loads(body).get("code"),
+                    {"ticket_invalid", "ticket_locked"},
+                )
+                self.assertNotIn("Set-Cookie", headers)
+
+    def test_totp_ticket_attempt_cap_with_fail2ban(self) -> None:
+        self.require_totp("alice")
+        source = "127.0.0.31"
+        # A fail2ban-tiltás drop-log bejegyzést ír; azt a teszt könyvtárába
+        # irányítjuk, hogy a projekt gyökerébe ne kerüljön szemét.
+        drops = gateway.droplog.DropLogService(
+            os.path.join(self.tmp.name, "totp-ban-drops.jsonl"),
+            enabled=False, logger=lambda *_: None,
+        )
+        original_drops = self.gw.drops
+        self.gw.drops = drops
+        self.addCleanup(setattr, self.gw, "drops", original_drops)
+
+        secret, _, _, _ = self.enroll_totp(
+            "alice", "hosszu-jelszo-1", source
+        )
+        status, _, body = self.login_from("alice", "hosszu-jelszo-1", source)
+        self.assertEqual(status, 200, body)
+        ticket = json.loads(body)["ticket"]
+
+        last: dict = {}
+        for _ in range(server.LOGIN_TICKET_MAX_ATTEMPTS):
+            status, headers, body = self.post_json(
+                "/api/login/totp",
+                {"ticket": ticket, "code": wrong_totp_code(secret)},
+                source=source,
+            )
+            self.assertEqual(status, 403, body)
+            last = json.loads(body)
+            self.assertNotIn("Set-Cookie", headers)
+        self.assertTrue(
+            last.get("banned") is True or last.get("code") == "ticket_locked",
+            last,
+        )
+
+        # A kimerült (vagy fail2ban-tiltott) jegy után a helyes kód sem
+        # adhat munkamenetet.
+        status, headers, body = self.post_json(
+            "/api/login/totp",
+            {"ticket": ticket, "code": fresh_totp_code(secret)},
+            source=source,
+        )
+        self.assertEqual(status, 403, body)
+        self.assertNotIn("Set-Cookie", headers)
+
+    def test_totp_ticket_invalidated_by_direct_secret_reset(self) -> None:
+        self.require_totp("alice")
+        source = "127.0.0.32"
+        secret, _, _, _ = self.enroll_totp(
+            "alice", "hosszu-jelszo-1", source
+        )
+        status, _, body = self.login_from("alice", "hosszu-jelszo-1", source)
+        self.assertEqual(status, 200, body)
+        ticket = json.loads(body)["ticket"]
+
+        before = server._record_fingerprint(self.users.record("alice"))
+        self.assertTrue(self.users.reset_totp("alice"))
+        after = server._record_fingerprint(self.users.record("alice"))
+        self.assertNotEqual(before, after)
+
+        status, headers, body = self.post_json(
+            "/api/login/totp",
+            {"ticket": ticket, "code": gateway.totp_code(secret)},
+            source=source,
+        )
+        self.assertEqual(status, 403, body)
+        self.assertEqual(json.loads(body)["code"], "ticket_invalid")
+        self.assertNotIn("Set-Cookie", headers)
+
+    def test_non_totp_login_still_returns_session(self) -> None:
+        self.users.reset_totp("alice")
+        self.users.set_totp_required("alice", False)
+        status, headers, body = self.login("alice", "hosszu-jelszo-1")
+        self.assertEqual(status, 200, body)
+        data = json.loads(body)
+        self.assertTrue(data["authenticated"])
+        self.assertNotIn("totp_required", data)
+        self.assertNotIn("ticket", data)
+        cookie = self.cookie_from(headers)
+        status, _, body = self.get(
+            "/api/status", headers={"Cookie": cookie}
+        )
+        self.assertTrue(json.loads(body)["authenticated"])
+
+    def test_wrong_totp_and_wrong_password_count_identically(self) -> None:
+        self.require_totp("alice")
+        source = "127.0.0.40"
+        secret, _, _, _ = self.enroll_totp(
+            "alice", "hosszu-jelszo-1", source
+        )
+        status, _, body = self.login_from("alice", "hosszu-jelszo-1", source)
+        self.assertEqual(status, 200, body)
+        ticket = json.loads(body)["ticket"]
+
+        status, headers, body = self.post_json(
+            "/api/login/totp",
+            {"ticket": ticket, "code": wrong_totp_code(secret)},
+            source=source,
+        )
+        self.assertEqual(status, 403, body)
+        self.assertEqual(json.loads(body)["code"], "totp_invalid")
+        self.assertNotIn("Set-Cookie", headers)
+        rows = [
+            row for row in self.gw.fail2ban.snapshot()["pending"]
+            if row["ip"] == source
+        ]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["count"], 1)
+        self.assertEqual(rows[0]["user"], "alice")
+
+        # Ugyanaz a számlálás hibás jelszónál is (friss fail2ban-állapotból).
+        self.reset_fail2ban()
+        status, headers, body = self.login_from(
+            "bob", "rossz-jelszo", source
+        )
+        self.assertEqual(status, 403, body)
+        self.assertNotIn("Set-Cookie", headers)
+        rows = [
+            row for row in self.gw.fail2ban.snapshot()["pending"]
+            if row["ip"] == source
+        ]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["count"], 1)
+        self.assertEqual(rows[0]["user"], "bob")
+
+    def test_totp_static_markup_present(self) -> None:
+        status, _, body = self.get("/")
+        self.assertEqual(status, 200)
+        for token in (
+            b'id="totp-view"',
+            b'id="totp-code"',
+            b'id="totp-enroll"',
+            b'id="totp-recovery"',
+            b'id="totp-recovery-codes"',
+            b"/api/login/totp",
+            b"totp_required",
+        ):
+            self.assertIn(token, body, token)
+        # Titok vagy szerveroldali mező ne legyen a statikus oldalba égetve.
+        for hidden in (
+            b"totp_secret",
+            b"totp_last_step",
+            b"totp_recovery",
+            RFC_TOTP_SECRET.encode(),
+        ):
+            self.assertNotIn(hidden, body, hidden)
 
 
 class RuleGroupStoreTests(unittest.TestCase):
@@ -2242,6 +3213,57 @@ class AdminHttpTests(unittest.TestCase):
         body = resp.read()
         conn.close()
         return json.loads(body)
+
+    # -- kétfaktoros belépés ---------------------------------------------------
+
+    def password_login(self, user: str, password: str, source: str = "127.0.0.1"):
+        """Jelszavas belépés nyers válasszal (a 2FA-jegyhez forrás-IP kell)."""
+        _, _, body = self.get("/api/challenge", source=source)
+        challenge = json.loads(body)
+        return self.post(
+            "/api/login",
+            {"user": user, "pass": password, "captcha": solve(challenge)},
+            source=source,
+        )
+
+    def enroll_totp(self, user: str, password: str, source: str = "127.0.0.1"):
+        """Első 2FA-beállítás; (secret, ticket, headers, válasz)."""
+        status, _, body = self.password_login(user, password, source)
+        self.assertEqual(status, 200, body)
+        offer = json.loads(body)
+        self.assertTrue(offer.get("totp_enroll_required"), offer)
+        secret = offer["secret"]
+        ticket = offer["ticket"]
+        status, headers, body = self.post(
+            "/api/login/totp/enroll",
+            {"ticket": ticket, "code": gateway.totp_code(secret)},
+            source=source,
+        )
+        self.assertEqual(status, 200, body)
+        return secret, ticket, headers, json.loads(body)
+
+    def create_user(self, cookie: str, name: str, password: str, **extra):
+        payload = {
+            "action": "create", "name": name, "password": password,
+            "role": "user", "enabled": True, "rules": [], "groups": [],
+        }
+        payload.update(extra)
+        return self.post(
+            "/api/admin/users", payload, cookie=cookie, source="127.0.0.5"
+        )
+
+    def drop_totp_user(self, name: str) -> None:
+        """A teszt-specifikus felhasználó és a hozzá tartozó állapot törlése."""
+        server.LOGIN_TICKETS.revoke_all()
+        self.gw.sessions.revoke_user(name)
+        self.gw.groups.remove_member_everywhere(name)
+        self.users.remove(name)
+
+    def restore_root_totp(self) -> None:
+        server.LOGIN_TICKETS.revoke_all()
+        self.users.reset_totp("root")
+        self.users.set_totp_required("root", False)
+        self.gw.sessions.revoke_user("root")
 
     def test_non_admin_is_rejected(self) -> None:
         cookie, _ = self.login("alice", "alice-jelszo-1")
@@ -3264,6 +4286,239 @@ class AdminHttpTests(unittest.TestCase):
         self.assertIn("drop_window_seconds", snapshot)
         self.assertEqual(snapshot["limits"]["max_drop_max"], 10000)
 
+    # -- kétfaktoros belépés ---------------------------------------------------
+
+    def test_admin_creates_user_with_totp_required(self) -> None:
+        admin = self.admin_cookie()
+        name = "totpcreated"
+        password = "totpcreated-jelszo-1"
+        self.addCleanup(self.drop_totp_user, name)
+        status, _, body = self.create_user(
+            admin, name, password, totp_required=True
+        )
+        self.assertEqual(status, 200, body)
+        user = next(
+            item for item in json.loads(body)["users"] if item["name"] == name
+        )
+        self.assertTrue(user["totp_required"])
+        self.assertFalse(user["totp_enrolled"])
+
+        status, headers, body = self.password_login(
+            name, password, source="127.0.0.2"
+        )
+        self.assertEqual(status, 200, body)
+        offer = json.loads(body)
+        self.assertTrue(offer["totp_required"])
+        self.assertTrue(offer["totp_enroll_required"])
+        self.assertTrue(offer["ticket"])
+        self.assertNotIn("Set-Cookie", headers)
+
+    def test_admin_totp_required_toggle_keeps_enrolled_secret(self) -> None:
+        admin = self.admin_cookie()
+        name = "totptoggle"
+        password = "totptoggle-jelszo-1"
+        source = "127.0.0.2"
+        self.addCleanup(self.drop_totp_user, name)
+        status, _, body = self.create_user(
+            admin, name, password, totp_required=True
+        )
+        self.assertEqual(status, 200, body)
+        secret, _, _, _ = self.enroll_totp(name, password, source)
+        self.assertTrue(self.users.record(name).totp_enrolled)
+
+        status, _, body = self.post(
+            "/api/admin/users",
+            {"action": "update", "name": name, "totp_required": False},
+            cookie=admin, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+        record = self.users.record(name)
+        self.assertEqual(record.totp_secret, secret)
+        self.assertFalse(record.totp_required)
+        status, headers, body = self.password_login(name, password, source)
+        self.assertEqual(status, 200, body)
+        self.assertNotIn("totp_required", json.loads(body))
+        self.assertIn("Set-Cookie", headers)
+
+        status, _, body = self.post(
+            "/api/admin/users",
+            {"action": "update", "name": name, "totp_required": True},
+            cookie=admin, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+        record = self.users.record(name)
+        self.assertEqual(record.totp_secret, secret)
+        self.assertTrue(record.totp_required)
+        status, headers, body = self.password_login(name, password, source)
+        self.assertEqual(status, 200, body)
+        offer = json.loads(body)
+        self.assertEqual(offer["mode"], "verify")
+        self.assertTrue(offer["ticket"])
+        self.assertNotIn("Set-Cookie", headers)
+
+    def test_admin_totp_reset_clears_secret_and_invalidates(self) -> None:
+        admin = self.admin_cookie()
+        name = "totpreset"
+        password = "totpreset-jelszo-1"
+        source = "127.0.0.2"
+        self.addCleanup(self.drop_totp_user, name)
+        status, _, body = self.create_user(
+            admin, name, password, totp_required=True
+        )
+        self.assertEqual(status, 200, body)
+        secret, _, enroll_headers, enrolled = self.enroll_totp(
+            name, password, source
+        )
+        user_cookie = enroll_headers["Set-Cookie"].split(";", 1)[0]
+        hashes = list(self.users.record(name).totp_recovery)
+        self.assertEqual(len(hashes), 10)
+
+        # Nyitott verify-jegy: a resetnek ezt is érvénytelenítenie kell.
+        status, _, body = self.password_login(name, password, source)
+        self.assertEqual(status, 200, body)
+        ticket = json.loads(body)["ticket"]
+
+        started = time.time()
+        status, _, body = self.post(
+            "/api/admin/users",
+            {"action": "totp_reset", "name": name},
+            cookie=admin, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+        state = json.loads(body)
+        self.assertIn("message", state)
+        self.assertIn(name, state["message"])
+        record = self.users.record(name)
+        self.assertEqual(record.totp_secret, "")
+        self.assertEqual(record.totp_last_step, -1)
+        self.assertEqual(record.totp_recovery, ())
+        self.assertTrue(record.totp_required)
+
+        status, _, body = self.get(
+            "/api/status", cookie=user_cookie, source=source
+        )
+        self.assertFalse(json.loads(body)["authenticated"])
+
+        rows = audit_since(self.audit, started)
+        resets = [
+            row for row in rows if row.get("event") == "admin_totp_reset"
+        ]
+        self.assertEqual(len(resets), 1)
+        self.assertEqual(resets[0]["target"], name)
+        dump = json.dumps(rows, ensure_ascii=False)
+        self.assertNotIn(secret, dump)
+        for digest in hashes:
+            self.assertNotIn(digest, dump)
+        self.assertNotIn("totp_secret", dump)
+        self.assertNotIn("totp_recovery", dump)
+
+        status, headers, body = self.post(
+            "/api/login/totp",
+            {"ticket": ticket, "code": gateway.totp_code(secret)},
+            source=source,
+        )
+        self.assertEqual(status, 403, body)
+        self.assertEqual(json.loads(body)["code"], "ticket_invalid")
+        self.assertNotIn("Set-Cookie", headers)
+
+        status, _, body = self.post(
+            "/api/admin/users",
+            {"action": "totp_reset", "name": "nincs-ilyen-user"},
+            cookie=admin, source="127.0.0.5",
+        )
+        self.assertEqual(status, 400, body)
+        self.assertFalse(json.loads(body)["ok"])
+
+    def test_admin_state_hides_totp_internals(self) -> None:
+        admin = self.admin_cookie()
+        name = "totpstate"
+        password = "totpstate-jelszo-1"
+        self.addCleanup(self.drop_totp_user, name)
+        status, _, body = self.create_user(
+            admin, name, password, totp_required=True
+        )
+        self.assertEqual(status, 200, body)
+        secret, _, _, enrolled = self.enroll_totp(
+            name, password, "127.0.0.2"
+        )
+        codes = enrolled["recovery_codes"]
+
+        status, _, body = self.get(
+            "/api/admin/state", cookie=admin, source="127.0.0.5"
+        )
+        self.assertEqual(status, 200, body)
+        raw = body.decode("utf-8")
+        for token in ("totp_secret", "totp_last_step", "totp_recovery", secret):
+            self.assertNotIn(token, raw)
+        for code in codes:
+            self.assertNotIn(code, raw)
+        state = json.loads(body)
+        for user in state["users"]:
+            self.assertEqual(
+                {key for key in user if key.startswith("totp")},
+                {"totp_required", "totp_enrolled"},
+            )
+        record = self.users.record(name)
+        self.assertTrue(record.totp_secret)
+        for digest in record.totp_recovery:
+            self.assertNotIn(digest, raw)
+
+    def test_admin_account_can_use_totp(self) -> None:
+        self.addCleanup(self.restore_root_totp)
+        self.users.reset_totp("root")
+        self.users.set_totp_required("root", True)
+        source = "127.0.0.5"
+
+        # Az első jelszavas lépés még nem ad munkamenetet.
+        status, headers, body = self.password_login(
+            "root", "root-jelszo-1", source
+        )
+        self.assertEqual(status, 200, body)
+        offer = json.loads(body)
+        self.assertTrue(offer["totp_enroll_required"])
+        self.assertTrue(offer["ticket"])
+        self.assertNotIn("Set-Cookie", headers)
+        secret = offer["secret"]
+        status, headers, body = self.post(
+            "/api/login/totp/enroll",
+            {"ticket": offer["ticket"], "code": gateway.totp_code(secret)},
+            source=source,
+        )
+        self.assertEqual(status, 200, body)
+        self.assertIn("Set-Cookie", headers)
+        self.assertEqual(len(json.loads(body)["recovery_codes"]), 10)
+
+        # Beállítás után a jelszó csak jegyet ad, munkamenetet nem.
+        status, headers, body = self.password_login(
+            "root", "root-jelszo-1", source
+        )
+        self.assertEqual(status, 200, body)
+        offer = json.loads(body)
+        self.assertEqual(offer["mode"], "verify")
+        self.assertTrue(offer["ticket"])
+        self.assertNotIn("Set-Cookie", headers)
+
+        status, headers, body = self.post(
+            "/api/login/totp",
+            {
+                "ticket": offer["ticket"],
+                "code": fresh_totp_code(
+                    secret,
+                    after_step=self.users.record("root").totp_last_step,
+                ),
+            },
+            source=source,
+        )
+        self.assertEqual(status, 200, body)
+        data = json.loads(body)
+        self.assertTrue(data["admin"])
+        cookie = headers["Set-Cookie"].split(";", 1)[0]
+        status, _, body = self.get(
+            "/api/admin/state", cookie=cookie, source=source
+        )
+        self.assertEqual(status, 200, body)
+        self.assertTrue(json.loads(body)["ok"])
+
 
 class RateLimitHttpTests(unittest.TestCase):
     def test_second_attempt_is_429(self) -> None:
@@ -3307,6 +4562,136 @@ class RateLimitHttpTests(unittest.TestCase):
                 srv.shutdown(); srv.server_close(); th.join(timeout=5)
         finally:
             tmp.cleanup()
+
+
+class TotpCliTests(unittest.TestCase):
+    """A ``server.py user totp-reset`` parancs viselkedése."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.users_path = os.path.join(self.tmp.name, "users.json")
+        self.users = gateway.UserStore(self.users_path, iterations=10_000)
+        self.users.add("cliuser", "cliuser-jelszo-1")
+        self.users.set_totp_required("cliuser", True)
+        self.secret = gateway.generate_totp_secret()
+        self.recovery = gateway.generate_recovery_codes(10)
+        self.users.enroll_totp(
+            "cliuser",
+            self.secret,
+            [gateway.hash_recovery_code(code) for code in self.recovery],
+        )
+
+    def run_cli(self, *args: str) -> subprocess.CompletedProcess:
+        env = {**os.environ, "HV_USERS": self.users_path}
+        return subprocess.run(
+            [sys.executable, str(ROOT / "server.py"), *args],
+            cwd=str(ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+    def assert_no_secrets(self, text: str) -> None:
+        self.assertNotIn(self.secret, text)
+        for code in self.recovery:
+            self.assertNotIn(code, text)
+
+    def test_cli_totp_reset_existing_user(self) -> None:
+        result = self.run_cli("user", "totp-reset", "cliuser")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("cliuser", result.stdout)
+        self.assertIn("2FA alaphelyzetbe állítva", result.stdout)
+        self.assert_no_secrets(result.stdout + result.stderr)
+
+        data = json.loads(Path(self.users_path).read_text(encoding="utf-8"))
+        item = data["cliuser"]
+        self.assertEqual(item.get("totp_secret", ""), "")
+        self.assertEqual(item.get("totp_last_step", -1), -1)
+        self.assertEqual(item.get("totp_recovery", []), [])
+        self.assertIs(item.get("totp_required"), True)
+        self.assertEqual(
+            stat.S_IMODE(os.stat(self.users_path).st_mode), 0o600
+        )
+        # A már betöltött példány is látja a változást (mtime-újratöltés).
+        record = self.users.record("cliuser")
+        self.assertEqual(record.totp_secret, "")
+        self.assertEqual(record.totp_last_step, -1)
+        self.assertEqual(record.totp_recovery, ())
+
+    def test_cli_totp_reset_unknown_user(self) -> None:
+        result = self.run_cli("user", "totp-reset", "nincs-ilyen")
+        self.assertEqual(result.returncode, 1)
+        output = result.stdout + result.stderr
+        self.assertIn("Nincs ilyen felhasználó", output)
+        self.assertIn("nincs-ilyen", output)
+        self.assert_no_secrets(output)
+        # A meglévő felhasználó érintetlen maradt.
+        self.assertTrue(self.users.record("cliuser").totp_secret)
+
+    def test_cli_totp_reset_while_server_runs(self) -> None:
+        tools = FakeTools(self.tmp.name)
+        fw = gateway.Firewall(binary=str(tools.nft), logger=lambda *_: None)
+        rules = gateway.RuleStore(
+            os.path.join(self.tmp.name, "rules.json"), catalog=CATALOG,
+            logger=lambda *_: None,
+        )
+        groups = gateway.GroupStore(
+            os.path.join(self.tmp.name, "groups.json"), logger=lambda *_: None
+        )
+        audit = gateway.AuditLog(
+            os.path.join(self.tmp.name, "audit.jsonl"), logger=lambda *_: None
+        )
+        settings = gateway.settings_store.SettingsStore(
+            os.path.join(self.tmp.name, "firewall-settings.json"),
+            logger=lambda *_: None, default_host_ssh="any",
+        )
+        drops = gateway.droplog.DropLogService(
+            os.path.join(self.tmp.name, "drops.jsonl"),
+            enabled=False, logger=lambda *_: None,
+        )
+        fail2ban = fail2ban_mod.Fail2ban(
+            fw, path=os.path.join(self.tmp.name, "fail2ban.json"),
+            audit=audit, logger=lambda *_: None, enabled=False,
+        )
+        gw = gateway.Gateway(
+            users=self.users, firewall=fw, catalog=CATALOG,
+            rules=rules, groups=groups, audit=audit, settings=settings,
+            drops=drops, fail2ban=fail2ban,
+            rate_limiter=gateway.RateLimiter(window=60, maximum=1000),
+        )
+        srv = server.AppServer(("127.0.0.1", 0), gw)
+        thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        thread.start()
+
+        def stop_server() -> None:
+            srv.shutdown()
+            srv.server_close()
+            thread.join(timeout=5)
+
+        self.addCleanup(stop_server)
+
+        # A futó szerver gyorsítótára már tartalmazza a beállított titkot.
+        self.assertTrue(self.users.record("cliuser").totp_secret)
+
+        result = self.run_cli("user", "totp-reset", "cliuser")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assert_no_secrets(result.stdout + result.stderr)
+
+        # mtime-alapú újratöltés: az élő példány a CLI írása után frissül.
+        record = self.users.record("cliuser")
+        self.assertEqual(record.totp_secret, "")
+        self.assertEqual(record.totp_last_step, -1)
+        self.assertEqual(record.totp_recovery, ())
+        self.assertTrue(record.totp_required)
+
+        data = json.loads(Path(self.users_path).read_text(encoding="utf-8"))
+        self.assertEqual(data["cliuser"]["totp_secret"], "")
+        self.assertEqual(data["cliuser"]["totp_recovery"], [])
+        self.assertEqual(
+            stat.S_IMODE(os.stat(self.users_path).st_mode), 0o600
+        )
 
 
 # ---------------------------------------------------- drop log és beállítások

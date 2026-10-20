@@ -74,6 +74,8 @@ services:
       HV_MIN_TTL: ${HV_MIN_TTL:-60}
       HV_MAX_TTL: ${HV_MAX_TTL:-86400}
       HV_AUTH_TTL: ${HV_AUTH_TTL:-600}
+      # A TOTP 2FA otpauth:// URI issuer/címkéje (alapból Dropjak).
+      HV_TOTP_ISSUER: ${HV_TOTP_ISSUER:-Dropjak}
       HV_CHALLENGE_TTL: ${HV_CHALLENGE_TTL:-600}
       HV_POW_DIFFICULTY: ${HV_POW_DIFFICULTY:-4}
       HV_PBKDF2_ITERATIONS: ${HV_PBKDF2_ITERATIONS:-600000}

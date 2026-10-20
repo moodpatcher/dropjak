@@ -286,6 +286,29 @@
   .smsg{display:none;margin:10px 0 0;font-size:12.5px;line-height:1.45;color:var(--red)}
   .smsg.show{display:block}
 
+  /* kétfaktoros belépés: csak az olvasható titok- és kódblokkok elrendezése */
+  .totp-secret{display:flex;align-items:flex-start;gap:8px;margin:0 0 16px}
+  .totp-secret code{
+    flex:1 1 auto;min-width:0;padding:10px 12px;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    font-size:13px;font-variant-numeric:tabular-nums;line-height:1.5;
+    background:var(--soft);border:1px solid var(--line-strong);border-radius:8px;
+    word-break:break-all;user-select:all;
+  }
+  .totp-secret button{flex:0 0 auto;padding:8px 10px;font-size:12.5px}
+  .totp-uri{
+    margin:0 0 16px;padding:10px 12px;
+    font-size:12px;line-height:1.5;
+    background:var(--soft);border:1px solid var(--line-strong);border-radius:8px;
+    word-break:break-all;user-select:all;
+  }
+  .totp-codes{
+    margin:14px 0 16px;padding:12px;
+    font-size:13px;line-height:1.8;
+    background:var(--soft);border:1px solid var(--line-strong);border-radius:8px;
+    white-space:pre;overflow:auto;user-select:all;
+  }
+
   /* belépett keret */
   .topbar{
     display:flex;
@@ -863,6 +886,62 @@
     </div>
     <button type="button" class="block" id="ban-retry"><span class="btn-ico" data-icon="refresh" aria-hidden="true"></span><span data-i18n="Újrapróbálás">Újrapróbálás</span></button>
     <p class="ban-hint" data-i18n="A tiltás automatikusan lejár, utána ismét beléphetsz.">A tiltás automatikusan lejár, utána ismét beléphetsz.</p>
+  </div>
+
+  <!-- ------------------------------------------------ kétfaktoros belépés -->
+  <div class="view" id="totp-view">
+    <div class="view" id="totp-verify">
+      <h1 data-i18n="Kétfaktoros azonosítás">Kétfaktoros azonosítás</h1>
+      <p class="subtitle" data-i18n="Írd be a hitelesítő alkalmazásban látható 6 jegyű kódot.">Írd be a hitelesítő alkalmazásban látható 6 jegyű kódot.</p>
+      <form id="totp-form" novalidate>
+        <label for="totp-code" data-i18n="Kód">Kód</label>
+        <input id="totp-code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" spellcheck="false" required>
+        <button id="totp-submit" class="block" type="submit" data-i18n="Belépés">Belépés</button>
+        <p class="msg" id="totp-msg" role="alert" aria-live="polite"></p>
+        <button id="totp-recovery-link" class="ghost block" type="button" data-i18n="Belépés recovery kóddal">Belépés recovery kóddal</button>
+        <button id="totp-back" class="ghost block" type="button" data-i18n="Vissza a belépéshez">Vissza a belépéshez</button>
+      </form>
+    </div>
+
+    <div class="view" id="totp-enroll">
+      <h1 data-i18n="Kétfaktoros azonosítás beállítása">Kétfaktoros azonosítás beállítása</h1>
+      <p class="subtitle" data-i18n="Telepítsd a Google Authenticator alkalmazást, majd add hozzá a fiókot az alábbi titokkal vagy az otpauth URI-val.">Telepítsd a Google Authenticator alkalmazást, majd add hozzá a fiókot az alábbi titokkal vagy az otpauth URI-val.</p>
+      <p class="subtitle"><span data-i18n="Fiók">Fiók</span>: <b id="totp-account"></b></p>
+      <label data-i18n="Titok">Titok</label>
+      <div class="totp-secret">
+        <code class="mono" id="totp-secret"></code>
+        <button id="totp-copy-secret" class="ghost small" type="button" data-i18n="Másolás">Másolás</button>
+      </div>
+      <label data-i18n="Otpauth URI">Otpauth URI</label>
+      <div class="mono totp-uri" id="totp-uri"></div>
+      <form id="totp-enroll-form" novalidate>
+        <label for="totp-enroll-code" data-i18n="Kód">Kód</label>
+        <input id="totp-enroll-code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" spellcheck="false" required>
+        <button id="totp-enroll-submit" class="block" type="submit" data-i18n="Beállítás">Beállítás</button>
+        <p class="msg" id="totp-enroll-msg" role="alert" aria-live="polite"></p>
+        <button id="totp-enroll-back" class="ghost block" type="button" data-i18n="Vissza a belépéshez">Vissza a belépéshez</button>
+      </form>
+    </div>
+
+    <div class="view" id="totp-recovery">
+      <h1 data-i18n="Recovery kód">Recovery kód</h1>
+      <p class="subtitle" data-i18n="Írd be a fiókodhoz tartozó egyik recovery kódot. Minden kód csak egyszer használható.">Írd be a fiókodhoz tartozó egyik recovery kódot. Minden kód csak egyszer használható.</p>
+      <form id="totp-recovery-form" novalidate>
+        <label for="totp-recovery-code" data-i18n="Recovery kód">Recovery kód</label>
+        <input id="totp-recovery-code" type="text" autocomplete="off" autocapitalize="characters" spellcheck="false" required>
+        <button id="totp-recovery-submit" class="block" type="submit" data-i18n="Belépés">Belépés</button>
+        <p class="msg" id="totp-recovery-msg" role="alert" aria-live="polite"></p>
+        <button id="totp-recovery-back" class="ghost block" type="button" data-i18n="Vissza a belépéshez">Vissza a belépéshez</button>
+      </form>
+    </div>
+
+    <div class="view" id="totp-codes">
+      <h1 data-i18n="Recovery kódok">Recovery kódok</h1>
+      <p class="msg show" data-i18n="Írd le őket, többé nem jelennek meg.">Írd le őket, többé nem jelennek meg.</p>
+      <p class="msg show" data-i18n="Ha most bezárod az oldalt, a kódok elvesznek.">Ha most bezárod az oldalt, a kódok elvesznek.</p>
+      <pre class="mono totp-codes" id="totp-recovery-codes"></pre>
+      <button id="totp-continue" class="block" type="button" data-i18n="Tovább a portálra">Tovább a portálra</button>
+    </div>
   </div>
 
   <!-- ------------------------------------------------ belépett fejléc -->
@@ -1635,6 +1714,41 @@ const I18N = {
     'a multicast cím nem tiltható le': 'a multicast address cannot be banned',
     'a broadcast cím nem tiltható le': 'the broadcast address cannot be banned',
     'a tiltás hossza egész szám (másodperc) kell': 'the ban duration must be a whole number of seconds',
+
+    // -- kétfaktoros azonosítás ----------------------------------------
+    'Kétfaktoros azonosítás': 'Two-factor authentication',
+    'Kétfaktoros azonosítás beállítása': 'Set up two-factor authentication',
+    'Kétfaktoros azonosítás kötelező': 'Two-factor authentication required',
+    'Írd be a hitelesítő alkalmazásban látható 6 jegyű kódot.': 'Enter the 6-digit code shown in your authenticator app.',
+    'Telepítsd a Google Authenticator alkalmazást, majd add hozzá a fiókot az alábbi titokkal vagy az otpauth URI-val.': 'Install Google Authenticator, then add the account with the secret below or the otpauth URI.',
+    'Fiók': 'Account',
+    'Titok': 'Secret',
+    'Otpauth URI': 'otpauth URI',
+    'Kód': 'Code',
+    'Beállítás': 'Set up',
+    'Belépés recovery kóddal': 'Sign in with a recovery code',
+    'Vissza a belépéshez': 'Back to sign-in',
+    'Recovery kód': 'Recovery code',
+    'Recovery kódok': 'Recovery codes',
+    'Írd be a fiókodhoz tartozó egyik recovery kódot. Minden kód csak egyszer használható.': 'Enter one of the recovery codes for your account. Each code can be used only once.',
+    'Írd le őket, többé nem jelennek meg.': 'Write them down; they will not be shown again.',
+    'Ha most bezárod az oldalt, a kódok elvesznek.': 'If you close the page now, the codes will be lost.',
+    'Tovább a portálra': 'Continue to the portal',
+    '2FA kötelező': '2FA required',
+    '2FA beállítva': '2FA configured',
+    '2FA nincs beállítva': '2FA not configured',
+    '2FA reset': 'Reset 2FA',
+    'A titok a vágólapra került.': 'The secret was copied to the clipboard.',
+    'A titok másolása nem sikerült.': 'Copying the secret failed.',
+    'A kód 6 számjegy legyen.': 'The code must be 6 digits.',
+    'Add meg a recovery kódot.': 'Enter the recovery code.',
+    'Hibás kód.': 'Incorrect code.',
+    'A belépési munkamenet lejárt. Lépj be újra.': 'The sign-in session has expired. Sign in again.',
+    'Túl sok hibás kísérlet. Lépj be újra.': 'Too many incorrect attempts. Sign in again.',
+    'Túl sok kísérlet. Várj egy kicsit, majd próbáld újra.': 'Too many attempts. Wait a moment, then try again.',
+    'Érvénytelen vagy már felhasznált recovery kód.': 'Invalid or already used recovery code.',
+    'A 2FA beállítása nem sikerült. Próbáld újra.': 'Two-factor authentication setup failed. Try again.',
+    'Érvénytelen kérés.': 'Invalid request.',
   },
 
   de: {
@@ -2173,6 +2287,41 @@ const I18N = {
     'a multicast cím nem tiltható le': 'eine Multicast-Adresse kann nicht gesperrt werden',
     'a broadcast cím nem tiltható le': 'die Broadcast-Adresse kann nicht gesperrt werden',
     'a tiltás hossza egész szám (másodperc) kell': 'die Sperrdauer muss eine ganze Zahl in Sekunden sein',
+
+    // -- Zwei-Faktor-Authentifizierung ---------------------------------
+    'Kétfaktoros azonosítás': 'Zwei-Faktor-Authentifizierung',
+    'Kétfaktoros azonosítás beállítása': 'Zwei-Faktor-Authentifizierung einrichten',
+    'Kétfaktoros azonosítás kötelező': 'Zwei-Faktor-Authentifizierung erforderlich',
+    'Írd be a hitelesítő alkalmazásban látható 6 jegyű kódot.': 'Gib den 6-stelligen Code aus deiner Authenticator-App ein.',
+    'Telepítsd a Google Authenticator alkalmazást, majd add hozzá a fiókot az alábbi titokkal vagy az otpauth URI-val.': 'Installiere Google Authenticator und füge das Konto dann mit dem unten stehenden Geheimnis oder der otpauth-URI hinzu.',
+    'Fiók': 'Konto',
+    'Titok': 'Geheimnis',
+    'Otpauth URI': 'otpauth-URI',
+    'Kód': 'Code',
+    'Beállítás': 'Einrichten',
+    'Belépés recovery kóddal': 'Mit Wiederherstellungscode anmelden',
+    'Vissza a belépéshez': 'Zurück zur Anmeldung',
+    'Recovery kód': 'Wiederherstellungscode',
+    'Recovery kódok': 'Wiederherstellungscodes',
+    'Írd be a fiókodhoz tartozó egyik recovery kódot. Minden kód csak egyszer használható.': 'Gib einen der Wiederherstellungscodes für dein Konto ein. Jeder Code kann nur einmal verwendet werden.',
+    'Írd le őket, többé nem jelennek meg.': 'Schreibe sie auf; sie werden nicht erneut angezeigt.',
+    'Ha most bezárod az oldalt, a kódok elvesznek.': 'Wenn du die Seite jetzt schließt, gehen die Codes verloren.',
+    'Tovább a portálra': 'Weiter zum Portal',
+    '2FA kötelező': '2FA erforderlich',
+    '2FA beállítva': '2FA eingerichtet',
+    '2FA nincs beállítva': '2FA nicht eingerichtet',
+    '2FA reset': '2FA zurücksetzen',
+    'A titok a vágólapra került.': 'Das Geheimnis wurde in die Zwischenablage kopiert.',
+    'A titok másolása nem sikerült.': 'Das Kopieren des Geheimnisses ist fehlgeschlagen.',
+    'A kód 6 számjegy legyen.': 'Der Code muss aus 6 Ziffern bestehen.',
+    'Add meg a recovery kódot.': 'Gib den Wiederherstellungscode ein.',
+    'Hibás kód.': 'Falscher Code.',
+    'A belépési munkamenet lejárt. Lépj be újra.': 'Die Anmeldesitzung ist abgelaufen. Melde dich erneut an.',
+    'Túl sok hibás kísérlet. Lépj be újra.': 'Zu viele fehlgeschlagene Versuche. Melde dich erneut an.',
+    'Túl sok kísérlet. Várj egy kicsit, majd próbáld újra.': 'Zu viele Versuche. Warte einen Moment und versuche es dann erneut.',
+    'Érvénytelen vagy már felhasznált recovery kód.': 'Ungültiger oder bereits verwendeter Wiederherstellungscode.',
+    'A 2FA beállítása nem sikerült. Próbáld újra.': 'Die Einrichtung der Zwei-Faktor-Authentifizierung ist fehlgeschlagen. Versuche es erneut.',
+    'Érvénytelen kérés.': 'Ungültige Anfrage.',
   },
 };
 
@@ -2277,6 +2426,10 @@ const I18N_PATTERNS = {
     [/^a tiltáslista mentése nem sikerült: (.+)$/, m => `failed to save the ban list: ${m[1]}`],
     [/^a fail2ban művelet nem sikerült: (.+)$/, m => `the fail2ban operation failed: ${m[1]}`],
     [/^érvénytelen IP-cím: (.+)$/, m => `invalid IP address: ${m[1]}`],
+    [/^Hibás kód\. Még (\d+) próbálkozás\.$/, m => `Incorrect code. ${countLabel(m[1], 'attempt', 'attempts')} left.`],
+    [/^Érvénytelen recovery kód\. Még (\d+) próbálkozás\.$/, m => `Invalid recovery code. ${countLabel(m[1], 'attempt', 'attempts')} left.`],
+    [/^Biztosan alaphelyzetbe állítod a 2FA-t: (.+)\? A nyitott munkamenetei lezárulnak\.$/, m => `Reset two-factor authentication for ${m[1]}? Their open sessions will end.`],
+    [/^(.+) 2FA beállítása alaphelyzetbe állítva\.$/, m => `Two-factor authentication for ${m[1]} has been reset.`],
   ],
   de: [
     [/^(\d+) lánc$/, m => `${m[1]} ${Number(m[1]) === 1 ? 'Kette' : 'Ketten'}`],
@@ -2378,6 +2531,10 @@ const I18N_PATTERNS = {
     [/^a tiltáslista mentése nem sikerült: (.+)$/, m => `Speichern der Sperrliste fehlgeschlagen: ${m[1]}`],
     [/^a fail2ban művelet nem sikerült: (.+)$/, m => `die Fail2ban-Operation ist fehlgeschlagen: ${m[1]}`],
     [/^érvénytelen IP-cím: (.+)$/, m => `ungültige IP-Adresse: ${m[1]}`],
+    [/^Hibás kód\. Még (\d+) próbálkozás\.$/, m => `Falscher Code. Noch ${m[1]} ${Number(m[1]) === 1 ? 'Versuch' : 'Versuche'}.`],
+    [/^Érvénytelen recovery kód\. Még (\d+) próbálkozás\.$/, m => `Ungültiger Wiederherstellungscode. Noch ${m[1]} ${Number(m[1]) === 1 ? 'Versuch' : 'Versuche'}.`],
+    [/^Biztosan alaphelyzetbe állítod a 2FA-t: (.+)\? A nyitott munkamenetei lezárulnak\.$/, m => `Zwei-Faktor-Authentifizierung für ${m[1]} zurücksetzen? Die offenen Sitzungen werden beendet.`],
+    [/^(.+) 2FA beállítása alaphelyzetbe állítva\.$/, m => `Die Zwei-Faktor-Authentifizierung für ${m[1]} wurde zurückgesetzt.`],
   ],
 };
 
@@ -2679,6 +2836,26 @@ const banSubtitle = document.getElementById('ban-subtitle');
 const banDetail   = document.getElementById('ban-detail');
 const banTimerEl  = document.getElementById('ban-timer');
 const banRetry    = document.getElementById('ban-retry');
+const totpView    = document.getElementById('totp-view');
+const totpForm    = document.getElementById('totp-form');
+const totpCodeEl  = document.getElementById('totp-code');
+const totpRecoveryLink = document.getElementById('totp-recovery-link');
+const totpBack    = document.getElementById('totp-back');
+const totpMsg     = document.getElementById('totp-msg');
+const totpEnrollForm   = document.getElementById('totp-enroll-form');
+const totpEnrollCode   = document.getElementById('totp-enroll-code');
+const totpEnrollBack   = document.getElementById('totp-enroll-back');
+const totpEnrollMsg    = document.getElementById('totp-enroll-msg');
+const totpSecretEl     = document.getElementById('totp-secret');
+const totpCopySecret   = document.getElementById('totp-copy-secret');
+const totpUriEl        = document.getElementById('totp-uri');
+const totpAccountEl    = document.getElementById('totp-account');
+const totpRecoveryForm   = document.getElementById('totp-recovery-form');
+const totpRecoveryCode   = document.getElementById('totp-recovery-code');
+const totpRecoveryBack   = document.getElementById('totp-recovery-back');
+const totpRecoveryMsg    = document.getElementById('totp-recovery-msg');
+const totpCodesList      = document.getElementById('totp-recovery-codes');
+const totpContinue       = document.getElementById('totp-continue');
 const topbar      = document.getElementById('topbar');
 const accessView  = document.getElementById('access-view');
 const sessionView = document.getElementById('session-view');
@@ -2722,6 +2899,8 @@ let mode = null;
 let powSolution = null;
 let tsToken = null;
 let busy = false;
+let totpState = null;           // {ticket, mode, secret, issuer, uri} — csak memóriában
+let totpBusy = false;
 
 let auth = null;              // aktuális belépett állapot
 let selectedRuleId = null;
@@ -2921,14 +3100,15 @@ function setView(name) {
   activeView = name;
   loginView.classList.toggle('active', name === 'login');
   banView.classList.toggle('active', name === 'ban');
+  if (totpView) totpView.classList.toggle('active', name === 'totp');
   accessView.classList.toggle('active', name === 'access');
   sessionView.classList.toggle('active', name === 'session');
   passwordView.classList.toggle('active', name === 'password');
   adminView.classList.toggle('active', name === 'admin');
   if (name !== 'ban') stopBanTimers();
-  const app = name !== 'login' && name !== 'ban';
+  const app = name !== 'login' && name !== 'ban' && name !== 'totp';
   topbar.hidden = !app;
-  mainTabs.hidden = name === 'password';
+  mainTabs.hidden = name === 'password' || name === 'totp';
   card.classList.toggle('app', app);
   document.body.classList.toggle('app', app);
   for (const tab of document.querySelectorAll('#main-tabs [data-main]')) {
@@ -2946,6 +3126,155 @@ function setView(name) {
     tickTimer = null;
     pollTimer = null;
   }
+}
+
+/* ============================================================ kétfaktoros belépés */
+
+const TOTP_PANELS = ['verify', 'enroll', 'recovery', 'codes'];
+const TOTP_SUBMIT_LABELS = { verify: 'Belépés', enroll: 'Beállítás', recovery: 'Belépés' };
+const TOTP_MSG_IDS = { verify: 'totp-msg', enroll: 'totp-enroll-msg', recovery: 'totp-recovery-msg' };
+const TOTP_ERRORS = {
+  totp_invalid: 'Hibás kód.',
+  ticket_invalid: 'A belépési munkamenet lejárt. Lépj be újra.',
+  ticket_locked: 'Túl sok hibás kísérlet. Lépj be újra.',
+  rate_limited: 'Túl sok kísérlet. Várj egy kicsit, majd próbáld újra.',
+  recovery_invalid: 'Érvénytelen vagy már felhasznált recovery kód.',
+  enroll_failed: 'A 2FA beállítása nem sikerült. Próbáld újra.',
+  bad_request: 'Érvénytelen kérés.',
+  origin_invalid: 'Érvénytelen kérés.'
+};
+
+function showTotpPanel(kind) {
+  for (const name of TOTP_PANELS) {
+    const node = document.getElementById('totp-' + name);
+    if (node) node.classList.toggle('active', name === kind);
+  }
+}
+function showTotpMsg(kind, text, ok) {
+  const id = TOTP_MSG_IDS[kind];
+  if (!id) return;
+  const node = document.getElementById(id);
+  if (!node) return;
+  node.textContent = text ? tr(text) : '';
+  node.classList.toggle('show', !!text);
+  node.classList.toggle('ok', !!ok);
+}
+function setTotpBusy(panel, on) {
+  const label = TOTP_SUBMIT_LABELS[panel];
+  if (!label) return;
+  totpBusy = on;
+  const button = document.getElementById('totp-' + panel + '-submit');
+  if (!button) return;
+  button.disabled = on;
+  button.textContent = tr(on ? 'Ellenőrzés…' : label);
+}
+function resetTotp() {
+  totpState = null;
+  for (const node of [totpCodeEl, totpEnrollCode, totpRecoveryCode]) {
+    if (node) node.value = '';
+  }
+  if (totpSecretEl) totpSecretEl.textContent = '';
+  if (totpUriEl) totpUriEl.textContent = '';
+  if (totpAccountEl) totpAccountEl.textContent = '';
+  if (totpCodesList) totpCodesList.textContent = '';
+  showTotpMsg('verify', '');
+  showTotpMsg('enroll', '');
+  showTotpMsg('recovery', '');
+  setTotpBusy('verify', false);
+  setTotpBusy('enroll', false);
+  setTotpBusy('recovery', false);
+}
+function totpErrorMessage(err) {
+  const data = (err && err.data) || {};
+  const remaining = Number(data.remaining);
+  const hasRemaining = Number.isFinite(remaining) && remaining > 0;
+  if (data.code === 'totp_invalid') {
+    return tr(hasRemaining ? `Hibás kód. Még ${remaining} próbálkozás.` : TOTP_ERRORS.totp_invalid);
+  }
+  if (data.code === 'recovery_invalid') {
+    return tr(hasRemaining
+      ? `Érvénytelen recovery kód. Még ${remaining} próbálkozás.`
+      : TOTP_ERRORS.recovery_invalid);
+  }
+  if (data.code === 'rate_limited' || err.status === 429) {
+    return tr(TOTP_ERRORS.rate_limited);
+  }
+  if (data.code && Object.prototype.hasOwnProperty.call(TOTP_ERRORS, data.code)) {
+    return tr(TOTP_ERRORS[data.code]);
+  }
+  return (err && err.message) || tr('A művelet nem sikerült.');
+}
+/* A hibakódokat előbb magyar üzenetre képezzük, majd a tr() fordítja.
+   A banned válasz a meglévő tiltóképernyőre visz, és a ticketet eldobja. */
+function totpError(err, msgEl) {
+  if (err && err.data && err.data.banned) {
+    resetTotp();
+    showBan(err.data);
+    return;
+  }
+  if (!msgEl) return;
+  msgEl.textContent = totpErrorMessage(err);
+  msgEl.classList.toggle('show', true);
+  msgEl.classList.toggle('ok', false);
+}
+function beginTotp(data) {
+  const enroll = !!data.totp_enroll_required;
+  totpState = {
+    ticket: String(data.ticket || ''),
+    mode: enroll ? 'enroll' : 'verify',
+    secret: String(data.secret || ''),
+    issuer: String(data.issuer || ''),
+    uri: String(data.otpauth_uri || '')
+  };
+  if (totpCodeEl) totpCodeEl.value = '';
+  if (totpEnrollCode) totpEnrollCode.value = '';
+  if (totpRecoveryCode) totpRecoveryCode.value = '';
+  showTotpMsg('verify', '');
+  showTotpMsg('enroll', '');
+  showTotpMsg('recovery', '');
+  if (enroll) {
+    if (totpSecretEl) totpSecretEl.textContent = totpState.secret;
+    if (totpUriEl) totpUriEl.textContent = totpState.uri;
+    if (totpAccountEl) {
+      totpAccountEl.textContent = [totpState.issuer, userEl.value.trim()].filter(Boolean).join(' · ');
+    }
+    showTotpPanel('enroll');
+  } else {
+    showTotpPanel('verify');
+  }
+  setView('totp');
+  setTimeout(() => {
+    try { (enroll ? totpEnrollCode : totpCodeEl).focus(); } catch (e) { /* nincs fókusz */ }
+  }, 40);
+}
+function backToLogin() {
+  resetTotp();
+  show('');
+  setView('login');
+  setTimeout(() => { try { userEl.focus(); } catch (e) { /* nincs fókusz */ } }, 40);
+}
+async function copyTotpSecret() {
+  const text = totpSecretEl ? totpSecretEl.textContent : '';
+  if (!text) return;
+  let ok = false;
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    }
+  } catch (err) {
+    ok = false;
+  }
+  if (!ok) {
+    const area = document.createElement('textarea');
+    area.className = 'fw-copy-area';
+    area.value = text;
+    document.body.append(area);
+    area.select();
+    try { ok = document.execCommand('copy'); } catch (err) { ok = false; }
+    area.remove();
+  }
+  showTotpMsg('enroll', ok ? 'A titok a vágólapra került.' : 'A titok másolása nem sikerült.', ok);
 }
 function stopTimers() {
   clearInterval(tickTimer);
@@ -3668,7 +3997,17 @@ function renderUsers() {
       } }, tr(user.enabled ? 'Letiltás' : 'Aktiválás')),
       el('button', { type: 'button', class: 'ghost small', onclick: () => {
         adminEdit = { kind: 'user', id: user.name }; adminDraft = null; adminFlash = null; renderAdminPanel();
-      } }, tr('Szerkesztés')),
+      } }, tr('Szerkesztés'))
+    );
+    if (user.totp_enrolled || user.totp_required) {
+      actions.append(el('button', { type: 'button', class: 'ghost small', onclick: () => {
+        if (!confirm(tr(
+          `Biztosan alaphelyzetbe állítod a 2FA-t: ${user.name}? A nyitott munkamenetei lezárulnak.`
+        ))) return;
+        adminSend('/api/admin/users', { action: 'totp_reset', name: user.name });
+      } }, tr('2FA reset')));
+    }
+    actions.append(
       el('button', { type: 'button', class: 'danger small', onclick: () => {
         if (confirm(tr(`Biztosan törlöd: ${user.name}?`))) {
           adminSend('/api/admin/users', { action: 'delete', name: user.name });
@@ -3684,6 +4023,11 @@ function renderUsers() {
       status.append(' ');
       status.append(el('span', { class: 'pill must', text: tr('első belépésnél jelszócsere') }));
     }
+    status.append(' ');
+    status.append(el('span', {
+      class: 'muted',
+      text: tr(user.totp_required ? '2FA kötelező' : user.totp_enrolled ? '2FA beállítva' : '2FA nincs beállítva')
+    }));
     body.append(el('tr', {},
       el('td', {}, el('b', { text: user.name })),
       el('td', {}, el('span', { class: 'pill' + (user.role === 'admin' ? ' admin' : ''), text: user.role === 'admin' ? 'admin' : tr('felhasználó') })),
@@ -3712,6 +4056,7 @@ function renderUserForm(name) {
       name: formValue(box, 'name').trim(),
       role: formValue(box, 'role'),
       enabled: boolValue(box, 'enabled'),
+      totp_required: boolValue(box, 'totp_required'),
       rules: pickedValues(box, 'rules'),
       groups: pickedValues(box, 'groups')
     };
@@ -3743,6 +4088,12 @@ function renderUserForm(name) {
     el('label', { style: 'display:flex;gap:7px;align-items:center;margin-top:9px' },
       el('input', { type: 'checkbox', name: 'enabled', checked: !!draftValue(draft, 'enabled', !edit || user.enabled) }),
       tr('aktív (be tud lépni)')
+    )
+  ));
+  grid.append(el('div', { class: 'field full' },
+    el('label', { style: 'display:flex;gap:7px;align-items:center;margin-top:0' },
+      el('input', { type: 'checkbox', name: 'totp_required', checked: !!draftValue(draft, 'totp_required', edit && user.totp_required) }),
+      tr('Kétfaktoros azonosítás kötelező')
     )
   ));
   grid.append(el('div', { class: 'field full' },
@@ -6417,6 +6768,15 @@ form.addEventListener('submit', async e => {
       pass: passEl.value,
       captcha
     });
+    if (data.totp_required) {
+      // A ticket nem munkamenet: nem hívunk refreshStatus-t, és nem
+      // kezeljük belépett állapotként.
+      authEpoch += 1;
+      resetCaptcha();
+      passEl.value = '';
+      beginTotp(data);
+      return;
+    }
     authEpoch += 1;
     resetCaptcha();
     passEl.value = '';
@@ -6437,6 +6797,91 @@ form.addEventListener('submit', async e => {
     }
   } finally {
     setBusy(false);
+  }
+});
+
+if (totpForm) totpForm.addEventListener('submit', async e => {
+  e.preventDefault();
+  if (totpBusy || !totpCodeEl) return;
+  const code = (totpCodeEl.value || '').replace(/\s+/g, '');
+  totpCodeEl.value = code;
+  if (!/^[0-9]{6}$/.test(code)) return showTotpMsg('verify', 'A kód 6 számjegy legyen.');
+  if (!totpState || !totpState.ticket) return showTotpMsg('verify', 'A belépési munkamenet lejárt. Lépj be újra.');
+  showTotpMsg('verify', '');
+  setTotpBusy('verify', true);
+  try {
+    await postJson('/api/login/totp', { ticket: totpState.ticket, code });
+    resetTotp();
+    await refreshStatus();
+  } catch (err) {
+    totpError(err, totpMsg);
+  } finally {
+    setTotpBusy('verify', false);
+  }
+});
+
+if (totpEnrollForm) totpEnrollForm.addEventListener('submit', async e => {
+  e.preventDefault();
+  if (totpBusy || !totpEnrollCode) return;
+  const code = (totpEnrollCode.value || '').replace(/\s+/g, '');
+  totpEnrollCode.value = code;
+  if (!/^[0-9]{6}$/.test(code)) return showTotpMsg('enroll', 'A kód 6 számjegy legyen.');
+  if (!totpState || !totpState.ticket) return showTotpMsg('enroll', 'A belépési munkamenet lejárt. Lépj be újra.');
+  showTotpMsg('enroll', '');
+  setTotpBusy('enroll', true);
+  try {
+    const data = await postJson('/api/login/totp/enroll', { ticket: totpState.ticket, code });
+    const codes = Array.isArray(data.recovery_codes) ? data.recovery_codes.map(item => String(item)) : [];
+    if (totpCodesList) totpCodesList.textContent = codes.join('\n');
+    // A titok és az URI csak a beállítás képernyőn volt látható.
+    if (totpSecretEl) totpSecretEl.textContent = '';
+    if (totpUriEl) totpUriEl.textContent = '';
+    if (totpAccountEl) totpAccountEl.textContent = '';
+    totpState = null;
+    showTotpPanel('codes');
+  } catch (err) {
+    totpError(err, totpEnrollMsg);
+  } finally {
+    setTotpBusy('enroll', false);
+  }
+});
+
+if (totpRecoveryForm) totpRecoveryForm.addEventListener('submit', async e => {
+  e.preventDefault();
+  if (totpBusy || !totpRecoveryCode) return;
+  const code = (totpRecoveryCode.value || '').replace(/\s+/g, '');
+  totpRecoveryCode.value = code;
+  if (!code) return showTotpMsg('recovery', 'Add meg a recovery kódot.');
+  if (!totpState || !totpState.ticket) return showTotpMsg('recovery', 'A belépési munkamenet lejárt. Lépj be újra.');
+  showTotpMsg('recovery', '');
+  setTotpBusy('recovery', true);
+  try {
+    await postJson('/api/login/recovery', { ticket: totpState.ticket, code });
+    resetTotp();
+    await refreshStatus();
+  } catch (err) {
+    totpError(err, totpRecoveryMsg);
+  } finally {
+    setTotpBusy('recovery', false);
+  }
+});
+
+if (totpRecoveryLink) totpRecoveryLink.addEventListener('click', () => {
+  showTotpMsg('recovery', '');
+  showTotpPanel('recovery');
+  setTimeout(() => { try { totpRecoveryCode.focus(); } catch (e) { /* nincs fókusz */ } }, 40);
+});
+if (totpBack) totpBack.addEventListener('click', backToLogin);
+if (totpEnrollBack) totpEnrollBack.addEventListener('click', backToLogin);
+if (totpRecoveryBack) totpRecoveryBack.addEventListener('click', backToLogin);
+if (totpCopySecret) totpCopySecret.addEventListener('click', copyTotpSecret);
+if (totpContinue) totpContinue.addEventListener('click', async () => {
+  totpContinue.disabled = true;
+  try {
+    resetTotp();
+    await refreshStatus();
+  } finally {
+    totpContinue.disabled = false;
   }
 });
 
