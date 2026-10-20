@@ -430,19 +430,52 @@
   .port-pill{display:inline-block;padding:2px 6px;font-size:10px;font-weight:600;color:var(--blue);background:var(--blue-bg);border:1px solid var(--blue-line);border-radius:5px;white-space:nowrap}
   .drop-iface{font-size:10px;color:#777;white-space:nowrap}
   .drop-facts{font-size:10px;color:#777;margin-bottom:2px}
-  .fw-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:10px}
-  .fw-card{padding:12px 13px;background:#fff;border:1px solid var(--line);border-radius:10px}
-  .fw-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:7px}
-  .fw-ip{font-size:14px;font-weight:600}
-  .fw-meta{display:flex;flex-wrap:wrap;gap:5px 9px;align-items:center;margin-bottom:8px;font-size:12px}
-  .fw-sec{margin-top:8px}
-  .fw-sec h4{margin:0 0 5px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#888}
-  .fw-chips{display:flex;flex-wrap:wrap;gap:5px}
-  .port-chip{display:inline-flex;align-items:center;gap:5px;padding:3px 7px;font-size:11px;background:var(--soft);border:1px solid var(--line-strong);border-radius:6px}
-  .port-chip b{font-weight:600}
-  .fw-left{font-size:10px;color:var(--muted)}
-  .fw-session{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:center;padding:5px 0;font-size:11.5px;border-top:1px dashed var(--line)}
-  .fw-session:first-child{padding-top:0;border-top:0}
+  /* Tűzfal: vizuális szabálynézet */
+  .fw-summary{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:0 0 9px;font-size:11.5px;color:var(--muted)}
+  .fw-summary .mono{font-size:11.5px;color:var(--ink)}
+  .fw-summary button{margin-left:0;padding:6px 10px;font-size:11.5px}
+  .fw-summary button.refresh{margin-left:auto}
+  .fw-legend{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 12px;font-size:10.5px;color:var(--muted)}
+  .fw-legend span{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;background:#fff;border:1px solid var(--line);border-radius:999px}
+  .fw-legend i{width:7px;height:7px;border-radius:50%;background:#9a9a95}
+  .fw-legend .accept i{background:#2f7d32}
+  .fw-legend .drop i{background:#b03030}
+  .fw-legend .jump i{background:#6d4aa6}
+  .fw-legend .nat i{background:#265a88}
+  .fw-chains{display:flex;flex-direction:column;gap:12px}
+  .fw-chain{background:#fff;border:1px solid var(--line);border-radius:11px;overflow:hidden}
+  .fw-chain-head{display:flex;align-items:center;flex-wrap:wrap;gap:7px 12px;padding:10px 14px;background:var(--soft);border-bottom:1px solid var(--line)}
+  .fw-chain-title{display:flex;align-items:baseline;gap:8px;min-width:0;flex-wrap:wrap}
+  .fw-chain-name{font-size:13px;font-weight:700;color:var(--ink)}
+  .fw-chain-desc{font-size:11px;color:var(--muted)}
+  .fw-badges{display:flex;flex-wrap:wrap;gap:5px;margin-left:auto}
+  .fw-badge{padding:2px 7px;font-size:10px;font-weight:600;color:#5c5c57;background:#fff;border:1px solid var(--line-strong);border-radius:999px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  .fw-badge.drop{color:var(--red);background:var(--red-bg);border-color:var(--red-line)}
+  .fw-badge.accept{color:var(--green);background:var(--green-bg);border-color:var(--green-line)}
+  .fw-rules{list-style:none;margin:0;padding:0}
+  .fw-rule{display:flex;align-items:flex-start;gap:9px;padding:7px 14px;border-top:1px solid #f2f2ef;font-size:11.5px}
+  .fw-rule:first-child{border-top:0}
+  .fw-rule:hover{background:#fbfbf9}
+  .fw-rule-no{flex:0 0 auto;min-width:20px;padding-top:3px;text-align:right;font-size:10px;color:#a6a6a0;font-variant-numeric:tabular-nums;user-select:none}
+  .fw-rule-body{display:flex;align-items:center;flex-wrap:wrap;gap:4px;min-width:0;flex:1 1 auto}
+  .fw-tok{display:inline-block;max-width:100%;padding:2px 6px;font-size:10.5px;line-height:1.35;color:#4a4a45;background:#f5f5f2;border:1px solid #e6e6e1;border-radius:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .fw-tok.iface{color:#3c5a3c;background:var(--green-bg);border-color:var(--green-line)}
+  .fw-tok.proto{color:#265a88;background:var(--blue-bg);border-color:var(--blue-line);font-weight:600}
+  .fw-tok.addr{color:#5b4a21;background:#fbf6e9;border-color:#eee2c2}
+  .fw-tok.port{color:#265a88;background:var(--blue-bg);border-color:var(--blue-line);font-weight:600}
+  .fw-tok.state{color:#555;background:#f1f1ee;border-color:#e0e0da}
+  .fw-tok.set{color:#6d4aa6;background:#f4effb;border-color:#e2d7f4;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  .fw-tok.mark{color:#8a5a00;background:var(--amber-bg);border-color:var(--amber-line);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  .fw-tok.limit{color:#777;background:#f7f7f4;border-color:#e6e6e1;font-size:10px}
+  .fw-tok.log{color:#777;background:#f7f7f4;border-color:#e6e6e1;font-style:italic}
+  .fw-tok.raw{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10px}
+  .fw-verdict{flex:0 0 auto;align-self:center;margin-left:6px;padding:3px 9px;font-size:10.5px;font-weight:700;border-radius:999px;white-space:nowrap;color:#555;background:#f1f1ee;border:1px solid #deded8}
+  .fw-verdict.accept{color:var(--green);background:var(--green-bg);border-color:var(--green-line)}
+  .fw-verdict.drop{color:var(--red);background:var(--red-bg);border-color:var(--red-line)}
+  .fw-verdict.return{color:#666;background:#f3f3f0;border-color:#e0e0da}
+  .fw-verdict.jump{color:#6d4aa6;background:#f4effb;border-color:#e2d7f4}
+  .fw-verdict.nat{color:var(--blue);background:var(--blue-bg);border-color:var(--blue-line)}
+  .fw-chain-empty{padding:11px 14px;font-size:11.5px;color:var(--muted)}
   .fw-warn{margin-top:8px;padding:6px 8px;font-size:11px;line-height:1.4;border-radius:7px;background:var(--amber-bg);border:1px solid var(--amber-line);color:var(--amber)}
   .fw-warn.err{background:var(--red-bg);border-color:var(--red-line);color:var(--red)}
   .fw-views{display:inline-flex;gap:4px;padding:3px;margin:0 0 12px;background:var(--soft);border:1px solid var(--line);border-radius:9px}
@@ -868,6 +901,21 @@ const I18N = {
     'a nyers szabályok nem olvashatók': 'the raw rules could not be read',
     'A nyers szabályok betöltése nem sikerült.': 'Failed to load the raw rules.',
     'A nézet a kernelben élő nftables láncokat mutatja, a dinamikus halmazok tartalma nélkül. A pre-auth és a blokk szabályai a preauth, block, preauth_nat és block_nat láncokban láthatók.': 'This view shows the live nftables chains in the kernel without the contents of dynamic sets. Pre-auth and block rules are shown in the preauth, block, preauth_nat and block_nat chains.',
+    'a kernelben élő nftables szabályok vizuálisan': 'live nftables rules from the kernel, visualised',
+    '5 másodpercenként frissül': 'refreshes every 5 seconds',
+    'A tűzfal szabályai még nem töltődtek be.': 'The firewall rules have not been loaded yet.',
+    'Nincs szabály ebben a láncban.': 'No rules in this chain.',
+    'Egyéni lánc': 'Custom chain',
+    'Továbbított forgalom – engedélyek és védelem': 'Forwarded traffic – grants and protection',
+    'A kapu hostjára érkező forgalom': 'Traffic to the gateway host',
+    'Portál-átirányítás és NAT-döntések': 'Portal redirect and NAT decisions',
+    'Kimenő maszkolás a WAN felé': 'Outbound masquerading to the WAN',
+    'Bejelentkezés előtti engedélyek': 'Pre-authentication grants',
+    'Mindig tiltott célok': 'Always-blocked destinations',
+    'Pre-auth kivétel a portál-átirányítás alól': 'Pre-auth exception to the portal redirect',
+    'Blokk a portál-átirányítás előtt': 'Block before the portal redirect',
+    'Vészhelyzeti ideiglenes hozzáférés': 'Emergency temporary access',
+    'A nézet a kernelben élő nftables láncokat mutatja, a dinamikus halmazok tartalma nélkül. Minden sor balról jobbra olvasandó: feltételek, majd a döntés.': 'This view shows the live nftables chains in the kernel without the contents of dynamic sets. Read each row left to right: conditions, then the decision.',
     'Jelenleg nincs engedélyezett IP-cím a tűzfalban.': 'There are currently no allowed IP addresses in the firewall.',
     'nincs munkamenet': 'no session',
     'szinkronban': 'in sync',
@@ -1302,6 +1350,21 @@ const I18N = {
     'a nyers szabályok nem olvashatók': 'die Rohregeln konnten nicht gelesen werden',
     'A nyers szabályok betöltése nem sikerült.': 'Die Rohregeln konnten nicht geladen werden.',
     'A nézet a kernelben élő nftables láncokat mutatja, a dinamikus halmazok tartalma nélkül. A pre-auth és a blokk szabályai a preauth, block, preauth_nat és block_nat láncokban láthatók.': 'Diese Ansicht zeigt die im Kernel aktiven nftables-Ketten ohne den Inhalt der dynamischen Sets. Die Pre-auth- und Block-Regeln stehen in den Ketten preauth, block, preauth_nat und block_nat.',
+    'a kernelben élő nftables szabályok vizuálisan': 'die im Kernel aktiven nftables-Regeln, visuell dargestellt',
+    '5 másodpercenként frissül': 'wird alle 5 Sekunden aktualisiert',
+    'A tűzfal szabályai még nem töltődtek be.': 'Die Firewall-Regeln wurden noch nicht geladen.',
+    'Nincs szabály ebben a láncban.': 'Keine Regeln in dieser Kette.',
+    'Egyéni lánc': 'Benutzerdefinierte Kette',
+    'Továbbított forgalom – engedélyek és védelem': 'Weitergeleiteter Verkehr – Freigaben und Schutz',
+    'A kapu hostjára érkező forgalom': 'Verkehr zum Gateway-Host',
+    'Portál-átirányítás és NAT-döntések': 'Portal-Umleitung und NAT-Entscheidungen',
+    'Kimenő maszkolás a WAN felé': 'Ausgehendes Masquerading zum WAN',
+    'Bejelentkezés előtti engedélyek': 'Freigaben vor der Anmeldung',
+    'Mindig tiltott célok': 'Immer blockierte Ziele',
+    'Pre-auth kivétel a portál-átirányítás alól': 'Pre-Auth-Ausnahme von der Portal-Umleitung',
+    'Blokk a portál-átirányítás előtt': 'Sperre vor der Portal-Umleitung',
+    'Vészhelyzeti ideiglenes hozzáférés': 'Temporärer Notfallzugang',
+    'A nézet a kernelben élő nftables láncokat mutatja, a dinamikus halmazok tartalma nélkül. Minden sor balról jobbra olvasandó: feltételek, majd a döntés.': 'Diese Ansicht zeigt die im Kernel aktiven nftables-Ketten ohne den Inhalt der dynamischen Sets. Jede Zeile wird von links nach rechts gelesen: Bedingungen, dann die Entscheidung.',
     'Jelenleg nincs engedélyezett IP-cím a tűzfalban.': 'Derzeit sind keine IP-Adressen in der Firewall freigegeben.',
     'nincs munkamenet': 'keine Sitzung',
     'szinkronban': 'synchron',
@@ -1576,6 +1639,29 @@ const I18N = {
 
 const I18N_PATTERNS = {
   en: [
+    [/^(\d+) lánc$/, m => countLabel(m[1], 'chain', 'chains')],
+    [/^(\d+) szabály$/, m => countLabel(m[1], 'rule', 'rules')],
+    [/^be: (.+)$/, m => `in: ${m[1]}`],
+    [/^ki: (.+)$/, m => `out: ${m[1]}`],
+    [/^célport (.+)$/, m => `dst port ${m[1]}`],
+    [/^forrásport (.+)$/, m => `src port ${m[1]}`],
+    [/^(TCP|UDP) forrásport (.+)$/, m => `${m[1]} src port ${m[2]}`],
+    [/^forrás \+ célport halmaz (.+)$/, m => `src + dst port set ${m[1]}`],
+    [/^forrás \+ UDP port halmaz (.+)$/, m => `src + UDP port set ${m[1]}`],
+    [/^forrás \+ TCP port halmaz (.+)$/, m => `src + TCP port set ${m[1]}`],
+    [/^forrás \+ MAC ≠ halmaz (.+)$/, m => `src + MAC ≠ set ${m[1]}`],
+    [/^forrás \+ célport (.+)$/, m => `src + dst port ${m[1]}`],
+    [/^forrás \+ UDP port (.+)$/, m => `src + UDP port ${m[1]}`],
+    [/^forrás \+ TCP port (.+)$/, m => `src + TCP port ${m[1]}`],
+    [/^forrás \+ MAC ≠ (.+)$/, m => `src + MAC ≠ ${m[1]}`],
+    [/^cél (.+)$/, m => `dst ${m[1]}`],
+    [/^forrás (.+)$/, m => `src ${m[1]}`],
+    [/^állapot: (.+)$/, m => `state: ${m[1]}`],
+    [/^jelölés (.+)$/, m => `mark ${m[1]}`],
+    [/^halmaz (.+)$/, m => `set ${m[1]}`],
+    [/^korlát (.+)$/, m => `limit ${m[1]}`],
+    [/^protokoll (.+)$/, m => `protocol ${m[1]}`],
+    [/^naplózás$/, 'log'],
     [/^Legfeljebb (\d+) perc$/, m => `Up to ${m[1]} min`],
     [/^Beállítható: ([0-9.]+)–([0-9.]+) óra$/, m => `Allowed: ${m[1]}–${m[2]} hours`],
     [/^Beállítható: ([0-9.]+)–([0-9.]+) perc$/, m => `Allowed: ${m[1]}–${m[2]} min`],
@@ -1636,6 +1722,29 @@ const I18N_PATTERNS = {
     [/^Captcha: (.+)$/, m => `Captcha: ${tr(m[1])}`],
   ],
   de: [
+    [/^(\d+) lánc$/, m => `${m[1]} ${Number(m[1]) === 1 ? 'Kette' : 'Ketten'}`],
+    [/^(\d+) szabály$/, m => `${m[1]} ${Number(m[1]) === 1 ? 'Regel' : 'Regeln'}`],
+    [/^be: (.+)$/, m => `ein: ${m[1]}`],
+    [/^ki: (.+)$/, m => `aus: ${m[1]}`],
+    [/^célport (.+)$/, m => `Zielport ${m[1]}`],
+    [/^forrásport (.+)$/, m => `Quellport ${m[1]}`],
+    [/^(TCP|UDP) forrásport (.+)$/, m => `${m[1]} Quellport ${m[2]}`],
+    [/^forrás \+ célport halmaz (.+)$/, m => `Quelle + Zielport Menge ${m[1]}`],
+    [/^forrás \+ UDP port halmaz (.+)$/, m => `Quelle + UDP-Port Menge ${m[1]}`],
+    [/^forrás \+ TCP port halmaz (.+)$/, m => `Quelle + TCP-Port Menge ${m[1]}`],
+    [/^forrás \+ MAC ≠ halmaz (.+)$/, m => `Quelle + MAC ≠ Menge ${m[1]}`],
+    [/^forrás \+ célport (.+)$/, m => `Quelle + Zielport ${m[1]}`],
+    [/^forrás \+ UDP port (.+)$/, m => `Quelle + UDP-Port ${m[1]}`],
+    [/^forrás \+ TCP port (.+)$/, m => `Quelle + TCP-Port ${m[1]}`],
+    [/^forrás \+ MAC ≠ (.+)$/, m => `Quelle + MAC ≠ ${m[1]}`],
+    [/^cél (.+)$/, m => `Ziel ${m[1]}`],
+    [/^forrás (.+)$/, m => `Quelle ${m[1]}`],
+    [/^állapot: (.+)$/, m => `Zustand: ${m[1]}`],
+    [/^jelölés (.+)$/, m => `Markierung ${m[1]}`],
+    [/^halmaz (.+)$/, m => `Menge ${m[1]}`],
+    [/^korlát (.+)$/, m => `Limit ${m[1]}`],
+    [/^protokoll (.+)$/, m => `Protokoll ${m[1]}`],
+    [/^naplózás$/, 'Protokollierung'],
     [/^Legfeljebb (\d+) perc$/, m => `Bis zu ${m[1]} Min.`],
     [/^Beállítható: ([0-9.]+)–([0-9.]+) óra$/, m => `Einstellbar: ${m[1]}–${m[2]} Std.`],
     [/^Beállítható: ([0-9.]+)–([0-9.]+) perc$/, m => `Einstellbar: ${m[1]}–${m[2]} Min.`],
@@ -1990,12 +2099,10 @@ let dropFilter = { src: '', dst: '', proto: '', port: '', reason: '', q: '', lim
 let sessionsState = null;
 let sessionClockTimer = null;
 let sessionPollTimer = null;
-let firewallState = null;
-let firewallView = 'overview';        // 'overview' | 'raw'
+let firewallView = 'overview';        // 'overview' (vizuális) | 'raw'
 let firewallRulesState = null;
 let firewallRulesError = '';
 let firewallRulesLoading = false;
-let firewallClockTimer = null;
 let firewallPollTimer = null;
 
 const DEFAULT_LIMITS = { min_ttl: 60, max_ttl: 86400, default_ttl: 3600 };
@@ -2140,9 +2247,7 @@ function stopSessionTimers() {
   sessionPollTimer = null;
 }
 function stopFirewallTimers() {
-  clearInterval(firewallClockTimer);
   clearInterval(firewallPollTimer);
-  firewallClockTimer = null;
   firewallPollTimer = null;
 }
 function startSessionTimers() {
@@ -2586,10 +2691,13 @@ function adminSetTab(name) {
   else if (name === 'drops') loadDrops();
   else if (name === 'sessions') loadSessions();
   else if (name === 'firewall') {
-    if (firewallView === 'raw') {
-      renderAdminPanel();
-      loadFirewallRules();
-    } else loadFirewall();
+    renderAdminPanel();
+    loadFirewallRules().then(() => {
+      if (activeView === 'admin' && adminTabName === 'firewall'
+          && firewallView === 'overview') {
+        startFirewallPoll();
+      }
+    });
   }
   else loadAdminState();
 }
@@ -4284,28 +4392,6 @@ async function loadSessions() {
 
 /* ============================================================ admin: tűzfal */
 
-function tickFirewallClocks() {
-  for (const node of adminPanel.querySelectorAll('[data-deadline]')) {
-    const left = Math.round((Number(node.dataset.deadline) - Date.now()) / 1000);
-    node.textContent = left > 0 ? fmtRemaining(left) : tr('lejárt');
-    node.classList.toggle('muted', left <= 0);
-  }
-}
-function deadlineNode(entry) {
-  if (!entry || entry.expires_in === null || entry.expires_in === undefined) return null;
-  const seconds = Math.max(0, Number(entry.expires_in) || 0);
-  return el('span', {
-    class: 'mono fw-left',
-    'data-deadline': String(Date.now() + seconds * 1000),
-    text: seconds > 0 ? fmtRemaining(seconds) : tr('lejárt')
-  });
-}
-function fwChip(label, entry) {
-  const chip = el('span', { class: 'port-chip' }, el('b', { text: label }));
-  const left = deadlineNode(entry);
-  if (left) chip.append(left);
-  return chip;
-}
 function fwViewTabs() {
   const bar = el('div', { class: 'fw-views', role: 'tablist' });
   for (const [key, label] of [
@@ -4322,6 +4408,475 @@ function fwViewTabs() {
     }));
   }
   return bar;
+}
+const FW_CHAIN_DESCRIPTIONS = {
+  forward: 'Továbbított forgalom – engedélyek és védelem',
+  input: 'A kapu hostjára érkező forgalom',
+  prerouting: 'Portál-átirányítás és NAT-döntések',
+  postrouting: 'Kimenő maszkolás a WAN felé',
+  preauth: 'Bejelentkezés előtti engedélyek',
+  block: 'Mindig tiltott célok',
+  preauth_nat: 'Pre-auth kivétel a portál-átirányítás alól',
+  block_nat: 'Blokk a portál-átirányítás előtt',
+  breakglass: 'Vészhelyzeti ideiglenes hozzáférés',
+};
+function fwNftTokens(text) {
+  const tokens = [];
+  let current = '';
+  let quoted = false;
+  for (const ch of text) {
+    if (ch === '"') {
+      current += ch;
+      quoted = !quoted;
+      continue;
+    }
+    if (!quoted && /\s/.test(ch)) {
+      if (current) tokens.push(current);
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  if (current) tokens.push(current);
+  return tokens;
+}
+function fwUnquote(value) {
+  return value && value.startsWith('"') && value.endsWith('"')
+    ? value.slice(1, -1)
+    : value;
+}
+function fwStripComma(value) {
+  return (value || '').replace(/,$/, '');
+}
+function fwPortValue(tokens, index) {
+  if (tokens[index] === '{') {
+    const parts = [];
+    let i = index + 1;
+    while (i < tokens.length && tokens[i] !== '}') {
+      parts.push(fwStripComma(fwUnquote(tokens[i])));
+      i++;
+    }
+    return { label: parts.join(', '), next: i + 1 };
+  }
+  if (index >= tokens.length) return { label: '', next: index };
+  return {
+    label: fwStripComma(fwUnquote(tokens[index])),
+    next: index + 1
+  };
+}
+function fwSetValue(value) {
+  return value && value.startsWith('@') ? 'halmaz ' + value : value;
+}
+function fwConcatRight(tokens, start) {
+  let right = '';
+  let neg = '';
+  let i = start;
+  if (tokens[i] === 'ct' && tokens[i + 1] === 'original'
+      && tokens[i + 2] === 'proto-dst') {
+    const value = fwPortValue(tokens, i + 3);
+    right = 'célport ' + fwSetValue(value.label);
+    i = value.next;
+  } else if (tokens[i] === 'udp' && tokens[i + 1] === 'dport') {
+    const value = fwPortValue(tokens, i + 2);
+    right = 'UDP port ' + fwSetValue(value.label);
+    i = value.next;
+  } else if (tokens[i] === 'tcp' && tokens[i + 1] === 'dport') {
+    const value = fwPortValue(tokens, i + 2);
+    right = 'TCP port ' + fwSetValue(value.label);
+    i = value.next;
+  } else if (tokens[i] === 'ether' && tokens[i + 1] === 'saddr') {
+    right = 'MAC';
+    i += 2;
+  }
+  if (tokens[i] === '!=') {
+    neg = ' ≠';
+    i++;
+  }
+  if (tokens[i] && tokens[i].startsWith('@')) {
+    right += neg + (right ? ' ' : '') + 'halmaz ' + tokens[i];
+    i++;
+  }
+  return { right, next: i };
+}
+function fwParseRule(text) {
+  const tokens = fwNftTokens(text);
+  const parts = [];
+  let verdict = null;
+  let i = 0;
+  while (i < tokens.length) {
+    const t = tokens[i];
+    if ((t === 'iifname' || t === 'oifname' || t === 'iif' || t === 'oif')
+        && tokens[i + 1]) {
+      parts.push({
+        label: (t === 'iifname' || t === 'iif' ? 'be: ' : 'ki: ')
+          + fwUnquote(tokens[i + 1]),
+        cls: 'iface'
+      });
+      i += 2;
+      continue;
+    }
+    if (t === 'meta'
+        && (tokens[i + 1] === 'l4proto' || tokens[i + 1] === 'nfproto')
+        && tokens[i + 2]) {
+      parts.push({ label: tokens[i + 2].toUpperCase(), cls: 'proto' });
+      i += 3;
+      continue;
+    }
+    if ((t === 'meta' || t === 'ct') && tokens[i + 1] === 'mark') {
+      const hasSet = tokens[i + 2] === 'set';
+      const value = hasSet ? tokens[i + 3] : tokens[i + 2];
+      if (value) {
+        parts.push({ label: 'jelölés ' + value, cls: 'mark' });
+        i += hasSet ? 4 : 3;
+        continue;
+      }
+    }
+    if (t === 'ct' && tokens[i + 1] === 'state') {
+      const value = fwPortValue(tokens, i + 2);
+      parts.push({ label: 'állapot: ' + value.label, cls: 'state' });
+      i = value.next;
+      continue;
+    }
+    if (t === 'ct' && tokens[i + 1] === 'status' && tokens[i + 2]) {
+      parts.push({ label: tokens[i + 2].toUpperCase(), cls: 'state' });
+      i += 3;
+      continue;
+    }
+    if (t === 'ct' && tokens[i + 1] === 'original' && tokens[i + 2] === 'ip'
+        && tokens[i + 3] === 'saddr' && tokens[i + 4] === '.') {
+      const concat = fwConcatRight(tokens, i + 5);
+      parts.push({ label: 'forrás + ' + concat.right, cls: 'set' });
+      i = concat.next;
+      continue;
+    }
+    if (t === 'ct' && tokens[i + 1] === 'original' && tokens[i + 2] === 'ip'
+        && (tokens[i + 3] === 'saddr' || tokens[i + 3] === 'daddr')) {
+      let j = i + 4;
+      let neg = '';
+      if (tokens[j] === '!=') {
+        neg = ' ≠';
+        j++;
+      }
+      if (tokens[j]) {
+        parts.push({
+          label: (tokens[i + 3] === 'saddr' ? 'forrás' : 'cél')
+            + neg + ' ' + fwUnquote(tokens[j]),
+          cls: 'addr'
+        });
+        j++;
+      }
+      i = j;
+      continue;
+    }
+    if (t === 'ct' && tokens[i + 1] === 'original'
+        && tokens[i + 2] === 'proto-dst') {
+      const value = fwPortValue(tokens, i + 3);
+      parts.push({
+        label: 'célport ' + fwSetValue(value.label),
+        cls: 'port'
+      });
+      i = value.next;
+      continue;
+    }
+    if (t === 'ip' && tokens[i + 1] === 'saddr' && tokens[i + 2] === '.') {
+      const concat = fwConcatRight(tokens, i + 3);
+      parts.push({ label: 'forrás + ' + concat.right, cls: 'set' });
+      i = concat.next;
+      continue;
+    }
+    if (t === 'ip' && (tokens[i + 1] === 'saddr' || tokens[i + 1] === 'daddr')) {
+      let j = i + 2;
+      let neg = '';
+      if (tokens[j] === '!=') {
+        neg = ' ≠';
+        j++;
+      }
+      if (tokens[j]) {
+        parts.push({
+          label: (tokens[i + 1] === 'saddr' ? 'forrás' : 'cél')
+            + neg + ' ' + fwUnquote(tokens[j]),
+          cls: 'addr'
+        });
+        j++;
+      }
+      i = j;
+      continue;
+    }
+    if (t === 'ip' && tokens[i + 1] === 'protocol' && tokens[i + 2]) {
+      parts.push({ label: 'protokoll ' + tokens[i + 2], cls: 'proto' });
+      i += 3;
+      continue;
+    }
+    if (t === 'icmp' && tokens[i + 1] === 'type' && tokens[i + 2]) {
+      parts.push({ label: 'ICMP ' + tokens[i + 2], cls: 'proto' });
+      i += 3;
+      continue;
+    }
+    if ((t === 'tcp' || t === 'udp')
+        && (tokens[i + 1] === 'dport' || tokens[i + 1] === 'sport')) {
+      let j = i + 2;
+      let neg = '';
+      if (tokens[j] === '!=') {
+        neg = ' ≠';
+        j++;
+      }
+      const value = fwPortValue(tokens, j);
+      parts.push({
+        label: t.toUpperCase()
+          + (tokens[i + 1] === 'dport' ? ' port' : ' forrásport')
+          + neg + ' ' + fwSetValue(value.label),
+        cls: 'port'
+      });
+      i = value.next;
+      continue;
+    }
+    if (t === 'ether' && tokens[i + 1] === 'saddr' && tokens[i + 2]) {
+      parts.push({ label: 'MAC ' + fwUnquote(tokens[i + 2]), cls: 'addr' });
+      i += 3;
+      continue;
+    }
+    if (t.startsWith('@')) {
+      parts.push({ label: 'halmaz ' + t, cls: 'set' });
+      i++;
+      continue;
+    }
+    if (t === 'limit') {
+      let j = i + 1;
+      const words = [];
+      while (j < tokens.length
+             && !['log', 'accept', 'drop', 'return', 'jump',
+                 'redirect', 'masquerade'].includes(tokens[j])) {
+        words.push(tokens[j]);
+        j++;
+      }
+      parts.push({ label: 'korlát ' + words.join(' '), cls: 'limit' });
+      i = j;
+      continue;
+    }
+    if (t === 'log') {
+      let j = i + 1;
+      while (j < tokens.length
+             && !['accept', 'drop', 'return', 'jump',
+                 'redirect', 'masquerade'].includes(tokens[j])) {
+        j++;
+      }
+      parts.push({
+        label: 'naplózás',
+        cls: 'log',
+        title: tokens.slice(i, j).join(' ')
+      });
+      i = j;
+      continue;
+    }
+    if (t === 'jump' && tokens[i + 1]) {
+      verdict = { label: '→ ' + tokens[i + 1], cls: 'jump' };
+      break;
+    }
+    if (t === 'accept' || t === 'drop' || t === 'return') {
+      verdict = { label: t, cls: t };
+      break;
+    }
+    if (t === 'masquerade') {
+      verdict = { label: 'masquerade', cls: 'nat' };
+      break;
+    }
+    if (t === 'redirect') {
+      let j = i + 1;
+      const words = [];
+      while (j < tokens.length
+             && !['accept', 'drop', 'return', 'jump', 'masquerade'].includes(tokens[j])) {
+        words.push(tokens[j]);
+        j++;
+      }
+      verdict = { label: ('redirect ' + words.join(' ')).trim(), cls: 'nat' };
+      break;
+    }
+    parts.push({ label: t, cls: 'raw' });
+    i++;
+  }
+  return { parts, verdict };
+}
+function fwParseChains(text) {
+  const chains = [];
+  let current = null;
+  for (const rawLine of String(text || '').split('\n')) {
+    const line = rawLine.replace(/^\t+/, '').trimEnd();
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const head = trimmed.match(/^chain\s+([A-Za-z0-9_.-]+)\s*\{$/);
+    if (head) {
+      current = { name: head[1], meta: '', rules: [] };
+      chains.push(current);
+      continue;
+    }
+    if (!current) continue;
+    if (trimmed === '}') {
+      current = null;
+      continue;
+    }
+    if (!current.meta && trimmed.startsWith('type ')) {
+      current.meta = trimmed;
+      continue;
+    }
+    current.rules.push(trimmed);
+  }
+  for (const chain of chains) {
+    const hook = chain.meta.match(/hook\s+([A-Za-z0-9_-]+)/);
+    const priority = chain.meta.match(/priority\s+([^;]+)/);
+    const policy = chain.meta.match(/policy\s+([A-Za-z0-9_-]+)/);
+    chain.hook = hook ? hook[1] : '';
+    chain.priority = priority ? priority[1].trim() : '';
+    chain.policy = policy ? policy[1] : '';
+  }
+  return chains;
+}
+function fwRuleNode(text, number) {
+  const parsed = fwParseRule(text);
+  const row = el('li', { class: 'fw-rule', title: text });
+  row.append(el('span', { class: 'fw-rule-no', text: String(number) }));
+  const body = el('div', { class: 'fw-rule-body' });
+  for (const part of parsed.parts) {
+    body.append(el('span', {
+      class: 'fw-tok ' + part.cls,
+      text: tr(part.label),
+      title: part.title || ''
+    }));
+  }
+  if (!body.childNodes.length && !parsed.verdict) {
+    body.append(el('span', { class: 'fw-tok raw', text: text }));
+  }
+  row.append(body);
+  if (parsed.verdict) {
+    row.append(el('span', {
+      class: 'fw-verdict ' + parsed.verdict.cls,
+      text: tr(parsed.verdict.label)
+    }));
+  }
+  return row;
+}
+function fwChainNode(chain) {
+  const card = el('section', { class: 'fw-chain' });
+  const head = el('div', { class: 'fw-chain-head' });
+  const title = el('div', { class: 'fw-chain-title' },
+    el('span', { class: 'fw-chain-name mono', text: chain.name }),
+    el('span', {
+      class: 'fw-chain-desc',
+      text: tr(FW_CHAIN_DESCRIPTIONS[chain.name] || 'Egyéni lánc')
+    })
+  );
+  head.append(title);
+  const badges = el('div', { class: 'fw-badges' });
+  if (chain.hook) badges.append(el('span', {
+    class: 'fw-badge', text: 'hook ' + chain.hook
+  }));
+  if (chain.priority) badges.append(el('span', {
+    class: 'fw-badge', text: 'priority ' + chain.priority
+  }));
+  if (chain.policy) badges.append(el('span', {
+    class: 'fw-badge ' + chain.policy, text: 'policy ' + chain.policy
+  }));
+  badges.append(el('span', {
+    class: 'fw-badge', text: tr(chain.rules.length + ' szabály')
+  }));
+  head.append(badges);
+  card.append(head);
+  if (!chain.rules.length) {
+    card.append(el('div', {
+      class: 'fw-chain-empty', text: tr('Nincs szabály ebben a láncban.')
+    }));
+    return card;
+  }
+  const list = el('ol', { class: 'fw-rules' });
+  chain.rules.forEach((rule, index) => list.append(fwRuleNode(rule, index + 1)));
+  card.append(list);
+  return card;
+}
+function fwLegend() {
+  const bar = el('div', { class: 'fw-legend' });
+  for (const [cls, label] of [
+    ['accept', 'accept'], ['drop', 'drop'], ['return', 'return'],
+    ['jump', 'jump'], ['nat', 'NAT']
+  ]) {
+    bar.append(el('span', { class: cls }, el('i', { class: cls }), label));
+  }
+  return bar;
+}
+function renderFirewallVisual() {
+  const state = firewallRulesState;
+  const toolbar = el('div', { class: 'fw-raw-toolbar' });
+  const info = [el('span', {
+    class: 'mono',
+    text: 'inet ' + ((state && state.table) || 'hatarvedelem')
+  })];
+  if (state && state.generated) {
+    info.push(el('span', {
+      'data-fw-generated': '1',
+      text: tr('generálva: ') + clockTime(state.generated)
+    }));
+  }
+  const chains = state ? fwParseChains(state.text) : [];
+  if (chains.length) {
+    const rules = chains.reduce((sum, chain) => sum + chain.rules.length, 0);
+    info.push(el('span', { text: tr(chains.length + ' lánc') }));
+    info.push(el('span', { text: tr(rules + ' szabály') }));
+  }
+  info.forEach((node, index) => {
+    if (index) toolbar.append(el('span', { class: 'muted', text: '·' }));
+    toolbar.append(node);
+  });
+  toolbar.append(el('button', {
+    type: 'button',
+    class: 'ghost refresh',
+    disabled: firewallRulesLoading,
+    text: firewallRulesLoading ? tr('Betöltés…') : tr('Frissítés'),
+    onclick: () => loadFirewallRules(),
+  }));
+  adminPanel.append(toolbar);
+  if (firewallRulesError) {
+    adminPanel.append(el('div', {
+      class: 'fw-warn err',
+      text: firewallRulesError
+    }));
+  }
+  if (state && state.dry_run) {
+    adminPanel.append(el('div', {
+      class: 'fw-warn',
+      text: tr('DRY-RUN mód: a nyers szabályok nem olvashatók.')
+    }));
+    return;
+  }
+  if (state && state.errors && state.errors.length) {
+    adminPanel.append(el('div', {
+      class: 'fw-warn err',
+      text: tr('Szabályolvasási hiba: ') + state.errors.join(' · ')
+    }));
+  }
+  if (!state) {
+    adminPanel.append(el('div', {
+      class: 'empty-box',
+      text: firewallRulesLoading
+        ? tr('Betöltés…')
+        : tr('A tűzfal szabályai még nem töltődtek be.')
+    }));
+    return;
+  }
+  if (!chains.length) {
+    adminPanel.append(el('div', {
+      class: 'empty-box',
+      text: state.missing && state.missing.length
+        ? tr('A tűzfal-tábla még nem létezik.')
+        : tr('Nincs megjeleníthető szabály.')
+    }));
+    return;
+  }
+  adminPanel.append(fwLegend());
+  const wrap = el('div', { class: 'fw-chains' });
+  for (const chain of chains) wrap.append(fwChainNode(chain));
+  adminPanel.append(wrap);
+  adminPanel.append(el('p', {
+    class: 'hint',
+    text: tr('A nézet a kernelben élő nftables láncokat mutatja, a dinamikus halmazok tartalma nélkül. Minden sor balról jobbra olvasandó: feltételek, majd a döntés.')
+  }));
 }
 function fwRawLine(text) {
   const line = el('span', { class: 'ln' });
@@ -4465,20 +5020,36 @@ function setFirewallView(view) {
   if (firewallView === view) return;
   firewallView = view;
   firewallRulesError = '';
-  if (view === 'raw') {
-    stopFirewallTimers();
-    renderAdminPanel();
-    loadFirewallRules();
-  } else {
-    loadFirewall();
-  }
+  stopFirewallTimers();
+  renderAdminPanel();
+  loadFirewallRules().then(() => {
+    if (activeView === 'admin' && adminTabName === 'firewall'
+        && firewallView === 'overview') {
+      startFirewallPoll();
+    }
+  });
+}
+function startFirewallPoll() {
+  stopFirewallTimers();
+  firewallPollTimer = setInterval(() => {
+    if (activeView === 'admin' && adminTabName === 'firewall'
+        && firewallView === 'overview') {
+      loadFirewallRules({ silent: true });
+    }
+  }, 5000);
 }
 let firewallRulesSeq = 0;
-async function loadFirewallRules() {
+async function loadFirewallRules(options = {}) {
+  const silent = options.silent === true;
+  if (silent && firewallRulesLoading) return;
   const seq = ++firewallRulesSeq;
+  const previousText = firewallRulesState ? firewallRulesState.text : null;
+  const previousError = firewallRulesError;
   firewallRulesLoading = true;
-  firewallRulesError = '';
-  renderAdminPanel();
+  if (!silent) {
+    firewallRulesError = '';
+    renderAdminPanel();
+  }
   try {
     const res = await fetch('/api/admin/firewall-rules', { cache: 'no-store' });
     const data = await res.json();
@@ -4487,215 +5058,43 @@ async function loadFirewallRules() {
     }
     if (seq !== firewallRulesSeq) return;
     firewallRulesState = data;
+    firewallRulesError = '';
   } catch (err) {
     if (seq !== firewallRulesSeq) return;
     firewallRulesError = err.message || 'A nyers szabályok betöltése nem sikerült.';
   }
   firewallRulesLoading = false;
-  if (activeView === 'admin' && adminTabName === 'firewall' && firewallView === 'raw') {
+  if (activeView !== 'admin' || adminTabName !== 'firewall') return;
+  const textChanged = Boolean(
+    firewallRulesState && firewallRulesState.text !== previousText
+  );
+  const errorChanged = firewallRulesError !== previousError;
+  if (!silent || textChanged || errorChanged) {
     renderAdminPanel();
+  } else if (firewallRulesState && firewallRulesState.generated) {
+    // Változatlan szabályoknál nem építjük újra a nézetet (nem ugrik a
+    // görgetés), csak a frissítés idejét írjuk át.
+    const stamp = adminPanel.querySelector('[data-fw-generated]');
+    if (stamp) {
+      stamp.textContent = tr('generálva: ')
+        + clockTime(firewallRulesState.generated);
+    }
   }
 }
 function renderFirewall() {
-  const rows = (firewallState && firewallState.ips) || [];
-  const counts = (firewallState && firewallState.counts) || {};
-  const bits = [
-    tr(`${counts.ips || 0} IP-cím`),
-    tr(`${counts.entries || 0} engedély`)
-  ];
-  if (counts.sessions !== undefined) bits.push(tr(`${counts.sessions} munkamenet`));
-  if (counts.orphans) bits.push(tr(`${counts.orphans} munkamenet nélküli`));
-  if (counts.mismatched) bits.push(tr(`${counts.mismatched} eltérés`));
   adminPanel.append(adminHead(
     'Tűzfal-nézet',
     firewallView === 'raw'
       ? tr('a kernelben élő nftables szabályok, mint az iptables -L -n')
-      : bits.join(' · ') + ' · ' + tr('a kerneloldali halmazok 5 másodpercenként frissülnek'),
+      : tr('a kernelben élő nftables szabályok vizuálisan') + ' · '
+        + tr('5 másodpercenként frissül'),
     null, null
   ));
   adminPanel.append(fwViewTabs());
   const notice = adminNotice(); if (notice) adminPanel.append(notice);
-  if (firewallView === 'raw') {
-    renderFirewallRaw();
-    return;
-  }
-  if (firewallState && firewallState.dry_run) {
-    adminPanel.append(el('div', {
-      class: 'fw-warn',
-      text: tr('DRY-RUN mód: a tűzfal-halmazok valós tartalma nem olvasható.')
-    }));
-  }
-  if (firewallState && firewallState.errors && firewallState.errors.length) {
-    adminPanel.append(el('div', {
-      class: 'fw-warn err',
-      text: tr('Halmazolvasási hiba: ') + firewallState.errors.join(' · ')
-    }));
-  }
-  if (!rows.length) {
-    adminPanel.append(el('div', {
-      class: 'empty-box',
-      text: tr('Jelenleg nincs engedélyezett IP-cím a tűzfalban.')
-    }));
-    return;
-  }
-  const cards = el('div', { class: 'fw-cards' });
-  for (const row of rows) {
-    const card = el('article', { class: 'fw-card' });
-    const status = el('span', {
-      class: 'pill ' + (row.orphan ? 'off' : (row.in_sync ? 'on' : 'must')),
-      text: tr(row.orphan
-        ? 'nincs munkamenet'
-        : (row.in_sync ? 'szinkronban' : 'eltérés'))
-    });
-    card.append(el('div', { class: 'fw-head' },
-      el('div', {},
-        el('span', { class: 'mono fw-ip', text: row.ip }), ' ', status
-      ),
-      el('div', { class: 'mono muted' },
-        tr('lejár: '),
-        deadlineNode({ expires_in: row.expires_in }) || el('span', { text: '—' })
-      )
-    ));
-
-    const meta = el('div', { class: 'fw-meta' });
-    meta.append(el('span', { class: 'muted', text: tr('Felhasználó:') }));
-    if (row.users && row.users.length) {
-      for (const user of row.users) meta.append(el('b', { text: user }));
-    } else {
-      meta.append(el('span', { class: 'muted', text: '—' }));
-    }
-    meta.append(el('span', { class: 'muted', text: tr('Szabály:') }));
-    if (row.rules && row.rules.length) {
-      for (const rule of row.rules) {
-        meta.append(el('span', {},
-          el('b', { text: tr(rule.label || '—') }),
-          rule.ports_label
-            ? el('span', { class: 'mono muted', text: ' · ' + tr(rule.ports_label) })
-            : null
-        ));
-      }
-    } else {
-      meta.append(el('span', { class: 'muted', text: '—' }));
-    }
-    card.append(meta);
-
-    const ports = el('div', { class: 'fw-sec' });
-    ports.append(el('h4', { text: tr('Engedélyezett portok') }));
-    const chips = el('div', { class: 'fw-chips' });
-    if (row.full) chips.append(fwChip(tr('Minden port'), row.full));
-    for (const entry of row.tcp || []) {
-      chips.append(fwChip(`TCP ${entry.port}`, entry));
-    }
-    for (const entry of row.udp || []) {
-      chips.append(fwChip(`UDP ${entry.port}`, entry));
-    }
-    if (row.icmp) chips.append(fwChip('ICMP', row.icmp));
-    if (!chips.childNodes.length) {
-      chips.append(el('span', {
-        class: 'fw-empty-line',
-        text: tr('Nincs portengedély a kernelben.')
-      }));
-    }
-    ports.append(chips);
-
-    const ssh = el('div', { class: 'fw-sec' });
-    ssh.append(el('h4', { text: tr('Host SSH (22/TCP)') }));
-    const sshChips = el('div', { class: 'fw-chips' });
-    if (row.host_ssh) {
-      sshChips.append(fwChip(tr('Engedélyezve'), row.host_ssh));
-    } else {
-      sshChips.append(el('span', {
-        class: 'fw-empty-line',
-        text: tr('Nincs engedélyezve.')
-      }));
-    }
-    ssh.append(sshChips);
-
-    const sessionBox = el('div', { class: 'fw-sec' });
-    sessionBox.append(el('h4', { text: tr('Munkamenet') }));
-    if (row.sessions && row.sessions.length) {
-      for (const session of row.sessions) {
-        const line = el('div', { class: 'fw-session' });
-        line.append(el('b', { text: session.user || '—' }));
-        if (session.role === 'admin') {
-          line.append(el('span', { class: 'pill admin', text: 'admin' }));
-        }
-        line.append(el('span', {
-          text: tr(session.rule_label || session.rule || '—')
-        }));
-        if (session.ports_label) {
-          line.append(el('span', {
-            class: 'mono muted',
-            text: tr(session.ports_label)
-          }));
-        }
-        line.append(el('span', {
-          class: 'mono muted',
-          text: tr('belépve: ') + clockTime(session.logged_in)
-        }));
-        const left = el('span', { class: 'mono' }, tr('hátralévő: '));
-        left.append(
-          deadlineNode({ expires_in: session.expires_in })
-          || document.createTextNode('—')
-        );
-        line.append(left);
-        sessionBox.append(line);
-      }
-    } else {
-      sessionBox.append(el('span', {
-        class: 'fw-empty-line',
-        text: tr('Nincs élő munkamenet ehhez az IP-címhez; az engedély a '
-            + 'kernel-timeout lejártáig él.')
-      }));
-    }
-    card.append(ports, ssh, sessionBox);
-
-    if (row.mismatch && row.mismatch.length) {
-      card.append(el('div', {
-        class: 'fw-warn' + (row.orphan ? '' : ' err'),
-        text: tr(row.orphan
-          ? 'Kerneloldali bejegyzés munkamenet nélkül: '
-          : 'Eltérés a munkamenet és a tűzfal között: ')
-          + row.mismatch.join(' · ')
-      }));
-    }
-    cards.append(card);
-  }
-  adminPanel.append(cards);
-  adminPanel.append(el('p', {
-    class: 'hint',
-    text: tr('Az itt látható portok a DNAT előtti célportok. Docker által '
-        + 'publikált konténer esetén ez a hoston publikált port. Az '
-        + 'engedélyek a munkamenet lejártakor a kernel-timeouttal is '
-        + 'törlődnek; a „váratlan” bejegyzés olyan kerneloldali engedély, '
-        + 'amelyre nincs élő munkamenet.')
-  }));
+  if (firewallView === 'raw') renderFirewallRaw();
+  else renderFirewallVisual();
 }
-async function loadFirewall() {
-  stopFirewallTimers();
-  try {
-    const res = await fetch('/api/admin/firewall', { cache: 'no-store' });
-    const data = await res.json();
-    if (!res.ok || !data.ok) {
-      throw new Error(data.error || 'a tűzfal állapota nem olvasható');
-    }
-    firewallState = data;
-    adminFlash = null;
-    renderAdminPanel();
-  } catch (err) {
-    adminFlash = {
-      text: err.message || 'A tűzfal állapotának betöltése nem sikerült.',
-      kind: 'err'
-    };
-    renderAdminPanel();
-  }
-  if (activeView === 'admin' && adminTabName === 'firewall' && firewallView === 'overview') {
-    tickFirewallClocks();
-    firewallClockTimer = setInterval(tickFirewallClocks, 1000);
-    firewallPollTimer = setInterval(loadFirewall, 5000);
-  }
-}
-
 function renderAdminPanel() {
   adminPanel.replaceChildren();
   if (adminTabName === 'users') renderUsers();
