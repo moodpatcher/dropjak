@@ -8,11 +8,14 @@
 # (dnf/yum/apt-get/zypper), és felajánlja a hiányzó csomagok telepítését.
 #
 # rootként futtatandó. A tűzfal-szabályokat csak a végén, ellenőrzés után
-# teszi élesbe. Ha SSH-n keresztül futtatod, a MEGLÉVŐ kapcsolatod a
-# conntrack-szabály miatt túléli a szabályok betöltését. ÚJ SSH-kapcsolat
-# viszont csak akkor jön létre, ha ugyanarról az IP-ről belépsz a portálon,
-# és engedélyezed a hozzáférést. Tartsd nyitva a jelenlegi kapcsolatot, és
-# készülj fel a szolgáltatói konzolra, ha a portál nem indul el.
+# teszi élesbe. FIGYELEM: az első szabálybetöltés megszakítja az SSH-t, ha
+# a forrás IP-hez még nincs hozzárendelt, TCP 22-t engedélyező host (input)
+# szabály. A meglévő SSH-kapcsolatot a conntrack önmagában NEM tartja
+# életben: a sablon SSH-őre a visszavont kapcsolatot is lezárja. ÚJ SSH
+# csak akkor jön létre, ha ugyanarról az IP-ről belépsz a portálon, és egy
+# hozzárendelt host szabályban engedélyezed a TCP 22-t. Tartsd nyitva a
+# szolgáltatói konzolt, vagy az első indítást HV_SKIP_FIREWALL=1 értékkel
+# végezd, majd a szabály beállítása után indíts újra normálisan.
 #
 # Példa:
 #   sudo ./install.sh --wan-if eth0 --lan-if eth1
@@ -32,6 +35,11 @@ SYSTEMD_UNIT="${SYSTEMD_DIR}/${SERVICE}.service"
 FIREWALL_UNIT="${SYSTEMD_DIR}/${FIREWALL_SERVICE}.service"
 SYSCTL_FILE="/etc/sysctl.d/90-hatarvedelem.conf"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# A sablon rendereléséhez használt értékek. Ugyanazok az alapértékek, mint a
+# docker/entrypoint.sh-ban és a docker-compose.yml-ben.
+FWD_MARK="${HV_FWD_MARK:-0x44524a4b}"
+DROP_LOG_GROUP="${HV_DROP_LOG_GROUP:-5}"
 
 PORT="80"
 LAN_IF=""
@@ -61,6 +69,14 @@ die()  { printf 'HIBA: %s\n' "$*" >&2; exit 1; }
 note() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 warn() { printf 'FIGYELEM: %s\n' "$*" >&2; }
 
+# A rendereléshez ugyanazokat az értékeket fogadjuk el, mint a Dockeres
+# belépési pont, hogy a nftables mark és a drop-log csoport ne csússzon el.
+[[ "$FWD_MARK" =~ ^0x[0-9A-Fa-f]{1,8}$ ]] \
+  || die "érvénytelen HV_FWD_MARK (0x kezdetű, legfeljebb 8 jegyű hex szám kell): $FWD_MARK"
+[[ "$DROP_LOG_GROUP" =~ ^[0-9]+$ ]] \
+  && (( 10#$DROP_LOG_GROUP >= 1 && 10#$DROP_LOG_GROUP <= 65535 )) \
+  || die "érvénytelen HV_DROP_LOG_GROUP (1-65535): $DROP_LOG_GROUP"
+
 usage() {
   cat <<'EOF'
 Használat: sudo ./install.sh [opciók]
@@ -72,8 +88,8 @@ Használat: sudo ./install.sh [opciók]
   --portal-net CIDR    ahonnan a portál elérhető (alap: az SSH forrása vagy
                        a LAN hálózat). Nyilvános portálhoz: 0.0.0.0/0.
                        A host SSH-t nem ez szabályozza: az csak aktív portál-
-                       munkamenettel és a beépített admin-full szabállyal
-                       nyílik meg.
+                       munkamenettel és a felhasználóhoz rendelt, TCP 22-t
+                       engedélyező host (input) szabállyal nyílik meg.
   --port PORT          a portál portja (alap: 80)
   --portal-url URL     a portál kanonikus címe (alap: http://<gateway-ip>)
   --yes                nem kérdez; a hiányzó csomagokat is telepíti, és a
@@ -83,6 +99,10 @@ Használat: sudo ./install.sh [opciók]
 
 A telepítő dnf/yum/apt-get/zypper alatt működik. Python 3.8 vagy újabb
 szükséges; RHEL 8-on ehhez automatikusan a python39 csomagot ajánlja fel.
+
+Környezeti változók (a docker/entrypoint.sh alapértékeivel egyezően):
+  HV_FWD_MARK          a forward szabályok nftables markja (alap: 0x44524a4b)
+  HV_DROP_LOG_GROUP    a drop-napló NFLOG csoportja (alap: 5)
 EOF
 }
 
@@ -106,7 +126,8 @@ done
 
 [[ $EUID -eq 0 ]] || die "rootként futtasd: sudo $0"
 command -v systemctl >/dev/null 2>&1 || die "hiányzik a systemd"
-for f in server.py gateway.py index.html icon.png services.json \
+for f in server.py gateway.py settings_store.py fail2ban.py droplog.py \
+         index.html icon.png blocked.png unauthorized.png services.json VERSION \
          deploy/hatarvedelem.nft deploy/hatarvedelem.service \
          deploy/hatarvedelem-firewall.service; do
   [[ -f "$SRC_DIR/$f" ]] || die "hiányzó fájl: $SRC_DIR/$f"
@@ -131,6 +152,17 @@ confirm() {
   fi
   read -r -p "$prompt [i/N]: " answer
   [[ "$answer" =~ ^[iI]([gG][eE][nN])?$ ]]
+}
+
+# sed helyettesítési mintájába kerülő érték escape-elése. A minták `|`
+# határolót használnak, ezért a backslash, a `|` és a `&` karaktereket kell
+# escape-elni.
+sed_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//|/\\|}"
+  value="${value//&/\\&}"
+  printf '%s' "$value"
 }
 
 python_ok() {
@@ -492,11 +524,18 @@ disable_conflicting_firewalls
 
 note "Program telepítése"
 install -d -m 0755 "$APP_DIR"
-install -m 0644 "$SRC_DIR/server.py" "$SRC_DIR/gateway.py" "$SRC_DIR/index.html" \
-  "$SRC_DIR/icon.png" "$SRC_DIR/services.json" "$APP_DIR/"
+install -m 0644 "$SRC_DIR/server.py" "$SRC_DIR/gateway.py" \
+  "$SRC_DIR/settings_store.py" "$SRC_DIR/fail2ban.py" "$SRC_DIR/droplog.py" \
+  "$SRC_DIR/index.html" "$SRC_DIR/icon.png" "$SRC_DIR/blocked.png" \
+  "$SRC_DIR/unauthorized.png" \
+  "$SRC_DIR/services.json" "$SRC_DIR/VERSION" "$APP_DIR/"
 if [[ -f "$SRC_DIR/README.md" ]]; then
   install -m 0644 "$SRC_DIR/README.md" "$APP_DIR/"
 fi
+# A sablon a Docker-layouttal egyezően referencia-célból kerül ide; a natív
+# tűzfal a /etc/nftables/hatarvedelem.nft renderelt példányát használja.
+install -d -m 0755 "$APP_DIR/deploy"
+install -m 0644 "$SRC_DIR/deploy/hatarvedelem.nft" "$APP_DIR/deploy/"
 
 if ! getent group "$SERVICE_USER" >/dev/null; then
   groupadd --system "$SERVICE_USER"
@@ -519,11 +558,14 @@ cleanup() {
 trap cleanup EXIT
 
 sed \
-  -e "s|__LAN_IF__|$LAN_IF|g" \
-  -e "s|__WAN_IF__|$WAN_IF|g" \
-  -e "s|__LAN_NET__|$LAN_NET|g" \
-  -e "s|__PORTAL_NET__|$PORTAL_NET|g" \
-  -e "s|__PORT__|$PORT|g" \
+  -e "s|__LAN_IF__|$(sed_escape "$LAN_IF")|g" \
+  -e "s|__WAN_IF__|$(sed_escape "$WAN_IF")|g" \
+  -e "s|__LAN_NET__|$(sed_escape "$LAN_NET")|g" \
+  -e "s|__PORTAL_NET__|$(sed_escape "$PORTAL_NET")|g" \
+  -e "s|__PORT__|$(sed_escape "$PORT")|g" \
+  -e "s|__FWD_MARK__|$(sed_escape "$FWD_MARK")|g" \
+  -e "s|__DROP_LOG_GROUP__|$(sed_escape "$DROP_LOG_GROUP")|g" \
+  -e "s|__PROXY__|# |g" \
   "$SRC_DIR/deploy/hatarvedelem.nft" > "$TMP_NFT"
 
 if grep -qE '__[A-Z0-9_]+__' "$TMP_NFT"; then
@@ -547,14 +589,18 @@ fi
 
 note "Tűzfal betöltése"
 warn "A host SSH ezután csak akkor nyílik meg, ha ugyanarról az IP-ről"
-warn "belépsz a portálra, és a beépített admin-full szabályt engedélyezed."
-warn "A jelenlegi SSH-kapcsolatod a conntrack miatt életben marad; az újhoz"
-warn "portál-belépés kell."
+warn "belépsz a portálra, és egy a felhasználóhoz rendelt host szabályban"
+warn "kifejezetten engedélyezed a TCP 22-es portot."
+warn "FIGYELEM: az első betöltés megszakítja a jelenlegi SSH-kapcsolatot,"
+warn "ha a forrás IP-hez még nincs ilyen hozzárendelt szabály. A conntrack"
+warn "önmagában nem tartja életben. Őrizd meg a szolgáltatói konzol"
+warn "hozzáférését, vagy előbb HV_SKIP_FIREWALL=1 értékkel indíts, állítsd"
+warn "be a szabályt, és utána töltsd be a tűzfalat."
 confirm "Betöltöm a tűzfalszabályokat?" || die "megszakítva"
 # A fájl idempotens: többszöri futtatás nem duplázza a szabályokat, és a
 # belépett kliensek halmazelemei megmaradnak.
 "$NFT_BIN" -f "$NFT_FILE"
-for hv_set in allowed_v4 allowed_tcp allowed_udp allowed_icmp host_ssh_v4; do
+for hv_set in allowed_v4 allowed_tcp allowed_udp allowed_icmp; do
   "$NFT_BIN" list set inet hatarvedelem "$hv_set" >/dev/null \
     || die "a tűzfal betöltődött, de a(z) $hv_set halmaz nem található"
 done
@@ -580,6 +626,18 @@ if grep -qE '__[A-Z0-9_]+__' "$SYSTEMD_UNIT" "$FIREWALL_UNIT"; then
   die "kitöltetlen helyőrző maradt a systemd unitokban"
 fi
 
+# A renderelt szabályok markjának és NFLOG-csoportjának egyeznie kell a
+# portál és a drop-log figyelő által használt értékkel. A unit sablon ezeket
+# nem tartalmazza, ezért drop-inként adjuk át őket.
+ENV_DROPIN_DIR="${SYSTEMD_DIR}/${SERVICE}.service.d"
+install -d -m 0755 "$ENV_DROPIN_DIR"
+cat > "$ENV_DROPIN_DIR/10-hatarvedelem-env.conf" <<EOF
+[Service]
+Environment=HV_FWD_MARK=$FWD_MARK
+Environment=HV_DROP_LOG_GROUP=$DROP_LOG_GROUP
+EOF
+chmod 0644 "$ENV_DROPIN_DIR/10-hatarvedelem-env.conf"
+
 systemctl daemon-reload
 systemctl enable "$FIREWALL_SERVICE" >/dev/null
 systemctl enable "$SERVICE" >/dev/null
@@ -589,7 +647,7 @@ if ! systemctl restart "$FIREWALL_SERVICE"; then
   journalctl -u "$FIREWALL_SERVICE" -n 30 --no-pager || true
   die "telepítés sikertelen"
 fi
-for hv_set in allowed_v4 allowed_tcp allowed_udp allowed_icmp host_ssh_v4; do
+for hv_set in allowed_v4 allowed_tcp allowed_udp allowed_icmp; do
   "$NFT_BIN" list set inet hatarvedelem "$hv_set" >/dev/null \
     || die "a(z) $hv_set halmaz nem található a szolgáltatás indulása után"
 done

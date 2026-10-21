@@ -1,5 +1,10 @@
 # Hol mit szerkessz
 
+> Ez az útmutató a Docker Compose telepítéshez tartozik. A natív `install.sh`
+> nem telepíti a `hv` parancsot (az a `/root/hatarvedelem` checkoutra és a
+> Docker volume-okra épül); natív telepítésnél a `systemctl` és a
+> `/opt/hatarvedelem/server.py` használható.
+
 A projekt itt van: `/root/hatarvedelem`. A legtöbbször **két fájlhoz** kell
 nyúlni. Mindenhez van rövid parancs, nem kell a Docker mappáiban keresgélni.
 
@@ -14,6 +19,16 @@ hv where       # ez a lap
 ```
 
 ## 1. Beállítások — `.env`
+
+> **FIGYELEM — kizárhatod magadat a hostról.** A tűzfal betöltése
+> megszakítja az aktuális SSH-kapcsolatot, ha arról a forrás IP-ről nincs
+> aktív, engedélyezett portál-munkamenet és a TCP 22-es portot kifejezetten
+> engedélyező host szabály. Az első indulás előtt állítsd be az admin fiókot
+> (`HV_ADMIN_ENABLED=1`, `HV_ADMIN_USER`, valamint `HV_ADMIN_PASSWORD` vagy
+> `HV_ADMIN_PASSWORD_FILE`). Admin fiók nélkül a portálra nem lehet belépni,
+> így az **Admin** panel elérhetetlen, és a host SSH zárva marad. Tartsd
+> elérhetővé a szolgáltatói konzolt: ha a `breakglass` lánc nem használható,
+> azon keresztül állíthatod helyre a hozzáférést.
 
 ```bash
 hv edit        # nano-val nyílik; utána: hv restart
@@ -44,15 +59,25 @@ kötelező cserét ír elő. Ha a jelszót a portálon cserélted le, az az
 csak nem foglalkozik vele. A többi felhasználót, csoportot és hozzáférési
 szabályt a portál **Admin** paneljén kezeld.
 
+A **Admin → Beállítások → Tűzfal neve** mezőben nevet adhatsz a
+tűzfalnak. A név a portál fejlécében, a böngésző címében és az új
+2FA-beiratkozások hitelesítő-bejegyzésében jelenik meg; üresen a `Dropjak`
+név érvényes. A módosítás csak az új beiratkozásokat érinti, a már meglévő
+hitelesítő-bejegyzéseket nem nevezi át.
+
 ## SSH a hostra
 
-A host SSH (22-es port) **csak akkor** nyílik meg, ha a portálon
-ugyanarról az IP-címről beléptél, és a portálon a beépített
-**admin-full** szabályt engedélyezted (a TTL megadásával). Egyedi teljes
-hozzáférésű vagy gyűjtőszabály nem nyitja meg. A jelszó
-megadása önmagában még nem nyitja meg. Kilépéskor azonnal,
-lejáratkor a kernel-timeouttal zárul. A böngésző és az SSH ugyanarról a
-hálózatról induljon (VPN-nél ugyanaz az exit IP).
+A host SSH (TCP 22) **csak akkor** nyílik meg, ha a portálon ugyanarról az
+IP-címről beléptél, és olyan, adminisztrátor által létrehozott host (`input`)
+szabályt engedélyeztél, amely kifejezetten felsorolja a TCP 22-es portot (az
+`allowed_input_tcp` halmazban). Az UDP 22 közönséges host-port, nem SSH.
+
+Aktív, engedélyezett portál-munkamenet kell ugyanarról az IP-címről. Egyedi
+teljes hozzáférésű szabály nem nyitja meg; egy gyűjtő csak egy TCP 22-t
+kifejezetten tartalmazó input tagon keresztül nyithatja meg. A jelszó
+megadása önmagában még nem nyitja meg. Kilépéskor azonnal, lejáratkor a
+kernel-timeouttal zárul. A böngésző és az SSH ugyanarról a hálózatról
+induljon (VPN-nél ugyanaz az exit IP).
 
 Ha kizártad magad, a szolgáltatói konzolról ideiglenesen vedd fel a
 `deploy/hatarvedelem.nft` input láncában a kommentben jelzett sort, töltsd
@@ -90,8 +115,9 @@ pedig a nyitott munkamenetek és a hátralévő idő látható; ott a
 **Lezárás** azonnal bont egy munkamenetet, a **Zárolás** pedig letiltja
 a felhasználót és lezárja minden munkamenetét. A **Tűzfal** fül a kernel
 tényleges állapotát mutatja IP-cím szerint csoportosítva: a nyitott
-TCP/UDP portokat, ICMP-t és host SSH-t, a portonkénti hátralévő időt,
-valamint a munkamenetekkel való egyezést (hiányzó/váratlan port, illetve
+TCP/UDP portokat, az ICMP-t és a host TCP 22-t (SSH) a többi
+host-bejegyzéshez hasonlóan, a portonkénti hátralévő időt, valamint a
+munkamenetekkel való egyezést (hiányzó/váratlan port, illetve
 munkamenet nélküli kernelbejegyzés). A nézet csak olvas.
 
 Az admin által megadott vagy visszaállított jelszót a felhasználó első

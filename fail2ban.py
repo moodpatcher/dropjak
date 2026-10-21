@@ -14,6 +14,13 @@ tiltás alá kerülnek, ha soha nem próbálnak belépni: a tiltás a csúszóab
 összegyűlt eldobott csomagok száma vagy a különböző célportok száma alapján
 indul. A DNS és a portál forgalma nem számít.
 
+A három figyelt jelzés egymástól függetlenül kapcsolható: a sikertelen
+belépéseké (``enabled``), az eldobott csomagoké (``drop_count_enabled``) és
+a különböző célportoké (``drop_ports_enabled``). Egyik kapcsoló sem függ a
+másiktól, és a küszöbök nem lehetnek nullák: a kikapcsolás egyetlen módja a
+kapcsoló. A ``drop_enabled`` mező csak visszamenőleges kompatibilitás miatt
+szerepel a kimenetben; értéke a két drop-mérőszám VAGY kapcsolata.
+
 A tiltás a beállított ideig tart; a kernel timeoutja akkor is lejáratja,
 ha a portál közben leáll. A tiltások a state-kötetben, 0600 jogosultságú
 JSON-fájlban maradnak meg, és induláskor visszatöltődnek. A folyamatban
@@ -48,9 +55,11 @@ MIN_WINDOW = 30
 MAX_WINDOW = 24 * 60 * 60
 MIN_BAN = 60
 MAX_BAN = 30 * 24 * 60 * 60
+# A küszöbök nem lehetnek nullák: a mérőszámot kizárólag a saját
+# kapcsolója kapcsolja ki. A számláló legfeljebb MAX_DROP_EVENTS eseményt
+# tárol IP-nként; ennél nagyobb küszöböt nem lehet elérni, ezért a maximum
+# ugyanaz.
 MIN_DROP_MAX = 1
-# A számláló legfeljebb MAX_DROP_EVENTS eseményt tárol IP-nként; ennél
-# nagyobb küszöböt nem lehet elérni, ezért a maximum ugyanaz.
 MAX_DROP_MAX = 10000
 MIN_DROP_PORTS = 1
 MAX_DROP_PORTS = 4096
@@ -59,6 +68,10 @@ MAX_DROP_WINDOW = 24 * 60 * 60
 MAX_BANS = 4096
 MAX_TRACKED_IPS = 4096
 MAX_DROP_EVENTS = 10000
+# Az evictionkor sikertelenül feloldott kernel-elemek újrapróbálási sora
+# legfeljebb ennyi címet tart. A sor nem perzisztált, és nem nőhet
+# korlátlanul: ha megtelik, a legrégebbi árva elem a TTL lejártáig marad.
+MAX_ORPHAN_UNBANS = 256
 
 
 def _env_int(name: str, default: int, minimum: int = 0) -> int:
@@ -70,6 +83,28 @@ def _env_int(name: str, default: int, minimum: int = 0) -> int:
     except ValueError:
         return default
     return max(minimum, value)
+
+
+def _env_int_in_range(
+    name: str, default: int, minimum: int, maximum: int
+) -> int:
+    """Egész környezeti érték; érvénytelen vagy tartományon kívüli -> default.
+
+    A küszöböknél a 0 érvénytelen: a mérőszámot csak a saját kapcsolója
+    kapcsolhatja ki. Ezért a nulla (és a negatív) értéket nem szabad
+    átengedni vagy 0-ra vágni, mert az csendben kikapcsolná a védelmet;
+    ilyenkor az alapérték marad.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    if value < minimum or value > maximum:
+        return default
+    return value
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -87,6 +122,26 @@ def _clamp(value: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, int(value)))
 
 
+def _drop_metric_state(config: dict) -> tuple[bool, bool]:
+    """A két drop-mérőszám aktív állapota (csomagszám, különböző portok).
+
+    Mindkét mérőszám kizárólag a saját kapcsolójától függ; a ``drop_enabled``
+    csak számított kompatibilitási mező, ezért itt nem kapuz. A küszöb
+    védőfeltétel: érvényes konfigurációban sosem 0, de egy korábbról
+    betöltött vagy kézzel módosított érték se kapcsolhasson be mérőszámot
+    nulla küszöbbel.
+    """
+    count_active = (
+        bool(config.get("drop_count_enabled", True))
+        and int(config.get("drop_max", 0)) > 0
+    )
+    ports_active = (
+        bool(config.get("drop_ports_enabled", True))
+        and int(config.get("drop_ports", 0)) > 0
+    )
+    return count_active, ports_active
+
+
 DEFAULT_ENABLED = _env_bool("HV_FAIL2BAN", True)
 DEFAULT_MAX_ATTEMPTS = _clamp(
     _env_int("HV_FAIL2BAN_MAX", 5, MIN_ATTEMPTS), MIN_ATTEMPTS, MAX_ATTEMPTS
@@ -102,15 +157,17 @@ DEFAULT_BAN = _clamp(
 # elérve az IP bekerül a banned_v4 halmazba. A portszám-alapú feltétel a
 # portszkennereket fogja meg, a darabszám-alapú az ismételt próbálkozásokat.
 DEFAULT_DROP_ENABLED = _env_bool("HV_FAIL2BAN_DROP", True)
-DEFAULT_DROP_MAX = _clamp(
-    _env_int("HV_FAIL2BAN_DROP_MAX", 120, MIN_DROP_MAX),
-    MIN_DROP_MAX,
-    MAX_DROP_MAX,
+DEFAULT_DROP_COUNT_ENABLED = _env_bool(
+    "HV_FAIL2BAN_DROP_COUNT_ENABLED", True
 )
-DEFAULT_DROP_PORTS = _clamp(
-    _env_int("HV_FAIL2BAN_DROP_PORTS", 12, MIN_DROP_PORTS),
-    MIN_DROP_PORTS,
-    MAX_DROP_PORTS,
+DEFAULT_DROP_PORTS_ENABLED = _env_bool(
+    "HV_FAIL2BAN_DROP_PORTS_ENABLED", True
+)
+DEFAULT_DROP_MAX = _env_int_in_range(
+    "HV_FAIL2BAN_DROP_MAX", 120, MIN_DROP_MAX, MAX_DROP_MAX
+)
+DEFAULT_DROP_PORTS = _env_int_in_range(
+    "HV_FAIL2BAN_DROP_PORTS", 12, MIN_DROP_PORTS, MAX_DROP_PORTS
 )
 DEFAULT_DROP_WINDOW = _clamp(
     _env_int("HV_FAIL2BAN_DROP_WINDOW", 180, MIN_DROP_WINDOW),
@@ -162,22 +219,50 @@ def validate_config(data, current: dict | None = None) -> dict:
     """A fail2ban-beállítások ellenőrzése; hiányzó mező a jelenlegi marad."""
     if not isinstance(data, dict):
         raise Fail2banError("a beállítás JSON-objektum kell")
-    current = current or {
+    defaults = {
         "enabled": DEFAULT_ENABLED,
         "max_attempts": DEFAULT_MAX_ATTEMPTS,
         "window_seconds": DEFAULT_WINDOW,
         "ban_seconds": DEFAULT_BAN,
         "drop_enabled": DEFAULT_DROP_ENABLED,
+        "drop_count_enabled": DEFAULT_DROP_COUNT_ENABLED,
+        "drop_ports_enabled": DEFAULT_DROP_PORTS_ENABLED,
         "drop_max": DEFAULT_DROP_MAX,
         "drop_ports": DEFAULT_DROP_PORTS,
         "drop_window_seconds": DEFAULT_DROP_WINDOW,
     }
+    # A mentett fájlból hiányzó új mezők az alapértéket kapják; a
+    # jelenlegi konfiguráció értékei maradnak, ha a kérés nem írja felül.
+    current = {**defaults, **(current or {})}
     enabled = data.get("enabled", current["enabled"])
     if not isinstance(enabled, bool):
         raise Fail2banError("az enabled mező igaz/hamis érték kell")
-    drop_enabled = data.get("drop_enabled", current["drop_enabled"])
-    if not isinstance(drop_enabled, bool):
-        raise Fail2banError("a drop_enabled mező igaz/hamis érték kell")
+    # A drop_enabled csak visszamenőleges kompatibilitási bemenet: a régi
+    # API/gyorsítótárazott UI a false értékkel kapcsolta ki a drop-alapú
+    # tiltást. Ilyenkor mindkét mérőszám-kapcsolót kikényszerítjük; a true
+    # érték nem kapcsol be semmit, mert a mérőszámok külön kapcsolhatók.
+    legacy_drop = None
+    if "drop_enabled" in data:
+        legacy_drop = data["drop_enabled"]
+        if not isinstance(legacy_drop, bool):
+            raise Fail2banError("a drop_enabled mező igaz/hamis érték kell")
+    drop_count_enabled = data.get(
+        "drop_count_enabled", current["drop_count_enabled"]
+    )
+    if not isinstance(drop_count_enabled, bool):
+        raise Fail2banError(
+            "a drop_count_enabled mező igaz/hamis érték kell"
+        )
+    drop_ports_enabled = data.get(
+        "drop_ports_enabled", current["drop_ports_enabled"]
+    )
+    if not isinstance(drop_ports_enabled, bool):
+        raise Fail2banError(
+            "a drop_ports_enabled mező igaz/hamis érték kell"
+        )
+    if legacy_drop is False:
+        drop_count_enabled = False
+        drop_ports_enabled = False
 
     def integer(name: str, label: str, minimum: int, maximum: int) -> int:
         raw = data.get(name, current[name])
@@ -200,7 +285,9 @@ def validate_config(data, current: dict | None = None) -> dict:
         "ban_seconds": integer(
             "ban_seconds", "a tiltás hossza", MIN_BAN, MAX_BAN
         ),
-        "drop_enabled": drop_enabled,
+        "drop_enabled": drop_count_enabled or drop_ports_enabled,
+        "drop_count_enabled": drop_count_enabled,
+        "drop_ports_enabled": drop_ports_enabled,
         "drop_max": integer(
             "drop_max", "a hálózati küszöb", MIN_DROP_MAX, MAX_DROP_MAX
         ),
@@ -249,6 +336,8 @@ class Fail2ban:
         window_seconds: int = DEFAULT_WINDOW,
         ban_seconds: int = DEFAULT_BAN,
         drop_enabled: bool = DEFAULT_DROP_ENABLED,
+        drop_count_enabled: bool = DEFAULT_DROP_COUNT_ENABLED,
+        drop_ports_enabled: bool = DEFAULT_DROP_PORTS_ENABLED,
         drop_max: int = DEFAULT_DROP_MAX,
         drop_ports: int = DEFAULT_DROP_PORTS,
         drop_window_seconds: int = DEFAULT_DROP_WINDOW,
@@ -260,12 +349,21 @@ class Fail2ban:
         self.log = logger
         self._on_ban = on_ban
         self._lock = threading.RLock()
+        # A drop_enabled paraméter csak első indulású kapu: a HV_FAIL2BAN_DROP
+        # (vagy a programozott konstruktorhívás) false értéke mindkét
+        # mérőszámot kikapcsolja. Futásidőben a mérőszámok egymástól
+        # függetlenül kapcsolhatók.
+        if not drop_enabled:
+            drop_count_enabled = False
+            drop_ports_enabled = False
         self._config = {
             "enabled": bool(enabled),
             "max_attempts": _clamp(max_attempts, MIN_ATTEMPTS, MAX_ATTEMPTS),
             "window_seconds": _clamp(window_seconds, MIN_WINDOW, MAX_WINDOW),
             "ban_seconds": _clamp(ban_seconds, MIN_BAN, MAX_BAN),
-            "drop_enabled": bool(drop_enabled),
+            "drop_enabled": bool(drop_count_enabled or drop_ports_enabled),
+            "drop_count_enabled": bool(drop_count_enabled),
+            "drop_ports_enabled": bool(drop_ports_enabled),
             "drop_max": _clamp(drop_max, MIN_DROP_MAX, MAX_DROP_MAX),
             "drop_ports": _clamp(drop_ports, MIN_DROP_PORTS, MAX_DROP_PORTS),
             "drop_window_seconds": _clamp(
@@ -280,6 +378,10 @@ class Fail2ban:
         self._drop_event_count = 0
         # IP -> ban rekord; perzisztált.
         self._bans: dict[str, dict] = {}
+        # Az evictionkor sikertelenül feloldott kernel-elemek címei. Nem
+        # perzisztált; a következő műveleteknél újrapróbáljuk a törlést,
+        # hogy ne maradjon láthatatlan, akár 30 napig élő tiltás.
+        self._orphan_unbans: list[str] = []
         self._error = ""
         # A legutóbb látott fájl-azonosító. A CLI külön folyamatként írja a
         # fail2ban.json-t; ha a fájl megváltozott, a portál a következő
@@ -288,6 +390,83 @@ class Fail2ban:
         self.load()
 
     # -- állapot ---------------------------------------------------------------
+
+    def _write_audit(self, event: str, **fields) -> None:
+        """Nem kötelező naplóbejegyzés; hiba esetén sem blokkol."""
+        if self.audit is None:
+            return
+        try:
+            self.audit.write(event, **fields)
+        except Exception as exc:
+            self.log(f"[napló] {event} írása nem sikerült: {exc}")
+
+    def _queue_orphan_unban_locked(
+        self, address: str, exc: Exception
+    ) -> bool:
+        """Egy sikertelen eviction-feloldás felvétele a korlátozott sorba.
+
+        Visszaadja, hogy a cím bekerült-e a sorba. A sor tele lehet, mert
+        nem nőhet korlátlanul; ilyenkor hangosan naplózunk és auditálunk,
+        mert az árva kernel-elem a timeout lejártáig érvényben maradhat.
+        """
+        if address in self._orphan_unbans:
+            return True
+        if len(self._orphan_unbans) >= MAX_ORPHAN_UNBANS:
+            self.log(
+                f"[fail2ban] HIBA: az árva tiltás-feloldási sor tele van "
+                f"({MAX_ORPHAN_UNBANS}); a(z) {address} kernel-eleme a "
+                "timeout lejártáig érvényben maradhat"
+            )
+            self._write_audit(
+                "fail2ban_ban_evict_failed",
+                ip=address,
+                reason=str(exc),
+                queued=False,
+                queue_limit=int(MAX_ORPHAN_UNBANS),
+            )
+            return False
+        self._orphan_unbans.append(address)
+        self._write_audit(
+            "fail2ban_ban_evict_failed",
+            ip=address,
+            reason=str(exc),
+            queued=True,
+        )
+        return True
+
+    def _discard_orphan_locked(self, address: str) -> None:
+        """A cím törlése az árva-sorból egy sikeres ban után.
+
+        A ``Firewall.ban`` előbb törli, majd újra létrehozza a kernel-
+        elemet, ezért a korábbi árva elem ezzel megszűnt.
+        """
+        try:
+            self._orphan_unbans.remove(address)
+        except ValueError:
+            pass
+
+    def _retry_orphan_unbans_locked(self) -> None:
+        """A korábban sikertelen eviction-feloldások újrapróbálása.
+
+        A sor elejéről haladunk, és az első hibánál megállunk: egy tartósan
+        hibás tűzfal mellett így nem pörög folyamatosan a hívási lánc. A
+        sikertelen cím a sorban marad. Ha a cím közben újra tiltás alá
+        került, a kernel-elem már élő, ezért csak a sort tisztítjuk.
+        """
+        while self._orphan_unbans:
+            address = self._orphan_unbans[0]
+            if address in self._bans:
+                self._orphan_unbans.pop(0)
+                continue
+            try:
+                self.firewall.unban(address)
+            except Exception as exc:
+                self.log(
+                    f"[fail2ban] a(z) {address} árva tiltásának feloldása "
+                    f"még nem sikerült: {exc}"
+                )
+                return
+            self._orphan_unbans.pop(0)
 
     def _file_stamp(self) -> tuple[int, int, int] | None:
         try:
@@ -332,6 +511,7 @@ class Fail2ban:
                 f"[fail2ban] FIGYELEM: a(z) {self.path} nem olvasható, "
                 f"a tiltáslista üres: {exc}"
             )
+            self._write_audit("fail2ban_load_error", reason=str(exc))
             return
         if not isinstance(raw, dict):
             with self._lock:
@@ -341,16 +521,43 @@ class Fail2ban:
                 f"[fail2ban] FIGYELEM: a(z) {self.path} formátuma hibás, "
                 "a tiltáslista üres"
             )
+            self._write_audit(
+                "fail2ban_load_error", reason="a fájl JSON-objektum kell"
+            )
             return
         config = dict(self._config)
         raw_config = raw.get("config")
         if isinstance(raw_config, dict):
+            migrated = dict(raw_config)
+            # Régi állapot migrálása: a 0 küszöb korábban az adott mérőszámot
+            # kapcsolta ki. Ilyenkor ne az egész konfiguráció essen vissza az
+            # alapértékre: csak azt a mérőszámot kapcsoljuk ki, és a küszöbét
+            # állítjuk vissza az alapértékre. A kifejezetten mentett
+            # drop_enabled=false továbbra is mindkét mérőszámot kikapcsolja.
+            for threshold_key, flag_key, default_threshold in (
+                ("drop_max", "drop_count_enabled", DEFAULT_DROP_MAX),
+                ("drop_ports", "drop_ports_enabled", DEFAULT_DROP_PORTS),
+            ):
+                value = migrated.get(threshold_key)
+                if (
+                    isinstance(value, int)
+                    and not isinstance(value, bool)
+                    and value == 0
+                ):
+                    migrated[flag_key] = False
+                    migrated[threshold_key] = default_threshold
+            if migrated.get("drop_enabled") is False:
+                migrated["drop_count_enabled"] = False
+                migrated["drop_ports_enabled"] = False
             try:
-                config = validate_config(raw_config, config)
+                config = validate_config(migrated, config)
             except Fail2banError as exc:
                 self.log(
                     f"[fail2ban] FIGYELEM: érvénytelen mentett beállítás, "
                     f"alapértelmezés használata: {exc}"
+                )
+                self._write_audit(
+                    "fail2ban_load_error", reason=str(exc)
                 )
         now = time.time()
         bans: dict[str, dict] = {}
@@ -629,7 +836,8 @@ class Fail2ban:
         reason = str(reason or "").strip()[:32] or "drop"
         with self._lock:
             self._refresh_locked()
-            if not self._config["enabled"] or not self._config["drop_enabled"]:
+            count_active, ports_active = _drop_metric_state(self._config)
+            if not count_active and not ports_active:
                 return None
             now = time.time()
             existing = self._bans.get(address)
@@ -637,14 +845,30 @@ class Fail2ban:
                 if existing["until"] > now:
                     return None
                 del self._bans[address]
+            # Csak olyan eseményt tárolunk, amely valamelyik aktív
+            # mérőszámhoz hozzá tud járulni. Kikapcsolt portmérőnél a
+            # portinformációt sem őrizzük meg, és a LAN-esemény (amely nem
+            # számít a csomagküszöbhöz) semleges.
+            counted = bool(count_total) and count_active
+            port_key = key if ports_active and "/" in key else ""
+            if not counted and not port_key:
+                return None
             self._prune_drop_events_locked(now, only=address)
             entry = self._drop_events.get(address) or {
                 "events": [], "reason": "",
             }
             events = entry["events"]
-            events.append((now, key, bool(count_total)))
+            events.append((now, port_key, counted))
+            # A korlátot mindkét aktív küszöbhöz méretezzük, hogy egy kicsi
+            # drop_max ne vágja le a nagy drop_ports által igényelt
+            # eseménysort.
             cap = min(
-                max(self._config["drop_max"] + 1, 512), MAX_DROP_EVENTS
+                max(
+                    count_active * (self._config["drop_max"] + 1),
+                    ports_active * (self._config["drop_ports"] + 1),
+                    512,
+                ),
+                MAX_DROP_EVENTS,
             )
             if len(events) > cap:
                 del events[:-cap]
@@ -657,9 +881,9 @@ class Fail2ban:
                 event_key for _, event_key, _ in events if "/" in event_key
             }
             total = sum(1 for _, _, counted in events if counted)
-            if (
-                total < self._config["drop_max"]
-                and len(ports) < self._config["drop_ports"]
+            if not (
+                (count_active and total >= self._config["drop_max"])
+                or (ports_active and len(ports) >= self._config["drop_ports"])
             ):
                 return None
             record = self._ban_locked(
@@ -694,6 +918,7 @@ class Fail2ban:
         now = time.time()
         with self._lock:
             self._refresh_locked()
+            self._retry_orphan_unbans_locked()
             record = self._bans.get(address)
             if record is None:
                 return None
@@ -715,12 +940,18 @@ class Fail2ban:
     ) -> dict:
         seconds = _clamp(int(seconds), MIN_BAN, MAX_BAN)
         now = time.time()
+        # Előbb a korábbi evictionökből visszamaradt árva elemeket
+        # próbáljuk törölni; ez nem blokkolhatja az új védő tiltást.
+        self._retry_orphan_unbans_locked()
         try:
             self.firewall.ban(address, seconds)
         except Exception as exc:
             raise Fail2banError(
                 f"a(z) {address} tűzfal-tiltása nem sikerült: {exc}"
             ) from exc
+        # A ban() a kernelben felülírja az esetleges korábbi elemet, ezért
+        # az ehhez a címhez tartozó árva bejegyzés már nem takarítható.
+        self._discard_orphan_locked(address)
         existing = self._bans.get(address)
         since = existing["since"] if existing is not None else now
         is_manual = bool(manual or (existing or {}).get("manual", False))
@@ -746,10 +977,29 @@ class Fail2ban:
             oldest = min(
                 self._bans.values(), key=lambda row: row["since"]
             )
+            # A memóriarekord eldobása előtt a kernel-elemet is fel kell
+            # oldani, különben egy láthatatlan tiltás maradna a TTL-ig.
+            kernel_released = True
+            try:
+                self.firewall.unban(oldest["ip"])
+            except Exception as exc:
+                kernel_released = False
+                self._queue_orphan_unban_locked(oldest["ip"], exc)
+                self.log(
+                    f"[fail2ban] FIGYELEM: a(z) {oldest['ip']} kikerülő "
+                    f"tiltásának kernel-feloldása nem sikerült: {exc}; "
+                    "a következő műveleteknél újrapróbáljuk"
+                )
             del self._bans[oldest["ip"]]
             self.log(
                 f"[fail2ban] a tiltáslista megtelt; a legrégebbi bejegyzés "
                 f"({oldest['ip']}) kikerült a nyilvántartásból"
+            )
+            self._write_audit(
+                "fail2ban_ban_evicted",
+                ip=oldest["ip"],
+                reason="max_bans",
+                kernel_released=kernel_released,
             )
         self._bans[address] = record
         self._attempts.pop(address, None)
@@ -807,6 +1057,7 @@ class Fail2ban:
         removed = 0
         with self._lock:
             self._refresh_locked()
+            self._retry_orphan_unbans_locked()
             for address in list(self._bans):
                 try:
                     self.firewall.unban(address)
@@ -824,10 +1075,18 @@ class Fail2ban:
     def configure(self, data: dict) -> dict:
         """Beállítások módosítása.
 
-        Kikapcsoláskor az automatikus tiltások azonnal felszabadulnak, a
-        kézi tiltások megmaradnak. A sorrend: kernel -> mentés -> memória;
-        ha a mentés nem sikerül, a felszabadított automatikus tiltásokat
-        visszaállítjuk.
+        A három jelzés független: a sikertelen belépés figyelésének
+        kikapcsolása csak a belépés-alapú, a két drop-mérőszám együttes
+        kikapcsolása csak a drop-alapú automatikus tiltásokat szabadítja
+        fel. A kézi tiltások mindig megmaradnak. A sorrend:
+        kernel -> mentés -> memória.
+
+        A felszabadítás best-effort: minden szükséges feloldást
+        megkísérlünk. Ha bármelyik nem sikerült, a beállítás változatlan
+        marad; a már felszabadított tiltásokat a pontos hátralévő idővel
+        visszaállítjuk, és a memóriarekordjaikat akkor is visszatesszük,
+        ha az újratiltás nem sikerült. Így nem marad néma, részleges
+        állapot. A mentés hibája esetén ugyanez a visszaállítás fut.
         """
         with self._lock:
             self._refresh_locked()
@@ -835,26 +1094,63 @@ class Fail2ban:
             was_enabled = self._config["enabled"]
             was_drop = self._config["drop_enabled"]
             released: list[dict] = []
-            release_all = was_enabled and not new_config["enabled"]
-            release_drop = (
-                was_drop
-                and not new_config["drop_enabled"]
-                and not release_all
-            )
-            if release_all or release_drop:
+            failed: list[tuple[dict, Exception]] = []
+            release_login = was_enabled and not new_config["enabled"]
+            release_drop = was_drop and not new_config["drop_enabled"]
+            if release_login or release_drop:
                 for address, record in list(self._bans.items()):
                     if record["manual"]:
                         continue
-                    if release_drop and record.get("source") != "drop":
+                    source = record.get("source")
+                    if release_login and source != "drop":
+                        pass
+                    elif release_drop and source == "drop":
+                        pass
+                    else:
                         continue
                     try:
                         self.firewall.unban(address)
                     except Exception as exc:
-                        raise Fail2banError(
-                            f"a(z) {address} tiltásának feloldása nem sikerült: {exc}"
-                        ) from exc
+                        failed.append((dict(record), exc))
+                        self.log(
+                            f"[fail2ban] a(z) {address} feloldása nem "
+                            f"sikerült: {exc}"
+                        )
+                        continue
                     released.append(dict(record))
                     del self._bans[address]
+            if failed:
+                # A konfiguráció nem változott. A már felszabadított
+                # tiltásokat a pontos hátralévő idővel állítjuk vissza; a
+                # memóriarekord mindenképp visszakerül.
+                restored = 0
+                for record in released:
+                    remaining = max(1, int(record["until"] - time.time()))
+                    try:
+                        self.firewall.ban(record["ip"], remaining)
+                        restored += 1
+                    except Exception as exc:
+                        self._error = str(exc)
+                        self.log(
+                            f"[fail2ban] a(z) {record['ip']} visszaállítása "
+                            f"nem sikerült: {exc}"
+                        )
+                        self._write_audit(
+                            "fail2ban_ban_restore_failed",
+                            ip=record["ip"],
+                            reason=str(exc),
+                        )
+                    self._bans[record["ip"]] = record
+                self._write_audit(
+                    "fail2ban_bans_release_failed",
+                    count=len(failed),
+                    reason=str(failed[0][1]),
+                    restored=restored,
+                )
+                raise Fail2banError(
+                    "a tiltások felszabadítása nem sikerült "
+                    f"({len(failed)} cím); a beállítás változatlan maradt"
+                )
             previous = dict(self._config)
             self._config = new_config
             try:
@@ -862,29 +1158,74 @@ class Fail2ban:
             except Fail2banError:
                 self._config = previous
                 for record in released:
+                    remaining = max(1, int(record["until"] - time.time()))
                     try:
-                        remaining = max(MIN_BAN, int(record["until"] - time.time()))
                         self.firewall.ban(record["ip"], remaining)
-                        self._bans[record["ip"]] = record
                     except Exception as exc:
+                        self._error = str(exc)
                         self.log(
                             f"[fail2ban] a(z) {record['ip']} visszaállítása "
                             f"nem sikerült: {exc}"
                         )
+                        self._write_audit(
+                            "fail2ban_ban_restore_failed",
+                            ip=record["ip"],
+                            reason=str(exc),
+                        )
+                    # A rekordot a sikertelen újratiltás után is vissza kell
+                    # tenni: a felület ne felejtse el a tiltást.
+                    self._bans[record["ip"]] = record
                 raise
             if not new_config["enabled"]:
                 self._attempts.clear()
-            if not new_config["enabled"] or not new_config["drop_enabled"]:
+            # A drop mesterállapota, bármelyik mérőszám-kapcsoló vagy a
+            # küszöbök változása után a régi számlálók nem érvényesek az új
+            # konfiguráció alatt. A belépés-figyelés kikapcsolása önmagában
+            # nem érinti a drop-számlálókat.
+            if (
+                previous["drop_enabled"] != new_config["drop_enabled"]
+                or previous["drop_count_enabled"]
+                != new_config["drop_count_enabled"]
+                or previous["drop_ports_enabled"]
+                != new_config["drop_ports_enabled"]
+                or previous["drop_max"] != new_config["drop_max"]
+                or previous["drop_ports"] != new_config["drop_ports"]
+            ):
                 self._drop_events.clear()
                 self._drop_event_count = 0
+            if released:
+                # A naplóban a forrás szerinti bontás is szerepel, hogy a
+                # belépés és a drop együttes kikapcsolása ne veszítse el
+                # a drop-rész információját.
+                login_count = sum(
+                    1 for record in released
+                    if release_login and record.get("source") != "drop"
+                )
+                drop_count = sum(
+                    1 for record in released
+                    if release_drop and record.get("source") == "drop"
+                )
+                self._write_audit(
+                    "fail2ban_bans_released",
+                    count=len(released),
+                    reason="disabled" if release_login else "drop_disabled",
+                    login_count=login_count,
+                    drop_count=drop_count,
+                )
             return self.snapshot()
 
     # -- indulás és nézet ------------------------------------------------------
 
     def sync(self) -> bool:
-        """A mentett tiltások visszatöltése a (frissen ürített) nft halmazba."""
-        now = time.time()
+        """A mentett tiltások visszatöltése a (frissen ürített) nft halmazba.
+
+        A hátralévő időt pontosan, egész másodpercre vágva adjuk át; a
+        ``MIN_BAN`` csak alsó korlát, nem kerekítés. A lejárt rekordokat
+        kihagyjuk, a nulla vagy negatív hátralévő idő nem kerül a kernelbe.
+        """
         with self._lock:
+            self._retry_orphan_unbans_locked()
+            now = time.time()
             expired = [
                 address
                 for address, record in self._bans.items()
@@ -892,10 +1233,12 @@ class Fail2ban:
             ]
             for address in expired:
                 del self._bans[address]
-            elements = [
-                (record["ip"], max(MIN_BAN, int(record["until"] - now)))
-                for record in self._bans.values()
-            ]
+            elements = []
+            for record in self._bans.values():
+                remaining = int(record["until"] - now)
+                if remaining <= 0:
+                    continue
+                elements.append((record["ip"], max(1, remaining)))
             try:
                 self.firewall.sync_bans(elements)
             except Exception as exc:
@@ -904,7 +1247,15 @@ class Fail2ban:
                     "[fail2ban] FIGYELEM: a mentett tiltások visszatöltése "
                     f"nem sikerült: {exc}"
                 )
+                self._write_audit(
+                    "fail2ban_sync_failed",
+                    reason=str(exc),
+                    count=len(elements),
+                )
                 return False
+            # A sync_bans() a halmazt teljesen üríti, és csak az ismert
+            # tiltásokat teszi vissza; az árva elemek ezzel eltűntek.
+            self._orphan_unbans.clear()
             if expired:
                 self._save_locked(raise_errors=False)
             return True
@@ -913,6 +1264,7 @@ class Fail2ban:
         now = time.time()
         with self._lock:
             self._refresh_locked()
+            self._retry_orphan_unbans_locked()
             expired = [
                 address
                 for address, record in self._bans.items()
@@ -948,6 +1300,7 @@ class Fail2ban:
                 )
             pending.sort(key=lambda row: row["count"], reverse=True)
             config = dict(self._config)
+            count_active, ports_active = _drop_metric_state(config)
             config_drop_max = config["drop_max"]
             config_drop_ports = config["drop_ports"]
             config_drop_window = config["drop_window_seconds"]
@@ -976,6 +1329,10 @@ class Fail2ban:
                         ),
                         "max_drops": config_drop_max,
                         "max_ports": config_drop_ports,
+                        "drop_count_enabled": config["drop_count_enabled"],
+                        "drop_ports_enabled": config["drop_ports_enabled"],
+                        "drop_count_active": count_active,
+                        "drop_ports_active": ports_active,
                     }
                 )
             drop_pending.sort(
@@ -989,6 +1346,10 @@ class Fail2ban:
             "window_seconds": config["window_seconds"],
             "ban_seconds": config["ban_seconds"],
             "drop_enabled": config["drop_enabled"],
+            "drop_count_enabled": config["drop_count_enabled"],
+            "drop_ports_enabled": config["drop_ports_enabled"],
+            "drop_count_active": count_active,
+            "drop_ports_active": ports_active,
             "drop_max": config["drop_max"],
             "drop_ports": config["drop_ports"],
             "drop_window_seconds": config["drop_window_seconds"],
@@ -1025,6 +1386,10 @@ class Fail2ban:
             "window_seconds": snapshot["window_seconds"],
             "ban_seconds": snapshot["ban_seconds"],
             "drop_enabled": snapshot["drop_enabled"],
+            "drop_count_enabled": snapshot["drop_count_enabled"],
+            "drop_ports_enabled": snapshot["drop_ports_enabled"],
+            "drop_count_active": snapshot["drop_count_active"],
+            "drop_ports_active": snapshot["drop_ports_active"],
             "drop_pending": len(snapshot["drop_pending"]),
             "drop_max": snapshot["drop_max"],
             "drop_ports": snapshot["drop_ports"],

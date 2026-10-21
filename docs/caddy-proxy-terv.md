@@ -2,7 +2,7 @@
 
 **Dátum:** 2026-10-20
 
-**Státusz: terv — nincs implementálva**
+**Státusz: implementálva (3.4.0), a tervtől eltérően:** statikus `deploy/Caddyfile` admin API és újratöltés nélkül; az útvonalak portálkapuzottak (`/api/proxy/ask`, `/api/proxy/auth` forward_auth). Lásd a README „Subdomain proxy (Caddy)” részét. Az alábbi szöveg az eredeti terv.
 
 Ez a dokumentum kizárólag tervet tartalmaz. A javaslat nem került implementálásra, a repóban a `docs/caddy-proxy-terv.md` létrehozásán kívül nem történt változtatás, nem történt commit, telepítés vagy host firewall módosítás.
 
@@ -25,7 +25,7 @@ A felvetés: egy domain vagy subdomain forwardolása egy portra, automatikus SSL
 
 1. A `forward` lánc továbbra is fail-closed marad; a publikus proxy csak a kifejezetten engedélyezett 80/443-at nyitja.
 2. Egy fail2ban ban a publikus 80/443-at is lezárja; csak a portál és a DHCP marad elérhető.
-3. A host SSH továbbra is csak aktív, engedélyezett portál-munkamenettel érhető el, és csak akkor, ha a munkamenet a beépített `admin-full` szabályt választotta; egyedi teljes hozzáférésű és gyűjtőszabályok nem nyitják meg.
+3. A host SSH továbbra is csak aktív, engedélyezett portál-munkamenettel érhető el, és csak akkor, ha a munkamenethez egy kifejezetten TCP 22-t engedélyező host (`input`) szabály van rendelve; egyedi teljes hozzáférésű és gyűjtőszabályok nem nyitják meg.
 4. Ha a portál vagy a Caddy nem indul el, semmilyen új hozzáférés nem nyílik ki.
 5. A proxy konfigurációja admin-only, és nem vezethető be a portál state-jébe vagy a Caddy admin API-ba illetéktelenül.
 
@@ -37,7 +37,7 @@ A felvetés: egy domain vagy subdomain forwardolása egy portra, automatikus SSL
 
 - A Dropjak konténer `network_mode: host` módban fut (`docker-compose.yml:16`), `read_only: true` (`:21`), `cap_drop: ALL` mellett csak `NET_ADMIN`, `NET_BIND_SERVICE`, `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID`, `SETGID` képességeket kap (`:27-36`). A state egy Docker volume-ban van (`:121-122`), a healthcheck a `/api/status`-t pollozza (`:133-138`).
 - Az nftables tábla `input` és `forward` lánca is `policy drop` (`deploy/hatarvedelem.nft:114-116`, `:133-137`). A `forward` prioritása -10, hogy a Docker saját szabályai előtt fusson.
-- A dinamikus halmazok (`allowed_v4`, `allowed_tcp`, `allowed_udp`, `allowed_icmp`, `host_ssh_v4`, `client_mac`) kernel-timeouttal járnak le; minden restart üríti őket (`README.md:21-31`).
+- A dinamikus halmazok (`allowed_v4`, `allowed_tcp`, `allowed_udp`, `allowed_icmp`, `allowed_input_tcp`, `allowed_input_udp`, `client_mac`) kernel-timeouttal járnak le; minden restart üríti őket (`README.md:21-31`).
 - A pre-auth és block szabályok a `forward` láncon, illetve a `preauth`/`block`/`preauth_nat`/`block_nat` custom láncokban élnek (`deploy/hatarvedelem.nft:109-112`, `gateway.py:1839-1954`). A pre-auth WAN-irányban csak DNAT-olt forgalomra illeszkedik (`ct status dnat`, `gateway.py:1919-1927`).
 - A DNAT előtti portot a rendszer `ct original proto-dst` segítségével nézi (`deploy/hatarvedelem.nft:198-200`), mert a Docker saját DNAT-ja ugyanabban a prerouting szakaszban futhat.
 - A Docker `DOCKER-USER` láncában egy guard csak a `FWD_MARK` jelöléssel ellátott csomagokat engedi át, minden mást eldob (`docker/entrypoint.sh:160-222`). Ez akkor is véd, ha a `hatarvedelem` tábla eltűnik.
@@ -57,7 +57,7 @@ A felvetés: egy domain vagy subdomain forwardolása egy portra, automatikus SSL
 ### 2.3. Jelenlegi UI és state
 
 - Az admin navigáció a Users/Groups/Rules/Sessions/Firewall/Drops/Fail2ban/Logs/Settings füleket tartalmazza (`index.html:934-942`).
-- A Settings fül két szekciót kezel: pre-auth és block (`README.md:246-266`); a UI a `settingsData()`, `renderSettingForm()`, `renderSettingSection()` és `renderSettings()` függvényekre épül (`index.html:4773-5004`). A host SSH nem beállítás, csak a beépített `admin-full` szabály engedélyezése nyitja meg.
+- A Settings fül két szekciót kezel: pre-auth és block (`README.md:246-266`); a UI a `settingsData()`, `renderSettingForm()`, `renderSettingSection()` és `renderSettings()` függvényekre épül (`index.html:4773-5004`). A host SSH nem beállítás: csak a felhasználóhoz rendelt, TCP 22-t kifejezetten engedélyező host szabály nyitja meg.
 - A tab-dispatch `index.html:6314-6321`, a HU/EN/DE i18n táblák ugyanabban a fájlban vannak; a raw firewall nézet lánccímkéi `index.html:5596-5599`.
 - A `settings_store.py` validálja és atomikusan írja a `firewall-settings.json`-t (`:126-196`, `:199-366`); korrupt fájl esetén üres pre-auth/block listára esik vissza (fail-closed).
 - A state volume tartalma: `users.json`, `groups.json`, `rules.json`, `audit.jsonl`, `drops.jsonl`, `fail2ban.json`, `firewall-settings.json` (`README.md:268-282`).
@@ -65,7 +65,7 @@ A felvetés: egy domain vagy subdomain forwardolása egy portra, automatikus SSL
 
 ### 2.4. Korlátok
 
-- A host SSH portal-gated, és csak a beépített `admin-full` szabállyal nyílik meg; egyedi teljes hozzáférésű vagy gyűjtőszabály nem nyitja meg. A proxy integráció nem nyithat management hozzáférést.
+- A host SSH portal-gated, és csak a felhasználóhoz rendelt, TCP 22-t kifejezetten engedélyező host szabállyal nyílik meg; egyedi teljes hozzáférésű vagy gyűjtőszabály nem nyitja meg. A proxy integráció nem nyithat management hozzáférést.
 - A fail-closed modell nem lazítható; a proxy csak külön, kifejezetten engedélyezett publikus portokat nyithat.
 - A kutatás read-only volt; a jelen dokumentum is terv, nem implementáció.
 - A `docs/` könyvtár a dokumentummal jött létre; más fájl nem változott.

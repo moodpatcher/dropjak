@@ -1,0 +1,45 @@
+# Dropjak — portállal védett aldomain-proxy (Caddy)
+#
+# Statikus konfiguráció: nincs admin API és nincs újratöltés. Az útvonalakat
+# a portál tárolja (Admin → Domainek), és a Caddy kérésenként a portál
+# loopback-végpontjait kérdezi:
+#   - /api/proxy/ask: kérhető-e tanúsítvány az adott névre (on-demand TLS);
+#   - /api/proxy/auth: a kliens IP-jének munkamenete választott-e a
+#     bejegyzést tartalmazó domain szabályt, és hova kell továbbítani
+#     (X-Dropjak-Upstream: 127.0.0.1:<port> vagy <ip>:<port>).
+# A {$PORT} a portál portja; a compose adja át.
+{
+	admin off
+	on_demand_tls {
+		ask http://127.0.0.1:{$PORT:8100}/api/proxy/ask
+	}
+	servers {
+		protocols h1 h2
+	}
+}
+
+https:// {
+	tls {
+		on_demand
+	}
+	# A tiltóoldal képe a portálról jön, hitelesítés nélkül.
+	handle /__dropjak/unauthorized.png {
+		rewrite * /api/proxy/unauthorized.png
+		reverse_proxy 127.0.0.1:{$PORT:8100}
+	}
+	handle {
+		# A nem 2xx választ (401 tiltóoldal, 302, 404) a Caddy változatlanul
+		# a kliensnek adja; 2xx esetén a célt mindig a portál állítja be.
+		forward_auth 127.0.0.1:{$PORT:8100} {
+			uri /api/proxy/auth
+			copy_headers X-Dropjak-Upstream
+		}
+		reverse_proxy {http.request.header.X-Dropjak-Upstream} {
+			header_up -X-Dropjak-Upstream
+		}
+	}
+}
+
+http:// {
+	redir https://{host}{uri} 308
+}

@@ -99,6 +99,23 @@
     margin:9px auto 0;
     background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 92 9'%3E%3Cpath d='M0 4.5h33M59 4.5h33' stroke='%238a2a2a' stroke-width='1'/%3E%3Cpath d='M46 1.5 49 4.5 46 7.5 43 4.5Z' fill='%238a2a2a'/%3E%3C/svg%3E") center/contain no-repeat;
   }
+  .site-name{
+    margin:-4px 0 12px;
+    font-size:12px;
+    line-height:1.35;
+    color:var(--muted);
+    text-align:center;
+    overflow-wrap:anywhere;
+  }
+  .site-name[hidden]{display:none}
+  .brand > div{min-width:0}
+  .brand .site-name{
+    margin:1px 0 0;
+    font-size:11px;
+    line-height:1.25;
+    text-align:left;
+    white-space:normal;
+  }
   h1{
     margin:0 0 4px;
     font-size:19px;
@@ -431,6 +448,7 @@
   .ttl-box label{margin:0;font-size:12px;font-weight:600;color:#666}
   .ttl-row{display:flex;align-items:center;gap:7px}
   .ttl-row input{width:100px;margin:0;padding:8px 9px;font-size:15px;font-variant-numeric:tabular-nums}
+  .ttl-unit{font-size:12px;font-weight:600;color:#666;white-space:nowrap;user-select:none}
   .ttl-hint{font-size:12px;color:var(--muted)}
   .foot-actions{margin-left:auto;display:flex;align-items:center;gap:7px}
   .foot-actions button{padding:10px 13px;font-size:13px}
@@ -441,7 +459,7 @@
   .stat-row{display:flex;gap:10px;margin:16px 0 8px}
   .stat{min-width:150px;padding:10px 14px;background:var(--soft);border:1px solid var(--line);border-radius:9px}
   .stat span{display:block;font-size:var(--fs-2xs);font-weight:600;color:var(--muted)}
-  .stat b{display:block;margin-top:3px;font-size:16px;font-variant-numeric:tabular-nums}
+  .stat b{display:block;margin-top:3px;font-size:16px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
   .timer{font-size:30px;font-weight:600;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
   .session-services{margin:8px 0 0;max-width:680px;justify-content:center}
   .session-actions{display:flex;gap:8px;margin-top:18px;flex-wrap:wrap;justify-content:center}
@@ -479,6 +497,24 @@
   .admin-form h3{margin:0 0 10px;font-size:13px}
   .form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 14px}
   .form-grid .full{grid-column:1/-1}
+  .f2b-group{margin:0 0 10px;padding:9px 11px 2px;background:var(--card);border:1px solid var(--line);border-radius:9px}
+  .f2b-toggle{display:flex;align-items:center;gap:7px;margin:0 0 3px;font-size:12.5px;font-weight:600;color:var(--ink);cursor:pointer}
+  .f2b-group-title{margin:0 0 3px;font-size:12.5px;font-weight:600;color:var(--ink)}
+  .f2b-toggle input{margin:0}
+  .f2b-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 14px}
+  .f2b-fields .full{grid-column:1/-1}
+  .f2b-group.is-off .f2b-fields{opacity:.55}
+  .f2b-group .field{margin:6px 0 8px}
+  /* Proxy-bejegyzés két sorban: aldomain + hostnév + kapcsolók, alatta a cél. */
+  .proxy-line{display:flex;flex-wrap:wrap;align-items:flex-end;gap:0 10px}
+  .proxy-line .field{flex:0 1 150px;min-width:0}
+  .proxy-line .field.port{flex-basis:90px}
+.proxy-line .field.root{flex-basis:180px}
+  .proxy-line .field.host{flex:1 1 160px}
+  .proxy-line .field.host .mono{display:block;padding:8px 0;overflow-wrap:anywhere}
+  .proxy-line .f2b-toggle,.proxy-line > button{margin:0 0 8px}
+  .proxy-line .f2b-toggle{margin-left:auto;font-weight:400}
+  .proxy-line > button{padding:5px 7px;font-size:12px;min-height:32px}
   .admin-form .field{margin:0 0 10px}
   .admin-form label{font-size:12px;margin-bottom:4px}
   .admin-form input,.admin-form select,.admin-form textarea{margin:0;padding:8px 9px;font-size:13.5px}
@@ -521,6 +557,7 @@
   .pill.on{color:var(--green)}
   .pill.off{color:var(--red)}
   .pill.admin{color:var(--amber)}
+  .dir-badge{display:inline-block;margin-left:2px;padding:1px 6px;font-size:var(--fs-2xs);font-weight:600;color:var(--amber);background:var(--amber-bg);border:1px solid var(--amber-line);border-radius:4px;vertical-align:middle}
   .log-tools{display:flex;align-items:flex-end;gap:8px;flex-wrap:wrap;margin-bottom:10px}
   .log-tools .field{display:flex;flex-direction:column;gap:3px}
   .log-tools label{font-size:12px;margin:0;color:var(--muted)}
@@ -533,6 +570,13 @@
   .log-detail details summary{cursor:pointer;color:var(--muted);font-size:12px}
   .log-detail pre{margin:4px 0 0;padding:6px;background:#f7f7f5;border:1px solid var(--line);border-radius:5px;font-size:12px;white-space:pre-wrap;word-break:break-word;max-height:160px;overflow:auto}
   .log-table td{font-size:12px}
+  .log-event-code{display:inline-block;margin-left:6px;font-size:10.5px;vertical-align:middle}
+  /* Az auditnapló súlyossági jelvénye; a témaváltozók a sötét módban is
+     ugyanezeket a színeket adják. */
+  .sev-badge{display:inline-block;margin-left:6px;padding:1px 5px;font-size:10.5px;font-weight:600;line-height:1.5;white-space:nowrap;vertical-align:middle;border:1px solid transparent;border-radius:4px}
+  .sev-badge.sev-info{color:var(--green);background:var(--green-bg);border-color:var(--green-line)}
+  .sev-badge.sev-warn{color:var(--amber);background:var(--amber-bg);border-color:var(--amber-line)}
+  .sev-badge.sev-alert{color:var(--red);background:var(--red-bg);border-color:var(--red-line)}
   /* drop napló — áttekintés */
   .drop-status{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin:0 0 10px;padding:7px 10px;font-size:12px;color:#52605a;background:var(--soft);border:1px solid var(--green-line);border-radius:8px}
   .drop-status b{font-size:12px;color:var(--green)}
@@ -687,6 +731,8 @@
     .admin-nav button{width:auto;white-space:nowrap}
     .admin-panel{padding:12px}
     .form-grid{grid-template-columns:1fr}
+    .f2b-fields{grid-template-columns:1fr}
+    .proxy-line .field{flex-grow:1}
     .drop-stats{grid-template-columns:repeat(2,minmax(0,1fr))}
     .drop-status-path{display:none}
     .drop-table-wrap{max-height:none}
@@ -778,6 +824,7 @@
     background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 92 9'%3E%3Cpath d='M0 4.5h33M59 4.5h33' stroke='%23e07878' stroke-width='1'/%3E%3Cpath d='M46 1.5 49 4.5 46 7.5 43 4.5Z' fill='%23e07878'/%3E%3C/svg%3E");
   }
   :root[data-theme="dark"] label{color:#b7b9bb}
+  :root[data-theme="dark"] .site-name{color:#b7b9bb}
   :root[data-theme="dark"] input,
   :root[data-theme="dark"] select,
   :root[data-theme="dark"] textarea{
@@ -836,6 +883,7 @@
   :root[data-theme="dark"] .chip.neutral{color:#b9bdc2}
   :root[data-theme="dark"] .rule-meta{color:#8f949a}
   :root[data-theme="dark"] .ttl-box label{color:#b7b9bb}
+  :root[data-theme="dark"] .ttl-unit{color:#b7b9bb}
   :root[data-theme="dark"] .stat span{color:#8f949a}
   :root[data-theme="dark"] .hint{color:#8f949a}
   :root[data-theme="dark"] .admin-nav button{color:#a9adb2;background:transparent;border-color:transparent}
@@ -863,6 +911,9 @@
   :root[data-theme="dark"] .log-tools .auto{color:#b7b9bb}
   :root[data-theme="dark"] .log-detail summary{color:#9b9d99}
   :root[data-theme="dark"] .log-detail pre{background:#11151a;border-color:var(--line);color:#c9cdd2}
+  :root[data-theme="dark"] .sev-badge.sev-info{color:var(--green);background:var(--green-bg);border-color:var(--green-line)}
+  :root[data-theme="dark"] .sev-badge.sev-warn{color:var(--amber);background:var(--amber-bg);border-color:var(--amber-line)}
+  :root[data-theme="dark"] .sev-badge.sev-alert{color:var(--red);background:var(--red-bg);border-color:var(--red-line)}
   :root[data-theme="dark"] .drop-status{color:#a9c4b0;background:var(--soft);border-color:var(--green-line)}
   :root[data-theme="dark"] .drop-status.err{background:var(--red-bg)}
   :root[data-theme="dark"] .drop-status-sep{color:#4a515b}
@@ -931,6 +982,7 @@
   <div class="view active" id="login-view">
     <img class="logo" src="icon.png" alt="Dropjak">
     <div class="wordmark">dropjak</div>
+    <div class="site-name" id="login-site-name" hidden></div>
     <h1 data-i18n="Állj!">Állj!</h1>
     <p class="subtitle" data-i18n="Azonosítsd magad!">Azonosítsd magad!</p>
     <form id="f" novalidate>
@@ -1051,7 +1103,10 @@
   <header class="topbar" id="topbar" hidden>
     <div class="brand">
       <img src="icon.png" alt="">
-      <div><b>dropjak</b></div>
+      <div>
+        <b>dropjak</b>
+        <div class="site-name" id="topbar-site-name" hidden></div>
+      </div>
     </div>
     <div class="who">
       <span data-i18n="Belépve:">Belépve:</span><b id="who-user">—</b>
@@ -1087,6 +1142,7 @@
           <label for="ttl" data-i18n="Hozzáférés hossza">Hozzáférés hossza</label>
           <div class="ttl-row">
             <input id="ttl" type="number" inputmode="numeric" min="1" max="720" step="1" value="1" required>
+            <span class="ttl-unit" data-i18n="óra">óra</span>
           </div>
           <span class="ttl-hint" id="ttl-hint" data-i18n="Beállítható időtartam">Beállítható időtartam</span>
         </div>
@@ -1150,6 +1206,7 @@
         <button type="button" data-admin="users" class="active"><span class="nav-ico" data-icon="users" aria-hidden="true"></span><span data-i18n="Felhasználók">Felhasználók</span></button>
         <button type="button" data-admin="groups"><span class="nav-ico" data-icon="groups" aria-hidden="true"></span><span data-i18n="Csoportok">Csoportok</span></button>
         <button type="button" data-admin="rules"><span class="nav-ico" data-icon="rules" aria-hidden="true"></span><span data-i18n="Szabályok">Szabályok</span></button>
+        <button type="button" data-admin="domains"><span class="nav-ico" data-icon="domains" aria-hidden="true"></span><span data-i18n="Domainek">Domainek</span></button>
         <button type="button" data-admin="sessions"><span class="nav-ico" data-icon="sessions" aria-hidden="true"></span><span data-i18n="Munkamenetek">Munkamenetek</span></button>
         <button type="button" data-admin="firewall"><span class="nav-ico" data-icon="firewall" aria-hidden="true"></span><span data-i18n="Tűzfal">Tűzfal</span></button>
         <button type="button" data-admin="drops"><span class="nav-ico" data-icon="drops" aria-hidden="true"></span><span data-i18n="Drop napló">Drop napló</span></button>
@@ -1166,7 +1223,7 @@
     <div class="lang-dock" id="lang-dock" role="group" aria-label="Nyelv" data-i18n-aria-label="Nyelv"></div>
     <div class="foot-meta">
       <button type="button" class="theme-toggle" id="theme-toggle"></button>
-      <span class="version" aria-label="Verzió">v2.0</span>
+      <span class="version" aria-label="Verzió">v__VERSION__</span>
     </div>
   </div>
 </div>
@@ -2061,6 +2118,7 @@ const ICON_SVGS = {
   users: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>`,
   groups: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>`,
   rules: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>`,
+  domains: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>`,
   sessions: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/></svg>`,
   firewall: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>`,
   drops: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>`,
@@ -2171,6 +2229,48 @@ const I18N = {
     'Elutasítás': 'Reject',
     'Fiókkérelmek': 'Account requests',
     'Fiókkérelmek engedélyezése': 'Allow account requests',
+    'Tűzfal neve': 'Firewall name',
+    'A név a portál fejlécében, a böngésző címében és az új 2FA-beiratkozások hitelesítő-bejegyzésében jelenik meg. Üresen a Dropjak név érvényes.': 'The name appears in the portal header, the browser title and the authenticator entry of new 2FA enrollments. Empty means Dropjak.',
+    'A tűzfal neve mentve.': 'Firewall name saved.',
+    'Az aldomain.gyökérdomain HTTPS-kérést a Caddy a host (Input) vagy egy mögötte álló magánhálózati gép (Forward) megadott portjára továbbítja, automatikus tanúsítvánnyal. Csak az a kliens jut át, akinek aktív munkamenete a bejegyzést tartalmazó domain szabályt választotta; a többiek tiltóoldalt látnak bejelentkezési gombbal.': 'Caddy forwards HTTPS requests for subdomain.root-domain to the given port on the host (Input) or on a private host behind it (Forward), with an automatic certificate. Only a client whose active session selected a domain rule containing the entry gets through; others see a denial page with a sign-in button.',
+    'Gyökérdomainek (üres lista: a proxy kikapcsolva)': 'Root domains (empty list disables the proxy)',
+    'Gyökérdomain': 'Root domain',
+    'Új gyökérdomain': 'New root domain',
+    'Aldomain': 'Subdomain',
+    'Teljes hostnév': 'Full hostname',
+    'Láthatóság': 'Visibility',
+    'Privát': 'Private',
+    'Publikus': 'Public',
+    '(publikus)': '(public)',
+    'Privát: csak a bejegyzést tartalmazó domain szabályt választó munkamenet éri el. Publikus: bárki elérheti bejelentkezés nélkül (a fail2ban által tiltott IP-címek kivételével).': 'Private: only a session that selected a domain rule containing the entry can reach it. Public: anyone can reach it without signing in (except IP addresses banned by fail2ban).',
+    'Új útvonal': 'New route',
+    'A proxy beállításai mentve.': 'Proxy settings saved.',
+    'proxy_domains: szöveg kell': 'proxy_domains: a string is required',
+    'proxy_domains: érvényes, kisbetűs domainnév kell (pl. z1.example.com)': 'proxy_domains: a valid lowercase domain name is required (e.g. z1.example.com)',
+    'proxy_domains: lista kell': 'proxy_domains: a list is required',
+    'proxy_domains: legfeljebb 16 gyökérdomain lehet': 'proxy_domains: at most 16 root domains',
+    'proxy: duplikált gyökérdomain': 'proxy: duplicate root domain',
+    'proxy_routes: lista kell': 'proxy_routes: a list is required',
+    'proxy_routes: legfeljebb 64 útvonal lehet': 'proxy_routes: at most 64 routes',
+    'proxy: az útvonal JSON-objektum kell': 'proxy: each route must be a JSON object',
+    'proxy: az aldomain egyetlen DNS-címke kell (a–z, 0–9, kötőjel)': 'proxy: the subdomain must be a single DNS label (a–z, 0–9, hyphen)',
+    'proxy: a teljes hostnév legfeljebb 253 karakter': 'proxy: the full hostname can be at most 253 characters',
+    'proxy: duplikált teljes hostnév': 'proxy: duplicate full hostname',
+    'proxy: a port 1 és 65535 között lehet': 'proxy: the port must be between 1 and 65535',
+    'proxy: fenntartott port (portál, 22, 53, 67, 80, 443, 2019)': 'proxy: reserved port (portal, 22, 53, 67, 80, 443, 2019)',
+    'Domainek': 'Domains',
+    'Portállal védett aldomain-proxy': 'Portal-gated subdomain proxy',
+    'Domain (proxy)': 'Domain (proxy)',
+    'Proxy-bejegyzések': 'Proxy entries',
+    'Keresés a proxy-bejegyzések között…': 'Search proxy entries…',
+    'A domain szabály a kiválasztott proxy-bejegyzéseket nyitja meg a Caddyn keresztül; tűzfalportot nem nyit.': 'A domain rule opens the selected proxy entries through Caddy; it opens no firewall port.',
+    'Legalább egy proxy-bejegyzést válassz a domain szabályhoz.': 'Select at least one proxy entry for the domain rule.',
+    'proxy: a típus input vagy forward lehet': 'proxy: the type must be input or forward',
+    'proxy: a láthatóság private vagy public lehet': 'proxy: the visibility must be private or public',
+    'proxy: a forward célhoz magánhálózati IPv4-cím kell (10/8, 172.16/12, 192.168/16)': 'proxy: a forward target needs a private IPv4 address (10/8, 172.16/12, 192.168/16)',
+    'domain szabályhoz nem adható meg port, ICMP vagy teljes hozzáférés': 'a domain rule cannot have ports, ICMP or full access',
+    'domains: 1–64 proxy-bejegyzésből álló lista kell': 'domains: a list of 1–64 proxy entries is required',
+    'domains: legalább egy proxy-bejegyzést válassz': 'domains: select at least one proxy entry',
     'A jóváhagyásra váró fiók captcha-védett, e-mail-címet tárol (nem küld e-mailt), és csak admin jóváhagyás után léphet be.': 'A pending account is captcha-protected, stores an email address (no email is sent), and can sign in only after administrator approval.',
     'Felhasználók': 'Users',
     'Felhasználó': 'User',
@@ -2203,7 +2303,9 @@ const I18N = {
     'Állapot': 'Status',
     'Közvetlen szabályok': 'Direct rules',
     'Érvényes szabályok': 'Effective rules',
-    'nincs beállítva (alap: mind)': 'not set (default: all)',
+    'nincs közvetlen beállítás (a forward szabályok öröklődnek)': 'no direct assignment (forward rules are inherited)',
+    'nincs közvetlen beállítás (csoportból örökölve)': 'no direct assignment (inherited from groups)',
+    'nincs beállítva': 'not set',
     'Letiltás': 'Disable',
     'Aktiválás': 'Enable',
     'Szerkesztés': 'Edit',
@@ -2238,22 +2340,36 @@ const I18N = {
     'Alap TTL': 'Default TTL',
     'Max TTL': 'Max TTL',
     'beépített': 'built-in',
-    'a beépített admin szabály nem duplikálható': 'the built-in admin rule cannot be duplicated',
+    'ez egy fenntartott, régi azonosító, nem duplikálható': 'this is a reserved legacy identifier and cannot be duplicated',
     'Gyűjtőszabály': 'Collection rule',
     'Tartalmazott szabályok': 'Included rules',
     'Duplikálás': 'Duplicate',
     'másolat': 'copy',
     'gyűjtő': 'collection',
-    'Legalább két egyedi szabályt válassz a gyűjtőszabályhoz.': 'Choose at least two individual rules for the collection.',
+    'Legalább egy egyedi szabályt válassz a gyűjtőszabályhoz.': 'Choose at least one individual rule for the collection.',
     'A gyűjtőszabály portjai a tagok uniója. Teljes hozzáférésű és gyűjtő szabály nem választható tagként.': 'A collection rule grants the union of its members’ ports. Full-access and collection rules cannot be members.',
+    'A gyűjtőszabály tagjai különböző irányúak is lehetnek; minden tag a saját irányában kap engedélyt.': 'Collection members may have different directions; each member grants access in its own direction.',
+    'Irány': 'Direction',
+    'Forward': 'Forward',
+    'Input (host)': 'Input (host)',
+    'Host': 'Host',
+    'A host szabály a portálgép saját szolgáltatásait nyitja meg a belépett kliens IP-jének. Csak a szükséges portokat add meg; a 8100 (portál) fenntartott.': 'A host rule opens the portal machine’s own services to the signed-in client IP. Enter only the necessary ports; 8100 (portal) is reserved.',
+    'host szabály nem lehet teljes hozzáférésű': 'a host rule cannot be full access',
+    'host szabály nem tartalmazhat ICMP-t': 'a host rule cannot include ICMP',
+    'host szabály nem használhat szolgáltatáslistát': 'a host rule cannot use a service list',
+    'host szabályhoz legalább egy TCP vagy UDP port kell': 'a host rule needs at least one TCP or UDP port',
+    'a 8100-as port (portál) nem nyitható meg host szabállyal': 'port 8100 (portal) cannot be opened with a host rule',
+    'direction: forward vagy input érték kell': 'direction: must be forward or input',
     'Keresés az egyedi szabályok között…': 'Search individual rules…',
     'Szabály duplikálva.': 'Rule duplicated.',
     'gyűjtőszabályhoz nem adható meg port, ICMP vagy teljes hozzáférés': 'a collection rule cannot have ports, ICMP or full access',
     'a gyűjtőszabály nem tartalmazhatja önmagát': 'a collection rule cannot contain itself',
-    'a beépített admin szabály nem lehet gyűjtőszabály tagja': 'the built-in admin rule cannot be a collection member',
-    'members: 2–64 szabály-azonosítóból álló lista kell': 'members: a list of 2–64 rule IDs is required',
+    'ez egy fenntartott, régi azonosító, nem lehet gyűjtőszabály tagja': 'this is a reserved legacy identifier and cannot be a collection member',
+    'ez egy fenntartott, régi azonosító, nem használható': 'this is a reserved legacy identifier and cannot be used',
+    'ez egy fenntartott, régi azonosító, nem rendelhető hozzá': 'this is a reserved legacy identifier and cannot be assigned',
+    'members: 1–64 szabály-azonosítóból álló lista kell': 'members: a list of 1–64 rule IDs is required',
     'members: ismétlődő szabály-azonosító': 'members: duplicate rule ID',
-    'members: legalább 2 és legfeljebb 64 egyedi szabály kell': 'members: at least 2 and at most 64 distinct rules are required',
+    'members: legalább 1 és legfeljebb 64 egyedi szabály kell': 'members: at least 1 and at most 64 distinct rules are required',
     'collection: logikai érték kell': 'collection: a boolean is required',
     'TCP portok': 'TCP ports',
     'UDP portok': 'UDP ports',
@@ -2267,6 +2383,19 @@ const I18N = {
     'Maximális idő (óra)': 'Maximum duration (hours)',
     '< 1 óra': '< 1 hour',
     'Ez a szabály legalább 1 órás időtartamot igényel.': 'This rule requires a duration of at least 1 hour.',
+    'A kiválasztott szabályok közül legalább egy legalább 1 órás időtartamot igényel.': 'At least one of the selected rules requires a duration of at least 1 hour.',
+    'A módosított szabály miatt az érintett hozzáférés azonnal visszavonásra került. Az új szabálydefiníció csak külön engedélyezéssel lép életbe; engedélyezd újra a hozzáférést.': 'The affected access was revoked immediately because the rule was modified. The new rule definition only takes effect with a separate authorization; authorize access again.',
+    'A módosított szabály miatt az érintett hozzáférés azonnal visszavonásra került. Az új szabálydefiníció csak külön engedélyezéssel lép életbe; a módosítás oldalon újra engedélyezheted.': 'The affected access was revoked immediately because the rule was modified. The new rule definition only takes effect with a separate authorization; you can authorize it again on the modify screen.',
+    'felső korlát': 'upper limit',
+    'további': 'more',
+    'összes esemény': 'all events',
+    'eseménykód': 'event code',
+    'keresés a látható értékekben (esemény, felhasználó, IP, szabály, ok)': 'search visible values (event, user, IP, rule, reason)',
+    'A kikapcsolt mérőszám nem számol és nem tilt; a meglévő tiltások a megadott idő elteltével normálisan lejárnak.': 'A disabled metric neither counts nor bans; existing bans expire normally after the configured time.',
+    'aktív mérőszám': 'active metric',
+    'nincs aktív mérőszám': 'no active metric',
+    'csomagszám': 'packet count',
+    'portszám': 'port count',
     'legfeljebb 256 port adható meg': 'at most 256 ports may be specified',
     'Teljes hozzáféréshez ne adj meg portot vagy ICMP-t.': 'Do not specify ports or ICMP for full access.',
     'Adj meg legalább egy TCP/UDP portot, ICMP-t vagy teljes hozzáférést.': 'Specify at least one TCP/UDP port, ICMP, or full access.',
@@ -2374,6 +2503,7 @@ const I18N = {
     'A jelszavad megváltozott. Most válassz hozzáférést.': 'Your password has been changed. Now choose access.',
     'A jelszó cseréje nem sikerült.': 'Failed to change the password.',
     'Nincs kiválasztható szabály.': 'No selectable rule.',
+    'Legalább egy szabályt ki kell választanod.': 'Select at least one rule.',
     'Engedélyezés…': 'Granting…',
     'A hozzáférés beállítása nem sikerült.': 'Failed to set access.',
     'A kilépés nem sikerült.': 'Sign-out failed.',
@@ -2430,8 +2560,8 @@ const I18N = {
     'hibás szabály-adat': 'invalid rule data',
     'legalább egy portot válassz': 'choose at least one port',
     'ez a szabály-azonosító foglalt': 'this rule ID is already in use',
-    'a beépített admin szabály nem módosítható': 'the built-in admin rule cannot be modified',
-    'a beépített admin szabály nem törölhető': 'the built-in admin rule cannot be deleted',
+    'ez egy fenntartott, régi azonosító, nem módosítható': 'this is a reserved legacy identifier and cannot be modified',
+    'ez egy fenntartott, régi azonosító, nem törölhető': 'this is a reserved legacy identifier and cannot be deleted',
     'érvénytelen felhasználónév': 'invalid username',
     'érvénytelen szerepkör': 'invalid role',
     'érvénytelen szabály-azonosító': 'invalid rule identifier',
@@ -2481,9 +2611,7 @@ const I18N = {
     'a kért hozzáférés érvénytelen (szolgáltatás vagy időtartam).': 'the requested access is invalid (service or duration).',
     'Az nftables nem tudta végrehajtani a kért műveletet.': 'nftables could not perform the requested operation.',
 
-    // -- beépített szabályok --------------------------------------------
-    'Admin – teljes hozzáférés': 'Admin – full access',
-    'Beépített, korlátozás nélküli szabály az adminisztrátoroknak.': 'Built-in unrestricted rule for administrators.',
+    // -- kezdő szabályok -------------------------------------------------
     'Böngészés': 'Browsing',
     'Web és DNS': 'Web and DNS',
     'Munka': 'Work',
@@ -2492,6 +2620,13 @@ const I18N = {
     'Web, DNS, SSH és ping': 'Web, DNS, SSH and ping',
     'Teljes': 'Full',
     'Korlátozatlan internet': 'Unrestricted internet',
+
+    // -- naplószűrők -----------------------------------------------------
+    'Szint': 'Severity',
+    'összes szint': 'all severities',
+    'információ': 'info',
+    'figyelmeztetés': 'warning',
+    'riasztás': 'alert',
 
     // -- naplóesemények --------------------------------------------------
     'portal_opened': 'portal opened',
@@ -2582,7 +2717,7 @@ const I18N = {
     'pl. 1.1.1.1': 'e.g. 1.1.1.1',
     // -- firewall settings --------------------------------------------
     'Tűzfal testreszabása': 'Firewall customization',
-    'Bejelentkezés előtt nyitva lévő és blokkolt célok.': 'Destinations open before sign-in and blocked targets.',
+    'Tűzfalnév, bejelentkezés előtt nyitva lévő és blokkolt célok.': 'Firewall name, destinations open before sign-in and blocked targets.',
     'A beállításfájl hibás, a pre-auth lista üres:': 'The settings file is invalid; the pre-auth list is empty:',
     'A pre-auth szabályok megkerülik a portált: a megadott cél és port a bejelentkezés előtt is elérhető minden LAN-kliensnek. Csak olyan szolgáltatást adj hozzá, amelynek nyilvánosnak kell lennie.': 'Pre-auth rules bypass the portal: the given destination and port are reachable by every LAN client before sign-in. Only add a service that must be public.',
     'Pre-auth szabályok': 'Pre-auth rules',
@@ -2606,7 +2741,6 @@ const I18N = {
     'A fail2ban adatok betöltése nem sikerült.': 'Failed to load fail2ban data.',
     'Fail2ban állapot': 'Fail2ban status',
     'az automatikus tiltás bekapcsolva': 'automatic banning is enabled',
-    'automatikus tiltás bekapcsolva': 'automatic banning enabled',
     'az automatikus tiltás kikapcsolva': 'automatic banning is disabled',
     'Tiltott IP': 'Banned IPs',
     'automatikus': 'automatic',
@@ -2619,6 +2753,8 @@ const I18N = {
     'Sikertelen belépés a tiltásig': 'Failed sign-ins before ban',
     'Időablak (perc)': 'Window (minutes)',
     'Tiltás hossza (perc)': 'Ban duration (minutes)',
+    'Közös beállítások': 'Shared settings',
+    'Minden automatikus tiltásra érvényes, a drop-alapúakra is.': 'Applies to every automatic ban, including drop-based ones.',
     'A küszöb elérésekor a forrás IP bekerül a banned_v4 halmazba, és a tűzfal eldobja a csomagjait. A portál és a DHCP kivétel, hogy a kliens lássa a tiltás okát, és ne veszítse el az IP-címét. A tiltás a megadott idő után automatikusan lejár; a kézi tiltások megmaradnak, ha az automatikus tiltást kikapcsolod. A tiltásról a drop log egyetlen eseményt rögzít, a tiltás alatti csomagokat ehhez az eseményhez rendeli, nem külön soronként, és a tiltás a pre-auth szabályokat is felülírja.': 'When the threshold is reached, the source IP is added to the banned_v4 set and the firewall drops its packets. The portal and DHCP are exempt so the client can see why it was banned and does not lose its IP address. The ban expires automatically after the given time; manual bans remain when you disable automatic banning. The drop log records a single ban event and folds packets dropped during the ban into that event instead of showing separate rows; the ban also overrides pre-auth rules.',
     'Adj meg érvényes számokat a küszöbhöz és az időtartamokhoz.': 'Enter valid numbers for the threshold and durations.',
     'IP-cím kézi tiltása': 'Manually ban an IP address',
@@ -2638,11 +2774,15 @@ const I18N = {
     'Nincs várakozó sikertelen belépés az időablakban.': 'No pending failed sign-ins in the window.',
     'A sikertelen jelszavas belépések számítanak, a captcha- és a kérésgyakorisági hibák nem. A tiltott IP csomagjait a tűzfal dobja el; a portál és a DHCP kivétel, hogy a kliens értesülhessen a tiltásról. A tiltások újraindítás után is megmaradnak, és a lejárat után a kernel automatikusan feloldja őket.': 'Failed password sign-ins count; captcha and rate-limit failures do not. The firewall drops packets from a banned IP; the portal and DHCP are exempt so the client can be told about the ban. Bans survive a restart, and the kernel lifts them automatically when they expire.',
     'Sikertelen belépések és gyanús forgalom tiltása forrás-IP szerint · a lista 5 másodpercenként frissül': 'Banning failed sign-ins and suspicious traffic by source IP · the list refreshes every 5 seconds',
-    'Drop-alapú tiltás': 'Drop-based banning',
-    'bejelentkezés nélküli portszkennerek tiltása': 'ban port scanners that never sign in',
+    'Sikertelen belépések': 'Failed sign-ins',
+    'Hibás jelszavas belépések; a captcha- és a gyakorisági hibák nem számítanak.': 'Failed password sign-ins; captcha and rate-limit failures do not count.',
+    'A bejelentkezés nélküli forgalom eldobott csomagjait számolja.': 'Counts dropped packets in traffic without a sign-in.',
+    'Különböző célportok': 'Distinct destination ports',
+    'Portszkennerek észlelése a különböző célportok alapján.': 'Detects port scanners by the number of distinct destination ports.',
     'Eldobott csomag a tiltásig': 'Dropped packets before a ban',
     'Különböző célport a tiltásig': 'Distinct destination ports before a ban',
     'Drop időablak (perc)': 'Drop window (minutes)',
+    'Mindkét drop-mérőszám ezt az időablakot használja.': 'Both drop metrics use this window.',
     'Várakozó drop': 'Pending drops',
     'a drop-alapú tiltás kikapcsolva': 'drop-based banning is disabled',
     'Várakozó drop-események': 'Pending drop events',
@@ -2738,6 +2878,10 @@ const I18N = {
     'csak jóváhagyásra váró kérelem utasítható el': 'only a pending account request can be rejected',
     'a jóváhagyásra váró fiók nem rendelhető csoporthoz': 'a pending account cannot be assigned to a group',
     'a registration_enabled mező igaz/hamis érték kell': 'the registration_enabled field must be a boolean',
+    'a tűzfal neve szöveg kell': 'the firewall name must be a string',
+    'site_name: szöveg kell': 'site_name: a string is required',
+    'site_name: legfeljebb 64 karakter': 'site_name: at most 64 characters',
+    'site_name: vezérlőkaraktert nem tartalmazhat': 'site_name: must not contain control characters',
   },
 
   de: {
@@ -2794,6 +2938,48 @@ const I18N = {
     'Elutasítás': 'Ablehnen',
     'Fiókkérelmek': 'Kontoanfragen',
     'Fiókkérelmek engedélyezése': 'Kontoanfragen erlauben',
+    'Tűzfal neve': 'Firewall-Name',
+    'A név a portál fejlécében, a böngésző címében és az új 2FA-beiratkozások hitelesítő-bejegyzésében jelenik meg. Üresen a Dropjak név érvényes.': 'Der Name erscheint in der Portal-Kopfzeile, im Browsertitel und im Authenticator-Eintrag neuer 2FA-Einrichtungen. Leer bedeutet Dropjak.',
+    'A tűzfal neve mentve.': 'Firewall-Name gespeichert.',
+    'Az aldomain.gyökérdomain HTTPS-kérést a Caddy a host (Input) vagy egy mögötte álló magánhálózati gép (Forward) megadott portjára továbbítja, automatikus tanúsítvánnyal. Csak az a kliens jut át, akinek aktív munkamenete a bejegyzést tartalmazó domain szabályt választotta; a többiek tiltóoldalt látnak bejelentkezési gombbal.': 'Caddy leitet HTTPS-Anfragen für subdomain.stammdomain an den angegebenen Port des Hosts (Input) oder eines dahinterliegenden privaten Rechners (Forward) weiter, mit automatischem Zertifikat. Nur ein Client, dessen aktive Sitzung eine Domain-Regel mit diesem Eintrag gewählt hat, kommt durch; andere sehen eine Sperrseite mit Anmeldeknopf.',
+    'Gyökérdomainek (üres lista: a proxy kikapcsolva)': 'Stammdomains (leere Liste deaktiviert den Proxy)',
+    'Gyökérdomain': 'Stammdomain',
+    'Új gyökérdomain': 'Neue Stammdomain',
+    'Aldomain': 'Subdomain',
+    'Teljes hostnév': 'Vollständiger Hostname',
+    'Láthatóság': 'Sichtbarkeit',
+    'Privát': 'Privat',
+    'Publikus': 'Öffentlich',
+    '(publikus)': '(öffentlich)',
+    'Privát: csak a bejegyzést tartalmazó domain szabályt választó munkamenet éri el. Publikus: bárki elérheti bejelentkezés nélkül (a fail2ban által tiltott IP-címek kivételével).': 'Privat: nur eine Sitzung, die eine Domain-Regel mit diesem Eintrag gewählt hat, erreicht ihn. Öffentlich: jeder erreicht ihn ohne Anmeldung (außer von fail2ban gesperrten IP-Adressen).',
+    'Új útvonal': 'Neue Route',
+    'A proxy beállításai mentve.': 'Proxy-Einstellungen gespeichert.',
+    'proxy_domains: szöveg kell': 'proxy_domains: Text erforderlich',
+    'proxy_domains: érvényes, kisbetűs domainnév kell (pl. z1.example.com)': 'proxy_domains: ein gültiger Domainname in Kleinbuchstaben ist erforderlich (z. B. z1.example.com)',
+    'proxy_domains: lista kell': 'proxy_domains: Liste erforderlich',
+    'proxy_domains: legfeljebb 16 gyökérdomain lehet': 'proxy_domains: höchstens 16 Stammdomains',
+    'proxy: duplikált gyökérdomain': 'proxy: doppelte Stammdomain',
+    'proxy_routes: lista kell': 'proxy_routes: Liste erforderlich',
+    'proxy_routes: legfeljebb 64 útvonal lehet': 'proxy_routes: höchstens 64 Routen',
+    'proxy: az útvonal JSON-objektum kell': 'proxy: jede Route muss ein JSON-Objekt sein',
+    'proxy: az aldomain egyetlen DNS-címke kell (a–z, 0–9, kötőjel)': 'proxy: die Subdomain muss ein einzelnes DNS-Label sein (a–z, 0–9, Bindestrich)',
+    'proxy: a teljes hostnév legfeljebb 253 karakter': 'proxy: der vollständige Hostname darf höchstens 253 Zeichen lang sein',
+    'proxy: duplikált teljes hostnév': 'proxy: doppelter vollständiger Hostname',
+    'proxy: a port 1 és 65535 között lehet': 'proxy: der Port muss zwischen 1 und 65535 liegen',
+    'proxy: fenntartott port (portál, 22, 53, 67, 80, 443, 2019)': 'proxy: reservierter Port (Portal, 22, 53, 67, 80, 443, 2019)',
+    'Domainek': 'Domains',
+    'Portállal védett aldomain-proxy': 'Portalgeschützter Subdomain-Proxy',
+    'Domain (proxy)': 'Domain (Proxy)',
+    'Proxy-bejegyzések': 'Proxy-Einträge',
+    'Keresés a proxy-bejegyzések között…': 'Proxy-Einträge durchsuchen…',
+    'A domain szabály a kiválasztott proxy-bejegyzéseket nyitja meg a Caddyn keresztül; tűzfalportot nem nyit.': 'Eine Domain-Regel öffnet die gewählten Proxy-Einträge über Caddy; sie öffnet keinen Firewall-Port.',
+    'Legalább egy proxy-bejegyzést válassz a domain szabályhoz.': 'Wähle mindestens einen Proxy-Eintrag für die Domain-Regel.',
+    'proxy: a típus input vagy forward lehet': 'proxy: der Typ muss input oder forward sein',
+    'proxy: a láthatóság private vagy public lehet': 'proxy: die Sichtbarkeit muss private oder public sein',
+    'proxy: a forward célhoz magánhálózati IPv4-cím kell (10/8, 172.16/12, 192.168/16)': 'proxy: ein Forward-Ziel braucht eine private IPv4-Adresse (10/8, 172.16/12, 192.168/16)',
+    'domain szabályhoz nem adható meg port, ICMP vagy teljes hozzáférés': 'eine Domain-Regel darf keine Ports, kein ICMP und keinen Vollzugriff haben',
+    'domains: 1–64 proxy-bejegyzésből álló lista kell': 'domains: eine Liste mit 1–64 Proxy-Einträgen ist erforderlich',
+    'domains: legalább egy proxy-bejegyzést válassz': 'domains: wähle mindestens einen Proxy-Eintrag',
     'A jóváhagyásra váró fiók captcha-védett, e-mail-címet tárol (nem küld e-mailt), és csak admin jóváhagyás után léphet be.': 'Ein ausstehendes Konto ist captcha-geschützt, speichert eine E-Mail-Adresse (es wird keine E-Mail gesendet) und kann sich erst nach der Freigabe durch einen Administrator anmelden.',
     'Felhasználók': 'Benutzer',
     'Felhasználó': 'Benutzer',
@@ -2826,7 +3012,9 @@ const I18N = {
     'Állapot': 'Status',
     'Közvetlen szabályok': 'Direkte Regeln',
     'Érvényes szabályok': 'Effektive Regeln',
-    'nincs beállítva (alap: mind)': 'nicht gesetzt (Standard: alle)',
+    'nincs közvetlen beállítás (a forward szabályok öröklődnek)': 'keine direkte Zuweisung (Forward-Regeln werden geerbt)',
+    'nincs közvetlen beállítás (csoportból örökölve)': 'keine direkte Zuweisung (von Gruppen geerbt)',
+    'nincs beállítva': 'nicht gesetzt',
     'Letiltás': 'Deaktivieren',
     'Aktiválás': 'Aktivieren',
     'Szerkesztés': 'Bearbeiten',
@@ -2861,22 +3049,36 @@ const I18N = {
     'Alap TTL': 'Standard-TTL',
     'Max TTL': 'Max. TTL',
     'beépített': 'integriert',
-    'a beépített admin szabály nem duplikálható': 'die integrierte Admin-Regel darf nicht dupliziert werden',
+    'ez egy fenntartott, régi azonosító, nem duplikálható': 'dies ist eine reservierte alte Kennung und kann nicht dupliziert werden',
     'Gyűjtőszabály': 'Sammlungsregel',
     'Tartalmazott szabályok': 'Enthaltene Regeln',
     'Duplikálás': 'Duplizieren',
     'másolat': 'Kopie',
     'gyűjtő': 'Sammlung',
-    'Legalább két egyedi szabályt válassz a gyűjtőszabályhoz.': 'Wähle mindestens zwei einzelne Regeln für die Sammlungsregel.',
+    'Legalább egy egyedi szabályt válassz a gyűjtőszabályhoz.': 'Wähle mindestens eine einzelne Regel für die Sammlungsregel.',
     'A gyűjtőszabály portjai a tagok uniója. Teljes hozzáférésű és gyűjtő szabály nem választható tagként.': 'Eine Sammlungsregel gewährt die Vereinigung der Ports ihrer Mitglieder. Vollzugriffs- und Sammlungsregeln können nicht Mitglied sein.',
+    'A gyűjtőszabály tagjai különböző irányúak is lehetnek; minden tag a saját irányában kap engedélyt.': 'Die Mitglieder einer Sammlungsregel dürfen unterschiedliche Richtungen haben; jedes Mitglied gewährt Zugriff in seiner eigenen Richtung.',
+    'Irány': 'Richtung',
+    'Forward': 'Weiterleitung',
+    'Input (host)': 'Eingang (Host)',
+    'Host': 'Host',
+    'A host szabály a portálgép saját szolgáltatásait nyitja meg a belépett kliens IP-jének. Csak a szükséges portokat add meg; a 8100 (portál) fenntartott.': 'Eine Host-Regel öffnet die eigenen Dienste der Portalmaschine für die IP des angemeldeten Clients. Gib nur die notwendigen Ports an; 8100 (Portal) ist reserviert.',
+    'host szabály nem lehet teljes hozzáférésű': 'eine Host-Regel darf kein Vollzugriff sein',
+    'host szabály nem tartalmazhat ICMP-t': 'eine Host-Regel darf kein ICMP enthalten',
+    'host szabály nem használhat szolgáltatáslistát': 'eine Host-Regel darf keine Dienstliste verwenden',
+    'host szabályhoz legalább egy TCP vagy UDP port kell': 'eine Host-Regel benötigt mindestens einen TCP- oder UDP-Port',
+    'a 8100-as port (portál) nem nyitható meg host szabállyal': 'Port 8100 (Portal) kann nicht mit einer Host-Regel geöffnet werden',
+    'direction: forward vagy input érték kell': 'direction: muss forward oder input sein',
     'Keresés az egyedi szabályok között…': 'Einzelne Regeln durchsuchen…',
     'Szabály duplikálva.': 'Regel dupliziert.',
     'gyűjtőszabályhoz nem adható meg port, ICMP vagy teljes hozzáférés': 'eine Sammlungsregel darf keine Ports, ICMP oder Vollzugriff haben',
     'a gyűjtőszabály nem tartalmazhatja önmagát': 'eine Sammlungsregel darf sich nicht selbst enthalten',
-    'a beépített admin szabály nem lehet gyűjtőszabály tagja': 'die integrierte Admin-Regel darf kein Mitglied einer Sammlungsregel sein',
-    'members: 2–64 szabály-azonosítóból álló lista kell': 'members: eine Liste mit 2–64 Regel-IDs ist erforderlich',
+    'ez egy fenntartott, régi azonosító, nem lehet gyűjtőszabály tagja': 'dies ist eine reservierte alte Kennung und kann kein Mitglied einer Sammlungsregel sein',
+    'ez egy fenntartott, régi azonosító, nem használható': 'dies ist eine reservierte alte Kennung und kann nicht verwendet werden',
+    'ez egy fenntartott, régi azonosító, nem rendelhető hozzá': 'dies ist eine reservierte alte Kennung und kann nicht zugewiesen werden',
+    'members: 1–64 szabály-azonosítóból álló lista kell': 'members: eine Liste mit 1–64 Regel-IDs ist erforderlich',
     'members: ismétlődő szabály-azonosító': 'members: doppelte Regel-ID',
-    'members: legalább 2 és legfeljebb 64 egyedi szabály kell': 'members: mindestens 2 und höchstens 64 verschiedene Regeln sind erforderlich',
+    'members: legalább 1 és legfeljebb 64 egyedi szabály kell': 'members: mindestens 1 und höchstens 64 verschiedene Regeln sind erforderlich',
     'collection: logikai érték kell': 'collection: ein boolescher Wert ist erforderlich',
     'TCP portok': 'TCP-Ports',
     'UDP portok': 'UDP-Ports',
@@ -2890,6 +3092,19 @@ const I18N = {
     'Maximális idő (óra)': 'Maximaldauer (Std.)',
     '< 1 óra': '< 1 Std.',
     'Ez a szabály legalább 1 órás időtartamot igényel.': 'Diese Regel erfordert eine Dauer von mindestens 1 Stunde.',
+    'A kiválasztott szabályok közül legalább egy legalább 1 órás időtartamot igényel.': 'Mindestens eine der ausgewählten Regeln erfordert eine Dauer von mindestens 1 Stunde.',
+    'A módosított szabály miatt az érintett hozzáférés azonnal visszavonásra került. Az új szabálydefiníció csak külön engedélyezéssel lép életbe; engedélyezd újra a hozzáférést.': 'Der betroffene Zugriff wurde wegen der geänderten Regel sofort widerrufen. Die neue Regeldefinition wird nur mit einer gesonderten Autorisierung wirksam; autorisiere den Zugriff erneut.',
+    'A módosított szabály miatt az érintett hozzáférés azonnal visszavonásra került. Az új szabálydefiníció csak külön engedélyezéssel lép életbe; a módosítás oldalon újra engedélyezheted.': 'Der betroffene Zugriff wurde wegen der geänderten Regel sofort widerrufen. Die neue Regeldefinition wird nur mit einer gesonderten Autorisierung wirksam; du kannst ihn auf der Änderungsseite erneut autorisieren.',
+    'felső korlát': 'Obergrenze',
+    'további': 'weitere',
+    'összes esemény': 'alle Ereignisse',
+    'eseménykód': 'Ereignis-Code',
+    'keresés a látható értékekben (esemény, felhasználó, IP, szabály, ok)': 'sichtbare Werte durchsuchen (Ereignis, Benutzer, IP, Regel, Grund)',
+    'A kikapcsolt mérőszám nem számol és nem tilt; a meglévő tiltások a megadott idő elteltével normálisan lejárnak.': 'Eine deaktivierte Metrik zählt nicht und sperrt nicht; bestehende Sperren laufen nach der festgelegten Zeit normal ab.',
+    'aktív mérőszám': 'aktive Metrik',
+    'nincs aktív mérőszám': 'keine aktive Metrik',
+    'csomagszám': 'Paketanzahl',
+    'portszám': 'Portanzahl',
     'legfeljebb 256 port adható meg': 'höchstens 256 Ports dürfen angegeben werden',
     'Teljes hozzáféréshez ne adj meg portot vagy ICMP-t.': 'Gib für den Vollzugriff keine Ports oder ICMP an.',
     'Adj meg legalább egy TCP/UDP portot, ICMP-t vagy teljes hozzáférést.': 'Gib mindestens einen TCP/UDP-Port, ICMP oder Vollzugriff an.',
@@ -2997,6 +3212,7 @@ const I18N = {
     'A jelszavad megváltozott. Most válassz hozzáférést.': 'Dein Passwort wurde geändert. Wähle jetzt den Zugriff.',
     'A jelszó cseréje nem sikerült.': 'Das Passwort konnte nicht geändert werden.',
     'Nincs kiválasztható szabály.': 'Keine auswählbare Regel.',
+    'Legalább egy szabályt ki kell választanod.': 'Wähle mindestens eine Regel aus.',
     'Engedélyezés…': 'Wird gewährt…',
     'A hozzáférés beállítása nem sikerült.': 'Der Zugriff konnte nicht eingerichtet werden.',
     'A kilépés nem sikerült.': 'Die Abmeldung ist fehlgeschlagen.',
@@ -3053,8 +3269,8 @@ const I18N = {
     'hibás szabály-adat': 'ungültige Regeldaten',
     'legalább egy portot válassz': 'wähle mindestens einen Port',
     'ez a szabály-azonosító foglalt': 'diese Regel-ID ist bereits vergeben',
-    'a beépített admin szabály nem módosítható': 'die integrierte Admin-Regel kann nicht geändert werden',
-    'a beépített admin szabály nem törölhető': 'die integrierte Admin-Regel kann nicht gelöscht werden',
+    'ez egy fenntartott, régi azonosító, nem módosítható': 'dies ist eine reservierte alte Kennung und kann nicht geändert werden',
+    'ez egy fenntartott, régi azonosító, nem törölhető': 'dies ist eine reservierte alte Kennung und kann nicht gelöscht werden',
     'érvénytelen felhasználónév': 'ungültiger Benutzername',
     'érvénytelen szerepkör': 'ungültige Rolle',
     'érvénytelen szabály-azonosító': 'ungültige Regel-ID',
@@ -3115,6 +3331,13 @@ const I18N = {
     'Web, DNS, SSH és ping': 'Web, DNS, SSH und Ping',
     'Teljes': 'Voll',
     'Korlátozatlan internet': 'Uneingeschränktes Internet',
+
+    // -- Protokollfilter -------------------------------------------------
+    'Szint': 'Schweregrad',
+    'összes szint': 'alle Schweregrade',
+    'információ': 'Info',
+    'figyelmeztetés': 'Warnung',
+    'riasztás': 'Alarm',
 
     // -- Protokollereignisse --------------------------------------------
     'portal_opened': 'Portal geöffnet',
@@ -3205,7 +3428,7 @@ const I18N = {
     'pl. 1.1.1.1': 'z. B. 1.1.1.1',
     // -- Firewall-Einstellungen ---------------------------------------
     'Tűzfal testreszabása': 'Firewall anpassen',
-    'Bejelentkezés előtt nyitva lévő és blokkolt célok.': 'Vor der Anmeldung offene und blockierte Ziele.',
+    'Tűzfalnév, bejelentkezés előtt nyitva lévő és blokkolt célok.': 'Firewall-Name, vor der Anmeldung offene und blockierte Ziele.',
     'A beállításfájl hibás, a pre-auth lista üres:': 'Die Einstellungsdatei ist ungültig; die Pre-auth-Liste ist leer:',
     'A pre-auth szabályok megkerülik a portált: a megadott cél és port a bejelentkezés előtt is elérhető minden LAN-kliensnek. Csak olyan szolgáltatást adj hozzá, amelynek nyilvánosnak kell lennie.': 'Pre-auth-Regeln umgehen das Portal: Das angegebene Ziel und der Port sind für jeden LAN-Client schon vor der Anmeldung erreichbar. Füge nur einen Dienst hinzu, der öffentlich sein muss.',
     'Pre-auth szabályok': 'Pre-auth-Regeln',
@@ -3229,7 +3452,6 @@ const I18N = {
     'A fail2ban adatok betöltése nem sikerült.': 'Die Fail2ban-Daten konnten nicht geladen werden.',
     'Fail2ban állapot': 'Fail2ban-Status',
     'az automatikus tiltás bekapcsolva': 'automatische Sperre ist aktiviert',
-    'automatikus tiltás bekapcsolva': 'automatische Sperre aktiviert',
     'az automatikus tiltás kikapcsolva': 'automatische Sperre ist deaktiviert',
     'Tiltott IP': 'Gesperrte IPs',
     'automatikus': 'automatisch',
@@ -3242,6 +3464,8 @@ const I18N = {
     'Sikertelen belépés a tiltásig': 'Fehlgeschlagene Anmeldungen bis zur Sperre',
     'Időablak (perc)': 'Zeitfenster (Minuten)',
     'Tiltás hossza (perc)': 'Sperrdauer (Minuten)',
+    'Közös beállítások': 'Gemeinsame Einstellungen',
+    'Minden automatikus tiltásra érvényes, a drop-alapúakra is.': 'Gilt für jede automatische Sperre, auch für drop-basierte.',
     'A küszöb elérésekor a forrás IP bekerül a banned_v4 halmazba, és a tűzfal eldobja a csomagjait. A portál és a DHCP kivétel, hogy a kliens lássa a tiltás okát, és ne veszítse el az IP-címét. A tiltás a megadott idő után automatikusan lejár; a kézi tiltások megmaradnak, ha az automatikus tiltást kikapcsolod. A tiltásról a drop log egyetlen eseményt rögzít, a tiltás alatti csomagokat ehhez az eseményhez rendeli, nem külön soronként, és a tiltás a pre-auth szabályokat is felülírja.': 'Beim Erreichen der Schwelle wird die Quell-IP in die Menge banned_v4 aufgenommen und die Firewall verwirft ihre Pakete. Portal und DHCP sind ausgenommen, damit der Client den Grund der Sperre sieht und seine IP-Adresse nicht verliert. Die Sperre läuft nach der angegebenen Zeit automatisch ab; manuelle Sperren bleiben bestehen, wenn du die automatische Sperre deaktivierst. Der Drop-Log zeichnet ein einziges Sperrereignis auf und ordnet während der Sperre verworfene Pakete diesem Ereignis zu, statt sie als separate Zeilen anzuzeigen; die Sperre übersteuert außerdem Pre-Auth-Regeln.',
     'Adj meg érvényes számokat a küszöbhöz és az időtartamokhoz.': 'Gib gültige Zahlen für Schwelle und Zeiträume ein.',
     'IP-cím kézi tiltása': 'IP-Adresse manuell sperren',
@@ -3261,10 +3485,14 @@ const I18N = {
     'Nincs várakozó sikertelen belépés az időablakban.': 'Keine ausstehenden fehlgeschlagenen Anmeldungen im Zeitfenster.',
     'A sikertelen jelszavas belépések számítanak, a captcha- és a kérésgyakorisági hibák nem. A tiltott IP csomagjait a tűzfal dobja el; a portál és a DHCP kivétel, hogy a kliens értesülhessen a tiltásról. A tiltások újraindítás után is megmaradnak, és a lejárat után a kernel automatikusan feloldja őket.': 'Fehlgeschlagene Passwort-Anmeldungen zählen; Captcha- und Ratenlimit-Fehler nicht. Die Firewall verwirft Pakete einer gesperrten IP; Portal und DHCP sind ausgenommen, damit der Client über die Sperre informiert werden kann. Sperren überleben einen Neustart und werden nach Ablauf automatisch vom Kernel aufgehoben.',
     'Sikertelen belépések és gyanús forgalom tiltása forrás-IP szerint · a lista 5 másodpercenként frissül': 'Sperre fehlgeschlagener Anmeldungen und verdächtigen Verkehrs nach Quell-IP · die Liste aktualisiert sich alle 5 Sekunden',
-    'Drop-alapú tiltás': 'Drop-basierte Sperre',
-    'bejelentkezés nélküli portszkennerek tiltása': 'Portscanner ohne Anmeldung sperren',
+    'Sikertelen belépések': 'Fehlgeschlagene Anmeldungen',
+    'Hibás jelszavas belépések; a captcha- és a gyakorisági hibák nem számítanak.': 'Fehlgeschlagene Passwort-Anmeldungen; Captcha- und Ratenlimit-Fehler zählen nicht.',
+    'A bejelentkezés nélküli forgalom eldobott csomagjait számolja.': 'Zählt verworfene Pakete im Verkehr ohne Anmeldung.',
+    'Különböző célportok': 'Verschiedene Zielports',
+    'Portszkennerek észlelése a különböző célportok alapján.': 'Erkennt Portscanner anhand der Anzahl verschiedener Zielports.',
     'Eldobott csomag a tiltásig': 'Verworfene Pakete bis zur Sperre',
     'Különböző célport a tiltásig': 'Verschiedene Zielports bis zur Sperre',
+    'Mindkét drop-mérőszám ezt az időablakot használja.': 'Beide Drop-Metriken verwenden dieses Zeitfenster.',
     'Drop időablak (perc)': 'Drop-Zeitfenster (Minuten)',
     'Várakozó drop': 'Ausstehende Drops',
     'a drop-alapú tiltás kikapcsolva': 'die drop-basierte Sperre ist deaktiviert',
@@ -3361,6 +3589,10 @@ const I18N = {
     'csak jóváhagyásra váró kérelem utasítható el': 'nur eine ausstehende Kontoanfrage kann abgelehnt werden',
     'a jóváhagyásra váró fiók nem rendelhető csoporthoz': 'ein ausstehendes Konto kann keiner Gruppe zugewiesen werden',
     'a registration_enabled mező igaz/hamis érték kell': 'das Feld registration_enabled muss ein Wahrheitswert sein',
+    'a tűzfal neve szöveg kell': 'der Firewall-Name muss Text sein',
+    'site_name: szöveg kell': 'site_name: Text erforderlich',
+    'site_name: legfeljebb 64 karakter': 'site_name: höchstens 64 Zeichen',
+    'site_name: vezérlőkaraktert nem tartalmazhat': 'site_name: darf keine Steuerzeichen enthalten',
   },
 };
 
@@ -3407,7 +3639,6 @@ const I18N_PATTERNS = {
     [/^Elutasítod: (.+)\? A kérelem törlődik\.$/, m => `Reject ${m[1]}? The request will be deleted.`],
     [/^(\d+) kiválasztva · (\d+) elem$/, m => `${m[1]} selected · ${m[2]} items`],
     [/^(\d+) csoport · a csoport szabályai minden tagra érvényesek$/, m => `${countLabel(m[1], 'group', 'groups')} · group rules apply to every member`],
-    [/^(\d+) szabály · az admin beépített teljes hozzáférése mindig él$/, m => `${countLabel(m[1], 'rule', 'rules')} · the admin's built-in full access is always active`],
     [/^(\d+) nyitott munkamenet · a hátralévő idő élőben frissül \(5 másodpercenként\)$/, m => `${countLabel(m[1], 'open session', 'open sessions')} · time left updates live (every 5 seconds)`],
     [/^(\d+) sor$/, m => countLabel(m[1], 'row', 'rows')],
     [/^(\d+) csomag$/, m => countLabel(m[1], 'packet', 'packets')],
@@ -3447,12 +3678,17 @@ const I18N_PATTERNS = {
     [/^members: érvénytelen elem$/, 'members: invalid element'],
     [/^members: érvénytelen elem: (.+)$/, m => `members: invalid element: ${m[1]}`],
     [/^ismeretlen szabály a gyűjtőszabályban: (.+)$/, m => `unknown rule in the collection: ${m[1]}`],
+    [/^ismeretlen proxy-bejegyzés: (.+)$/, m => `unknown proxy entry: ${m[1]}`],
+    [/^proxy: domain szabály hivatkozik rá, ezért nem törölhető és nem nevezhető át: (.+); előbb vedd ki a szabályból$/, m => `proxy: referenced by a domain rule, so it cannot be deleted or renamed: ${m[1]}; remove it from the rule first`],
+    [/^proxy: ismeretlen gyökérdomain: (.+); gyökérdomain csak a bejegyzései törlése vagy áthelyezése után törölhető$/, m => `proxy: unknown root domain: ${m[1]}; a root domain can only be deleted after its entries are deleted or moved`],
+    [/^proxy: a teljes hostnév nem lehet gyökérdomain: (.+)$/, m => `proxy: a full hostname cannot be a root domain: ${m[1]}`],
     [/^a gyűjtőszabály nem tartalmazhat másik gyűjtőszabályt: (.+)$/, m => `a collection rule cannot contain another collection: ${m[1]}`],
     [/^a gyűjtőszabály nem tartalmazhat teljes hozzáférésű szabályt: (.+)$/, m => `a collection rule cannot contain a full-access rule: ${m[1]}`],
     [/^körkörös gyűjtőszabály-hivatkozás: (.+)$/, m => `circular collection reference: ${m[1]}`],
     [/^hiányzó gyűjtőszabály-tag: (.+)$/, m => `missing collection member: ${m[1]}`],
     [/^a\(z\) (.+) szabály nem törölhető, mert tagja a következő gyűjtőszabályoknak: (.+); előbb vedd ki a tagok közül$/, m => `rule ${m[1]} cannot be deleted because it is a member of these collection rules: ${m[2]}; remove it from them first`],
     [/^a\(z\) (.+) szabály tagja a következő gyűjtőszabályoknak: (.+); előbb vedd ki a tagok közül$/, m => `rule ${m[1]} is a member of these collection rules: ${m[2]}; remove it from them first`],
+    [/^(.+): host szabály nem használhat szolgáltatáslistát$/, m => `${m[1]}: a host rule cannot use a service list`],
     [/^már létezik ilyen csoport: (.+)$/, m => `a group with this ID already exists: ${m[1]}`],
     [/^nincs ilyen csoport: (.+)$/, m => `no such group: ${m[1]}`],
     [/^már létezik ilyen felhasználó: (.+)$/, m => `a user with this name already exists: ${m[1]}`],
@@ -3533,7 +3769,6 @@ const I18N_PATTERNS = {
     [/^Elutasítod: (.+)\? A kérelem törlődik\.$/, m => `${m[1]} ablehnen? Die Anfrage wird gelöscht.`],
     [/^(\d+) kiválasztva · (\d+) elem$/, m => `${m[1]} ausgewählt · ${m[2]} Einträge`],
     [/^(\d+) csoport · a csoport szabályai minden tagra érvényesek$/, m => `${countLabel(m[1], 'Gruppe', 'Gruppen')} · Gruppenregeln gelten für alle Mitglieder`],
-    [/^(\d+) szabály · az admin beépített teljes hozzáférése mindig él$/, m => `${countLabel(m[1], 'Regel', 'Regeln')} · der integrierte Vollzugriff des Admins ist immer aktiv`],
     [/^(\d+) nyitott munkamenet · a hátralévő idő élőben frissül \(5 másodpercenként\)$/, m => `${countLabel(m[1], 'offene Sitzung', 'offene Sitzungen')} · die verbleibende Zeit wird live aktualisiert (alle 5 Sekunden)`],
     [/^(\d+) sor$/, m => countLabel(m[1], 'Zeile', 'Zeilen')],
     [/^(\d+) csomag$/, m => countLabel(m[1], 'Paket', 'Pakete')],
@@ -3573,12 +3808,17 @@ const I18N_PATTERNS = {
     [/^members: érvénytelen elem$/, 'members: ungültiges Element'],
     [/^members: érvénytelen elem: (.+)$/, m => `members: ungültiges Element: ${m[1]}`],
     [/^ismeretlen szabály a gyűjtőszabályban: (.+)$/, m => `unbekannte Regel in der Sammlung: ${m[1]}`],
+    [/^ismeretlen proxy-bejegyzés: (.+)$/, m => `unbekannter Proxy-Eintrag: ${m[1]}`],
+    [/^proxy: domain szabály hivatkozik rá, ezért nem törölhető és nem nevezhető át: (.+); előbb vedd ki a szabályból$/, m => `proxy: eine Domain-Regel verweist darauf, daher kann er nicht gelöscht oder umbenannt werden: ${m[1]}; entferne ihn zuerst aus der Regel`],
+    [/^proxy: ismeretlen gyökérdomain: (.+); gyökérdomain csak a bejegyzései törlése vagy áthelyezése után törölhető$/, m => `proxy: unbekannte Stammdomain: ${m[1]}; eine Stammdomain kann erst gelöscht werden, wenn ihre Einträge gelöscht oder verschoben wurden`],
+    [/^proxy: a teljes hostnév nem lehet gyökérdomain: (.+)$/, m => `proxy: ein vollständiger Hostname darf keine Stammdomain sein: ${m[1]}`],
     [/^a gyűjtőszabály nem tartalmazhat másik gyűjtőszabályt: (.+)$/, m => `eine Sammlungsregel darf keine andere Sammlung enthalten: ${m[1]}`],
     [/^a gyűjtőszabály nem tartalmazhat teljes hozzáférésű szabályt: (.+)$/, m => `eine Sammlungsregel darf keine Vollzugriffsregel enthalten: ${m[1]}`],
     [/^körkörös gyűjtőszabály-hivatkozás: (.+)$/, m => `zirkuläre Sammlungsreferenz: ${m[1]}`],
     [/^hiányzó gyűjtőszabály-tag: (.+)$/, m => `fehlendes Sammlungsmitglied: ${m[1]}`],
     [/^a\(z\) (.+) szabály nem törölhető, mert tagja a következő gyűjtőszabályoknak: (.+); előbb vedd ki a tagok közül$/, m => `Regel ${m[1]} kann nicht gelöscht werden, da sie Mitglied dieser Sammlungsregeln ist: ${m[2]}; entferne sie zuerst daraus`],
     [/^a\(z\) (.+) szabály tagja a következő gyűjtőszabályoknak: (.+); előbb vedd ki a tagok közül$/, m => `Regel ${m[1]} ist Mitglied dieser Sammlungsregeln: ${m[2]}; entferne sie zuerst daraus`],
+    [/^(.+): host szabály nem használhat szolgáltatáslistát$/, m => `${m[1]}: eine Host-Regel darf keine Dienstliste verwenden`],
     [/^már létezik ilyen csoport: (.+)$/, m => `eine Gruppe mit dieser ID existiert bereits: ${m[1]}`],
     [/^nincs ilyen csoport: (.+)$/, m => `keine solche Gruppe: ${m[1]}`],
     [/^már létezik ilyen felhasználó: (.+)$/, m => `ein Benutzer mit diesem Namen existiert bereits: ${m[1]}`],
@@ -3944,6 +4184,7 @@ const slot        = document.getElementById('captcha-slot');
 const loginView   = document.getElementById('login-view');
 const registerView= document.getElementById('register-view');
 const registerLink= document.getElementById('register-link');
+const loginSiteName = document.getElementById('login-site-name');
 const registerForm= document.getElementById('register-form');
 const regUserEl   = document.getElementById('reg-user');
 const regEmailEl  = document.getElementById('reg-email');
@@ -3979,6 +4220,7 @@ const totpRecoveryMsg    = document.getElementById('totp-recovery-msg');
 const totpCodesList      = document.getElementById('totp-recovery-codes');
 const totpContinue       = document.getElementById('totp-continue');
 const topbar      = document.getElementById('topbar');
+const topbarSiteName = document.getElementById('topbar-site-name');
 const accessView  = document.getElementById('access-view');
 const sessionView = document.getElementById('session-view');
 const passwordView= document.getElementById('password-view');
@@ -4027,7 +4269,8 @@ let totpState = null;           // {ticket, mode, secret, issuer, uri} — csak 
 let totpBusy = false;
 
 let auth = null;              // aktuális belépett állapot
-let selectedRuleId = null;
+let selectedRuleIds = [];     // a kiválasztott szabályok, kiválasztási sorrendben
+let sessionRevokedNotice = ''; // a munkamenet-nézet visszavonási értesítése
 let modifying = false;
 let activeView = 'login';
 let tickTimer = null;
@@ -4509,19 +4752,77 @@ function renderIdentity(data) {
   adminTab.hidden = !admin;
 }
 
+/* A szabálydefiníció stabil ujjlenyomata: a kulcsok sorrendjétől független,
+   így a 30 másodperces poll csak valódi katalógusváltozásnál rajzol újra. */
+function ruleSignature(rule) {
+  if (!rule || typeof rule !== 'object') return '';
+  const keys = Object.keys(rule).sort();
+  return JSON.stringify(keys.map(key => [key, rule[key]]));
+}
+function rulesSignature(rules) {
+  const rows = (Array.isArray(rules) ? rules : [])
+    .map(rule => [String((rule && rule.id) || ''), ruleSignature(rule)]);
+  rows.sort((left, right) => left[0].localeCompare(right[0]));
+  return JSON.stringify(rows);
+}
+function sameSelection(one, two) {
+  const left = (Array.isArray(one) ? one : []).map(String).sort();
+  const right = (Array.isArray(two) ? two : []).map(String).sort();
+  return left.length === right.length
+    && left.every((id, index) => id === right[index]);
+}
+function statusSelection(data, fallback = []) {
+  if (Array.isArray(data && data.selected_rules)) {
+    return data.selected_rules.filter(id => typeof id === 'string');
+  }
+  if (data && typeof data.rule === 'string' && data.rule) return [data.rule];
+  return Array.isArray(fallback) ? fallback.slice() : [];
+}
 function renderAuth(data, keepExpiry = false) {
   const previous = auth;
+  const rules = Array.isArray(data.rules)
+    ? data.rules
+    : (previous ? previous.rules : []);
+  let selectedIds;
+  if (Array.isArray(data.selected_rules) && data.selected_rules.length) {
+    selectedIds = data.selected_rules.filter(id => typeof id === 'string');
+  } else if (data.rule) {
+    selectedIds = [data.rule];
+  } else if (keepExpiry && previous) {
+    // A /api/status függő válasza nem tartalmaz kiválasztást; a szerkesztés
+    // közben bejelölt szabályokat nem veszítjük el.
+    selectedIds = (previous.selectedRules || []).slice();
+  } else {
+    selectedIds = [];
+  }
+  const providedLabels = Array.isArray(data.selected_rule_labels)
+    ? data.selected_rule_labels
+    : null;
+  const selectedLabels = selectedIds.map((id, index) => {
+    const provided = providedLabels ? providedLabels[index] : undefined;
+    if (provided !== undefined && provided !== null && provided !== '') {
+      return String(provided);
+    }
+    const rule = rules.find(item => item.id === id);
+    return rule ? (rule.label || id) : id;
+  });
   auth = {
     user: data.user,
     role: data.role || 'user',
     admin: !!data.admin || data.role === 'admin',
     authorized: !!data.authorized,
     mustChangePassword: !!data.must_change_password,
-    rule: data.rule || '',
-    ruleLabel: data.rule_label || '',
-    rules: Array.isArray(data.rules) ? data.rules : (previous ? previous.rules : []),
+    rule: data.rule || selectedIds[0] || '',
+    ruleLabel: data.rule_label || selectedLabels[0] || '',
+    selectedRules: selectedIds,
+    selectedRuleLabels: selectedLabels,
+    rules,
+    rulesSignature: rulesSignature(rules),
     limits: data.limits || (previous ? previous.limits : DEFAULT_LIMITS),
     grant: data.grant || (keepExpiry && previous ? previous.grant : null),
+    grants: Array.isArray(data.grants)
+      ? data.grants
+      : (keepExpiry && previous ? previous.grants : null),
     expiresAt: (keepExpiry && previous && previous.user === data.user)
       ? previous.expiresAt
       : Date.now() + Math.max(0, Number(data.expires_in) || 0) * 1000
@@ -4538,6 +4839,7 @@ function portChips(item) {
   for (const port of item.tcp || []) labels.push(`TCP ${port}`);
   for (const port of item.udp || []) labels.push(`UDP ${port}`);
   if (item.icmp) labels.push('ICMP');
+  for (const host of item.hosts || []) labels.push(`Domain: ${host}`);
   return labels;
 }
 function chip(text, neutral) {
@@ -4562,14 +4864,17 @@ function renderRules() {
   rulesEmpty.hidden = rules.length > 0;
   grantBtn.disabled = rules.length === 0;
   for (const rule of rules) {
+    const selected = selectedRuleIds.includes(rule.id);
     const cardEl = el('button', {
       type: 'button',
-      class: 'rule-card' + (rule.id === selectedRuleId ? ' active' : ''),
+      class: 'rule-card' + (selected ? ' active' : ''),
       'data-rule': rule.id,
+      'aria-pressed': selected ? 'true' : 'false',
       onclick: () => selectRule(rule.id, true)
     });
     cardEl.append(el('span', { class: 'check', text: '✓' }));
-    cardEl.append(el('b', { text: ruleDisplayLabel(rule.label || rule.id) }));
+    const hostMark = !rule.collection && rule.direction === 'input' ? ` · ${tr('Host')}` : '';
+    cardEl.append(el('b', { text: ruleDisplayLabel(rule.label || rule.id) + hostMark }));
     if (rule.description) cardEl.append(el('span', { class: 'desc', text: tr(rule.description) }));
     const chips = el('div', { class: 'chips' });
     const labels = portChips(rule);
@@ -4584,19 +4889,54 @@ function renderRules() {
     rulesEl.append(cardEl);
   }
 }
+function selectedRules() {
+  if (!auth || !Array.isArray(auth.rules)) return [];
+  return selectedRuleIds
+    .map(id => auth.rules.find(rule => rule.id === id))
+    .filter(Boolean);
+}
 function currentRule() {
-  if (!auth || !Array.isArray(auth.rules)) return null;
-  return auth.rules.find(rule => rule.id === selectedRuleId) || null;
+  // Kompatibilitás: a régi egyválasztós kód az első kijelölést kapja.
+  const rules = selectedRules();
+  return rules.length ? rules[0] : null;
+}
+function currentRuleId() {
+  return selectedRuleIds.length ? selectedRuleIds[0] : null;
+}
+function selectionDefaultTtl() {
+  // A kiválasztott szabályok közül a legrövidebb alapértelmezett idő él.
+  const defaults = selectedRules()
+    .map(rule => Number(rule.default_ttl))
+    .filter(value => Number.isFinite(value) && value > 0);
+  return defaults.length ? Math.min(...defaults) : null;
 }
 function ttlBounds() {
   const global = (auth && auth.limits) || DEFAULT_LIMITS;
-  const rule = currentRule();
+  const rules = selectedRules();
   const minSec = Math.max(60, Number(global.min_ttl) || 60);
   let maxSec = Math.max(60, Number(global.max_ttl) || DEFAULT_LIMITS.max_ttl);
-  if (rule) {
-    maxSec = Math.min(maxSec, Number(rule.max_ttl) || maxSec);
+  let rule = null;
+  let ruleCap = null;
+  const capped = [];
+  for (const item of rules) {
+    const value = Number(item.max_ttl);
+    if (!Number.isFinite(value) || value <= 0) continue;
+    if (ruleCap === null || value < ruleCap) {
+      ruleCap = value;
+      capped.length = 0;
+      capped.push(item);
+    } else if (value === ruleCap) {
+      capped.push(item);
+    }
+    if (!rule || value < Number(rule.max_ttl)) rule = item;
+    maxSec = Math.min(maxSec, value);
   }
-  return { minSec, maxSec, rule };
+  // Hiányzó max_ttl esetén a globális korlát marad (régi viselkedés).
+  if (!rule && rules.length) rule = rules[0];
+  // A felső korlátot ténylegesen meghatározó szabály(ok). Ha a globális
+  // korlát a szigorúbb, akkor egyik kiválasztott szabály sem köt.
+  const binding = ruleCap !== null && ruleCap <= maxSec ? capped : [];
+  return { minSec, maxSec, rule, rules, binding };
 }
 function ttlDisplayBounds() {
   const { minSec, maxSec } = ttlBounds();
@@ -4622,40 +4962,88 @@ function updateTtlBounds() {
   let value = unavailable ? min : (current > 0 ? current : min);
   if (!unavailable) value = Math.min(max, Math.max(min, value));
   ttlEl.value = String(Math.round(value));
-  const { rule } = ttlBounds();
+  const { rules, binding } = ttlBounds();
+  const labels = rules.map(item => ruleDisplayLabel(item.label || item.id));
+  // Több kiválasztott szabálynál a teljes lista a tooltipben marad.
+  ttlHint.title = labels.length > 1 ? labels.join(' · ') : '';
   let text;
   if (unavailable) {
-    text = tr('Ez a szabály legalább 1 órás időtartamot igényel.');
+    text = rules.length > 1
+      ? tr('A kiválasztott szabályok közül legalább egy legalább 1 órás időtartamot igényel.')
+      : tr('Ez a szabály legalább 1 órás időtartamot igényel.');
   } else {
+    // Először a tartományt fordítjuk le, utána fűzzük hozzá a (felhasználói)
+    // szabálycímkéket, ahogy az egész mondatot fordító minta is teszi.
     text = tr(`Beállítható: ${min}–${max} óra`);
-    if (rule) text += ` · ${ruleDisplayLabel(rule.label)}`;
+    if (labels.length > 1) {
+      const visible = labels.slice(0, 3);
+      const hidden = labels.length - visible.length;
+      text += ` · ${visible.join(' · ')}`;
+      if (hidden > 0) text += ` · +${hidden} ${tr('további')}`;
+      // A kötő szabályok listáját csak akkor fűzzük hozzá, ha azok szigorú
+      // részhalmazát adják a kiválasztott szabályoknak; különben a fenti
+      // címkék már minden érintett szabályt mutatnak (nincs ismétlés).
+      if (binding.length && binding.length < rules.length) {
+        const names = binding.map(item => ruleDisplayLabel(item.label || item.id));
+        text += ` · ${tr('felső korlát')}: ${names.join(', ')}`;
+      }
+    } else if (labels.length === 1) {
+      text += ` · ${labels[0]}`;
+    }
   }
   ttlHint.textContent = text;
 }
 function selectRule(ruleId, resetTtl) {
-  selectedRuleId = ruleId;
-  for (const node of rulesEl.querySelectorAll('.rule-card')) {
-    node.classList.toggle('active', node.dataset.rule === ruleId);
+  // Ha a felhasználó nem nyúlt az időtartamhoz, a kijelölés alapértelmezett
+  // értékét követjük; kézzel beírt értéket csak a korlátokhoz igazítunk.
+  const previousDefault = resetTtl
+    ? String(ttlHours(selectionDefaultTtl()))
+    : null;
+  const index = selectedRuleIds.indexOf(ruleId);
+  if (index === -1) {
+    selectedRuleIds.push(ruleId);
+  } else if (selectedRuleIds.length > 1) {
+    selectedRuleIds.splice(index, 1);
+  } else {
+    // Legalább egy szabály mindig kijelölve marad.
+    showAccessMsg('Legalább egy szabályt ki kell választanod.');
+    return;
   }
-  const rule = currentRule();
-  if (rule && resetTtl) {
-    // Új szabály választásakor az alapértelmezett időtartamot órában adjuk meg.
-    setTtlSeconds(rule.default_ttl);
+  showAccessMsg('');
+  for (const node of rulesEl.querySelectorAll('.rule-card')) {
+    const active = selectedRuleIds.includes(node.dataset.rule);
+    node.classList.toggle('active', active);
+    node.setAttribute('aria-pressed', active ? 'true' : 'false');
+  }
+  if (resetTtl && String(ttlEl.value) === previousDefault) {
+    // Több szabálynál a legrövidebb alapértelmezett időt használjuk.
+    setTtlSeconds(selectionDefaultTtl());
   } else {
     updateTtlBounds();
   }
 }
-function chooseDefaultRule() {
+function chooseDefaultRules() {
   const rules = auth && Array.isArray(auth.rules) ? auth.rules : [];
-  if (auth && auth.rule && rules.some(rule => rule.id === auth.rule)) {
-    return auth.rule;
+  const ids = new Set(rules.map(rule => rule.id));
+  const keepKnown = list => list.filter(id => ids.has(id));
+  if (auth && Array.isArray(auth.selectedRules) && auth.selectedRules.length) {
+    const chosen = keepKnown(auth.selectedRules);
+    if (chosen.length) return chosen;
   }
-  if (selectedRuleId && rules.some(rule => rule.id === selectedRuleId)) {
-    return selectedRuleId;
+  if (auth && auth.rule && ids.has(auth.rule)) {
+    return [auth.rule];
   }
-  return rules.length ? rules[0].id : null;
+  if (selectedRuleIds.length) {
+    const chosen = keepKnown(selectedRuleIds);
+    if (chosen.length) return chosen;
+  }
+  return rules.length ? [rules[0].id] : [];
+}
+function chooseDefaultRule() {
+  return chooseDefaultRules()[0] || null;
 }
 function showAccess(data) {
+  sessionRevokedNotice = '';
   if (data.must_change_password) {
     renderAuth(data);
     showPassword(data.message);
@@ -4664,7 +5052,7 @@ function showAccess(data) {
   const wasAuthorized = !!data.authorized;
   renderAuth(data);
   modifying = wasAuthorized;
-  selectedRuleId = chooseDefaultRule();
+  selectedRuleIds = chooseDefaultRules();
   renderRules();
   accessTitle.textContent = tr(wasAuthorized
     ? 'Hozzáférés módosítása'
@@ -4673,9 +5061,9 @@ function showAccess(data) {
   accessBack.hidden = !wasAuthorized;
   const rule = currentRule();
   if (rule) {
-    const seconds = wasAuthorized && data.rule === rule.id && data.expires_in
+    const seconds = wasAuthorized && Number(data.expires_in) > 0
       ? data.expires_in
-      : rule.default_ttl;
+      : selectionDefaultTtl();
     // A hozzáférés hosszát mindig egész órában adjuk meg.
     setTtlSeconds(seconds);
   } else {
@@ -4689,10 +5077,31 @@ function showAccess(data) {
 function showSession(data, keepExpiry = false) {
   renderAuth(data, keepExpiry);
   auth.authorized = true;
-  sessionRule.textContent = ruleDisplayLabel(data.rule_label || (data.rule || '—'));
+  let selectedLabels = (Array.isArray(data.selected_rule_labels)
+    && data.selected_rule_labels.length)
+    ? data.selected_rule_labels
+    : null;
+  if (!selectedLabels && Array.isArray(data.selected_rules) && data.selected_rules.length) {
+    // Új szerver listát küld, de címkék nélkül: a szabályokból pótoljuk.
+    selectedLabels = auth.selectedRuleLabels;
+  }
+  sessionRule.textContent = (selectedLabels && selectedLabels.length)
+    ? selectedLabels.map(label => ruleDisplayLabel(label)).join(' · ')
+    : ruleDisplayLabel(data.rule_label || (data.rule || '—'));
   sessionSvcs.replaceChildren();
-  const grant = data.grant || auth.grant;
-  const labels = portChips(grant);
+  const labels = [];
+  const grants = auth.grants;
+  if (Array.isArray(grants) && grants.length) {
+    // Irányonként jelenítjük meg az engedélyeket (Host = bejövő).
+    for (const grant of grants) {
+      const direction = grant && grant.direction === 'input' ? tr('Host') : tr('Forward');
+      for (const label of portChips(grant)) labels.push(`${direction}: ${label}`);
+    }
+  } else {
+    const grant = data.grant || auth.grant;
+    labels.push(...portChips(grant));
+  }
+  for (const host of data.hosts || []) labels.push(`Domain: ${host}`);
   for (const label of labels) sessionSvcs.append(chip(label));
   sessionSvcs.hidden = !labels.length;
   setView('session');
@@ -4723,7 +5132,8 @@ function endSession(text, ok) {
   // ne bontsák és ne írják felül az új belépést.
   authEpoch += 1;
   auth = null;
-  selectedRuleId = null;
+  sessionRevokedNotice = '';
+  selectedRuleIds = [];
   modifying = false;
   adminState = null;
   adminEdit = null;
@@ -4749,15 +5159,73 @@ function updateTimer() {
 
 /* ============================================================ szerverállapot */
 
+function applySiteName(raw) {
+  /* A név megjelenítési adat: szövegként, címkézés nélkül kerül a DOM-ba. */
+  const name = String(raw === null || raw === undefined ? '' : raw)
+    .trim().slice(0, 64);
+  const visible = !!name && name !== 'Dropjak';
+  for (const node of [loginSiteName, topbarSiteName]) {
+    if (!node) continue;
+    node.textContent = visible ? name : '';
+    node.hidden = !visible;
+  }
+  document.title = visible ? 'Dropjak · ' + name : 'Dropjak';
+}
+
 function updateRegistrationAvailability(data) {
   if (!registerLink) return;
   registerLink.hidden = !(data && data.registration_enabled);
+}
+
+/* Az access (módosítás) nézet frissítése a 30 másodperces pollból.
+   Nem navigálunk és nem hívjuk a showSession()-t: a felhasználó a helyén
+   marad, a szabálykártyák csak valódi katalógusváltozásnál épülnek újra. */
+function refreshAccessFromStatus(data) {
+  const previous = auth;
+  if (!previous) return;
+  const previousRules = Array.isArray(previous.rules) ? previous.rules : [];
+  const freshRules = Array.isArray(data.rules) ? data.rules : previousRules;
+  const catalogChanged =
+    rulesSignature(previousRules) !== rulesSignature(freshRules);
+  const before = new Map(
+    previousRules.map(rule => [rule.id, ruleSignature(rule)])
+  );
+  const after = new Map(freshRules.map(rule => [rule.id, ruleSignature(rule)]));
+  const revoked = new Set();
+  for (const id of selectedRuleIds) {
+    const was = before.get(id);
+    const now = after.get(id);
+    if (was !== undefined && (now === undefined || now !== was)) {
+      revoked.add(id);
+    }
+  }
+  // A szerver a módosult/törölt szabályt már kivette a választásból.
+  const previousServer = Array.isArray(previous.selectedRules)
+    ? previous.selectedRules : [];
+  const freshServer = statusSelection(data, previousServer);
+  for (const id of previousServer) {
+    if (!freshServer.includes(id)) revoked.add(id);
+  }
+  // Friss auth: szabályok, választás, grantek és lejárat.
+  renderAuth(data);
+  // Csak az érvényes, éppen bejelölt szabályokat tartjuk meg; ha mind
+  // eltűnt, a szerver megmaradt választására esünk vissza.
+  selectedRuleIds = selectedRuleIds.filter(
+    id => !revoked.has(id) && after.has(id)
+  );
+  if (!selectedRuleIds.length) selectedRuleIds = chooseDefaultRules();
+  if (catalogChanged || revoked.size) renderRules();
+  updateTtlBounds();
+  if (revoked.size) {
+    showAccessMsg('A módosított szabály miatt az érintett hozzáférés azonnal visszavonásra került. Az új szabálydefiníció csak külön engedélyezéssel lép életbe; engedélyezd újra a hozzáférést.');
+  }
 }
 
 async function refreshStatus() {
   try {
     const res = await fetch('/api/status', { cache: 'no-store' });
     const data = await res.json();
+    applySiteName(data.site_name);
     if (!data.authenticated) {
       updateRegistrationAvailability(data);
       if (data.banned) {
@@ -4793,6 +5261,29 @@ async function refreshStatus() {
         renderAuth(data, true);
         return;
       }
+      if (activeView === 'access') {
+        // A módosítás képernyőn maradunk; a friss katalógus és a szerver
+        // által megőrzött választás helyben frissül.
+        refreshAccessFromStatus(data);
+        return;
+      }
+      if (activeView === 'session') {
+        const revoked = auth
+          ? !sameSelection(
+            auth.selectedRules,
+            statusSelection(data, auth.selectedRules)
+          )
+          : false;
+        showSession(data);
+        // A friss katalógus a session-nézetben is azonnal érvényes.
+        if (Array.isArray(data.rules)) auth.rules = data.rules;
+        auth.rulesSignature = rulesSignature(auth.rules);
+        if (revoked) {
+          sessionRevokedNotice = 'A módosított szabály miatt az érintett hozzáférés azonnal visszavonásra került. Az új szabálydefiníció csak külön engedélyezéssel lép életbe; a módosítás oldalon újra engedélyezheted.';
+        }
+        if (sessionRevokedNotice) showSessionMsg(sessionRevokedNotice);
+        return;
+      }
       showSession(data);
       return;
     }
@@ -4802,11 +5293,18 @@ async function refreshStatus() {
     }
     if (activeView !== 'access') showAccess(data);
     else {
+      // Engedélyezés előtt is a helyén marad a képernyő: a friss katalógust
+      // vesszük át, de a felhasználó éppen bejelölt szabályait nem dobjuk el.
+      const previousRules = auth && Array.isArray(auth.rules) ? auth.rules : [];
+      const freshRules = Array.isArray(data.rules) ? data.rules : previousRules;
+      const catalogChanged =
+        rulesSignature(previousRules) !== rulesSignature(freshRules);
       renderAuth(data, true);
-      const rules = data.rules || [];
-      auth.rules = rules;
-      selectedRuleId = chooseDefaultRule();
-      renderRules();
+      auth.rules = freshRules;
+      const valid = new Set(freshRules.map(rule => rule.id));
+      selectedRuleIds = selectedRuleIds.filter(id => valid.has(id));
+      if (!selectedRuleIds.length) selectedRuleIds = chooseDefaultRules();
+      if (catalogChanged) renderRules();
       updateTtlBounds();
     }
   } catch (e) {
@@ -5056,7 +5554,7 @@ function adminSetTab(name) {
   stopSessionTimers();
   stopFirewallTimers();
   stopFail2banTimers();
-  if (name === 'logs') loadLogs();
+  if (name === 'logs') loadLogs(true);
   else if (name === 'drops') loadDrops();
   else if (name === 'sessions') loadSessions();
   else if (name === 'fail2ban') loadFail2ban();
@@ -5082,6 +5580,7 @@ const ADMIN_HEAD_ICONS = {
   'Felhasználók': 'users',
   'Csoportok': 'groups',
   'Szabályok': 'rules',
+  'Domainek': 'domains',
   'Munkamenetek': 'sessions',
   'Tűzfal-nézet': 'firewall',
   'Tűzfal testreszabása': 'settings',
@@ -5184,7 +5683,8 @@ function boolValue(formEl, name) {
 function rulePickerLabel(rule) {
   const ports = tr(rule.ports_label || 'nincs port');
   const marker = rule.collection ? ` · ${tr('gyűjtő')}` : '';
-  return `${ruleDisplayLabel(rule.label)} — ${ports}${marker}`;
+  const host = rule.direction === 'input' ? ` · ${tr('Host')}` : '';
+  return `${ruleDisplayLabel(rule.label)} — ${ports}${host}${marker}`;
 }
 /* Hiba esetén a megnyitott admin-űrlap értékeit elmentjük, hogy az
    újrarenderelés ne törölje a felhasználó által beírt mezőket. */
@@ -5317,7 +5817,15 @@ function renderUsers() {
   )));
   const body = el('tbody');
   for (const user of users) {
-    const direct = user.rules && user.rules.length ? user.rules.join(', ') : (user.rules_set ? '—' : tr('nincs beállítva (alap: mind)'));
+    const direct = user.rules && user.rules.length
+      ? user.rules.join(', ')
+      : (user.rules_set
+          ? '—'
+          : (user.role === 'admin'
+              ? tr('nincs beállítva')
+              : tr((user.groups || []).length
+                  ? 'nincs közvetlen beállítás (csoportból örökölve)'
+                  : 'nincs közvetlen beállítás (a forward szabályok öröklődnek)')));
     const effective = (user.effective_rules || []).join(', ') || '—';
     const actions = el('td', { class: 'actions' });
     actions.append(
@@ -5703,7 +6211,7 @@ function renderRulesAdmin() {
   const rules = (adminState && adminState.rules) || [];
   adminPanel.append(adminHead(
     'Szabályok',
-    `${rules.length} szabály · az admin beépített teljes hozzáférése mindig él`,
+    `${rules.length} szabály`,
     'Új szabály',
     () => { adminEdit = { kind: 'rule', id: null }; adminDraft = null; adminFlash = null; renderAdminPanel(); }
   ));
@@ -5750,6 +6258,9 @@ function renderRulesAdmin() {
     const nameLine = el('div', {}, el('b', { text: ruleDisplayLabel(rule.label) }));
     if (rule.collection) {
       nameLine.append(' ', el('span', { class: 'pill', text: tr('gyűjtő') }));
+    }
+    if (!rule.collection && rule.direction === 'input') {
+      nameLine.append(' ', el('span', { class: 'dir-badge', text: tr('Host') }));
     }
     nameCell.append(nameLine);
     if (rule.members && rule.members.length) {
@@ -5830,6 +6341,7 @@ function renderRuleForm(id) {
       renderAdminPanel();
       return;
     }
+    const direction = formValue(box, 'direction') === 'input' ? 'input' : 'forward';
     const base = {
       action: edit ? 'update' : 'create',
       id: formValue(box, 'id').trim(),
@@ -5839,11 +6351,12 @@ function renderRuleForm(id) {
       max_ttl: Math.round(maxHours * 3600)
     };
     if (collection) {
+      // A gyűjtőszabálynak nincs saját iránya: a tagok irányai döntenek.
       const members = pickedValues(box, 'members');
-      if (members.length < 2) {
+      if (members.length < 1) {
         captureAdminDraft();
         adminFlash = {
-          text: 'Legalább két egyedi szabályt válassz a gyűjtőszabályhoz.',
+          text: 'Legalább egy egyedi szabályt válassz a gyűjtőszabályhoz.',
           kind: 'err'
         };
         renderAdminPanel();
@@ -5852,8 +6365,24 @@ function renderRuleForm(id) {
       submit({ ...base, collection: true, members });
       return;
     }
-    const full = boolValue(box, 'full');
-    const icmp = boolValue(box, 'icmp');
+    if (formValue(box, 'direction') === 'domain') {
+      // A domain szabálynak nincs iránya és portja, csak proxy-bejegyzései.
+      const domains = pickedValues(box, 'domains');
+      if (domains.length < 1) {
+        captureAdminDraft();
+        adminFlash = {
+          text: 'Legalább egy proxy-bejegyzést válassz a domain szabályhoz.',
+          kind: 'err'
+        };
+        renderAdminPanel();
+        return;
+      }
+      submit({ ...base, collection: false, domains });
+      return;
+    }
+    const host = direction === 'input';
+    const full = host ? false : boolValue(box, 'full');
+    const icmp = host ? false : boolValue(box, 'icmp');
     const tcp = parsePortInput(formValue(box, 'tcp'));
     const udp = parsePortInput(formValue(box, 'udp'));
     const portErrors = [];
@@ -5874,6 +6403,15 @@ function renderRuleForm(id) {
       renderAdminPanel();
       return;
     }
+    if (direction === 'input' && !tcp.ports.length && !udp.ports.length) {
+      captureAdminDraft();
+      adminFlash = {
+        text: 'host szabályhoz legalább egy TCP vagy UDP port kell',
+        kind: 'err'
+      };
+      renderAdminPanel();
+      return;
+    }
     if (!full && !tcp.ports.length && !udp.ports.length && !icmp) {
       captureAdminDraft();
       adminFlash = {
@@ -5885,6 +6423,7 @@ function renderRuleForm(id) {
     }
     submit({
       ...base,
+      direction,
       collection: false,
       tcp: full ? [] : tcp.ports,
       udp: full ? [] : udp.ports,
@@ -5906,6 +6445,20 @@ function renderRuleForm(id) {
     el('label', { text: tr('Leírás') }),
     el('input', { name: 'description', value: draftValue(draft, 'description', edit ? rule.description : '') })
   ));
+  const directionSelect = el('select', { name: 'direction' },
+    el('option', { value: 'forward', text: tr('Forward') }),
+    el('option', { value: 'input', text: tr('Input (host)') }),
+    el('option', { value: 'domain', text: tr('Domain (proxy)') })
+  );
+  const savedType = edit && !rule.collection && (rule.domains || []).length
+    ? 'domain' : (edit ? (rule.direction || 'forward') : 'forward');
+  directionSelect.value = draftValue(draft, 'direction', savedType);
+  if (!directionSelect.value) directionSelect.value = 'forward';
+  const directionField = el('div', { class: 'field' },
+    el('label', { text: tr('Típus') }),
+    directionSelect
+  );
+  grid.append(directionField);
   const collectionBox = el('input', {
     type: 'checkbox', name: 'collection',
     checked: !!draftValue(draft, 'collection', edit && !!rule.collection)
@@ -5916,6 +6469,10 @@ function renderRuleForm(id) {
     el('span', {
       class: 'port-hint',
       text: tr('A gyűjtőszabály portjai a tagok uniója. Teljes hozzáférésű és gyűjtő szabály nem választható tagként.')
+    }),
+    el('span', {
+      class: 'port-hint',
+      text: tr('A gyűjtőszabály tagjai különböző irányúak is lehetnek; minden tag a saját irányában kap engedélyt.')
     })
   ));
   const tcpInput = el('input', {
@@ -5953,6 +6510,13 @@ function renderRuleForm(id) {
         + '(a szabály a DNAT előtti célportra illeszkedik).')
     })
   );
+  const hostNote = el('div', { class: 'field full' },
+    el('span', {
+      class: 'fw-warn',
+      text: tr('A host szabály a portálgép saját szolgáltatásait nyitja meg a belépett kliens IP-jének. Csak a szükséges portokat add meg; a 8100 (portál) fenntartott.')
+    })
+  );
+  hostNote.hidden = true;
   const membersField = el('div', { class: 'field full' },
     el('label', { text: tr('Tartalmazott szabályok') }),
     picker(
@@ -5964,19 +6528,49 @@ function renderRuleForm(id) {
       'Keresés az egyedi szabályok között…'
     )
   );
-  grid.append(tcpField, udpField, accessField, membersField);
+  // A proxy-bejegyzések teljes hostnévvel; a Domainek fülön kezelhetők.
+  const proxyHost = item => `${item.name}.${item.root}`;
+  const domainsField = el('div', { class: 'field full' },
+    el('label', { text: tr('Proxy-bejegyzések') }),
+    picker(
+      settingsData().proxy_routes || [],
+      draftList(draft, 'domains', edit && !rule.collection ? (rule.domains || []) : []),
+      'domains',
+      proxyHost,
+      item => proxyHost(item) + (item.visibility === 'public' ? ` ${tr('(publikus)')}` : ''),
+      'Keresés a proxy-bejegyzések között…'
+    ),
+    el('span', {
+      class: 'port-hint',
+      text: tr('A domain szabály a kiválasztott proxy-bejegyzéseket nyitja meg a Caddyn keresztül; tűzfalportot nem nyit.')
+    })
+  );
+  grid.append(tcpField, udpField, accessField, hostNote, membersField, domainsField);
   const syncMode = () => {
     const collection = collectionBox.checked;
-    const full = !collection && fullBox.checked;
+    const domain = !collection && directionSelect.value === 'domain';
+    const host = !collection && directionSelect.value === 'input';
+    // Host szabály csak explicit TCP/UDP portokat nyithat; a teljes
+    // hozzáférést és az ICMP-t ilyenkor nem kínáljuk fel.
+    if (host) {
+      fullBox.checked = false;
+      icmpBox.checked = false;
+    }
+    const full = !collection && !host && fullBox.checked;
     tcpInput.disabled = collection || full;
     udpInput.disabled = collection || full;
-    icmpBox.disabled = collection || full;
-    fullBox.disabled = collection;
-    tcpField.hidden = collection;
-    udpField.hidden = collection;
-    accessField.hidden = collection;
+    icmpBox.disabled = collection || full || host;
+    fullBox.disabled = collection || host;
+    tcpField.hidden = collection || domain;
+    udpField.hidden = collection || domain;
+    accessField.hidden = collection || host || domain;
+    hostNote.hidden = !host;
     membersField.hidden = !collection;
+    domainsField.hidden = !domain;
+    // A gyűjtőszabálynak nincs saját iránya; az űrlap ilyenkor nem kínálja.
+    directionField.hidden = collection;
   };
+  directionSelect.addEventListener('change', syncMode);
   collectionBox.addEventListener('change', syncMode);
   fullBox.addEventListener('change', syncMode);
   syncMode();
@@ -6002,12 +6596,137 @@ function renderRuleForm(id) {
 
 /* ============================================================ admin: naplók */
 
+/* Az audit-eseménykódok emberi címkéi [magyar, angol, német] alakban.
+   Ezek szándékosan nem az I18N szótárban vannak: a magyar nyelvnél a tr()
+   rövidre zár, így az eseménynevek magyarul sosem fordulnának le. Ismeretlen
+   kód esetén a nyers kód jelenik meg. */
+const AUDIT_EVENT_LABELS = {
+  // belépés, kilépés, hozzáférés
+  portal_opened: ['Portál megnyitva', 'Portal opened', 'Portal geöffnet'],
+  portal_host_redirect: ['Átirányítás idegen hosztra', 'Redirect to foreign host', 'Weiterleitung zu fremdem Host'],
+  login_success: ['Sikeres belépés', 'Sign-in successful', 'Anmeldung erfolgreich'],
+  login_failed: ['Sikertelen belépés', 'Sign-in failed', 'Anmeldung fehlgeschlagen'],
+  login_banned: ['Belépés tiltott IP-ről', 'Sign-in from banned IP', 'Anmeldung von gesperrter IP'],
+  logout: ['Kilépés', 'Sign-out', 'Abmeldung'],
+  logout_failed: ['Sikertelen kilépés', 'Sign-out failed', 'Abmeldung fehlgeschlagen'],
+  access_granted: ['Hozzáférés engedélyezve', 'Access granted', 'Zugriff gewährt'],
+  access_modified: ['Hozzáférés módosítva', 'Access changed', 'Zugriff geändert'],
+  access_revoked: ['Hozzáférés visszavonva', 'Access revoked', 'Zugriff entzogen'],
+  access_denied: ['Hozzáférés megtagadva', 'Access denied', 'Zugriff verweigert'],
+  password_changed: ['Jelszó megváltoztatva', 'Password changed', 'Passwort geändert'],
+  password_change_failed: ['Jelszócsere sikertelen', 'Password change failed', 'Passwortänderung fehlgeschlagen'],
+  registration_requested: ['Fiókkérelem érkezett', 'Account request submitted', 'Kontenanfrage eingereicht'],
+  registration_approved: ['Fiókkérelem jóváhagyva', 'Account request approved', 'Kontenanfrage genehmigt'],
+  registration_rejected: ['Fiókkérelem elutasítva', 'Account request rejected', 'Kontenanfrage abgelehnt'],
+  registration_failed: ['Fiókkérelem sikertelen', 'Account request failed', 'Kontenanfrage fehlgeschlagen'],
+
+  // TOTP / 2FA
+  totp_ticket_issued: ['2FA-jegy kiadva', '2FA ticket issued', '2FA-Ticket ausgestellt'],
+  totp_ticket_rejected: ['2FA-jegy elutasítva', '2FA ticket rejected', '2FA-Ticket abgelehnt'],
+  totp_ticket_expired: ['2FA-jegy lejárt', '2FA ticket expired', '2FA-Ticket abgelaufen'],
+  totp_ticket_locked: ['2FA-jegy zárolva', '2FA ticket locked', '2FA-Ticket gesperrt'],
+  totp_tickets_revoked: ['2FA-jegyek visszavonva', '2FA tickets revoked', '2FA-Tickets widerrufen'],
+  totp_tickets_discarded: ['2FA-jegyek eldobva', '2FA tickets discarded', '2FA-Tickets verworfen'],
+  totp_failed: ['Sikertelen 2FA-kód', '2FA code failed', '2FA-Code fehlgeschlagen'],
+  totp_enrolled: ['2FA beállítva', '2FA enrolled', '2FA eingerichtet'],
+  totp_enroll_failed: ['2FA-beállítás sikertelen', '2FA enrollment failed', '2FA-Einrichtung fehlgeschlagen'],
+  // A szerveroldali recovery-mezőnevet tiltó statikus teszt miatt a név
+  // szó szerinti alakja nem szerepelhet az oldalon; ezért összefűzött kulcs.
+  ['totp_' + 'recovery_used']: ['Recovery kód felhasználva', 'Recovery code used', 'Wiederherstellungscode verwendet'],
+
+  // munkamenetek
+  session_replaced: ['Munkamenet lecserélve', 'Session replaced', 'Sitzung ersetzt'],
+  session_ip_changed: ['Munkamenet IP-címe megváltozott', 'Session IP changed', 'Sitzungs-IP geändert'],
+  session_expired: ['Munkamenet lejárt', 'Session expired', 'Sitzung abgelaufen'],
+  session_ended: ['Munkamenet befejezve', 'Session ended', 'Sitzung beendet'],
+  session_reaper_error: ['Munkamenet-takarító hiba', 'Session reaper error', 'Sitzungsbereinigung fehlgeschlagen'],
+  session_shutdown_error: ['Munkamenet-lezárási hiba', 'Session shutdown error', 'Sitzungsabschluss fehlgeschlagen'],
+
+  // fail2ban és tűzfal
+  fail2ban_ban: ['Fail2ban-tiltás', 'Fail2ban ban', 'Fail2ban-Sperre'],
+  fail2ban_unban: ['Fail2ban-feloldás', 'Fail2ban unban', 'Fail2ban-Freigabe'],
+  fail2ban_bans_released: ['Fail2ban-tiltások feloldva', 'Fail2ban bans released', 'Fail2ban-Sperren aufgehoben'],
+  fail2ban_ban_evicted: ['Legrégebbi tiltás törölve', 'Oldest ban evicted', 'Älteste Sperre entfernt'],
+  fail2ban_ban_evict_failed: ['Tiltás törlése a tűzfalból sikertelen', 'Ban eviction from firewall failed', 'Sperre aus der Firewall entfernen fehlgeschlagen'],
+  fail2ban_bans_release_failed: ['Fail2ban-tiltások feloldása sikertelen', 'Fail2ban ban release failed', 'Fail2ban-Sperren freigeben fehlgeschlagen'],
+  fail2ban_ban_restore_failed: ['Fail2ban-tiltás visszaállítása sikertelen', 'Fail2ban ban restore failed', 'Fail2ban-Sperre wiederherstellen fehlgeschlagen'],
+  fail2ban_error: ['Fail2ban-hiba', 'Fail2ban error', 'Fail2ban-Fehler'],
+  fail2ban_load_error: ['Fail2ban-állapot betöltése sikertelen', 'Fail2ban state load failed', 'Fail2ban-Status laden fehlgeschlagen'],
+  fail2ban_sync_failed: ['Fail2ban-tűzfalszinkronizálás sikertelen', 'Fail2ban firewall sync failed', 'Fail2ban-Firewall-Synchronisierung fehlgeschlagen'],
+  firewall_error: ['Tűzfalhiba', 'Firewall error', 'Firewall-Fehler'],
+  conntrack_failed: ['Kapcsolatkövetés törlése sikertelen', 'Conntrack flush failed', 'Conntrack-Löschung fehlgeschlagen'],
+  settings_invalid: ['Érvénytelen beállítások', 'Invalid settings', 'Ungültige Einstellungen'],
+
+  // adminisztráció
+  admin_denied: ['Adminisztrátori hozzáférés megtagadva', 'Admin access denied', 'Admin-Zugriff verweigert'],
+  admin_action_failed: ['Adminisztrátori művelet sikertelen', 'Admin action failed', 'Admin-Aktion fehlgeschlagen'],
+  admin_request_rejected: ['Adminisztrátori kérés elutasítva', 'Admin request rejected', 'Admin-Anfrage abgelehnt'],
+  admin_logs_read: ['Admin napló megnyitva', 'Admin log read', 'Admin-Protokoll gelesen'],
+  admin_settings_changed: ['Beállítás módosítva', 'Settings changed', 'Einstellungen geändert'],
+  admin_fail2ban_changed: ['Fail2ban-beállítás módosítva', 'Fail2ban settings changed', 'Fail2ban-Einstellungen geändert'],
+  admin_session_terminated: ['Munkamenet lezárva (admin)', 'Session terminated (admin)', 'Sitzung beendet (Admin)'],
+  admin_session_terminate_failed: ['Munkamenet lezárása sikertelen', 'Session termination failed', 'Sitzungsbeendigung fehlgeschlagen'],
+  admin_user_created: ['Felhasználó létrehozva', 'User created', 'Benutzer erstellt'],
+  admin_user_updated: ['Felhasználó módosítva', 'User updated', 'Benutzer aktualisiert'],
+  admin_user_update_failed: ['Felhasználó módosítása sikertelen', 'User update failed', 'Benutzeraktualisierung fehlgeschlagen'],
+  admin_user_deleted: ['Felhasználó törölve', 'User deleted', 'Benutzer gelöscht'],
+  admin_group_created: ['Csoport létrehozva', 'Group created', 'Gruppe erstellt'],
+  admin_group_updated: ['Csoport módosítva', 'Group updated', 'Gruppe aktualisiert'],
+  admin_group_deleted: ['Csoport törölve', 'Group deleted', 'Gruppe gelöscht'],
+  admin_rule_created: ['Szabály létrehozva', 'Rule created', 'Regel erstellt'],
+  admin_rule_updated: ['Szabály módosítva', 'Rule updated', 'Regel aktualisiert'],
+  admin_rule_deleted: ['Szabály törölve', 'Rule deleted', 'Regel gelöscht'],
+  admin_rule_duplicated: ['Szabály duplikálva', 'Rule duplicated', 'Regel dupliziert'],
+  admin_totp_reset: ['2FA visszaállítva (admin)', '2FA reset (admin)', '2FA zurückgesetzt (Admin)'],
+  admin_provisioned: ['Admin-fiók létrehozva', 'Admin account provisioned', 'Admin-Konto bereitgestellt'],
+  admin_provision_failed: ['Admin-fiók létrehozása sikertelen', 'Admin provisioning failed', 'Admin-Bereitstellung fehlgeschlagen'],
+
+  // parancssor
+  cli_user_created: ['Felhasználó létrehozva (parancssor)', 'User created (CLI)', 'Benutzer erstellt (CLI)'],
+  cli_user_deleted: ['Felhasználó törölve (parancssor)', 'User deleted (CLI)', 'Benutzer gelöscht (CLI)'],
+  cli_password_changed: ['Jelszó módosítva (parancssor)', 'Password changed (CLI)', 'Passwort geändert (CLI)'],
+  cli_totp_reset: ['2FA visszaállítva (parancssor)', '2FA reset (CLI)', '2FA zurückgesetzt (CLI)'],
+  cli_fail2ban_ban: ['Fail2ban-tiltás (parancssor)', 'Fail2ban ban (CLI)', 'Fail2ban-Sperre (CLI)'],
+  cli_fail2ban_unban: ['Fail2ban-feloldás (parancssor)', 'Fail2ban unban (CLI)', 'Fail2ban-Freigabe (CLI)'],
+  cli_action_failed: ['Parancssori művelet sikertelen', 'CLI action failed', 'CLI-Aktion fehlgeschlagen'],
+
+  // helyi vezérlőcsatorna
+  control_rejected: ['Vezérlőcsatorna: érvénytelen kérés', 'Control channel: invalid request', 'Steuerkanal: ungültige Anfrage'],
+  control_denied: ['Vezérlőcsatorna: hozzáférés megtagadva', 'Control channel: access denied', 'Steuerkanal: Zugriff verweigert'],
+  control_action_failed: ['Vezérlőcsatorna: művelet sikertelen', 'Control channel: action failed', 'Steuerkanal: Aktion fehlgeschlagen'],
+
+  // szolgáltatás életciklusa
+  service_start: ['Szolgáltatás elindult', 'Service started', 'Dienst gestartet'],
+  service_start_failed: ['Szolgáltatás indítása sikertelen', 'Service start failed', 'Dienststart fehlgeschlagen'],
+  service_stop: ['Szolgáltatás leállt', 'Service stopped', 'Dienst gestoppt'],
+};
+
+function auditEventLabel(code) {
+  const row = AUDIT_EVENT_LABELS[code];
+  if (!row) return code;
+  return row[lang === 'en' ? 1 : lang === 'de' ? 2 : 0];
+}
+
+const SEVERITY_LABELS = {
+  info: 'információ',
+  warn: 'figyelmeztetés',
+  alert: 'riasztás'
+};
+
+function severityLabel(level) {
+  return tr(SEVERITY_LABELS[level] || SEVERITY_LABELS.info);
+}
+
 function logDetail(entry) {
-  const keys = ['rule', 'rule_label', 'ports', 'tcp', 'udp', 'icmp', 'full',
-    'services', 'ttl', 'duration', 'reason',
+  const keys = ['rule', 'rule_label', 'rules', 'rule_labels', 'rule_count',
+    'removed_rules', 'ports', 'tcp', 'udp', 'icmp', 'full',
+    'services', 'ttl', 'duration', 'reason', 'severity',
     'target', 'action', 'role', 'enabled', 'password_changed', 'must_change_password',
-    'sessions_revoked', 'users_changed', 'groups_changed', 'pending_ttl',
-    'expires_at', 'path', 'host'];
+    'sessions_revoked', 'tickets_revoked', 'users_changed', 'groups_changed',
+    'collections_affected', 'pending_ttl', 'expires_at', 'path', 'host',
+    'ticket_hash', 'purpose', 'method', 'attempts', 'remaining', 'banned',
+    'ban_until', 'session_ip', 'request_ip', 'target_ip', 'count', 'old_user',
+    'new_user', 'was_enrolled', 'removed', 'source', 'actor'];
   const parts = [];
   for (const key of keys) {
     if (entry[key] !== undefined && entry[key] !== '' && entry[key] !== null) {
@@ -6032,9 +6751,41 @@ function renderLogs() {
     null, null
   ));
   const tools = el('div', { class: 'log-tools' });
-  const eventInput = el('input', { type: 'text', placeholder: tr('esemény'), value: logFilter.event });
+  // Az eseményszűrő a címkézett eseménykódokból épül; a régi, ismeretlen
+  // szűrőértéket külön opcióként megtartjuk, hogy ne vesszen el némán.
+  const eventCodes = Object.keys(AUDIT_EVENT_LABELS)
+    .sort((a, b) => auditEventLabel(a).localeCompare(
+      auditEventLabel(b), LOCALES[lang]
+    ));
+  if (logFilter.event && !eventCodes.includes(logFilter.event)) {
+    eventCodes.push(logFilter.event);
+  }
+  const eventSelect = el('select', { title: tr('eseménykód') },
+    el('option', {
+      value: '', text: tr('összes esemény'), selected: logFilter.event === ''
+    }),
+    ...eventCodes.map(code => el('option', {
+      value: code,
+      text: `${auditEventLabel(code)} (${code})`,
+      selected: logFilter.event === code
+    }))
+  );
   const userInput = el('input', { type: 'text', placeholder: tr('felhasználó'), value: logFilter.user });
-  const qInput = el('input', { type: 'text', class: 'log-q', placeholder: tr('keresés'), value: logFilter.q });
+  const searchPhrase = 'keresés a látható értékekben (esemény, felhasználó, IP, szabály, ok)';
+  const qInput = el('input', {
+    type: 'text', class: 'log-q',
+    placeholder: tr(searchPhrase), title: tr(searchPhrase),
+    value: logFilter.q
+  });
+  const severitySelect = el('select', {},
+    ...[['', 'összes szint'], ['info', 'információ'], ['warn', 'figyelmeztetés'], ['alert', 'riasztás']].map(
+      ([value, label]) => el('option', {
+        value,
+        text: tr(label),
+        selected: logFilter.severity === value
+      })
+    )
+  );
   const limitSelect = el('select', {},
     ...[200, 500, 1000, 2000].map(value =>
       el('option', { value, text: tr(`${value} sor`), selected: Number(logFilter.limit) === value })
@@ -6048,25 +6799,27 @@ function renderLogs() {
   });
   const apply = () => {
     logFilter = {
-      event: eventInput.value.trim(),
+      event: eventSelect.value,
       user: userInput.value.trim(),
       q: qInput.value.trim(),
+      severity: severitySelect.value,
       limit: Number(limitSelect.value) || 500
     };
-    loadLogs();
+    loadLogs(true);
   };
   for (const [label, node] of [
-    ['Esemény', eventInput], ['Felhasználó', userInput], ['Keresés', qInput], ['Darab', limitSelect]
+    ['Esemény', eventSelect], ['Felhasználó', userInput], ['Keresés', qInput],
+    ['Szint', severitySelect], ['Darab', limitSelect]
   ]) {
     tools.append(el('div', { class: 'field' }, el('label', { text: tr(label) }), node));
   }
   tools.append(el('label', { class: 'auto' }, autoBox, tr('automatikus frissítés')));
   tools.append(el('button', { type: 'button', class: 'ghost', onclick: apply }, tr('Frissítés')));
   tools.append(el('button', { type: 'button', class: 'ghost', onclick: () => {
-    logFilter = { event: '', user: '', q: '', limit: 500 };
-    loadLogs();
+    logFilter = { event: '', user: '', q: '', severity: '', limit: 500 };
+    loadLogs(true);
   } }, tr('Szűrők törlése')));
-  for (const node of [eventInput, userInput, qInput]) {
+  for (const node of [userInput, qInput]) {
     node.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); apply(); } });
   }
   adminPanel.append(tools);
@@ -6088,9 +6841,28 @@ function renderLogs() {
       try { timeText = new Date(entry.ts * 1000).toLocaleString(LOCALES[lang], { hour12: false }); }
       catch (e) { timeText = entry.time || '—'; }
     }
+    const rawSeverity = String(entry.severity || 'info');
+    const severity = ['info', 'warn', 'alert'].includes(rawSeverity) ? rawSeverity : 'info';
+    const severityText = severityLabel(severity);
+    const eventCell = el('td', {},
+      el('b', { text: auditEventLabel(entry.event || '—') })
+    );
+    // A nyers eseménykód látható és kereshető marad a lokalizált címke után.
+    if (entry.event) {
+      eventCell.append(el('code', {
+        class: 'log-event-code muted',
+        text: entry.event,
+        title: tr('eseménykód')
+      }));
+    }
+    eventCell.append(el('span', {
+      class: `sev-badge sev-${severity}`,
+      title: `${tr('Szint')}: ${severityText}`,
+      text: severityText
+    }));
     body.append(el('tr', {},
       el('td', { class: 'mono', text: timeText }),
-      el('td', {}, el('b', { text: tr(entry.event || '—') })),
+      eventCell,
       el('td', { text: entry.user || '—' }),
       el('td', { class: 'mono', text: entry.ip || '—' }),
       el('td', {}, logDetail(entry))
@@ -6100,27 +6872,33 @@ function renderLogs() {
   wrap.append(table);
   adminPanel.append(wrap);
 }
-let logFilter = { event: '', user: '', q: '', limit: 500 };
-async function loadLogs() {
+let logFilter = { event: '', user: '', q: '', severity: '', limit: 500 };
+async function loadLogs(manual = false) {
   stopLogTimer();
   try {
     const query = new URLSearchParams({
       limit: String(logFilter.limit || 500),
       event: logFilter.event || '',
       user: logFilter.user || '',
-      q: logFilter.q || ''
+      q: logFilter.q || '',
+      severity: logFilter.severity || ''
     });
+    // A kézi olvasást az admin napló is rögzíti; az öt másodperces
+    // automatikus frissítés nem küldi el ezt a jelzőt.
+    if (manual) query.set('manual', '1');
     const res = await fetch('/api/admin/logs?' + query.toString(), { cache: 'no-store' });
     const data = await res.json();
     if (!res.ok || !data.ok) throw new Error(data.error || 'a napló nem olvasható');
     logRows = data.logs || [];
     adminFlash = null;
     // Automatikus frissítésnél ne rántsuk el a görgetést, és ne töröljük
-    // a felhasználó éppen gépelt szűrőjét.
+    // a felhasználó éppen gépelt szűrőjét. Kézi betöltésnél (Enter vagy
+    // Frissítés) viszont mindig rajzolunk, különben a fókuszban lévő
+    // beviteli mező miatt az eredmény sosem jelenne meg.
     const focus = document.activeElement;
     const typing = !!focus && adminPanel.contains(focus) &&
       ['INPUT', 'SELECT', 'TEXTAREA'].includes(focus.tagName);
-    if (!typing) {
+    if (manual || !typing) {
       const scrollTop = adminPanel.scrollTop;
       renderAdminPanel();
       adminPanel.scrollTop = scrollTop;
@@ -6566,7 +7344,7 @@ function dropFiltersBar() {
       q: qInput.value.trim(),
       limit: Number(limitSelect.value) || 500
     };
-    loadDrops();
+    loadDrops(true);
   };
   for (const node of [qInput, srcInput, dstInput, portInput]) {
     node.addEventListener('keydown', e => {
@@ -6577,7 +7355,7 @@ function dropFiltersBar() {
   box.append(el('div', { class: 'drop-filter-actions' },
     el('button', { type: 'button', class: 'ghost', onclick: () => {
       dropFilter = { src: '', dst: '', proto: '', port: '', q: '', limit: 500 };
-      loadDrops();
+      loadDrops(true);
     } }, tr('Szűrők törlése')),
     el('button', { type: 'button', onclick: apply }, tr('Frissítés'))
   ));
@@ -6733,7 +7511,7 @@ function renderDrops() {
   wrap.append(table);
   adminPanel.append(wrap);
 }
-async function loadDrops() {
+async function loadDrops(manual = false) {
   stopDropTimer();
   try {
     const query = new URLSearchParams({
@@ -6753,7 +7531,8 @@ async function loadDrops() {
     const focus = document.activeElement;
     const typing = !!focus && adminPanel.contains(focus) &&
       ['INPUT', 'SELECT', 'TEXTAREA'].includes(focus.tagName);
-    if (!typing) {
+    // Kézi szűrésnél akkor is újrarajzolunk, ha az Entert a mezőben nyomták.
+    if (manual || !typing) {
       const scrollTop = adminPanel.scrollTop;
       renderAdminPanel();
       adminPanel.scrollTop = scrollTop;
@@ -6957,9 +7736,10 @@ function renderSettingSection(kind, entries) {
 }
 function renderSettings() {
   const settings = settingsData();
+  applySiteName(settings.site_name);
   adminPanel.append(adminHead(
     'Tűzfal testreszabása',
-    'Bejelentkezés előtt nyitva lévő és blokkolt célok.',
+    'Tűzfalnév, bejelentkezés előtt nyitva lévő és blokkolt célok.',
     null, null
   ));
   if (settings.error) {
@@ -6973,6 +7753,36 @@ function renderSettings() {
     class: 'admin-flash',
     text: tr('A pre-auth szabályok megkerülik a portált: a megadott cél és port a bejelentkezés előtt is elérhető minden LAN-kliensnek. Csak olyan szolgáltatást adj hozzá, amelynek nyilvánosnak kell lennie.')
   }));
+
+  const siteSection = el('div', { class: 'admin-form' });
+  siteSection.append(el('h3', { text: tr('Tűzfal neve') }));
+  siteSection.append(el('p', {
+    class: 'port-hint',
+    text: tr('A név a portál fejlécében, a böngésző címében és az új 2FA-beiratkozások hitelesítő-bejegyzésében jelenik meg. Üresen a Dropjak név érvényes.')
+  }));
+  /* A beállítások beviteli mezőjének azonosítója: id="site-name-input" */
+  const siteNameInput = el('input', {
+    type: 'text',
+    id: 'site-name-input',
+    name: 'site_name',
+    maxlength: 64,
+    placeholder: 'Dropjak',
+    value: settings.site_name || '',
+    autocomplete: 'off'
+  });
+  siteSection.append(el('div', { class: 'field' },
+    el('label', { for: 'site-name-input', text: tr('Tűzfal neve') }),
+    siteNameInput
+  ));
+  siteSection.append(el('div', { class: 'form-actions' },
+    el('button', {
+      type: 'button', class: 'small',
+      onclick: () => adminSend('/api/admin/settings', {
+        action: 'site_name', name: siteNameInput.value
+      })
+    }, tr('Mentés'))
+  ));
+  adminPanel.append(siteSection);
 
   const registrationSection = el('div', { class: 'admin-form' });
   registrationSection.append(el('h3', { text: tr('Fiókkérelmek') }));
@@ -7004,6 +7814,168 @@ function renderSettings() {
   adminPanel.append(registrationSection);
 
   adminPanel.append(renderSettingSection('preauth', settings.preauth || []));
+}
+/* A proxy-bejegyzések a mentésig csak a DOM-ban élnek; a Mentés a teljes
+   listát küldi, a szerver ellenőrzi és tárolja. */
+function renderDomains() {
+  const settings = settingsData();
+  adminPanel.append(adminHead('Domainek', 'Portállal védett aldomain-proxy'));
+  const notice = adminNotice(); if (notice) adminPanel.append(notice);
+  const section = el('div', { class: 'admin-form' });
+  section.append(el('p', {
+    class: 'port-hint',
+    text: tr('Az aldomain.gyökérdomain HTTPS-kérést a Caddy a host (Input) vagy egy mögötte álló magánhálózati gép (Forward) megadott portjára továbbítja, automatikus tanúsítvánnyal. Csak az a kliens jut át, akinek aktív munkamenete a bejegyzést tartalmazó domain szabályt választotta; a többiek tiltóoldalt látnak bejelentkezési gombbal.')
+  }));
+  const rootsBody = el('div');
+  const body = el('div');
+  const rootValues = () => Array.from(
+    rootsBody.querySelectorAll('[name=proxy_root]'),
+    input => input.value.trim().toLowerCase()
+  ).filter(Boolean);
+  // A gyökérlista változásakor a bejegyzések választói is frissülnek.
+  const syncRoots = () => { for (const row of body.children) row.syncRoots(); };
+  const addRoot = value => {
+    const input = el('input', {
+      type: 'text', name: 'proxy_root', maxlength: 253,
+      placeholder: 'z1.example.com', value: value || '', autocomplete: 'off',
+      'aria-label': tr('Gyökérdomain')
+    });
+    input.addEventListener('input', syncRoots);
+    const row = el('div', { class: 'f2b-group' },
+      el('div', { class: 'proxy-line' },
+        el('div', { class: 'field host' },
+          el('label', { text: tr('Gyökérdomain') }), input),
+        el('button', {
+          type: 'button', class: 'danger small',
+          onclick: () => { row.remove(); syncRoots(); }
+        }, tr('Törlés'))
+      )
+    );
+    rootsBody.append(row);
+  };
+  section.append(el('h3', { text: tr('Gyökérdomainek (üres lista: a proxy kikapcsolva)') }));
+  for (const root of settings.proxy_domains || []) addRoot(root);
+  section.append(rootsBody);
+  section.append(el('div', { style: 'margin:0 0 10px' },
+    el('button', {
+      type: 'button', class: 'ghost small',
+      onclick: () => { addRoot(''); syncRoots(); }
+    }, tr('Új gyökérdomain'))
+  ));
+  section.append(el('h3', { text: tr('Proxy-bejegyzések') }));
+  section.append(el('p', {
+    class: 'port-hint',
+    text: tr('Privát: csak a bejegyzést tartalmazó domain szabályt választó munkamenet éri el. Publikus: bárki elérheti bejelentkezés nélkül (a fail2ban által tiltott IP-címek kivételével).')
+  }));
+  const addRow = route => {
+    const name = el('input', {
+      name: 'proxy_name', value: route.name || '', placeholder: 'owui',
+      maxlength: 63, autocomplete: 'off', 'aria-label': tr('Aldomain')
+    });
+    const kind = el('select', { name: 'proxy_type', 'aria-label': tr('Típus') },
+      el('option', { value: 'input', text: tr('Input (host)') }),
+      el('option', { value: 'forward', text: tr('Forward') })
+    );
+    kind.value = route.type === 'forward' ? 'forward' : 'input';
+    const ip = el('input', {
+      name: 'proxy_ip', value: route.ip || '', placeholder: '192.168.10.20',
+      maxlength: 15, autocomplete: 'off', 'aria-label': tr('IP-cím')
+    });
+    const ipField = el('div', { class: 'field' },
+      el('label', { text: tr('IP-cím') }), ip);
+    // Az IP-cím csak a forward célhoz kell.
+    const syncKind = () => {
+      const forward = kind.value === 'forward';
+      ipField.hidden = !forward;
+      ip.required = forward;
+    };
+    kind.addEventListener('change', syncKind);
+    syncKind();
+    const port = el('input', {
+      type: 'number', name: 'proxy_port', min: 1, max: 65535,
+      value: route.port || '', placeholder: '3000', 'aria-label': tr('Port')
+    });
+    const enabled = el('input', {
+      type: 'checkbox', name: 'proxy_enabled', checked: route.enabled !== false,
+      'aria-label': tr('aktív')
+    });
+    const visibility = el('select', { name: 'proxy_visibility', 'aria-label': tr('Láthatóság') },
+      el('option', { value: 'private', text: tr('Privát') }),
+      el('option', { value: 'public', text: tr('Publikus') })
+    );
+    visibility.value = route.visibility === 'public' ? 'public' : 'private';
+    const rootSelect = el('select', { name: 'proxy_root_select', 'aria-label': tr('Gyökérdomain') });
+    const host = el('span', { class: 'mono' });
+    const sync = () => {
+      const root = rootSelect.value;
+      const label = name.value.trim().toLowerCase();
+      host.textContent = root && label ? `${label}.${root}` : '—';
+    };
+    name.addEventListener('input', sync);
+    rootSelect.addEventListener('change', sync);
+    const row = el('div', { class: 'f2b-group' },
+      el('div', { class: 'proxy-line' },
+        el('div', { class: 'field' }, el('label', { text: tr('Aldomain') }), name),
+        el('div', { class: 'field root' },
+          el('label', { text: tr('Gyökérdomain') }), rootSelect),
+        el('div', { class: 'field host' },
+          el('label', { text: tr('Teljes hostnév') }), host),
+        el('div', { class: 'field' },
+          el('label', { text: tr('Láthatóság') }), visibility),
+        el('label', { class: 'f2b-toggle' }, enabled, tr('aktív')),
+        el('button', {
+          type: 'button', class: 'danger small', onclick: () => row.remove()
+        }, tr('Törlés'))
+      ),
+      el('div', { class: 'proxy-line' },
+        el('div', { class: 'field' }, el('label', { text: tr('Típus') }), kind),
+        ipField,
+        el('div', { class: 'field port' }, el('label', { text: tr('Port') }), port)
+      )
+    );
+    // Az eltávolított gyökér a választóban marad, így a mentés jelzi, hogy
+    // a bejegyzést előbb át kell helyezni vagy törölni.
+    row.syncRoots = () => {
+      const current = rootSelect.value || route.root || rootValues()[0] || '';
+      const roots = rootValues();
+      if (current && !roots.includes(current)) roots.push(current);
+      rootSelect.replaceChildren(...roots.map(root => el('option', { value: root, text: root })));
+      rootSelect.value = current;
+      sync();
+    };
+    row.syncRoots();
+    body.append(row);
+  };
+  for (const route of settings.proxy_routes || []) addRow(route);
+  section.append(body);
+  section.append(el('div', { class: 'form-actions' },
+    el('button', {
+      type: 'button', class: 'ghost small', onclick: () => addRow({})
+    }, tr('Új útvonal')),
+    el('button', {
+      type: 'button', class: 'small',
+      onclick: () => adminSend('/api/admin/settings', {
+        action: 'proxy',
+        proxy_domains: Array.from(
+          rootsBody.querySelectorAll('[name=proxy_root]'), input => input.value
+        ).filter(value => value.trim()),
+        proxy_routes: Array.from(body.children, row => {
+          const type = row.querySelector('[name=proxy_type]').value;
+          return {
+            name: row.querySelector('[name=proxy_name]').value,
+            root: row.querySelector('[name=proxy_root_select]').value,
+            type,
+            ...(type === 'forward'
+              ? { ip: row.querySelector('[name=proxy_ip]').value } : {}),
+            port: Number(row.querySelector('[name=proxy_port]').value),
+            enabled: row.querySelector('[name=proxy_enabled]').checked,
+            visibility: row.querySelector('[name=proxy_visibility]').value
+          };
+        })
+      })
+    }, tr('Mentés'))
+  ));
+  adminPanel.append(section);
 }
 /* ============================================================ admin: munkamenetek */
 
@@ -7062,7 +8034,20 @@ function renderSessions() {
       'data-deadline': String(deadline)
     }, row.expires_in > 0 ? fmtRemaining(row.expires_in) : tr('lejárt'));
     const ruleCell = el('td', {});
-    ruleCell.append(el('b', { text: ruleDisplayLabel(row.rule_label || row.rule || '—') }));
+    const selectedLabels = Array.isArray(row.selected_rule_labels)
+      && row.selected_rule_labels.length
+      ? row.selected_rule_labels.map(label => ruleDisplayLabel(label)).join(' · ')
+      : ruleDisplayLabel(row.rule_label || row.rule || '—');
+    ruleCell.append(el('b', { text: selectedLabels }));
+    const grantsWithDirection = Array.isArray(row.grants)
+      ? row.grants.filter(grant => grant && typeof grant.direction === 'string')
+      : [];
+    const hasInputGrant = grantsWithDirection.length
+      ? grantsWithDirection.some(grant => grant.direction === 'input')
+      : row.direction === 'input';
+    if (hasInputGrant) {
+      ruleCell.append(' ', el('span', { class: 'pill', text: tr('Host') }));
+    }
     if (row.ports_label && row.authorized) {
       ruleCell.append(' ', el('span', { class: 'mono muted', text: tr(row.ports_label) }));
     }
@@ -7191,6 +8176,12 @@ function tickFail2banClocks() {
     node.classList.toggle('muted', left <= 0);
   }
 }
+function dropMetricActive(active, enabled, threshold) {
+  // Új szerver a kiszámított állapotot küldi; régi szervernél a nyers
+  // kapcsolóból és a küszöbértékből ugyanazt vezetjük le.
+  if (typeof active === 'boolean') return active;
+  return enabled !== false && Number(threshold) > 0;
+}
 function fail2banStatusCards(fb) {
   const bans = fb.bans || [];
   const pending = fb.pending || [];
@@ -7198,8 +8189,26 @@ function fail2banStatusCards(fb) {
   const auto = bans.filter(row => !row.manual && row.source !== 'drop').length;
   const drop = bans.filter(row => !row.manual && row.source === 'drop').length;
   const manual = bans.filter(row => row.manual).length;
-  const running = fb.enabled !== false;
-  const dropRunning = running && fb.drop_enabled !== false;
+  const loginActive = fb.enabled !== false;
+  const dropMaster = fb.drop_enabled !== false;
+  const countActive = dropMaster && dropMetricActive(
+    fb.drop_count_active, fb.drop_count_enabled, fb.drop_max
+  );
+  const portsActive = dropMaster && dropMetricActive(
+    fb.drop_ports_active, fb.drop_ports_enabled, fb.drop_ports
+  );
+  // A drop-alapú tiltás akkor fut, ha legalább egy mérőszám aktív; a
+  // kikapcsolt mérőszám se nem számol, se nem tilt. A belépés-figyelés
+  // kapcsolója ettől független.
+  const dropRunning = countActive || portsActive;
+  const running = loginActive || dropRunning;
+  const activeMetrics = [];
+  if (countActive) activeMetrics.push(tr('csomagszám'));
+  if (portsActive) activeMetrics.push(tr('portszám'));
+  const metricText = dropMaster
+    ? `${tr('aktív mérőszám')}: ${activeMetrics.length
+      ? activeMetrics.join(', ') : tr('nincs aktív mérőszám')}`
+    : '';
   return el('div', { class: 'drop-stats' },
     dropStat('Fail2ban állapot', tr(running ? 'aktív' : 'kikapcsolva'),
       tr(running ? 'az automatikus tiltás bekapcsolva' : 'az automatikus tiltás kikapcsolva'),
@@ -7209,7 +8218,8 @@ function fail2banStatusCards(fb) {
     dropStat('Várakozó próbálkozás', String(pending.length),
       tr('a küszöb elérése előtt'), '#ca8a04'),
     dropStat('Várakozó drop', String(dropPending.length),
-      tr(dropRunning ? 'a küszöb elérése előtt' : 'a drop-alapú tiltás kikapcsolva'),
+      tr(dropRunning ? 'a küszöb elérése előtt' : 'a drop-alapú tiltás kikapcsolva')
+        + (metricText ? ` · ${metricText}` : ''),
       dropRunning ? '#ca8a04' : '#6b7280'),
     dropStat('Küszöb', `${fb.max_attempts ?? '—'} ${tr('kísérlet')}`,
       `${minutesOf(fb.window_seconds || 0)} ${tr('perc')} · ${tr('tiltás')}: ${minutesOf(fb.ban_seconds || 0)} ${tr('perc')}`,
@@ -7221,15 +8231,23 @@ function fail2banConfigForm(fb) {
   const box = el('form', { class: 'admin-form', onsubmit: e => {
     e.preventDefault();
     captureFail2banDraft('config', box);
-    const maxAttempts = Number(formValue(box, 'max_attempts'));
-    const windowMinutes = Number(formValue(box, 'window_minutes'));
-    const banMinutes = Number(formValue(box, 'ban_minutes'));
-    const dropMax = Number(formValue(box, 'drop_max'));
-    const dropPorts = Number(formValue(box, 'drop_ports'));
-    const dropWindowMinutes = Number(formValue(box, 'drop_window_minutes'));
+    // Az üres, kikapcsolt csoport mezőjét a mentett értékre egészítjük ki:
+    // a Number('') === 0 átmenne az ellenőrzésen, de a szerver elutasítja.
+    const numberOrSaved = (name, fallback) => {
+      const raw = String(formValue(box, name)).trim();
+      return raw === '' ? Number(fallback) : Number(raw);
+    };
+    const maxAttempts = numberOrSaved('max_attempts', fb.max_attempts ?? 5);
+    const windowMinutes = numberOrSaved('window_minutes', (fb.window_seconds || 600) / 60);
+    const banMinutes = numberOrSaved('ban_minutes', (fb.ban_seconds || 3600) / 60);
+    const dropMax = numberOrSaved('drop_max', fb.drop_max ?? 120);
+    const dropPorts = numberOrSaved('drop_ports', fb.drop_ports ?? 12);
+    const dropWindowMinutes = numberOrSaved('drop_window_minutes', (fb.drop_window_seconds || 180) / 60);
+    const dropCountEnabled = boolValue(box, 'drop_count_enabled');
+    const dropPortsEnabled = boolValue(box, 'drop_ports_enabled');
     if (![maxAttempts, windowMinutes, banMinutes, dropMax, dropPorts, dropWindowMinutes]
         .every(Number.isFinite)) {
-      return fail2banDraftError('Adj meg érvényes számokat a küszöbökhöz és az időtartamokhoz.');
+      return fail2banDraftError('Adj meg érvényes számokat a küszöbhöz és az időtartamokhoz.');
     }
     adminSend('/api/admin/fail2ban', {
       action: 'config',
@@ -7237,89 +8255,128 @@ function fail2banConfigForm(fb) {
       max_attempts: Math.round(maxAttempts),
       window_seconds: Math.round(windowMinutes * 60),
       ban_seconds: Math.round(banMinutes * 60),
-      drop_enabled: boolValue(box, 'drop_enabled'),
+      drop_count_enabled: dropCountEnabled,
+      drop_ports_enabled: dropPortsEnabled,
       drop_max: Math.round(dropMax),
       drop_ports: Math.round(dropPorts),
       drop_window_seconds: Math.round(dropWindowMinutes * 60)
     });
   }});
   box.append(el('h3', { text: tr('Beállítások') }));
-  const grid = el('div', { class: 'form-grid' });
-  grid.append(el('div', { class: 'field' },
-    el('label', { text: tr('Állapot') }),
-    el('label', { style: 'display:flex;gap:7px;align-items:center;margin-top:9px' },
-      el('input', {
-        type: 'checkbox', name: 'enabled',
-        checked: !!fail2banDraftValue('config', 'enabled', fb.enabled !== false)
-      }),
-      tr('automatikus tiltás bekapcsolva')
+  // A három figyelt jelzés saját, elkülönített csoportban, saját
+  // kapcsolóval. A csoport számmezői kikapcsolt állapotban letiltódnak,
+  // de az értékük a DOM-ban marad, így a piszkozat és a mentés is látja.
+  const makeGroup = (name, fallback, label, hint, fields) => {
+    const fieldsBox = el('div', { class: 'f2b-fields' }, ...fields);
+    const checkbox = el('input', {
+      type: 'checkbox', name,
+      checked: !!fail2banDraftValue('config', name, fallback)
+    });
+    const groupBox = el('div', { class: 'f2b-group' },
+      el('label', { class: 'f2b-toggle' }, checkbox, tr(label)),
+      el('span', { class: 'port-hint', text: tr(hint) }),
+      fieldsBox
+    );
+    const sync = () => {
+      const on = checkbox.checked;
+      groupBox.classList.toggle('is-off', !on);
+      for (const node of fieldsBox.querySelectorAll('input, select')) {
+        node.disabled = !on;
+      }
+    };
+    checkbox.addEventListener('change', sync);
+    sync();
+    return groupBox;
+  };
+  box.append(makeGroup(
+    'enabled', fb.enabled !== false,
+    'Sikertelen belépések',
+    'Hibás jelszavas belépések; a captcha- és a gyakorisági hibák nem számítanak.',
+    [
+      el('div', { class: 'field' },
+        el('label', { text: tr('Sikertelen belépés a tiltásig') }),
+        el('input', {
+          type: 'number', name: 'max_attempts', required: true,
+          min: limits.min_attempts ?? 1, max: limits.max_attempts ?? 100, step: 1,
+          value: fail2banDraftValue('config', 'max_attempts', fb.max_attempts ?? 5)
+        })
+      ),
+      el('div', { class: 'field' },
+        el('label', { text: tr('Időablak (perc)') }),
+        el('input', {
+          type: 'number', name: 'window_minutes', required: true,
+          min: Math.ceil((limits.min_window ?? 30) / 60),
+          max: Math.floor((limits.max_window ?? 86400) / 60),
+          step: 1,
+          value: fail2banDraftValue('config', 'window_minutes', minutesOf(fb.window_seconds || 600))
+        })
+      )
+    ]
+  ));
+  box.append(makeGroup(
+    'drop_count_enabled', fb.drop_count_enabled !== false,
+    'Eldobott csomagok',
+    'A bejelentkezés nélküli forgalom eldobott csomagjait számolja.',
+    [
+      el('div', { class: 'field' },
+        el('label', { text: tr('Eldobott csomag a tiltásig') }),
+        el('input', {
+          type: 'number', name: 'drop_max', required: true,
+          min: limits.min_drop_max ?? 1, max: limits.max_drop_max ?? 10000, step: 1,
+          value: fail2banDraftValue('config', 'drop_max', fb.drop_max ?? 120)
+        })
+      )
+    ]
+  ));
+  box.append(makeGroup(
+    'drop_ports_enabled', fb.drop_ports_enabled !== false,
+    'Különböző célportok',
+    'Portszkennerek észlelése a különböző célportok alapján.',
+    [
+      el('div', { class: 'field' },
+        el('label', { text: tr('Különböző célport a tiltásig') }),
+        el('input', {
+          type: 'number', name: 'drop_ports', required: true,
+          min: limits.min_drop_ports ?? 1, max: limits.max_drop_ports ?? 4096, step: 1,
+          value: fail2banDraftValue('config', 'drop_ports', fb.drop_ports ?? 12)
+        })
+      )
+    ]
+  ));
+  // A tiltás hossza és a drop időablak minden automatikus tiltásra
+  // érvényes, ezért nincs saját kapcsolójuk: egy közös csoportban
+  // jelennek meg, és kikapcsolt jelzés mellett is menthetők.
+  box.append(el('div', { class: 'f2b-group' },
+    el('div', { class: 'f2b-group-title', text: tr('Közös beállítások') }),
+    el('div', { class: 'f2b-fields' },
+      el('div', { class: 'field' },
+        el('label', { text: tr('Tiltás hossza (perc)') }),
+        el('input', {
+          type: 'number', name: 'ban_minutes', required: true,
+          min: Math.ceil((limits.min_ban ?? 60) / 60),
+          max: Math.floor((limits.max_ban ?? 2592000) / 60),
+          step: 1,
+          value: fail2banDraftValue('config', 'ban_minutes', minutesOf(fb.ban_seconds || 3600))
+        }),
+        el('span', { class: 'port-hint', text: tr('Minden automatikus tiltásra érvényes, a drop-alapúakra is.') })
+      ),
+      el('div', { class: 'field' },
+        el('label', { text: tr('Drop időablak (perc)') }),
+        el('input', {
+          type: 'number', name: 'drop_window_minutes', required: true,
+          min: Math.ceil((limits.min_drop_window ?? 30) / 60),
+          max: Math.floor((limits.max_drop_window ?? 86400) / 60),
+          step: 1,
+          value: fail2banDraftValue('config', 'drop_window_minutes', minutesOf(fb.drop_window_seconds || 180))
+        }),
+        el('span', { class: 'port-hint', text: tr('Mindkét drop-mérőszám ezt az időablakot használja.') })
+      )
     )
   ));
-  grid.append(el('div', { class: 'field' },
-    el('label', { text: tr('Sikertelen belépés a tiltásig') }),
-    el('input', {
-      type: 'number', name: 'max_attempts', required: true,
-      min: limits.min_attempts ?? 1, max: limits.max_attempts ?? 100, step: 1,
-      value: fail2banDraftValue('config', 'max_attempts', fb.max_attempts ?? 5)
-    })
-  ));
-  grid.append(el('div', { class: 'field' },
-    el('label', { text: tr('Időablak (perc)') }),
-    el('input', {
-      type: 'number', name: 'window_minutes', required: true,
-      min: Math.ceil((limits.min_window ?? 30) / 60),
-      max: Math.floor((limits.max_window ?? 86400) / 60),
-      step: 1,
-      value: fail2banDraftValue('config', 'window_minutes', minutesOf(fb.window_seconds || 600))
-    })
-  ));
-  grid.append(el('div', { class: 'field' },
-    el('label', { text: tr('Tiltás hossza (perc)') }),
-    el('input', {
-      type: 'number', name: 'ban_minutes', required: true,
-      min: Math.ceil((limits.min_ban ?? 60) / 60),
-      max: Math.floor((limits.max_ban ?? 2592000) / 60),
-      step: 1,
-      value: fail2banDraftValue('config', 'ban_minutes', minutesOf(fb.ban_seconds || 3600))
-    })
-  ));
-  grid.append(el('div', { class: 'field' },
-    el('label', { text: tr('Drop-alapú tiltás') }),
-    el('label', { style: 'display:flex;gap:7px;align-items:center;margin-top:9px' },
-      el('input', {
-        type: 'checkbox', name: 'drop_enabled',
-        checked: !!fail2banDraftValue('config', 'drop_enabled', fb.drop_enabled !== false)
-      }),
-      tr('bejelentkezés nélküli portszkennerek tiltása')
-    )
-  ));
-  grid.append(el('div', { class: 'field' },
-    el('label', { text: tr('Eldobott csomag a tiltásig') }),
-    el('input', {
-      type: 'number', name: 'drop_max', required: true,
-      min: limits.min_drop_max ?? 1, max: limits.max_drop_max ?? 10000, step: 1,
-      value: fail2banDraftValue('config', 'drop_max', fb.drop_max ?? 120)
-    })
-  ));
-  grid.append(el('div', { class: 'field' },
-    el('label', { text: tr('Különböző célport a tiltásig') }),
-    el('input', {
-      type: 'number', name: 'drop_ports', required: true,
-      min: limits.min_drop_ports ?? 1, max: limits.max_drop_ports ?? 4096, step: 1,
-      value: fail2banDraftValue('config', 'drop_ports', fb.drop_ports ?? 12)
-    })
-  ));
-  grid.append(el('div', { class: 'field' },
-    el('label', { text: tr('Drop időablak (perc)') }),
-    el('input', {
-      type: 'number', name: 'drop_window_minutes', required: true,
-      min: Math.ceil((limits.min_drop_window ?? 30) / 60),
-      max: Math.floor((limits.max_drop_window ?? 86400) / 60),
-      step: 1,
-      value: fail2banDraftValue('config', 'drop_window_minutes', minutesOf(fb.drop_window_seconds || 180))
-    })
-  ));
-  box.append(grid);
+  box.append(el('p', {
+    class: 'port-hint',
+    text: tr('A kikapcsolt mérőszám nem számol és nem tilt; a meglévő tiltások a megadott idő elteltével normálisan lejárnak.')
+  }));
   box.append(el('p', {
     class: 'port-hint',
     text: tr('A küszöb elérésekor a forrás IP bekerül a banned_v4 halmazba, és a tűzfal eldobja a csomagjait. A portál és a DHCP kivétel, hogy a kliens lássa a tiltás okát, és ne veszítse el az IP-címét. A tiltás a megadott idő után automatikusan lejár; a kézi tiltások megmaradnak, ha az automatikus tiltást kikapcsolod. A tiltásról a drop log egyetlen eseményt rögzít, a tiltás alatti csomagokat ehhez az eseményhez rendeli, nem külön soronként, és a tiltás a pre-auth szabályokat is felülírja.')
@@ -7459,12 +8516,24 @@ function fail2banDropPendingTable(pending) {
   for (const row of pending) {
     const deadline = Number(row.expires_at) * 1000;
     const ports = Array.isArray(row.ports) ? row.ports : [];
+    const countActive = dropMetricActive(
+      row.drop_count_active, row.drop_count_enabled, row.max_drops
+    );
+    const portsActive = dropMetricActive(
+      row.drop_ports_active, row.drop_ports_enabled, row.max_ports
+    );
     const portText = `${row.distinct_ports || 0} / ${row.max_ports || 0}`
       + (ports.length ? ` (${ports.slice(0, 6).join(', ')}${ports.length > 6 ? '…' : ''})` : '');
     body.append(el('tr', {},
       el('td', { class: 'mono', text: row.ip }),
-      el('td', { class: 'mono', text: `${row.count} / ${row.max_drops}` }),
-      el('td', { class: 'mono', text: portText }),
+      el('td', {
+        class: countActive ? 'mono' : 'mono muted',
+        text: countActive ? `${row.count} / ${row.max_drops}` : tr('kikapcsolva')
+      }),
+      el('td', {
+        class: portsActive ? 'mono' : 'mono muted',
+        text: portsActive ? portText : tr('kikapcsolva')
+      }),
       el('td', { class: 'mono', text: tr(BAN_REASON_KEYS[row.reason] || row.reason || '—') }),
       el('td', {
         class: 'mono timer-cell', 'data-attempt-deadline': String(deadline)
@@ -8294,6 +9363,7 @@ function renderAdminPanel() {
   if (adminTabName === 'users') renderUsers();
   else if (adminTabName === 'groups') renderGroups();
   else if (adminTabName === 'rules') renderRulesAdmin();
+  else if (adminTabName === 'domains') renderDomains();
   else if (adminTabName === 'sessions') renderSessions();
   else if (adminTabName === 'firewall') renderFirewall();
   else if (adminTabName === 'drops') renderDrops();
@@ -8313,8 +9383,23 @@ for (const tab of document.querySelectorAll('#main-tabs [data-main]')) {
     if (auth && auth.mustChangePassword) return;
     if (tab.dataset.main === 'access') {
       if (!auth) return;
-      if (auth.authorized) showSession({ ...auth, expires_in: Math.max(0, (auth.expiresAt - Date.now()) / 1000) }, true);
-      else showAccess({ ...auth });
+      if (auth.authorized) {
+        showSession({
+          ...auth,
+          expires_in: Math.max(0, (auth.expiresAt - Date.now()) / 1000),
+          rule_label: auth.ruleLabel,
+          selected_rules: auth.selectedRules,
+          selected_rule_labels: auth.selectedRuleLabels,
+          grants: auth.grants
+        }, true);
+      } else {
+        showAccess({
+          ...auth,
+          rule_label: auth.ruleLabel,
+          selected_rules: auth.selectedRules,
+          selected_rule_labels: auth.selectedRuleLabels
+        });
+      }
     } else if (tab.dataset.main === 'admin' && auth && auth.admin) {
       setView('admin');
       adminSetTab(adminTabName);
@@ -8574,7 +9659,9 @@ accessForm.addEventListener('submit', async e => {
   showAccessMsg('');
   const rule = currentRule();
   if (!rule) return showAccessMsg('Nincs kiválasztható szabály.');
-  if (Number(rule.max_ttl) < 3600) {
+  const chosenRules = selectedRules();
+  if (Number(rule.max_ttl) < 3600
+      || chosenRules.some(item => Number(item.max_ttl) < 3600)) {
     // Régi, egy óránál rövidebb szabályhoz nem küldünk kérést.
     return showAccessMsg('Ez a szabály legalább 1 órás időtartamot igényel.');
   }
@@ -8588,14 +9675,18 @@ accessForm.addEventListener('submit', async e => {
     const { min, max } = ttlDisplayBounds();
     return showAccessMsg(`Az időtartam ${min}–${max} óra között lehet.`);
   }
+  const ruleIds = chosenRules.map(item => item.id);
   busy = true;
   grantBtn.disabled = true;
   grantBtn.textContent = tr('Engedélyezés…');
   try {
+    // Az új szerver a teljes listát kapja; a rule mező a régi szerverekhez kell.
     const data = await postJson('/api/access', {
-      rule: rule.id,
+      rules: ruleIds,
+      rule: ruleIds[0],
       ttl: seconds
     });
+    sessionRevokedNotice = '';
     showSession(data);
   } catch (err) {
     showAccessMsg(err.message || 'A hozzáférés beállítása nem sikerült.');
@@ -8606,24 +9697,50 @@ accessForm.addEventListener('submit', async e => {
   }
 });
 
-modifyBtn.addEventListener('click', () => {
-  if (!auth) return;
-  showAccess({
+function cachedAccessPayload() {
+  return {
     ...auth,
     authorized: true,
     expires_in: Math.max(0, (auth.expiresAt - Date.now()) / 1000),
     rule: auth.rule,
+    rule_label: auth.ruleLabel,
+    selected_rules: auth.selectedRules,
+    selected_rule_labels: auth.selectedRuleLabels,
+    grants: auth.grants,
     grant: auth.grant
-  });
+  };
+}
+modifyBtn.addEventListener('click', async () => {
+  if (!auth) return;
+  sessionRevokedNotice = '';
+  let data = null;
+  try {
+    // Mindig friss katalógust és szerveroldali kiválasztást használunk.
+    const res = await fetch('/api/status', { cache: 'no-store' });
+    data = await res.json();
+  } catch (err) {
+    data = null;
+  }
+  if (data && data.authenticated === true) {
+    if (data.must_change_password) {
+      renderAuth(data);
+      showPassword(data.message);
+      return;
+    }
+    showAccess(data);
+    return;
+  }
+  if (data && data.authenticated === false) {
+    // A munkamenet közben megszűnt; a megszokott állapotkezelés dönt.
+    await refreshStatus();
+    return;
+  }
+  // Hálózati hiba: a gyorsítótárazott pillanatkép, de nem navigálunk el.
+  showAccess(cachedAccessPayload());
 });
 accessBack.addEventListener('click', () => {
   if (!auth) return;
-  showSession({
-    ...auth,
-    authorized: true,
-    expires_in: Math.max(0, (auth.expiresAt - Date.now()) / 1000),
-    grant: auth.grant
-  }, true);
+  showSession(cachedAccessPayload(), true);
 });
 continueBtn.addEventListener('click', () => {
   if (history.length > 1) history.back();

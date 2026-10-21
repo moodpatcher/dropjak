@@ -87,9 +87,12 @@ the ticket is never placed in a URL.
 
 - A ticket is created only after the password and captcha succeed for a user
   who needs a second factor.
-- Tickets are held in memory only. They are not written to `users.json`,
-  `fail2ban.json`, the audit log or any other state file, and they are lost on
-  server restart.
+- Tickets are held in memory only. A raw ticket is never written to
+  `users.json`, `fail2ban.json`, the audit log or any other state file, and
+  tickets are lost on server restart. The audit log records the ticket
+  lifecycle (issued, rejected, expired, locked) with a non-reversible
+  12-character SHA-256 hash (`ticket_hash`) and metadata such as purpose,
+  attempt count and TTL; the ticket value itself is never recorded.
 - A ticket has a 300-second TTL. An expired ticket cannot be reused; the user
   restarts at the password/captcha step.
 - A ticket is bound to the client IP address observed by the portal (the
@@ -109,17 +112,22 @@ the ticket is never placed in a URL.
 Wrong TOTP codes and wrong recovery codes count toward the same per-IP login
 failure counter as wrong passwords. They use the existing fail2ban threshold,
 window and ban duration. A banned IP is handled by the existing ban screen and
-cannot sign in until the ban expires or is lifted. No ticket, secret or
-recovery code is written to the ban state, drop log or audit log.
+cannot sign in until the ban expires or is lifted. The ban state, drop log
+and audit log never contain a ticket value, a TOTP secret or a recovery code.
+For a pending ticket the audit log stores only its non-reversible 12-character
+hash and lifecycle metadata (issued/rejected/expired/locked).
 
 ## Configuration
 
-`HV_TOTP_ISSUER` sets the issuer and label used in the `otpauth://` URI
-(default `Dropjak`). It is passed through `docker-compose.yml` as
+The **Admin → Settings → Firewall name** value takes precedence: it sets the
+issuer and label used in the `otpauth://` URI for new enrollments. When no
+site name is configured, `HV_TOTP_ISSUER` (default `Dropjak`) is the
+fallback. The variable is passed through `docker-compose.yml` as
 `HV_TOTP_ISSUER: ${HV_TOTP_ISSUER:-Dropjak}` and documented in
-`.env.example`. It changes only the label shown by the authenticator app; it
-is not a security control. The 300-second ticket TTL and the 5-attempt limit
-are fixed in this MVP.
+`.env.example`. Existing authenticator entries keep their old issuer;
+re-enroll to pick up a new name. The issuer changes only the label shown by
+the authenticator app; it is not a security control. The 300-second ticket
+TTL and the 5-attempt limit are fixed in this MVP.
 
 ## Admin reset and CLI
 
@@ -159,9 +167,12 @@ and the session must be revoked immediately.
 - **Seeds at rest.** TOTP seeds are stored unencrypted in `users.json` (mode
   `0600`) inside the state volume. Protect the volume and any backups; a
   backup contains the seeds and the recovery-code hashes.
-- **No secrets in logs or audit.** The portal does not log or audit TOTP
-  secrets, pending tickets or recovery codes. Audit entries describe the
-  action (for example `admin_totp_reset`), not the values.
+- **No secrets in logs or audit.** The portal never writes TOTP secrets,
+  ticket values or recovery codes to any log. Audit entries describe the
+  action (for example `admin_totp_reset`) and, for a pending ticket, contain a
+  non-reversible 12-character hash plus lifecycle metadata
+  (issued/rejected/expired/locked), never the ticket itself. See
+  [audit-log.md](audit-log.md).
 - **Recovery codes.** Only lowercase SHA-256 hashes are stored. The plaintext
   is shown once at enrollment and cannot be recovered later. Losing both the
   authenticator and the recovery codes requires an admin or CLI reset.

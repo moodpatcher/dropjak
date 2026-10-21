@@ -22,6 +22,24 @@ APP_USER=hatarvedelem
 log() { printf '[hatarvedelem] %s\n' "$*"; }
 die() { printf '[hatarvedelem] HIBA: %s\n' "$*" >&2; exit 1; }
 
+# A gateway.py _env_bool() függvényével azonos logika: 1/true/yes/on igaz,
+# 0/false/no/off hamis, üres vagy ismeretlen értéknél az alapértelmezés.
+# Kis/nagybetűtől és környező szóköztől független.
+env_bool() {
+    # $1: környezeti változó neve, $2: alapértelmezés (1 vagy 0)
+    _value=$(printenv "$1" 2>/dev/null || true)
+    _value=$(
+        printf '%s' "$_value" \
+            | tr '[:upper:]' '[:lower:]' \
+            | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+    )
+    case "$_value" in
+        1 | true | yes | on) printf '%s' 1 ;;
+        0 | false | no | off) printf '%s' 0 ;;
+        *) printf '%s' "$2" ;;
+    esac
+}
+
 # ---------------------------------------------------------------- ellenőrzés
 
 valid_ifname() {
@@ -79,7 +97,8 @@ ensure_state_dir() {
 }
 
 run_as_app() {
-    if [ "$(id -u)" -ne 0 ] || [ "${HV_RUN_AS_ROOT:-0}" = "1" ]; then
+    # A logikai kapcsolókat az env_bool() értelmezi (1/true/yes/on).
+    if [ "$(id -u)" -ne 0 ] || [ "$(env_bool HV_RUN_AS_ROOT 0)" = "1" ]; then
         exec "$@"
     fi
     command -v setpriv >/dev/null 2>&1 \
@@ -133,6 +152,14 @@ render_ruleset() {
     # A portál és a drop-log figyelő ugyanezt az értéket olvassa.
     export HV_FWD_MARK HV_DROP_LOG_GROUP
 
+    # A proxy 80/443 elfogadó szabályai csak HV_PROXY=1 mellett élnek;
+    # különben megjegyzésként maradnak a kitöltött fájlban.
+    if [ "$(env_bool HV_PROXY 0)" = "1" ]; then
+        HV_PROXY_PREFIX=""
+    else
+        HV_PROXY_PREFIX="# "
+    fi
+
     # Ha a /run nem írható (pl. read-only gyökér, tmpfs nélkül), a /tmp a
     # tartalék. A compose konfiguráció mindkettőt tmpfs-ként biztosítja.
     RENDERED=${HV_NFT_FILE:-/run/hatarvedelem.nft}
@@ -148,6 +175,7 @@ render_ruleset() {
         -e "s|__PORT__|$PORT|g" \
         -e "s|__FWD_MARK__|$HV_FWD_MARK|g" \
         -e "s|__DROP_LOG_GROUP__|$HV_DROP_LOG_GROUP|g" \
+        -e "s|__PROXY__|$HV_PROXY_PREFIX|g" \
         "$TEMPLATE" >"$RENDERED" || die "a szabálysablon nem tölthető ki"
 
     chmod 0600 "$RENDERED" || true
@@ -222,7 +250,7 @@ EOF
 }
 
 start_firewall_watchdog() {
-    [ "${HV_FIREWALL_WATCHDOG:-1}" = "1" ] || return 0
+    [ "$(env_bool HV_FIREWALL_WATCHDOG 1)" = "1" ] || return 0
     (
         while :; do
             sleep 5
@@ -249,6 +277,34 @@ start_firewall_watchdog() {
     log "tűzfal-figyelő elindítva (5 másodperc)"
 }
 
+warn_lockout() {
+    # A tűzfal betöltése azonnal életbe lép: a host SSH csak ugyanarról a
+    # forrás IP-ről marad elérhető, ahol aktív, engedélyezett portál-
+    # munkamenet van, és a munkamenet egy, a felhasználóhoz rendelt, a
+    # 22-es TCP-portot kifejezetten engedélyező host (input) szabályt
+    # használ. Nincs beépített admin szabály.
+    log "FIGYELEM: a tűzfal betöltése után a host SSH (22/TCP) csak ugyanarról a forrás IP-ről érhető el, ahol aktív, engedélyezett portál-munkamenet és egy a felhasználóhoz rendelt, a 22-es TCP-portot kifejezetten engedélyező host szabály van."
+    log "FIGYELEM: ha SSH-n keresztül indítod a Dropjakot, a tűzfal betöltése megszakíthatja a jelenlegi SSH-kapcsolatot."
+    log "FIGYELEM: tartsd nyitva a szolgáltatói (out-of-band) konzolt, hogy kizárás esetén helyreállíthasd a hozzáférést."
+    # Ugyanazokat az igaz értékeket fogadjuk el, mint a gateway.py
+    # _env_bool() függvénye (1, true, yes, on; kis/nagybetűtől függetlenül).
+    admin_enabled=$(
+        printf '%s' "${HV_ADMIN_ENABLED:-}" \
+            | tr '[:upper:]' '[:lower:]' \
+            | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+    )
+    case "$admin_enabled" in
+        1 | true | yes | on) admin_enabled=1 ;;
+        *) admin_enabled=0 ;;
+    esac
+    if [ "$admin_enabled" -ne 1 ] \
+            || { [ -z "${HV_ADMIN_PASSWORD:-}" ] \
+                 && [ -z "${HV_ADMIN_PASSWORD_FILE:-}" ]; }; then
+        log "FIGYELEM: nincs beállított induláskori admin hitelesítő adat (HV_ADMIN_ENABLED=1/true/yes/on és HV_ADMIN_PASSWORD vagy HV_ADMIN_PASSWORD_FILE szükséges)."
+        log "FIGYELEM: ha emellett még admin fiók sem létezik, a portálra nem lehet belépni, és a host SSH zárva marad. Előbb állítsd be ezeket a .env fájlban, vagy hozz létre admin fiókot a CLI-vel."
+    fi
+}
+
 load_firewall() {
     NFT_BIN=${HV_NFT_BIN:-}
     if [ -z "$NFT_BIN" ]; then
@@ -272,13 +328,44 @@ load_firewall() {
     # Újraindításnál a kernelben maradt engedélyek ne maradjanak érvényben
     # a boot-védelem eltávolítása után. A portál is kiüríti a halmazt, de
     # így a rövid átadási időben sem marad nyitva senki.
-    if [ "${HV_FLUSH_ON_START:-1}" = "1" ]; then
-        for hv_set in allowed_v4 allowed_tcp allowed_udp allowed_icmp \
-                host_ssh_v4 client_mac banned_v4; do
+    #
+    # A HV_FLUSH_ON_START ugyanazt az értelmezést használja, mint a
+    # gateway.py (1/true/yes/on). Ha kikapcsolták, az alapértelmezett
+    # biztonságos viselkedés az árva engedélyek egyeztetése (ürítés); csak
+    # a kifejezett, nem biztonságos HV_ALLOW_STALE_GRANTS_ON_START=1 opt-in
+    # engedi, hogy a korábbi engedélyek a kernel TTL-ig életben maradjanak.
+    flush_on_start=$(env_bool HV_FLUSH_ON_START 1)
+    allow_stale_grants=$(env_bool HV_ALLOW_STALE_GRANTS_ON_START 0)
+    log "HV_FLUSH_ON_START hatásos értéke: $flush_on_start"
+    if [ "$flush_on_start" != "1" ] && [ "$allow_stale_grants" = "1" ]; then
+        log "FIGYELEM: HV_FLUSH_ON_START ki van kapcsolva, és HV_ALLOW_STALE_GRANTS_ON_START=1 van beállítva. A korábbi folyamat kernelben maradt engedélyei a TTL-ig (akár 30 napig) érvényben maradhatnak, munkamenet nélkül!"
+    else
+        if [ "$flush_on_start" != "1" ]; then
+            log "FIGYELEM: HV_FLUSH_ON_START ki van kapcsolva, de az árva engedélyek nem maradhatnak a kernelben; a dinamikus halmazok a memóriabeli (üres) munkamenet-táblához igazítva."
+        fi
+        for hv_set in allowed_v4 allowed_tcp allowed_udp \
+                allowed_input_tcp allowed_input_udp allowed_icmp \
+                client_mac banned_v4; do
             "$NFT_BIN" flush set inet hatarvedelem "$hv_set" \
                 || die "a(z) $hv_set halmaz ürítése nem sikerült"
         done
-        log "a dinamikus halmazok kiürítve (HV_FLUSH_ON_START=1)"
+        log "a dinamikus halmazok kiürítve (HV_FLUSH_ON_START=$flush_on_start)"
+    fi
+
+    # A korábbi verziók host_ssh_v4 halmaza már nem része a sablonnak. A
+    # régi elfogadó szabályt a sablon input-láncának újratöltése (flush
+    # chain input) eltávolítja, ezért a megmaradt halmaz ártalmatlan; a
+    # higiénia kedvéért mégis töröljük. A hiánya nem hiba.
+    if "$NFT_BIN" list set inet hatarvedelem host_ssh_v4 >/dev/null 2>&1; then
+        if "$NFT_BIN" delete set inet hatarvedelem host_ssh_v4; then
+            log "a régi host_ssh_v4 halmaz törölve"
+        else
+            # Az új szabálykészlet már betöltődött, a grantok kiürültek:
+            # itt nem állhat le az indulás, különben a tűzfal élne, de a
+            # portál nem indulna el, és az SSH kívülről zárva maradna.
+            # A halmaz az új input-lánc mellett már nem ad hozzáférést.
+            log "FIGYELEM: a régi host_ssh_v4 halmaz törlése nem sikerült; a halmaz a betöltött input-lánc mellett már nem ad hozzáférést, a portál indul tovább."
+        fi
     fi
 
     # A hoston korán betöltött tartalék tábla már nem kell: a végleges
@@ -311,9 +398,11 @@ if [ "$#" -gt 0 ]; then
     run_as_app "$@"
 fi
 
-if [ "${HV_SKIP_FIREWALL:-0}" = "1" ]; then
-    log "FIGYELEM: a tűzfalszabályok betöltése kihagyva (HV_SKIP_FIREWALL=1)"
+skip_firewall=$(env_bool HV_SKIP_FIREWALL 0)
+if [ "$skip_firewall" = "1" ]; then
+    log "FIGYELEM: a tűzfalszabályok betöltése kihagyva (HV_SKIP_FIREWALL=$skip_firewall)"
 else
+    warn_lockout
     load_firewall
     start_firewall_watchdog
 fi

@@ -13,9 +13,10 @@
 #   - forward: minden tiltva; a belépett kliens csak a választott szabály
 #     TCP/UDP célportjaira mehet (allowed_tcp/allowed_udp), ICMP-re az
 #     allowed_icmp révén; teljes hozzáférésnél az allowed_v4 halmaz tagjaként
-#   - input:   a portál mindenki számára elérhető; a host SSH csak aktív,
-#     engedélyezett portál-munkamenettel, és csak a beépített admin-full
-#     szabály választásakor; a DNS/DHCP a LAN felől
+#   - input:   a portál mindenki számára elérhető; a host SSH (TCP 22)
+#     kizárólag egy admin által létrehozott, a felhasználóhoz rendelt host
+#     (input) szabályon keresztül nyílik meg (allowed_input_tcp, explicit
+#     22), aktív, engedélyezett portál-munkamenettel; a DNS/DHCP a LAN felől
 #   - a nem engedélyezett kliensek HTTP-je a belépőoldalra kerül
 #
 # Az iifname/oifname használatának oka, hogy a szabályok betöltése ne
@@ -49,19 +50,51 @@ add set inet hatarvedelem allowed_udp {
     size 16384
 }
 
-# ICMP (ping) engedély a kliens IP-hez.
-add set inet hatarvedelem allowed_icmp {
-    type ipv4_addr
+# Host (input) szabályok: a portálgép saját szolgáltatásai, amelyeket a
+# belépett kliens IP-jének nyitunk meg a munkamenet TTL-jéig. A forward
+# halmazoktól külön tároljuk őket, és csak a bejövő (input) lánc fogadja el
+# belőlük a forgalmat. Csak a 8100-as port (portál) fenntartott: a portál
+# validációja nem engedi ide felvenni, és a lenti elfogadó szabály is
+# kizárja. A 22-es portot adminisztrátor által létrehozott host szabály
+# deklarálhatja; a host elfogadás a 8100-at ettől függetlenül kizárja.
+add set inet hatarvedelem allowed_input_tcp {
+    type ipv4_addr . inet_service
     flags timeout
-    size 4096
+    size 16384
 }
 
-# Azon kliensek IPv4 címei, akiknek a portálon engedélyezett munkamenetük
-# van, és a beépített admin-full szabályt választották. A host SSH-t ez a
-# halmaz nyitja meg; egyedi teljes hozzáférésű és gyűjtőszabály nem kerül
-# ide. Az elem a munkamenet TTL-jével jár le; kilépéskor a portál azonnal
-# törli.
-add set inet hatarvedelem host_ssh_v4 {
+add set inet hatarvedelem allowed_input_udp {
+    type ipv4_addr . inet_service
+    flags timeout
+    size 16384
+}
+
+# A host (input) szabályokban valaha deklarált célportok. A normál
+# szinkron ezekbe csak hozzáad: így egy szabály törlése nem nyithatja meg
+# újra a már meglévő kapcsolatot. Az input lánc ezekkel vágja el az
+# established forgalmat, ha az engedély eltűnik, akkor is, ha a conntrack
+# ürítése nem sikerül, vagy a kernel (nf_conntrack_tcp_loose) újraéleszti
+# a folyamot. Az elavult portok ártalmatlanok: csak szigorúbbá teszik az
+# established forgalom ellenőrzését.
+#
+# A méret 65536: az érvényes host portok száma legfeljebb 65535, ezért a
+# halmaz soha nem telhet meg, és nem veszhet el csendben egy őrelem. A
+# takarítás (prune) csak olyan portot töröl, amelyre egyetlen perzisztált
+# szabály sem hivatkozik, és amelyhez nem tartozik élő conntrack-bejegyzés.
+# Induláskor a halmaz szándékosan nem ürül: a törölt portok régi folyamai
+# így továbbra is el vannak vágva.
+add set inet hatarvedelem host_service_tcp {
+    type inet_service
+    size 65536
+}
+
+add set inet hatarvedelem host_service_udp {
+    type inet_service
+    size 65536
+}
+
+# ICMP (ping) engedély a kliens IP-hez.
+add set inet hatarvedelem allowed_icmp {
     type ipv4_addr
     flags timeout
     size 4096
@@ -184,6 +217,17 @@ table inet hatarvedelem {
         iifname "__LAN_IF__" ip saddr @allowed_icmp ip saddr . ether saddr != @client_mac limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
         iifname "__LAN_IF__" ip saddr @allowed_icmp ip saddr . ether saddr != @client_mac drop
 
+        # Admin által beállított blokk. Feltétel nélkül hívjuk: a block lánc
+        # a conntrack eredeti tuple-jára illeszkedik, ezért a válaszirányt
+        # is lefedi, és a LAN, a WAN/DNAT, valamint a Docker-híd felől
+        # érkező csomagok is ide jutnak. Egy LAN-ra korlátozott ugrás esetén
+        # a szerver oldala egy meglévő folyamban a tiltás után is küldhetne,
+        # a WAN/DNAT-forgalom pedig sosem érné el a blokkláncot. A blokk
+        # minden engedély (session, pre-auth, konténer) előtt fut, ezért az
+        # aktív munkamenet sem kerülheti meg; conntrack-ürítésre nincs
+        # szükség, mert minden csomag ide jut.
+        jump block
+
         # Portra korlátozott hozzáférés. A ct original proto-dst a DNAT
         # ELŐTTI célportot jelenti, ezért a Docker által publikált
         # konténerportoknál a host portjával kell a szabályban szerepelni.
@@ -235,10 +279,8 @@ table inet hatarvedelem {
         # lejárta után is életben maradt (a conntrack törlése nélkül).
         ip daddr 172.30.0.2 ct state established,related ct original ip saddr 172.30.0.2 meta mark set __FWD_MARK__ accept
 
-        # Admin által beállított blokk (a pre-auth előtt) és a
-        # bejelentkezés előtti engedélyek. A pre-auth lánc a válaszirányt
+        # Bejelentkezés előtti engedélyek. A pre-auth lánc a válaszirányt
         # is lefedi, ezért feltétel nélkül hívjuk.
-        iifname "__LAN_IF__" jump block
         jump preauth
 
         # A fennmaradó, nem engedélyezett forgalom naplózott eldobása.
@@ -284,12 +326,20 @@ table inet hatarvedelem {
         ip saddr @banned_v4 limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=fail2ban " group __DROP_LOG_GROUP__
         ip saddr @banned_v4 drop
 
+        # Admin által beállított blokk a host felé irányuló forgalomra is.
+        # Feltétel nélküli, ezért a host-engedélyek és a meglévő host-
+        # kapcsolatok sem kerülhetik meg. A loopback, a breakglass, a DHCP
+        # és a portál korábbi elfogadása érintetlen marad, így egy blokk-
+        # bejegyzés nem zárhatja ki a portált vagy a vészhelyzeti
+        # hozzáférést. A block lánc a conntrack eredeti tuple-jára
+        # illeszkedik, ezért minden csomagra fut; conntrack-ürítésre nincs
+        # szükség.
+        jump block
+
         # A host felé irányuló engedélyezett forgalom (SSH, DNS, ICMP) is
         # csak a munkamenet alatt rögzített MAC-csel jöhet a LAN-on. A portál
         # forgalmát ez nem érinti, mert a portál IP-je nincs a dinamikus
         # halmazokban.
-        iifname "__LAN_IF__" ip saddr @host_ssh_v4 ip saddr . ether saddr != @client_mac limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
-        iifname "__LAN_IF__" ip saddr @host_ssh_v4 ip saddr . ether saddr != @client_mac drop
         iifname "__LAN_IF__" ip saddr @allowed_v4 ip saddr . ether saddr != @client_mac limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
         iifname "__LAN_IF__" ip saddr @allowed_v4 ip saddr . ether saddr != @client_mac drop
         iifname "__LAN_IF__" ip saddr @allowed_icmp ip saddr . ether saddr != @client_mac limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
@@ -298,20 +348,84 @@ table inet hatarvedelem {
         iifname "__LAN_IF__" udp dport 53 ip saddr . ether saddr != @client_mac drop
         iifname "__LAN_IF__" tcp dport 53 ip saddr . ether saddr != @client_mac limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
         iifname "__LAN_IF__" tcp dport 53 ip saddr . ether saddr != @client_mac drop
+        # A host (input) szabályok portjai is csak a rögzített MAC-csel
+        # érhetők el a LAN felől, ugyanúgy, mint a forward engedélyek.
+        iifname "__LAN_IF__" ip saddr . tcp dport @allowed_input_tcp ip saddr . ether saddr != @client_mac limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
+        iifname "__LAN_IF__" ip saddr . tcp dport @allowed_input_tcp ip saddr . ether saddr != @client_mac drop
+        iifname "__LAN_IF__" ip saddr . udp dport @allowed_input_udp ip saddr . ether saddr != @client_mac limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
+        iifname "__LAN_IF__" ip saddr . udp dport @allowed_input_udp ip saddr . ether saddr != @client_mac drop
+
+        # Caddy aldomain-proxy (csak HV_PROXY=1 mellett; különben a belépési
+        # pont kikommentálja). Szándékosan a fail2ban-drop, a blokk és a
+        # MAC-ellenőrzés UTÁN: a tiltott forrás a proxyt sem érheti el. A
+        # jogosultságot a Caddy kérésenként a portáltól kérdezi, ezért a
+        # port nyilvános; a LAN felől (hairpin) csak rögzített IP+MAC
+        # párral. A host-őrök elé kerül, hogy egy régi host szabály 80/443
+        # őrbejegyzése ne vágja el a proxykapcsolatokat. A nem engedélyezett
+        # LAN-kliens TCP 80-ját a prerouting továbbra is a portálra
+        # irányítja; az engedélyezettét nem, ezért a LAN-on a 80 is kell.
+        __PROXY__iifname "__WAN_IF__" tcp dport { 80, 443 } accept
+        __PROXY__iifname "__LAN_IF__" tcp dport { 80, 443 } ip saddr . ether saddr @client_mac accept
 
         # A meglévő TCP DNS-kapcsolat se maradjon életben a jogosultság
         # lejárta után. (Az UDP DNS minden kérése külön csomag, ezért azt a
-        # lenti engedélyező szabályok zárják le.)
+        # lenti engedélyező szabályok zárják le.) Az engedélyezett host
+        # (input) TCP 53 szabályt kivesszük: a host kapcsolat valódi
+        # jogosultságát a lenti host_service_* őr ellenőrzi, így a DNS-őr
+        # nem szakítja meg a szabály élettartama alatt.
         iifname "__LAN_IF__" tcp dport 53 ct state established,related \
-            ip saddr != @allowed_v4 ip saddr . tcp dport != @allowed_tcp limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=dns-revoked " group __DROP_LOG_GROUP__
+            ip saddr != @allowed_v4 ip saddr . tcp dport != @allowed_tcp \
+            ip saddr . tcp dport != @allowed_input_tcp limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=dns-revoked " group __DROP_LOG_GROUP__
         iifname "__LAN_IF__" tcp dport 53 ct state established,related \
-            ip saddr != @allowed_v4 ip saddr . tcp dport != @allowed_tcp drop
+            ip saddr != @allowed_v4 ip saddr . tcp dport != @allowed_tcp \
+            ip saddr . tcp dport != @allowed_input_tcp drop
 
-        # Meglévő SSH-kapcsolat se maradjon életben, ha az IP kikerült a
-        # host_ssh_v4 halmazból (lejárat, kilépés, összeomlás után is).
-        # Ez a szabály a lenti általános established-accept elé kerül.
-        tcp dport 22 ct state established,related ip saddr != @host_ssh_v4 limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=ssh-revoked " group __DROP_LOG_GROUP__
-        tcp dport 22 ct state established,related ip saddr != @host_ssh_v4 drop
+        # Meglévő SSH-kapcsolat csak addig marad életben, amíg az
+        # (IP, 22) pár szerepel az allowed_input_tcp halmazban, azaz a
+        # felhasználóhoz rendelt, TCP 22-t engedélyező host szabály aktív.
+        # Ha az engedély eltűnik (lejárat, kilépés, összeomlás után is), a
+        # kapcsolat lezárul. Ez a szabály a lenti általános
+        # established-accept elé kerül, különben a visszavont SSH túlélne.
+        tcp dport 22 ct state established,related ip saddr . tcp dport != @allowed_input_tcp limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=ssh-revoked " group __DROP_LOG_GROUP__
+        tcp dport 22 ct state established,related ip saddr . tcp dport != @allowed_input_tcp drop
+
+        # A host DNS-szolgáltatása (53) a későbbi, LAN-os elfogadó
+        # szabályokkal azonos feltételekkel már established állapotban is
+        # elérhető a forward engedéllyel rendelkező kliensnek. Ez a szűk
+        # kivétel csak a DNS/53-ra vonatkozik, ezért nem nyit utat a host
+        # szolgáltatások felé. A DHCP (a cím megtartásához belépés előtt is
+        # kell) ugyanígy a host-őr előtt megy át, hogy egy elavult
+        # host_service_udp 67 bejegyzés ne szakítsa meg a megújítást.
+        iifname "__LAN_IF__" tcp dport 53 ct state established,related ip saddr @allowed_v4 accept
+        iifname "__LAN_IF__" tcp dport 53 ct state established,related ip saddr . tcp dport @allowed_tcp accept
+        iifname "__LAN_IF__" udp dport 53 ct state established,related ip saddr @allowed_v4 accept
+        iifname "__LAN_IF__" udp dport 53 ct state established,related ip saddr . udp dport @allowed_udp accept
+        iifname "__LAN_IF__" udp sport 68 udp dport 67 accept
+
+        # Meglévő host (input) kapcsolat se maradjon életben, ha az IP
+        # kikerült az allowed_input_tcp/allowed_input_udp halmazból. Az
+        # input lánc a host szolgáltatásokhoz csak a kliens→host irányú
+        # csomagokat látja; a portál-átirányított csomagok célportja ekkor
+        # már 8100, ezért a csomag szintű tcp/udp dport a helyes kulcs.
+        # A DNS/53 és a DHCP saját elfogadó szabályai a fentiek; minden
+        # más host-portra a host_service_* halmazok (csak hozzáadás)
+        # zárják le a folyamot, ha az engedély eltűnik. Így a
+        # conntrack-ürítés elmaradása és a nf_conntrack_tcp_loose által
+        # újraélesztett folyam esetén is zár.
+        # A TCP 22-es portot szándékosan kivesszük az általános őrből: a
+        # TCP 22 kizárólag az SSH-specifikus őr hatásköre (fent), így nem
+        # két helyen dől el ugyanaz a kapcsolat. Az UDP őr nem kap ilyen
+        # kivételt: az SSH-őr TCP-only, a UDP 22 közönséges host-port.
+        tcp dport @host_service_tcp tcp dport != 22 ct state established,related \
+            ip saddr . tcp dport != @allowed_input_tcp \
+            limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=host-revoked " group __DROP_LOG_GROUP__
+        tcp dport @host_service_tcp tcp dport != 22 ct state established,related \
+            ip saddr . tcp dport != @allowed_input_tcp drop
+        udp dport @host_service_udp ct state established,related \
+            ip saddr . udp dport != @allowed_input_udp \
+            limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=host-revoked " group __DROP_LOG_GROUP__
+        udp dport @host_service_udp ct state established,related \
+            ip saddr . udp dport != @allowed_input_udp drop
 
         ct state established,related accept
 
@@ -327,18 +441,20 @@ table inet hatarvedelem {
         iifname "__LAN_IF__" tcp dport __PORT__ accept
         ip saddr __PORTAL_NET__ tcp dport __PORT__ accept
 
-        # SSH a hostra kizárólag aktív, engedélyezett portál-munkamenettel,
-        # és csak ha a munkamenet a beépített admin-full szabályt választotta.
-        # A portál a szabály és a TTL kiválasztása után teszi be az IP-t;
-        # a jelszó önmagában nem. Kilépéskor azonnal, lejáratkor a
-        # kernel-timeouttal törlődik.
-        # Vészhelyzeti közvetlen hozzáféréshez ideiglenesen ide vehető fel
-        # egy cím, de ez megkerüli a portált:
-        #   ip saddr 203.0.113.10 tcp dport 22 accept
-        ip saddr @host_ssh_v4 tcp dport 22 accept
-
-        # DHCP a LAN felől (a cím megtartásához belépés előtt is kell).
-        iifname "__LAN_IF__" udp sport 68 udp dport 67 accept
+        # Host (input) szabály: a portálgép saját szolgáltatása a belépett
+        # kliens IP-jének. Nincs iifname feltétel, ezért LAN-ról és WAN-ról
+        # egyaránt működik; a fail2ban- és MAC-drop szabályok előbb futnak.
+        # Ez az egyetlen SSH-elfogadási útvonal is: a TCP 22 csak akkor
+        # nyílik meg, ha egy admin által létrehozott, a felhasználóhoz
+        # rendelt host szabály kifejezetten tartalmazza, és a munkamenet
+        # aktív. A portál a szabály és a TTL kiválasztása után teszi be az
+        # IP-t; a jelszó önmagában nem. Kilépéskor azonnal, lejáratkor a
+        # kernel-timeouttal törlődik. A 8100-as (portál) port továbbra is
+        # fenntartott, és ezt a szabály is kizárja (védelem a kézzel
+        # felvett elemek ellen). Vészhelyzeti közvetlen hozzáféréshez külön
+        # breakglass szabály használható.
+        ip saddr . tcp dport @allowed_input_tcp tcp dport != 8100 accept
+        ip saddr . udp dport @allowed_input_udp udp dport != 8100 accept
 
         # A host DNS-szolgáltatása (dnsmasq) csak a kiválasztott szabály
         # alapján érhető el. Enélkül a portál előtt is nyitva lenne egy
@@ -373,6 +489,10 @@ table inet hatarvedelem {
         # l4proto előtag itt is a concat típusához kell.
         iifname "__LAN_IF__" meta l4proto tcp ip saddr . ct original proto-dst @allowed_tcp return
         iifname "__LAN_IF__" meta l4proto udp ip saddr . ct original proto-dst @allowed_udp return
+        # A host szabály által megnyitott TCP 80 (a portálgép saját
+        # szolgáltatása) szintén megkerüli a portál-átirányítást; UDP-nél
+        # nincs redirect.
+        iifname "__LAN_IF__" meta l4proto tcp ip saddr . ct original proto-dst @allowed_input_tcp return
         iifname "__LAN_IF__" meta l4proto tcp ct original proto-dst 80 redirect to :__PORT__
     }
 

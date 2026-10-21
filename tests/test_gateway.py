@@ -168,7 +168,10 @@ class FakeTools:
                 "table": "hatarvedelem",
                 "type": (
                     ["ipv4_addr", "inet_service"]
-                    if set_name in ("allowed_tcp", "allowed_udp")
+                    if set_name in (
+                        "allowed_tcp", "allowed_udp",
+                        "allowed_input_tcp", "allowed_input_udp",
+                    )
                     else "ipv4_addr"
                 ),
                 "flags": ["timeout"],
@@ -421,7 +424,6 @@ class FirewallTests(unittest.TestCase):
             [
                 "nft delete element inet hatarvedelem allowed_v4 { 192.168.50.23 }",
                 "nft delete element inet hatarvedelem allowed_icmp { 192.168.50.23 }",
-                "nft delete element inet hatarvedelem host_ssh_v4 { 192.168.50.23 }",
             ],
         )
 
@@ -434,43 +436,272 @@ class FirewallTests(unittest.TestCase):
         self.assertEqual(len(lines), len(set(lines)))
         self.assertEqual(
             len(lines),
-            3 + len(CATALOG.all_tcp_ports()) + len(CATALOG.all_udp_ports()),
+            2 + len(CATALOG.all_tcp_ports()) + len(CATALOG.all_udp_ports()),
         )
         for line in (
             "nft delete element inet hatarvedelem allowed_v4 { 192.168.50.23 }",
             "nft delete element inet hatarvedelem allowed_icmp { 192.168.50.23 }",
-            "nft delete element inet hatarvedelem host_ssh_v4 { 192.168.50.23 }",
             "nft delete element inet hatarvedelem allowed_tcp { 192.168.50.23 . 80 }",
             "nft delete element inet hatarvedelem allowed_udp { 192.168.50.23 . 53 }",
             "nft delete element inet hatarvedelem allowed_udp { 192.168.50.23 . 51820 }",
         ):
             self.assertIn(line, lines)
 
-    def test_grant_host_ssh_uses_dedicated_set(self) -> None:
-        self.fw.grant_host_ssh("192.168.50.23", 120)
-        self.assertEqual(
-            self.tools.script(),
-            [
-                "add element inet hatarvedelem host_ssh_v4 "
-                "{ 192.168.50.23 timeout 120s }"
-            ],
+    def test_grant_host_rule_uses_input_sets(self) -> None:
+        host = gateway.Ports(
+            tcp=(25566,), udp=(25566,), direction="input"
+        )
+        self.fw.grant("192.168.50.23", host, 120)
+        script = self.tools.script()
+        self.assertIn(
+            "add element inet hatarvedelem allowed_input_tcp "
+            "{ 192.168.50.23 . 25566 timeout 120s }",
+            script,
         )
         self.assertIn(
-            "nft delete element inet hatarvedelem host_ssh_v4 { 192.168.50.23 }",
+            "add element inet hatarvedelem allowed_input_udp "
+            "{ 192.168.50.23 . 25566 timeout 120s }",
+            script,
+        )
+        # A host port sosem kerülhet a forward halmazokba.
+        self.assertFalse(
+            any("allowed_tcp" in line or "allowed_udp" in line
+                for line in script),
+            script,
+        )
+        self.assertFalse(any("allowed_v4" in line for line in script), script)
+        self.assertIn(
+            "nft delete element inet hatarvedelem allowed_input_tcp "
+            "{ 192.168.50.23 . 25566 }",
+            self.tools.deletes(),
+        )
+        self.assertIn(
+            "nft delete element inet hatarvedelem allowed_input_udp "
+            "{ 192.168.50.23 . 25566 }",
             self.tools.deletes(),
         )
 
-    def test_revoke_host_ssh_is_idempotent(self) -> None:
-        self.fw.revoke_host_ssh("192.168.50.23")
+    def test_grant_all_mixed_directions(self) -> None:
+        forward = gateway.Ports(tcp=(80,), udp=(443,))
+        host = gateway.Ports(
+            tcp=(25566,), udp=(25566,), direction="input"
+        )
+        self.fw.grant_all("192.168.50.23", (forward, host), 120)
+        script = self.tools.script()
+        for line in (
+            "add element inet hatarvedelem allowed_tcp "
+            "{ 192.168.50.23 . 80 timeout 120s }",
+            "add element inet hatarvedelem allowed_udp "
+            "{ 192.168.50.23 . 443 timeout 120s }",
+            "add element inet hatarvedelem allowed_input_tcp "
+            "{ 192.168.50.23 . 25566 timeout 120s }",
+            "add element inet hatarvedelem allowed_input_udp "
+            "{ 192.168.50.23 . 25566 timeout 120s }",
+        ):
+            self.assertIn(line, script)
+        self.assertFalse(any("allowed_v4" in line for line in script), script)
+
+        # Ismétlődő engedélyrész nem ad ismétlődő nft-elemet.
+        self.tools.clear()
+        self.fw.grant_all("192.168.50.23", (forward, forward), 60)
+        lines = self.tools.script()
+        self.assertEqual(len(lines), len(set(lines)), lines)
+        self.assertEqual(len(lines), 2, lines)
+
+        # Üres engedélyhalmaz: nincs MAC-kötés és nincs nft-művelet.
+        self.tools.clear()
+        self.fw.grant_all("192.168.50.23", (), 60)
+        self.assertEqual(self.tools.lines(), [])
+
+        # A visszavonás mindkét irány halmazaiból töröl.
+        self.fw.revoke_all("192.168.50.23", (forward, host))
+        deletes = self.tools.deletes()
+        for line in (
+            "nft delete element inet hatarvedelem allowed_tcp "
+            "{ 192.168.50.23 . 80 }",
+            "nft delete element inet hatarvedelem allowed_udp "
+            "{ 192.168.50.23 . 443 }",
+            "nft delete element inet hatarvedelem allowed_input_tcp "
+            "{ 192.168.50.23 . 25566 }",
+            "nft delete element inet hatarvedelem allowed_input_udp "
+            "{ 192.168.50.23 . 25566 }",
+        ):
+            self.assertIn(line, deletes)
+
+    def test_revoke_and_revoke_all_remove_host_elements(self) -> None:
+        host = gateway.Ports(tcp=(25566,), direction="input")
+        self.fw.revoke("192.168.50.23", host)
         self.assertEqual(
             self.tools.deletes(),
             [
-                "nft delete element inet hatarvedelem host_ssh_v4 { 192.168.50.23 }",
+                "nft delete element inet hatarvedelem allowed_input_tcp "
+                "{ 192.168.50.23 . 25566 }",
             ],
         )
-        self.fw.revoke_host_ssh("nem-ip")
-        self.fw.revoke_host_ssh("2001:db8::1")
-        self.assertEqual(len(self.tools.deletes()), 1)
+
+        self.tools.clear()
+        self.fw.revoke_all("192.168.50.23", (host,))
+        lines = self.tools.deletes()
+        self.assertIn(
+            "nft delete element inet hatarvedelem allowed_input_tcp "
+            "{ 192.168.50.23 . 25566 }",
+            lines,
+        )
+        self.assertFalse(
+            any("allowed_tcp" in line or "allowed_udp" in line
+                for line in lines),
+            lines,
+        )
+
+    def test_input_full_and_icmp_are_rejected_by_firewall(self) -> None:
+        with self.assertRaises(gateway.FirewallError):
+            self.fw.grant(
+                "10.0.0.5",
+                gateway.Ports(full=True, direction="input"),
+                60,
+            )
+        with self.assertRaises(gateway.FirewallError):
+            self.fw.grant(
+                "10.0.0.5",
+                gateway.Ports(icmp=True, direction="input"),
+                60,
+            )
+        self.assertEqual(self.tools.lines(), [])
+
+    def test_flush_includes_input_sets(self) -> None:
+        self.fw.flush()
+        flushed = [
+            line for line in self.tools.lines()
+            if line.startswith("nft flush set inet hatarvedelem ")
+        ]
+        for set_name in ("allowed_input_tcp", "allowed_input_udp"):
+            self.assertIn(
+                f"nft flush set inet hatarvedelem {set_name}", flushed
+            )
+        # A host_service_* őrhalmazok szándékosan nem ürülnek induláskor.
+        for set_name in ("host_service_tcp", "host_service_udp"):
+            self.assertNotIn(
+                f"nft flush set inet hatarvedelem {set_name}", flushed
+            )
+
+    def test_sync_host_ports_adds_ports_without_flushing(self) -> None:
+        self.fw.sync_host_ports(
+            [25566, 25566, 0, 70000, "25565", True], [25566]
+        )
+        script = self.tools.script()
+        self.assertEqual(
+            script,
+            [
+                "add element inet hatarvedelem host_service_tcp "
+                "{ 25566 }",
+                "add element inet hatarvedelem host_service_udp "
+                "{ 25566 }",
+            ],
+        )
+        self.assertFalse(
+            any("flush set" in line for line in self.tools.lines()),
+            self.tools.lines(),
+        )
+        # A portőr nem érinti a tényleges engedélyező halmazokat.
+        self.assertFalse(
+            any("allowed_input" in line or "allowed_tcp" in line
+                for line in script),
+            script,
+        )
+
+    def test_sync_host_ports_empty_is_noop(self) -> None:
+        self.fw.sync_host_ports([], [])
+        self.fw.sync_host_ports(None, ())
+        self.assertEqual(self.tools.lines(), [])
+
+    def test_sync_host_ports_raises_on_nft_failure(self) -> None:
+        self.tools.make_fail("nft: Operation not permitted")
+        with self.assertRaises(gateway.FirewallError):
+            self.fw.sync_host_ports([25566], [])
+
+    def test_snapshot_and_health_include_input_and_service_sets(self) -> None:
+        snapshot = self.fw.snapshot()
+        # A host engedélyek a snapshotban is szerepelnek (az admin nézet
+        # ezekből rajzolja a csoportokat); a csak bővülő védőhalmazok
+        # szándékosan nem részei a megjelenített képnek.
+        for set_name in ("allowed_input_tcp", "allowed_input_udp"):
+            self.assertIn(set_name, snapshot["sets"])
+            self.assertIn(
+                f"nft -j list set inet hatarvedelem {set_name}",
+                self.tools.lines(),
+            )
+        for set_name in ("host_service_tcp", "host_service_udp"):
+            self.assertNotIn(set_name, snapshot["sets"])
+
+        self.tools.clear()
+        ok, why = self.fw.healthy()
+        self.assertTrue(ok, why)
+        for set_name in (
+            "allowed_input_tcp", "allowed_input_udp",
+            "host_service_tcp", "host_service_udp",
+        ):
+            self.assertIn(
+                f"nft list set inet hatarvedelem {set_name}",
+                self.tools.lines(),
+            )
+
+    def test_deny_without_ports_removes_input_set_elements(self) -> None:
+        self.tools.set_json("allowed_input_tcp", [
+            {"val": {"concat": ["192.168.50.23", 25566]},
+             "timeout": 60, "expires": 60},
+            {"val": {"concat": ["192.168.50.24", 25566]},
+             "timeout": 60, "expires": 60},
+        ])
+        self.tools.set_json("allowed_input_udp", [
+            {"val": {"concat": ["192.168.50.23", 25566]},
+             "timeout": 60, "expires": 60},
+        ])
+        self.fw.deny("192.168.50.23")
+        deletes = self.tools.deletes()
+        for line in (
+            "nft delete element inet hatarvedelem allowed_v4 "
+            "{ 192.168.50.23 }",
+            "nft delete element inet hatarvedelem allowed_icmp "
+            "{ 192.168.50.23 }",
+            "nft delete element inet hatarvedelem allowed_input_tcp "
+            "{ 192.168.50.23 . 25566 }",
+            "nft delete element inet hatarvedelem allowed_input_udp "
+            "{ 192.168.50.23 . 25566 }",
+        ):
+            self.assertIn(line, deletes)
+        # Más IP elemét nem törli.
+        self.assertFalse(
+            any("192.168.50.24" in line for line in deletes), deletes
+        )
+
+    def test_grant_host_rule_tcp22_uses_input_set(self) -> None:
+        host_ssh = gateway.Ports(tcp=(22,), direction="input")
+        self.fw.grant("192.168.50.23", host_ssh, 120)
+        self.assertEqual(
+            self.tools.script(),
+            [
+                "add element inet hatarvedelem allowed_input_tcp "
+                "{ 192.168.50.23 . 22 timeout 120s }"
+            ],
+        )
+
+    def test_revoke_all_deletes_host_22_input_element(self) -> None:
+        host_ssh = gateway.Ports(tcp=(22,), direction="input")
+        self.fw.revoke_all("192.168.50.23", (host_ssh,))
+        self.assertEqual(
+            self.tools.deletes(),
+            [
+                "nft delete element inet hatarvedelem allowed_v4 "
+                "{ 192.168.50.23 }",
+                "nft delete element inet hatarvedelem allowed_icmp "
+                "{ 192.168.50.23 }",
+                "nft delete element inet hatarvedelem allowed_input_tcp "
+                "{ 192.168.50.23 . 22 }",
+            ],
+        )
+        self.fw.revoke_all("nem-ip")
+        self.fw.revoke_all("2001:db8::1")
+        self.assertEqual(len(self.tools.deletes()), 3)
 
     def test_invalid_ip_never_reaches_nft(self) -> None:
         with self.assertRaises(gateway.FirewallError):
@@ -515,10 +746,6 @@ class FirewallTests(unittest.TestCase):
             {"val": {"concat": ["192.168.50.24", 80]},
              "timeout": 60, "expires": 50},
         ])
-        self.tools.set_json("host_ssh_v4", [
-            {"val": "192.168.50.23", "timeout": 90, "expires": 80},
-        ])
-
         snapshot = self.fw.snapshot()
         self.assertEqual(snapshot["errors"], [])
         self.assertEqual(snapshot["sets"]["allowed_v4"], [{
@@ -610,7 +837,6 @@ class FirewallTests(unittest.TestCase):
             "sets": {
                 "allowed_v4": [],
                 "allowed_icmp": [],
-                "host_ssh_v4": [],
                 "allowed_tcp": [
                     {"address": "192.168.50.23", "port": 80,
                      "expires_in": 100, "timeout": 120},
@@ -654,7 +880,7 @@ class FirewallTests(unittest.TestCase):
         self.assertFalse(alice["in_sync"])
         self.assertEqual(alice["ports_label"], "TCP 80")
         self.assertIn("hiányzó TCP 443", alice["mismatch"])
-        self.assertFalse(alice["host_ssh"])
+        self.assertNotIn("host_ssh", alice)
         self.assertEqual(alice["expires_in"], 100)
         self.assertEqual(alice["users"], ["alice"])
 
@@ -677,8 +903,6 @@ class FirewallTests(unittest.TestCase):
                                 "timeout": 60}],
                 "allowed_icmp": [{"address": "10.0.0.9", "expires_in": 60,
                                   "timeout": 60}],
-                "host_ssh_v4": [{"address": "10.0.0.9", "expires_in": 60,
-                                 "timeout": 60}],
                 "allowed_tcp": [],
                 "allowed_udp": [],
             },
@@ -687,7 +911,7 @@ class FirewallTests(unittest.TestCase):
         sessions = [{
             "user": "root", "ip": "10.0.0.9", "authorized": True,
             "tcp": [], "udp": [], "icmp": True, "full": True,
-            "rule": "admin-full", "rule_label": "Admin",
+            "rule": "custom-full", "rule_label": "Teljes",
             "ports_label": "Minden port", "expires_in": 60, "logged_in": 1,
         }]
         grouped = gateway.group_firewall_snapshot(snapshot, sessions)
@@ -696,44 +920,201 @@ class FirewallTests(unittest.TestCase):
         self.assertEqual(row["mismatch"], [])
         self.assertTrue(row["full"])
         self.assertTrue(row["icmp"])
-        self.assertTrue(row["host_ssh"])
+        self.assertNotIn("host_ssh", row)
         self.assertEqual(row["ports_label"], "Minden port")
         self.assertEqual(grouped["counts"]["mismatched"], 0)
 
-    def test_group_snapshot_host_ssh_only_expected_for_admin_full(self) -> None:
-        # Egyedi teljes hozzáférésű szabály nem nyit SSH-t, ezért a hiányzó
-        # host SSH nem hiba nála; a beépített admin-fullnál viszont igen.
+    def test_group_snapshot_input_grant_in_sync_and_marked(self) -> None:
+        snapshot = {
+            "sets": {
+                "allowed_v4": [],
+                "allowed_icmp": [],
+                "allowed_tcp": [],
+                "allowed_udp": [],
+                "allowed_input_tcp": [
+                    {"address": "192.168.50.23", "port": 25566,
+                     "expires_in": 90, "timeout": 120},
+                ],
+                "allowed_input_udp": [],
+            },
+            "errors": [],
+        }
+        sessions = [{
+            "user": "alice", "ip": "192.168.50.23", "authorized": True,
+            "tcp": [25566], "udp": [], "icmp": False, "full": False,
+            "direction": "input", "rule": "host-25566",
+            "rule_label": "mpwerks host", "ports_label": "TCP 25566",
+            "expires_in": 90, "logged_in": 1,
+        }]
+        grouped = gateway.group_firewall_snapshot(snapshot, sessions)
+        row = grouped["ips"][0]
+        self.assertEqual(row["mismatch"], [])
+        self.assertTrue(row["in_sync"], row)
+        # A host (input) bejegyzés irányjelölést kap, és a felirat jelzi.
+        self.assertEqual(row["tcp"], [{
+            "port": 25566, "direction": "input",
+            "expires_in": 90, "timeout": 120,
+        }])
+        self.assertEqual(row["ports_label"], "Host TCP 25566")
+        self.assertEqual(row["entry_count"], 1)
+        self.assertEqual(grouped["counts"]["mismatched"], 0)
+
+    def test_group_snapshot_removed_input_grant_is_mismatch(self) -> None:
+        snapshot = {
+            "sets": {
+                "allowed_v4": [], "allowed_icmp": [],
+                "allowed_tcp": [], "allowed_udp": [],
+                "allowed_input_tcp": [], "allowed_input_udp": [],
+            },
+            "errors": [],
+        }
+        sessions = [{
+            "user": "alice", "ip": "192.168.50.23", "authorized": True,
+            "tcp": [25566], "udp": [], "icmp": False, "full": False,
+            "direction": "input", "rule": "host-25566",
+            "rule_label": "mpwerks host", "ports_label": "TCP 25566",
+            "expires_in": 90, "logged_in": 1,
+        }]
+        row = gateway.group_firewall_snapshot(snapshot, sessions)["ips"][0]
+        self.assertFalse(row["in_sync"])
+        # Nem téves forward „hiányzó TCP” eltérés.
+        self.assertEqual(row["mismatch"], ["hiányzó host TCP 25566"])
+
+    def test_group_snapshot_orphan_input_entry_is_visible(self) -> None:
+        snapshot = {
+            "sets": {
+                "allowed_v4": [], "allowed_icmp": [],
+                "allowed_tcp": [], "allowed_udp": [],
+                "allowed_input_tcp": [
+                    {"address": "192.168.50.31", "port": 25566,
+                     "expires_in": 40, "timeout": 60},
+                ],
+                "allowed_input_udp": [],
+            },
+            "errors": [],
+        }
+        grouped = gateway.group_firewall_snapshot(snapshot, [])
+        row = grouped["ips"][0]
+        self.assertTrue(row["orphan"])
+        self.assertEqual(row["ports_label"], "Host TCP 25566")
+        self.assertEqual(row["mismatch"], ["váratlan host TCP 25566"])
+        self.assertEqual(row["tcp"][0]["direction"], "input")
+        self.assertEqual(grouped["counts"]["orphans"], 1)
+
+    def test_group_snapshot_mixed_collection_in_sync_and_mismatches(self) -> None:
+        def snapshot(input_tcp_ports, input_udp_ports=()):
+            return {
+                "sets": {
+                    "allowed_v4": [],
+                    "allowed_icmp": [],
+                    "allowed_tcp": [
+                        {"address": "192.168.50.23", "port": 80,
+                         "expires_in": 90, "timeout": 120},
+                    ],
+                    "allowed_udp": [],
+                    "allowed_input_tcp": [
+                        {"address": "192.168.50.23", "port": port,
+                         "expires_in": 90, "timeout": 120}
+                        for port in input_tcp_ports
+                    ],
+                    "allowed_input_udp": [
+                        {"address": "192.168.50.23", "port": port,
+                         "expires_in": 90, "timeout": 120}
+                        for port in input_udp_ports
+                    ],
+                },
+                "errors": [],
+            }
+
+        sessions = [{
+            "user": "alice", "ip": "192.168.50.23", "authorized": True,
+            "tcp": [80, 25566], "udp": [25566], "icmp": False, "full": False,
+            "direction": "mixed", "rule": "mixed-col",
+            "rule_label": "Mixed", "ports_label": "TCP 80, 25566 · UDP 25566",
+            "expires_in": 90, "logged_in": 1,
+            "grants": [
+                {"direction": "forward", "tcp": [80], "udp": [],
+                 "icmp": False, "full": False},
+                {"direction": "input", "tcp": [25566], "udp": [25566],
+                 "icmp": False, "full": False},
+            ],
+        }]
+
+        matching = gateway.group_firewall_snapshot(
+            snapshot([25566], [25566]), sessions
+        )
+        row = matching["ips"][0]
+        self.assertTrue(row["in_sync"], row)
+        self.assertEqual(row["mismatch"], [])
+        self.assertEqual(row["ports_label"], "TCP 80 · Host TCP 25566 · "
+                         "Host UDP 25566")
+        self.assertEqual(matching["counts"]["mismatched"], 0)
+
+        missing = gateway.group_firewall_snapshot(
+            snapshot([], [25566]), sessions
+        )["ips"][0]
+        self.assertFalse(missing["in_sync"])
+        self.assertEqual(missing["mismatch"], ["hiányzó host TCP 25566"])
+
+        extra = gateway.group_firewall_snapshot(
+            snapshot([25566, 25567], [25566]), sessions
+        )["ips"][0]
+        self.assertFalse(extra["in_sync"])
+        self.assertEqual(extra["mismatch"], ["váratlan host TCP 25567"])
+
+    def test_group_snapshot_host_ssh_is_only_a_host_22_entry(self) -> None:
+        # A teljes forward szabály nem nyit host SSH-t. A host SSH kizárólag
+        # közönséges TCP 22-es input bejegyzésként jelenik meg.
         base_sets = {
             "allowed_v4": [{"address": "10.0.0.9", "expires_in": 60,
                             "timeout": 60}],
             "allowed_icmp": [{"address": "10.0.0.9", "expires_in": 60,
                               "timeout": 60}],
-            "host_ssh_v4": [],
             "allowed_tcp": [],
             "allowed_udp": [],
+            "allowed_input_tcp": [],
+            "allowed_input_udp": [],
         }
 
-        def session(rule: str) -> dict:
-            return {
-                "user": "root", "ip": "10.0.0.9", "authorized": True,
-                "tcp": [], "udp": [], "icmp": True, "full": True,
-                "rule": rule, "rule_label": "Teljes",
-                "ports_label": "Minden port", "expires_in": 60, "logged_in": 1,
-            }
-
+        full_session = {
+            "user": "root", "ip": "10.0.0.9", "authorized": True,
+            "tcp": [], "udp": [], "icmp": True, "full": True,
+            "rule": "custom-full", "rule_label": "Teljes",
+            "ports_label": "Minden port", "expires_in": 60, "logged_in": 1,
+        }
         custom = gateway.group_firewall_snapshot(
-            {"sets": base_sets, "errors": []}, [session("custom-full")]
+            {"sets": base_sets, "errors": []}, [full_session]
         )
         custom_row = custom["ips"][0]
         self.assertTrue(custom_row["in_sync"], custom_row)
-        self.assertNotIn("hiányzó host SSH", custom_row["mismatch"])
+        self.assertNotIn("host_ssh", custom_row)
+        self.assertEqual(custom_row["tcp"], [])
 
-        builtin = gateway.group_firewall_snapshot(
-            {"sets": base_sets, "errors": []}, [session(gateway.ADMIN_RULE_ID)]
-        )
-        builtin_row = builtin["ips"][0]
-        self.assertFalse(builtin_row["in_sync"])
-        self.assertIn("hiányzó host SSH", builtin_row["mismatch"])
+        ssh_sets = dict(base_sets)
+        ssh_sets["allowed_v4"] = []
+        ssh_sets["allowed_icmp"] = []
+        ssh_sets["allowed_input_tcp"] = [
+            {"address": "10.0.0.9", "port": 22,
+             "expires_in": 60, "timeout": 60},
+        ]
+        ssh_session = {
+            "user": "admin", "ip": "10.0.0.9", "authorized": True,
+            "tcp": [22], "udp": [], "icmp": False, "full": False,
+            "direction": "input", "rule": "host-ssh",
+            "rule_label": "Host SSH", "ports_label": "TCP 22",
+            "expires_in": 60, "logged_in": 1,
+        }
+        ssh_row = gateway.group_firewall_snapshot(
+            {"sets": ssh_sets, "errors": []}, [ssh_session]
+        )["ips"][0]
+        self.assertTrue(ssh_row["in_sync"], ssh_row)
+        self.assertEqual(ssh_row["mismatch"], [])
+        self.assertEqual(ssh_row["tcp"], [{
+            "port": 22, "direction": "input",
+            "expires_in": 60, "timeout": 60,
+        }])
+        self.assertEqual(ssh_row["ports_label"], "Host TCP 22")
+        self.assertEqual(ssh_row["entry_count"], 1)
 
 
     # -- MAC-kötés -----------------------------------------------------------
@@ -773,17 +1154,19 @@ class FirewallTests(unittest.TestCase):
             self.tools.script(),
         )
 
-    def test_grant_host_ssh_binds_client_mac_and_ttl(self) -> None:
+    def test_grant_host_tcp22_binds_client_mac_and_ttl(self) -> None:
         fw = self._mac_firewall(self._arp("192.168.10.2", "aa:bb:cc:dd:ee:ff"))
-        fw.grant_host_ssh("192.168.10.2", 120)
+        fw.grant(
+            "192.168.10.2", gateway.Ports(tcp=(22,), direction="input"), 120
+        )
         self.assertIn(
             "add element inet hatarvedelem client_mac "
             "{ 192.168.10.2 . aa:bb:cc:dd:ee:ff timeout 120s }",
             self.tools.script(),
         )
         self.assertIn(
-            "add element inet hatarvedelem host_ssh_v4 "
-            "{ 192.168.10.2 timeout 120s }",
+            "add element inet hatarvedelem allowed_input_tcp "
+            "{ 192.168.10.2 . 22 timeout 120s }",
             self.tools.script(),
         )
 
@@ -813,9 +1196,14 @@ class FirewallTests(unittest.TestCase):
     def test_non_lan_client_needs_no_mac(self) -> None:
         fw = self._mac_firewall("")
         fw.grant("203.0.113.5", ports_for("web"), 60)
+        # Nem-LAN címen nincs MAC-kötés; a maradék elem takarítása viszont
+        # ilyenkor is lefut (F8), ezért csak a hozzáadást tiltjuk.
         self.assertFalse(
-            any("client_mac" in line for line in self.tools.lines()),
-            self.tools.lines(),
+            any(
+                "add element inet hatarvedelem client_mac" in line
+                for line in self.tools.script()
+            ),
+            self.tools.script(),
         )
 
     def test_revoke_all_removes_mac_binding(self) -> None:
@@ -827,6 +1215,37 @@ class FirewallTests(unittest.TestCase):
             "nft delete element inet hatarvedelem client_mac "
             "{ 192.168.10.2 . aa:bb:cc:dd:ee:ff }",
             self.tools.deletes(),
+        )
+
+    def test_revoke_all_removes_mac_for_non_lan_address(self) -> None:
+        """Nem-LAN címnél is kitakarítja a maradt MAC-elemet (F8)."""
+        fw = self._mac_firewall("")
+        self.tools.set_json("client_mac", [
+            {"val": {"concat": [
+                "203.0.113.5", "aa:bb:cc:dd:ee:ff"
+            ]}},
+        ])
+        fw.revoke_all("203.0.113.5")
+        self.assertIn(
+            "nft delete element inet hatarvedelem client_mac "
+            "{ 203.0.113.5 . aa:bb:cc:dd:ee:ff }",
+            self.tools.deletes(),
+        )
+
+    def test_mac_listing_failure_blocks_grant(self) -> None:
+        """Hibás client_mac kimenet esetén nincs engedélyezés (fail-closed)."""
+        fw = self._mac_firewall(self._arp("192.168.10.2", "aa:bb:cc:dd:ee:ff"))
+        (self.tools.json_dir / "client_mac.json").write_text(
+            "{nem json", encoding="utf-8"
+        )
+        with self.assertRaises(gateway.FirewallError):
+            fw.grant("192.168.10.2", ports_for("web"), 60)
+        self.assertFalse(
+            any(
+                "add element inet hatarvedelem allowed_tcp" in line
+                for line in self.tools.script()
+            ),
+            self.tools.script(),
         )
 
     def test_parse_mac_json(self) -> None:
@@ -842,7 +1261,13 @@ class FirewallTests(unittest.TestCase):
             gateway.Firewall.parse_mac_json(raw, "192.168.10.2"),
             ["aa:bb:cc:dd:ee:ff"],
         )
-        self.assertEqual(gateway.Firewall.parse_mac_json("{nem json", "x"), [])
+        # A hibás listázás nem jelenthet "nincs kötés" állapotot.
+        for raw in ("{nem json", "[]", b"\xff"):
+            with self.assertRaises(gateway.FirewallError):
+                gateway.Firewall.parse_mac_json(raw, "x")
+        self.assertEqual(
+            gateway.Firewall.parse_mac_json('{"nftables": []}', "x"), []
+        )
 
     def test_arp_mac_rejects_all_zero_and_bad_mac(self) -> None:
         path = os.path.join(self.tmp.name, "arp-zero")
@@ -1008,7 +1433,7 @@ class UserStoreAccountRequestTests(unittest.TestCase):
 
     def test_effective_rules_are_empty_for_pending_without_rules_key(self) -> None:
         # Ellenőrző eset: a rules mező nélküli aktív (örökölt) felhasználó
-        # továbbra is minden szabályt megkap, tehát a régi ág él.
+        # továbbra is megkapja a forward szabályokat, tehát a régi ág él.
         self.store.add("legacy", "hosszu-jelszo-1")
         self.store.add(
             "pending", "hosszu-jelszo-1", pending=True, email="p@e.co"
@@ -1198,6 +1623,39 @@ class TotpPrimitiveTests(unittest.TestCase):
         self.assertEqual(query["algorithm"], ["SHA1"])
         self.assertEqual(query["digits"], ["6"])
         self.assertEqual(query["period"], ["30"])
+
+    def test_otpauth_uri_custom_issuer_and_fallback(self) -> None:
+        with mock.patch.object(gateway, "TOTP_ISSUER", "Teszt Kupac"):
+            uri = gateway.build_otpauth_uri(
+                "alice", RFC_TOTP_SECRET, issuer="Északi Torony"
+            )
+            fallback = gateway.build_otpauth_uri(
+                "alice", RFC_TOTP_SECRET, issuer=None
+            )
+            empty = gateway.build_otpauth_uri(
+                "alice", RFC_TOTP_SECRET, issuer="   "
+            )
+        parsed = urllib.parse.urlparse(uri)
+        self.assertEqual(parsed.path, "/%C3%89szaki%20Torony%3Aalice")
+        query = urllib.parse.parse_qs(parsed.query)
+        self.assertEqual(query["issuer"], ["Északi Torony"])
+        self.assertEqual(query["secret"], [RFC_TOTP_SECRET])
+        self.assertEqual(
+            urllib.parse.urlparse(fallback).path, "/Teszt%20Kupac%3Aalice"
+        )
+        self.assertEqual(
+            urllib.parse.parse_qs(
+                urllib.parse.urlparse(fallback).query
+            )["issuer"],
+            ["Teszt Kupac"],
+        )
+        self.assertEqual(
+            urllib.parse.urlparse(empty).path, "/Teszt%20Kupac%3Aalice"
+        )
+        self.assertEqual(
+            urllib.parse.parse_qs(urllib.parse.urlparse(empty).query)["issuer"],
+            ["Teszt Kupac"],
+        )
 
 
 class TotpUserStoreTests(unittest.TestCase):
@@ -1530,6 +1988,89 @@ class LoginTicketStoreTests(unittest.TestCase):
         self.assertIsNone(self.store.peek("alice", self.ip))
 
 
+class LoginTicketAuditTests(unittest.TestCase):
+    """A 2FA-jegyek kiadás/lejárat/elutasítás naplózása."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.audit = gateway.AuditLog(
+            os.path.join(self.tmp.name, "audit.jsonl"),
+            logger=lambda *_: None,
+        )
+        self.now = 1000.0
+        self.store = server.LoginTicketStore(
+            ttl=5, max_attempts=3, clock=lambda: self.now
+        )
+        self.store.set_audit(self.audit)
+        self.ip = "127.0.0.9"
+
+    def test_abandoned_ticket_expiry_is_audited(self) -> None:
+        token = self.store.issue("verify", "alice", self.ip, "fp")
+        self.now = 1005.0
+        self.store.purge()
+        rows = self.audit.read(event="totp_ticket_expired")
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["severity"], "info")
+        self.assertEqual(row["user"], "alice")
+        self.assertEqual(row["ip"], self.ip)
+        self.assertEqual(row["purpose"], "verify")
+        self.assertEqual(row["attempts"], 0)
+        self.assertEqual(row["ttl"], 5)
+        self.assertEqual(row["reason"], "expired")
+        self.assertEqual(row["ticket_hash"], server._ticket_hash(token))
+        self.assertNotIn(token, json.dumps(rows))
+        # A megőrzött ok alapján a későbbi kérés pontos indokot kap.
+        self.assertEqual(self.store.inspect(token, self.ip)[1], "expired")
+
+    def test_expiry_after_failed_attempt_is_warning(self) -> None:
+        token = self.store.issue("verify", "alice", self.ip, "fp")
+        self.assertEqual(self.store.fail(token, self.ip), 2)
+        self.now = 1006.0
+        self.store.purge()
+        row = self.audit.read(event="totp_ticket_expired")[0]
+        self.assertEqual(row["severity"], "warn")
+        self.assertEqual(row["attempts"], 1)
+
+    def test_inspect_reasons_and_revocation_events(self) -> None:
+        self.assertEqual(self.store.inspect("", self.ip)[1], "bad_request")
+        self.assertEqual(
+            self.store.inspect("nem-letezo-jegy", self.ip)[1], "unknown"
+        )
+        token = self.store.issue("verify", "alice", self.ip, "fp")
+        self.assertIsNotNone(self.store.consume(token, self.ip))
+        self.assertEqual(
+            self.store.inspect(token, self.ip)[1], "already_consumed"
+        )
+        locked = self.store.issue("verify", "alice", self.ip, "fp")
+        for _ in range(3):
+            self.store.fail(locked, self.ip)
+        self.assertEqual(
+            self.store.inspect(locked, self.ip)[1], "too_many_attempts"
+        )
+        other = self.store.issue("verify", "alice", self.ip, "fp")
+        self.assertEqual(
+            self.store.inspect(other, "127.0.0.10")[1], "ip_mismatch"
+        )
+        self.assertEqual(
+            self.store.revoke_user("alice", reason="deleted"), 1
+        )
+        self.assertEqual(
+            self.store.inspect(other, self.ip)[1], "user_state_changed"
+        )
+        revoked = self.audit.read(event="totp_tickets_revoked")
+        self.assertEqual(len(revoked), 1)
+        self.assertEqual(revoked[0]["target"], "alice")
+        self.assertEqual(revoked[0]["count"], 1)
+        self.assertEqual(revoked[0]["reason"], "deleted")
+
+        self.store.revoke_all(reason="service_stop")
+        discarded = self.audit.read(event="totp_tickets_discarded")
+        self.assertEqual(len(discarded), 1)
+        self.assertEqual(discarded[0]["reason"], "service_stop")
+
+
 class AdminProvisionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -1578,6 +2119,21 @@ class AdminProvisionTests(unittest.TestCase):
             self._provision(True, "admin", "rovid")
         with self.assertRaises(gateway.UserStoreError):
             self._provision(True, "rossz nev", "hosszu-jelszo-1")
+
+    def test_created_admin_has_no_implicit_rules_and_keeps_assignments(self) -> None:
+        self.assertEqual(self._provision(True, "admin", "hosszu-jelszo-1"), "created")
+        record = self.store.record("admin")
+        self.assertEqual(record.rules, ())
+        self.assertTrue(record.rules_set)
+        self.store.set_metadata("admin", rules=("browse",))
+        self.assertEqual(
+            self._provision(True, "admin", "hosszu-jelszo-1"), "unchanged"
+        )
+        self.assertEqual(self.store.record("admin").rules, ("browse",))
+        self.assertEqual(
+            self._provision(True, "admin", "masik-jelszo-2"), "updated"
+        )
+        self.assertEqual(self.store.record("admin").rules, ("browse",))
 
     def test_disabling_keeps_existing_user(self) -> None:
         self._provision(True, "admin", "hosszu-jelszo-1")
@@ -1633,7 +2189,16 @@ class SessionTests(unittest.TestCase):
         )
         self.web_rule = make_rule("web-only", ("web",))
         self.icmp_rule = make_rule("icmp-only", ("icmp",))
-        self.admin_rule = make_rule(gateway.ADMIN_RULE_ID, ("all",))
+        # A host SSH ma már csak egy közönséges, a felhasználóhoz rendelt
+        # host (input) szabállyal nyitható, amely kifejezetten a 22-es
+        # TCP-portot engedélyezi.
+        self.admin_rule = gateway.Rule(
+            id="host-ssh",
+            label="Host SSH",
+            description="",
+            tcp=(22,),
+            direction="input",
+        )
 
     def tearDown(self) -> None:
         gateway.CONNTRACK_BIN = self._old_conntrack
@@ -1681,7 +2246,9 @@ class SessionTests(unittest.TestCase):
             "add element inet hatarvedelem allowed_udp { 192.168.50.23 . 853 timeout 90s }",
         ):
             self.assertIn(line, script)
-        self.assertFalse(any("host_ssh_v4" in line for line in script), script)
+        self.assertFalse(
+            any("allowed_input_tcp" in line for line in script), script
+        )
         self.assertFalse(any("allowed_v4" in line for line in script), script)
         # Előző engedély hiányában nincs conntrack-takarítás.
         self.assertEqual(self.conntrack_lines(), [])
@@ -1743,10 +2310,6 @@ class SessionTests(unittest.TestCase):
             deletes,
         )
         self.assertIn(
-            "nft delete element inet hatarvedelem host_ssh_v4 { 192.168.50.23 }",
-            deletes,
-        )
-        self.assertIn(
             "nft delete element inet hatarvedelem allowed_tcp { 192.168.50.23 . 80 }",
             deletes,
         )
@@ -1768,16 +2331,14 @@ class SessionTests(unittest.TestCase):
             "nft delete element inet hatarvedelem allowed_tcp { 192.168.50.23 . 80 }",
             deletes,
         )
-        self.assertIn(
-            "nft delete element inet hatarvedelem host_ssh_v4 { 192.168.50.23 }",
-            deletes,
-        )
         script = self.tools.script()
         self.assertIn(
             "add element inet hatarvedelem allowed_icmp { 192.168.50.23 timeout 60s }",
             script,
         )
-        self.assertFalse(any("host_ssh_v4" in line for line in script), script)
+        self.assertFalse(
+            any("allowed_input_tcp" in line for line in script), script
+        )
         self.assertTrue(
             any(line.startswith("conntrack -D -s 192.168.50.23") for line in self.tools.lines())
         )
@@ -1816,9 +2377,6 @@ class SessionTests(unittest.TestCase):
         self.assertTrue(
             any("allowed_tcp { 192.168.50.23 . 80 }" in line for line in lines), lines
         )
-        self.assertTrue(
-            any("host_ssh_v4 { 192.168.50.23 }" in line for line in lines), lines
-        )
         self.assertFalse(any("192.168.50.24" in line for line in lines), lines)
 
     def test_second_login_replaces_authorized_session(self) -> None:
@@ -1835,10 +2393,6 @@ class SessionTests(unittest.TestCase):
         deletes = self.tools.deletes()
         self.assertIn(
             "nft delete element inet hatarvedelem allowed_tcp { 192.168.50.23 . 80 }",
-            deletes,
-        )
-        self.assertIn(
-            "nft delete element inet hatarvedelem host_ssh_v4 { 192.168.50.23 }",
             deletes,
         )
         self.assertTrue(
@@ -1867,6 +2421,138 @@ class SessionTests(unittest.TestCase):
         self.assertGreater(row["logged_in"], 0)
         self.assertTrue(row["id"])
         self.assertEqual(row["id"], session.sid)
+        # A forward szabály munkamenete is megkapja az irányt, hogy az
+        # adminlista és a csoportos nézet egyértelmű legyen.
+        self.assertEqual(row["direction"], "forward")
+
+    def test_snapshot_contains_input_direction_for_host_rule(self) -> None:
+        host_rule = gateway.Rule(
+            id="host-25566",
+            label="mpwerks (host)",
+            description="",
+            tcp=(25566,),
+            default_ttl=300,
+            max_ttl=600,
+            direction="input",
+        )
+        session = self.sessions.login("alice", "192.168.50.23")
+        self.sessions.authorize(session.token, "192.168.50.23", host_rule, 120)
+        row = self.sessions.active_sessions()[0]
+        self.assertEqual(row["direction"], "input")
+        self.assertEqual(row["rule"], "host-25566")
+        self.assertEqual(row["ports_label"], "TCP 25566")
+        self.assertEqual(row["tcp"], [25566])
+
+    def test_mixed_collection_grants_and_revocation(self) -> None:
+        # Feloldott, vegyes irányú gyűjtő: forward TCP 80 és host
+        # TCP/UDP 25566 engedély.
+        mixed = gateway.Rule(
+            id="mixed-col",
+            label="Mixed collection",
+            description="",
+            tcp=(80,),
+            input_tcp=(25566,),
+            input_udp=(25566,),
+            members=("mix-web", "mix-host"),
+            direction="mixed",
+            default_ttl=300,
+            max_ttl=600,
+        )
+        self.assertEqual(
+            [part.direction for part in mixed.grants], ["forward", "input"]
+        )
+        session = self.sessions.login("alice", "192.168.50.23")
+        authorized = self.sessions.authorize(
+            session.token, "192.168.50.23", mixed, 120
+        )
+        self.assertEqual(authorized.direction, "mixed")
+        self.assertEqual(authorized.grant_parts, mixed.grants)
+        self.assertEqual(authorized.grants, mixed.grants)
+        self.assertEqual(authorized.ports.direction, "forward")
+        self.assertEqual(authorized.ports.tcp, (80, 25566))
+        self.assertEqual(authorized.ports.udp, (25566,))
+
+        row = self.sessions.active_sessions()[0]
+        self.assertEqual(row["direction"], "mixed")
+        self.assertEqual(row["grants"], [
+            {
+                "direction": "forward", "tcp": [80], "udp": [],
+                "icmp": False, "full": False,
+            },
+            {
+                "direction": "input", "tcp": [25566], "udp": [25566],
+                "icmp": False, "full": False,
+            },
+        ])
+        self.assertEqual(row["tcp"], [80, 25566])
+        self.assertEqual(row["udp"], [25566])
+        script = self.tools.script()
+        self.assertIn(
+            "add element inet hatarvedelem allowed_tcp "
+            "{ 192.168.50.23 . 80 timeout 120s }",
+            script,
+        )
+        self.assertIn(
+            "add element inet hatarvedelem allowed_input_tcp "
+            "{ 192.168.50.23 . 25566 timeout 120s }",
+            script,
+        )
+        self.assertIn(
+            "add element inet hatarvedelem allowed_input_udp "
+            "{ 192.168.50.23 . 25566 timeout 120s }",
+            script,
+        )
+
+        # Módosítás: mindkét irány régi engedélye törlődik.
+        self.tools.clear()
+        self.sessions.authorize(
+            session.token, "192.168.50.23", self.web_rule, 60
+        )
+        deletes = self.tools.deletes()
+        for line in (
+            "nft delete element inet hatarvedelem allowed_tcp "
+            "{ 192.168.50.23 . 80 }",
+            "nft delete element inet hatarvedelem allowed_input_tcp "
+            "{ 192.168.50.23 . 25566 }",
+            "nft delete element inet hatarvedelem allowed_input_udp "
+            "{ 192.168.50.23 . 25566 }",
+        ):
+            self.assertIn(line, deletes)
+
+        # Lejárat: szintén mindkét irány törlődik.
+        self.sessions.authorize(
+            session.token, "192.168.50.23", mixed, 60
+        )
+        self.tools.clear()
+        self.assertEqual(self.sessions.reap_once(now=time.time() + 7200), 1)
+        deletes = self.tools.deletes()
+        for line in (
+            "nft delete element inet hatarvedelem allowed_tcp "
+            "{ 192.168.50.23 . 80 }",
+            "nft delete element inet hatarvedelem allowed_input_tcp "
+            "{ 192.168.50.23 . 25566 }",
+            "nft delete element inet hatarvedelem allowed_input_udp "
+            "{ 192.168.50.23 . 25566 }",
+        ):
+            self.assertIn(line, deletes)
+
+        # Kijelentkezés: szintén mindkét irány engedélye törlődik.
+        second = self.sessions.login("bob", "192.168.50.24")
+        self.sessions.authorize(second.token, "192.168.50.24", mixed, 60)
+        self.tools.clear()
+        self.assertIsNotNone(
+            self.sessions.logout(second.token, "192.168.50.24")
+        )
+        deletes = self.tools.deletes()
+        for line in (
+            "nft delete element inet hatarvedelem allowed_tcp "
+            "{ 192.168.50.24 . 80 }",
+            "nft delete element inet hatarvedelem allowed_input_tcp "
+            "{ 192.168.50.24 . 25566 }",
+            "nft delete element inet hatarvedelem allowed_input_udp "
+            "{ 192.168.50.24 . 25566 }",
+        ):
+            self.assertIn(line, deletes)
 
     def test_terminate_specific_session(self) -> None:
         alice = self.sessions.login("alice", "192.168.50.23")
@@ -1886,10 +2572,6 @@ class SessionTests(unittest.TestCase):
         deletes = self.tools.deletes()
         self.assertIn(
             "nft delete element inet hatarvedelem allowed_tcp { 192.168.50.23 . 80 }",
-            deletes,
-        )
-        self.assertIn(
-            "nft delete element inet hatarvedelem host_ssh_v4 { 192.168.50.23 }",
             deletes,
         )
         self.assertTrue(
@@ -1926,7 +2608,7 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(self.sessions.last_end("192.168.50.23")["reason"], "logout")
         self.assertEqual(self.sessions.active_sessions(), [])
 
-    # -- host SSH: csak a beépített admin-full nyitja ----------------------
+    # -- host SSH: csak a felhasználóhoz rendelt, 22/TCP host szabály -------
 
     def _host_ssh_script(
         self, manager: gateway.SessionManager, rule: gateway.Rule
@@ -1935,38 +2617,39 @@ class SessionTests(unittest.TestCase):
         manager.authorize(session.token, "192.168.50.23", rule, 60)
         return [
             line for line in self.tools.script()
-            if "host_ssh_v4" in line
+            if "allowed_input_tcp" in line and ". 22 " in line
         ]
 
-    def test_host_ssh_opens_only_for_builtin_admin_full(self) -> None:
+    def test_host_ssh_requires_explicit_host_22_rule(self) -> None:
         manager = gateway.SessionManager(
             self.fw, ttl=3600, pending_ttl=600
         )
         # Szűk szolgáltatási szabály nem nyit SSH-t.
         self.assertEqual(self._host_ssh_script(manager, self.web_rule), [])
-        # Egyedi teljes hozzáférésű szabály sem nyit SSH-t.
+        # Egyedi teljes hozzáférésű (forward) szabály sem nyit host SSH-t.
         self.tools.clear()
         custom_full = make_rule("custom-full", ("all",))
         self.assertTrue(custom_full.full)
         self.assertEqual(self._host_ssh_script(manager, custom_full), [])
-        # A beépített admin-full viszont megnyitja, a TTL-jével.
+        # A 22-es TCP-portot kifejezetten engedélyező host szabály viszont
+        # igen, a TTL-jével, és a szokásos MAC-kötéssel.
         self.tools.clear()
         self.assertEqual(
             self._host_ssh_script(manager, self.admin_rule),
             [
-                "add element inet hatarvedelem host_ssh_v4 "
-                "{ 192.168.50.23 timeout 60s }"
+                "add element inet hatarvedelem allowed_input_tcp "
+                "{ 192.168.50.23 . 22 timeout 60s }"
             ],
         )
 
-    def test_switching_away_from_admin_full_revokes_ssh(self) -> None:
+    def test_switching_away_from_host_22_rule_revokes_ssh(self) -> None:
         session = self.sessions.login("alice", "192.168.50.23")
         self.sessions.authorize(
             session.token, "192.168.50.23", self.admin_rule, 300
         )
         self.assertIn(
-            "add element inet hatarvedelem host_ssh_v4 "
-            "{ 192.168.50.23 timeout 300s }",
+            "add element inet hatarvedelem allowed_input_tcp "
+            "{ 192.168.50.23 . 22 timeout 300s }",
             self.tools.script(),
         )
         self.tools.clear()
@@ -1975,13 +2658,40 @@ class SessionTests(unittest.TestCase):
             session.token, "192.168.50.23", self.web_rule, 60
         )
         self.assertIn(
-            "nft delete element inet hatarvedelem host_ssh_v4 "
-            "{ 192.168.50.23 }",
+            "nft delete element inet hatarvedelem allowed_input_tcp "
+            "{ 192.168.50.23 . 22 }",
             self.tools.deletes(),
         )
         self.assertFalse(
-            any("host_ssh_v4" in line for line in self.tools.script()),
+            any("allowed_input_tcp" in line for line in self.tools.script()),
             self.tools.script(),
+        )
+
+    def test_host_ssh_revoked_on_logout_and_shutdown(self) -> None:
+        session = self.sessions.login("alice", "192.168.50.23")
+        self.sessions.authorize(
+            session.token, "192.168.50.23", self.admin_rule, 120
+        )
+        self.tools.clear()
+        self.assertIsNotNone(
+            self.sessions.logout(session.token, "192.168.50.23")
+        )
+        self.assertIn(
+            "nft delete element inet hatarvedelem allowed_input_tcp "
+            "{ 192.168.50.23 . 22 }",
+            self.tools.deletes(),
+        )
+
+        second = self.sessions.login("bob", "192.168.50.24")
+        self.sessions.authorize(
+            second.token, "192.168.50.24", self.admin_rule, 120
+        )
+        self.tools.clear()
+        self.assertEqual(self.sessions.shutdown(), 1)
+        self.assertIn(
+            "nft delete element inet hatarvedelem allowed_input_tcp "
+            "{ 192.168.50.24 . 22 }",
+            self.tools.deletes(),
         )
 
     # -- versenyhelyzetek és leállás ---------------------------------------
@@ -2013,11 +2723,6 @@ class SessionTests(unittest.TestCase):
             "{ 192.168.50.23 . 80 }",
             deletes,
         )
-        self.assertIn(
-            "nft delete element inet hatarvedelem host_ssh_v4 "
-            "{ 192.168.50.23 }",
-            deletes,
-        )
         self.assertEqual(self.sessions.count(), 0)
         self.assertGreaterEqual(len(self.conntrack_lines()), 1)
 
@@ -2044,7 +2749,651 @@ class SessionTests(unittest.TestCase):
         )
 
 
+class UnionGrantsTests(unittest.TestCase):
+    """A ``union_grants`` irányonkénti és determinisztikus uniója."""
+
+    def test_full_absorbs_other_parts_in_the_same_direction(self) -> None:
+        union = gateway.union_grants((
+            gateway.Ports(tcp=(443,), udp=(53,)),
+            gateway.Ports(full=True, direction="forward"),
+            gateway.Ports(tcp=(80,), icmp=True),
+        ))
+        self.assertEqual(
+            union, (gateway.Ports(full=True, direction="forward"),)
+        )
+
+    def test_ports_are_unioned_sorted_and_ordered_forward_first(self) -> None:
+        union = gateway.union_grants((
+            gateway.Ports(tcp=(443, 80), udp=(53,), direction="forward"),
+            gateway.Ports(tcp=(80,), icmp=True, direction="forward"),
+            gateway.Ports(tcp=(22,), direction="input"),
+        ))
+        self.assertEqual(
+            union,
+            (
+                gateway.Ports(
+                    tcp=(80, 443), udp=(53,), icmp=True,
+                    direction="forward",
+                ),
+                gateway.Ports(tcp=(22,), direction="input"),
+            ),
+        )
+
+    def test_empty_parts_are_omitted(self) -> None:
+        self.assertEqual(gateway.union_grants(()), ())
+        self.assertEqual(
+            gateway.union_grants((gateway.Ports(), gateway.Ports())), ()
+        )
+
+    def test_unknown_direction_raises_firewall_error(self) -> None:
+        with self.assertRaises(gateway.FirewallError):
+            gateway.union_grants((gateway.Ports(direction="bogus"),))
+
+
+class SubtractGrantsTests(unittest.TestCase):
+    """Az aktív teljes hozzáférés csak a távozó teljes részt fedi."""
+
+    def test_active_full_keeps_non_full_parts_for_exact_deletion(self) -> None:
+        # A portos/ICMP elemek a kernelben léteznek, és a munkamenet
+        # összevont grant_parts-ából eltűntek; ezért a maradéknak
+        # tartalmaznia kell őket, hogy a revoke_exact törölhesse. Ha itt
+        # kimaradnának, a teljes hozzáférés későbbi visszavonásakor újra
+        # előbukkannának.
+        forward = gateway.Ports(
+            tcp=(80,), icmp=True, direction="forward"
+        )
+        result = gateway.SessionManager._subtract_grants(
+            (
+                forward,
+                gateway.Ports(tcp=(22,), direction="input"),
+            ),
+            (gateway.Ports(full=True, direction="forward"),),
+        )
+        self.assertEqual(
+            result,
+            (
+                forward,
+                gateway.Ports(tcp=(22,), direction="input"),
+            ),
+        )
+
+    def test_removed_full_covered_by_active_full_is_dropped(self) -> None:
+        full = gateway.Ports(full=True, direction="forward")
+        result = gateway.SessionManager._subtract_grants(
+            (full,), (full,)
+        )
+        self.assertEqual(result, ())
+
+    def test_removed_full_is_kept_without_active_full(self) -> None:
+        full = gateway.Ports(full=True, direction="forward")
+        result = gateway.SessionManager._subtract_grants(
+            (full,), (gateway.Ports(tcp=(80,), direction="forward"),)
+        )
+        self.assertEqual(result, (full,))
+
+
+class MultiSelectionTests(unittest.TestCase):
+    """Több egyidejű szabályválasztás a valódi tűzfallal."""
+
+    IP = "192.168.50.23"
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.tools = FakeTools(self.tmp.name)
+        self._old_conntrack = gateway.CONNTRACK_BIN
+        gateway.CONNTRACK_BIN = str(self.tools.conntrack)
+        self.addCleanup(
+            setattr, gateway, "CONNTRACK_BIN", self._old_conntrack
+        )
+        self.fw = gateway.Firewall(
+            binary=str(self.tools.nft), logger=lambda *_: None
+        )
+        self.sessions = gateway.SessionManager(
+            self.fw, ttl=3600, pending_ttl=600
+        )
+
+    def conntrack_lines(self) -> list[str]:
+        return [
+            line for line in self.tools.lines()
+            if line.startswith("conntrack ")
+        ]
+
+    @staticmethod
+    def rule(
+        rule_id: str,
+        *,
+        label: str | None = None,
+        tcp=(),
+        udp=(),
+        icmp: bool = False,
+        full: bool = False,
+        max_ttl: int = 3600,
+    ) -> gateway.Rule:
+        return gateway.Rule(
+            id=rule_id,
+            label=label or rule_id,
+            description="",
+            tcp=tuple(tcp),
+            udp=tuple(udp),
+            icmp=icmp,
+            full=full,
+            max_ttl=max_ttl,
+        )
+
+    def login(self) -> gateway.Session:
+        return self.sessions.login("alice", self.IP)
+
+    def test_authorize_union_grants_overlapping_port_once(self) -> None:
+        web = self.rule("web", label="Web", tcp=(80,), udp=(53,))
+        secure = self.rule("secure", label="Secure", tcp=(80, 443))
+        session = self.login()
+
+        authorized = self.sessions.authorize(
+            session.token, self.IP, [web, secure], 120
+        )
+
+        self.assertEqual(authorized.rules, ("web", "secure"))
+        self.assertEqual(authorized.rule, "web")
+        self.assertEqual(authorized.rule_label, "Web")
+        self.assertEqual(
+            authorized.rule_parts,
+            (
+                gateway.RuleSelection("web", "Web", web.grants),
+                gateway.RuleSelection("secure", "Secure", secure.grants),
+            ),
+        )
+        self.assertEqual(
+            authorized.grant_parts,
+            (
+                gateway.Ports(
+                    tcp=(80, 443), udp=(53,), direction="forward"
+                ),
+            ),
+        )
+        self.assertEqual(authorized.tcp, (80, 443))
+        self.assertEqual(authorized.udp, (53,))
+        script = self.tools.script()
+        self.assertEqual(
+            len([
+                line for line in script
+                if "allowed_tcp" in line and ". 80 " in line
+            ]),
+            1,
+            script,
+        )
+        row = self.sessions.active_sessions()[0]
+        self.assertEqual(row["rule"], "web")
+        self.assertEqual(row["rule_label"], "Web")
+        self.assertEqual(row["selected_rules"], ["web", "secure"])
+        self.assertEqual(
+            row["selected_rule_labels"], ["Web", "Secure"]
+        )
+
+    def test_single_rule_and_duplicate_ids_are_compatible(self) -> None:
+        web = self.rule("web", tcp=(80,))
+        secure = self.rule("secure", tcp=(443,))
+        session = self.login()
+
+        single = self.sessions.authorize(
+            session.token, self.IP, web, 60
+        )
+        self.assertEqual(single.rules, ("web",))
+        self.assertEqual(single.rule, "web")
+        self.assertEqual(single.rule_parts[0].rule_id, "web")
+
+        updated = self.sessions.authorize(
+            session.token, self.IP, [web, secure, web], 60
+        )
+        self.assertEqual(updated.rules, ("web", "secure"))
+        self.assertEqual(
+            [part.rule_id for part in updated.rule_parts],
+            ["web", "secure"],
+        )
+        self.assertEqual(
+            updated.grant_parts,
+            (gateway.Ports(tcp=(80, 443), direction="forward"),),
+        )
+
+    def test_authorize_rejects_invalid_rule_collections(self) -> None:
+        session = self.login()
+        empty = self.rule("empty")
+        for value in (None, "web", [], [None], [self.rule("ok"), "x"]):
+            with self.assertRaises(gateway.AccessError) as ctx:
+                self.sessions.authorize(session.token, self.IP, value, 60)
+            self.assertEqual(
+                str(ctx.exception), "érvénytelen hozzáférési szabály"
+            )
+        with self.assertRaises(gateway.AccessError) as ctx:
+            self.sessions.authorize(
+                session.token, self.IP, [empty], 60
+            )
+        self.assertEqual(
+            str(ctx.exception), "ez a szabály nem ad hozzáférést"
+        )
+        self.assertEqual(self.sessions.count(authorized_only=True), 0)
+        self.assertEqual(self.tools.script(), [])
+
+    def test_multi_rule_ttl_uses_strictest_max_ttl(self) -> None:
+        long_rule = self.rule("long", label="Hosszú", tcp=(80,), max_ttl=600)
+        short_rule = self.rule(
+            "short", label="Rövid", tcp=(443,), max_ttl=300
+        )
+        session = self.login()
+
+        with self.assertRaises(gateway.AccessError) as ctx:
+            self.sessions.authorize(
+                session.token, self.IP, [long_rule, short_rule], 301
+            )
+        message = str(ctx.exception)
+        self.assertIn("Rövid", message)
+        self.assertIn("szabály miatt legfeljebb", message)
+        self.assertIn("5 perc", message)
+        self.assertEqual(self.sessions.count(authorized_only=True), 0)
+        self.assertEqual(self.tools.script(), [])
+
+        # A legszigorúbb szabály max_ttl-je még éppen elfogadható.
+        accepted = self.sessions.authorize(
+            session.token, self.IP, [long_rule, short_rule], 300
+        )
+        self.assertTrue(accepted.authorized)
+
+        # Egyetlen szabálynál a régi hibaüzenet marad.
+        with self.assertRaises(gateway.AccessError) as ctx:
+            self.sessions.authorize(
+                session.token, self.IP, short_rule, 301
+            )
+        self.assertEqual(
+            str(ctx.exception),
+            "ez a szabály legfeljebb 5 perc időtartamra engedélyez",
+        )
+
+    def test_partial_revoke_rule_keeps_session_and_other_grants(self) -> None:
+        first = self.rule("first", label="Első", tcp=(80, 8080))
+        second = self.rule("second", label="Második", tcp=(80, 443))
+        session = self.login()
+        authorized = self.sessions.authorize(
+            session.token, self.IP, [first, second], 120
+        )
+        expires = authorized.expires
+        self.tools.clear()
+
+        self.assertEqual(self.sessions.revoke_rule("first"), 1)
+
+        current = self.sessions.validate(session.token, self.IP)
+        self.assertIsNotNone(current)
+        self.assertTrue(current.authorized)
+        self.assertEqual(current.rules, ("second",))
+        self.assertEqual(current.rule, "second")
+        self.assertEqual(current.rule_label, "Második")
+        self.assertEqual(
+            current.grant_parts,
+            (gateway.Ports(tcp=(80, 443), direction="forward"),),
+        )
+        self.assertEqual(current.expires, expires)
+
+        deletes = self.tools.deletes()
+        self.assertIn(
+            "nft delete element inet hatarvedelem allowed_tcp "
+            f"{{ {self.IP} . 8080 }}",
+            deletes,
+        )
+        # A maradó elemeket a grant_all az időtúllépés újraindításához
+        # törölheti, de ezeket ugyanabban a folyamatban vissza is adja, és
+        # a revoke_exact nem érintette őket.
+        adds = [
+            line for line in self.tools.script()
+            if line.startswith("add element ")
+        ]
+        for port in (80, 443):
+            self.assertTrue(
+                any(
+                    line.startswith(
+                        "add element inet hatarvedelem allowed_tcp "
+                        f"{{ {self.IP} . {port} timeout "
+                    )
+                    for line in adds
+                ),
+                adds,
+            )
+        self.assertFalse(
+            any("allowed_v4" in line for line in deletes), deletes
+        )
+        # Csak a távozó port kapcsolatai szakadnak meg, nem az egész IP.
+        lines = self.conntrack_lines()
+        self.assertIn(
+            f"conntrack -D -s {self.IP} -p tcp --dport 8080", lines
+        )
+        self.assertNotIn(f"conntrack -D -s {self.IP}", lines)
+        # Újabb hívás már nem érinti a munkamenetet.
+        self.assertEqual(self.sessions.revoke_rule("first"), 0)
+        self.assertIsNotNone(self.sessions.validate(session.token, self.IP))
+
+    def test_revoke_user_rules_keeps_other_users_and_selections(self) -> None:
+        first = self.rule("first", tcp=(80,))
+        second = self.rule("second", tcp=(443,))
+        alice = self.sessions.login("alice", self.IP)
+        bob = self.sessions.login("bob", "192.168.50.24")
+        self.sessions.authorize(
+            alice.token, self.IP, [first, second], 120
+        )
+        self.sessions.authorize(
+            bob.token, "192.168.50.24", [first], 120
+        )
+
+        self.assertEqual(
+            self.sessions.revoke_user_rules("alice", ["first"]), 1
+        )
+
+        alice_current = self.sessions.validate(alice.token, self.IP)
+        self.assertIsNotNone(alice_current)
+        self.assertEqual(alice_current.rules, ("second",))
+        bob_current = self.sessions.validate(
+            bob.token, "192.168.50.24"
+        )
+        self.assertIsNotNone(bob_current)
+        self.assertEqual(bob_current.rules, ("first",))
+
+    def test_expired_session_is_not_regranted_by_partial_revoke(self) -> None:
+        first = self.rule("first", label="Első", tcp=(80,))
+        second = self.rule("second", label="Második", tcp=(443,))
+        session = self.login()
+        authorized = self.sessions.authorize(
+            session.token, self.IP, [first, second], 120
+        )
+        authorized.expires = time.time() - 1
+        self.tools.clear()
+
+        self.assertEqual(self.sessions.revoke_rule("first"), 1)
+
+        # A lejárt munkamenet nem maradhat részlegesen frissítve a
+        # nyilvántartásban, és a maradó választás grantjeit sem szabad
+        # újra kiadni.
+        self.assertNotIn(session.token, self.sessions._sessions)
+        self.assertEqual(self.sessions.count(), 0)
+        self.assertEqual(
+            [
+                line for line in self.tools.script()
+                if line.startswith("add element ")
+            ],
+            [],
+        )
+        self.assertIsNone(self.sessions.validate(session.token, self.IP))
+
+    def test_revoke_rules_removes_rule_and_collection_in_one_pass(self) -> None:
+        rule = self.rule("rule", label="Szabály", tcp=(80,))
+        collection = gateway.Rule(
+            id="collection",
+            label="Gyűjtő",
+            description="",
+            tcp=(80, 443),
+            members=("rule",),
+            max_ttl=3600,
+        )
+        session = self.login()
+        self.sessions.authorize(
+            session.token, self.IP, [rule, collection], 120
+        )
+        self.tools.clear()
+
+        self.assertEqual(
+            self.sessions.revoke_rules((rule.id, collection.id)), 1
+        )
+
+        # Egy zárolás alatt a teljes választáshalmaz tűnik el; nincs
+        # köztes, részleges újrakiadás.
+        self.assertNotIn(session.token, self.sessions._sessions)
+        self.assertEqual(self.sessions.count(), 0)
+        self.assertEqual(
+            [
+                line for line in self.tools.script()
+                if line.startswith("add element ")
+            ],
+            [],
+        )
+
+    def test_removing_full_selection_deletes_allowed_v4_and_keeps_session(
+        self,
+    ) -> None:
+        full = self.rule("full", label="Teljes", full=True)
+        ports = self.rule("ports", label="Portok", tcp=(443,))
+        session = self.login()
+        authorized = self.sessions.authorize(
+            session.token, self.IP, [full, ports], 120
+        )
+        self.assertEqual(
+            authorized.grant_parts,
+            (gateway.Ports(full=True, direction="forward"),),
+        )
+        self.assertIn(
+            "add element inet hatarvedelem allowed_v4 "
+            f"{{ {self.IP} timeout 120s }}",
+            self.tools.script(),
+        )
+        self.assertFalse(
+            any("allowed_tcp" in line for line in self.tools.script())
+        )
+        self.tools.clear()
+
+        self.assertEqual(self.sessions.revoke_rule("full"), 1)
+
+        current = self.sessions.validate(session.token, self.IP)
+        self.assertIsNotNone(current)
+        self.assertTrue(current.authorized)
+        self.assertEqual(current.rules, ("ports",))
+        self.assertEqual(
+            current.grant_parts,
+            (gateway.Ports(tcp=(443,), direction="forward"),),
+        )
+        deletes = self.tools.deletes()
+        self.assertIn(
+            "nft delete element inet hatarvedelem allowed_v4 "
+            f"{{ {self.IP} }}",
+            deletes,
+        )
+        self.assertFalse(
+            any("allowed_icmp" in line for line in deletes), deletes
+        )
+        self.assertFalse(
+            any("client_mac" in line for line in deletes), deletes
+        )
+        # A 443-as port a munkamenetben továbbra is engedélyezett, ezért a
+        # teljes IP-s ürítés megszakítaná annak élő kapcsolatait. A távozó
+        # full elemhez célzott törlés sem indítható, így nincs conntrack-hívás.
+        self.assertEqual(self.conntrack_lines(), [])
+        # A maradó port eddig az allowed_v4 alatt élt; a törlése után külön
+        # kernel-elemként újra ki kell adni, különben a munkamenet papíron
+        # élne, de a portja nem lenne engedélyezve.
+        adds = [
+            line for line in self.tools.script()
+            if line.startswith("add element ")
+        ]
+        self.assertTrue(
+            any(
+                line.startswith(
+                    "add element inet hatarvedelem allowed_tcp "
+                    f"{{ {self.IP} . 443 timeout "
+                )
+                for line in adds
+            ),
+            adds,
+        )
+
+
+class ConntrackFlushRemovedTests(unittest.TestCase):
+    """A célzott conntrack-törlés irányvak és kíméli a maradó engedélyeket."""
+
+    IP = "192.168.50.23"
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.tools = FakeTools(self.tmp.name)
+        self._old_conntrack = gateway.CONNTRACK_BIN
+        gateway.CONNTRACK_BIN = str(self.tools.conntrack)
+        self.addCleanup(
+            setattr, gateway, "CONNTRACK_BIN", self._old_conntrack
+        )
+
+    def conntrack_lines(self) -> list[str]:
+        return [
+            line for line in self.tools.lines()
+            if line.startswith("conntrack ")
+        ]
+
+    def test_removed_full_does_not_flush_remaining_input_ssh(self) -> None:
+        # Egy teljes forward hozzáférést input-22 vált fel: a teljes IP-s
+        # ürítés megszakítaná a még engedélyezett SSH-kapcsolatot.
+        result = gateway.conntrack_flush_removed(
+            self.IP,
+            (gateway.Ports(full=True, direction="forward"),),
+            (gateway.Ports(tcp=(22,), direction="input"),),
+        )
+        self.assertFalse(result)
+        self.assertEqual(self.conntrack_lines(), [])
+
+    def test_removed_port_kept_by_other_direction_is_not_flushed(self) -> None:
+        # A conntrack -D -s irányvak: a 80-as portot egy input engedély
+        # továbbra is használja, ezért nem szabad célzottan törölni.
+        result = gateway.conntrack_flush_removed(
+            self.IP,
+            (gateway.Ports(tcp=(80,), direction="forward"),),
+            (gateway.Ports(tcp=(80,), direction="input"),),
+        )
+        self.assertFalse(result)
+        self.assertEqual(self.conntrack_lines(), [])
+
+    def test_removed_full_without_remaining_flushes_whole_ip(self) -> None:
+        result = gateway.conntrack_flush_removed(
+            self.IP,
+            (gateway.Ports(full=True, direction="forward"),),
+            (),
+        )
+        self.assertTrue(result)
+        self.assertEqual(
+            self.conntrack_lines(), [f"conntrack -D -s {self.IP}"]
+        )
+
+    def test_too_many_commands_with_remaining_skips_flush(self) -> None:
+        # 17 célzott parancs > CONNTRACK_REMOVED_LIMIT. Maradó engedély
+        # mellett nem szabad teljes IP-s ürítésre váltani.
+        removed = gateway.Ports(
+            tcp=tuple(range(8000, 8017)), direction="forward"
+        )
+        result = gateway.conntrack_flush_removed(
+            self.IP,
+            (removed,),
+            (gateway.Ports(tcp=(443,), direction="input"),),
+        )
+        self.assertFalse(result)
+        self.assertEqual(self.conntrack_lines(), [])
+
+
 # ------------------------------------------------------------------ egyéb mag
+
+class SessionAuditTests(unittest.TestCase):
+    """A munkamenet-életciklus audit-eseményei."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.tools = FakeTools(self.tmp.name)
+        self._old_conntrack = gateway.CONNTRACK_BIN
+        gateway.CONNTRACK_BIN = str(self.tools.conntrack)
+        self.addCleanup(
+            setattr, gateway, "CONNTRACK_BIN", self._old_conntrack
+        )
+        self.fw = gateway.Firewall(
+            binary=str(self.tools.nft), logger=lambda *_: None
+        )
+        self.audit = gateway.AuditLog(
+            os.path.join(self.tmp.name, "audit.jsonl"),
+            logger=lambda *_: None,
+        )
+        self.sessions = gateway.SessionManager(
+            self.fw, ttl=3600, pending_ttl=600, audit=self.audit
+        )
+        self.ip = "192.168.50.23"
+        self.web_rule = make_rule("web-only", ("web",))
+
+    def _expire(self, token: str) -> None:
+        with self.sessions._lock:
+            self.sessions._sessions[token] = gateway.replace(
+                self.sessions._sessions[token], expires=time.time() - 1
+            )
+
+    def test_session_replaced_includes_pending_and_authorized(self) -> None:
+        first = self.sessions.login("alice", self.ip)
+        second = self.sessions.login("alice", self.ip)
+        rows = self.audit.read(event="session_replaced")
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["old_user"], "alice")
+        self.assertEqual(row["new_user"], "alice")
+        self.assertEqual(row["ip"], self.ip)
+        self.assertEqual(row["old_sid"], first.sid)
+        self.assertEqual(row["old_authorized"], False)
+        self.assertEqual(row["reason"], "new_login_same_ip")
+        self.assertEqual(self.sessions.count(), 1)
+        self.assertIsNotNone(
+            self.sessions.validate(second.token, self.ip)
+        )
+
+        # Engedéllyel rendelkező munkamenet cseréjekor az összesített
+        # access_revoked esemény is megmarad.
+        self.sessions.authorize(second.token, self.ip, self.web_rule, 60)
+        self.sessions.login("alice", self.ip)
+        rows = self.audit.read(event="session_replaced")
+        self.assertEqual(len(rows), 2)
+        replaced = [row for row in rows if row["old_authorized"]]
+        self.assertEqual(len(replaced), 1)
+        self.assertEqual(replaced[0]["old_rule"], "web-only")
+        revoked = self.audit.read(event="access_revoked")
+        self.assertEqual(len(revoked), 1)
+
+    def test_session_expiry_via_validate_and_authorize(self) -> None:
+        pending = self.sessions.login("alice", self.ip)
+        self._expire(pending.token)
+        self.assertIsNone(self.sessions.validate(pending.token, self.ip))
+
+        authorized = self.sessions.login("bob", self.ip)
+        self.sessions.authorize(authorized.token, self.ip, self.web_rule, 60)
+        self._expire(authorized.token)
+        with self.assertRaises(gateway.AccessError):
+            self.sessions.authorize(
+                authorized.token, self.ip, self.web_rule, 60
+            )
+
+        rows = self.audit.read(event="session_expired")
+        self.assertEqual(len(rows), 2)
+        by_user = {row["user"]: row for row in rows}
+        self.assertEqual(by_user["alice"]["authorized"], False)
+        self.assertEqual(by_user["bob"]["authorized"], True)
+        self.assertEqual(by_user["bob"]["rule"], "web-only")
+        for row in rows:
+            self.assertEqual(row["reason"], "expired")
+            self.assertEqual(row["ip"], self.ip)
+            self.assertIn("sid", row)
+            self.assertIn("duration", row)
+
+    def test_session_ip_changed_is_audited(self) -> None:
+        session = self.sessions.login("alice", self.ip)
+        self.assertIsNone(
+            self.sessions.validate(session.token, "192.168.50.24")
+        )
+        row = self.audit.read(event="session_ip_changed")[0]
+        self.assertEqual(row["user"], "alice")
+        self.assertEqual(row["sid"], session.sid)
+        self.assertEqual(row["session_ip"], self.ip)
+        self.assertEqual(row["request_ip"], "192.168.50.24")
+        self.assertEqual(row["authorized"], False)
+
+    def test_revoke_user_does_not_emit_per_session_events(self) -> None:
+        self.sessions.login("alice", self.ip)
+        self.assertEqual(self.sessions.revoke_user("alice"), 1)
+        self.assertEqual(self.audit.read(event="session_expired"), [])
+        self.assertEqual(self.audit.read(event="session_ended"), [])
+
 
 class RateLimiterTests(unittest.TestCase):
     def test_window(self) -> None:
@@ -2096,6 +3445,59 @@ class PowTests(unittest.TestCase):
 
 # ------------------------------------------------------------------ HTTP
 
+class AuditLogTests(unittest.TestCase):
+    """Az auditnapló központi súlyosság- és érzékenységkezelése."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = os.path.join(self.tmp.name, "audit.jsonl")
+        self.audit = gateway.AuditLog(self.path, logger=lambda *_: None)
+
+    def test_write_redacts_sensitive_fields_and_truncates(self) -> None:
+        self.audit.write(
+            "ismeretlen_esemeny",
+            password="Titok-Jelszo-42",
+            code="987654",
+            ticket="Nyers-Jegy-ABC",
+            ticket_hash="abc123def456",
+            note="x" * 600,
+        )
+        rows = self.audit.read()
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["severity"], "info")
+        for key in ("password", "code", "ticket"):
+            self.assertNotIn(key, row)
+        self.assertEqual(row["ticket_hash"], "abc123def456")
+        self.assertEqual(len(row["note"]), 500)
+        raw = open(self.path, encoding="utf-8").read()
+        for value in ("Titok-Jelszo-42", "987654", "Nyers-Jegy-ABC"):
+            self.assertNotIn(value, raw)
+
+    def test_explicit_severity_wins_and_read_filters(self) -> None:
+        self.audit.write("firewall_error", reason="teszt")
+        self.audit.write("login_success", user="alice")
+        self.audit.write("sajat_esemeny", severity="warn", reason="x")
+        alerts = self.audit.read(severity="alert")
+        self.assertEqual([row["event"] for row in alerts], ["firewall_error"])
+        self.assertEqual(
+            [row["event"] for row in self.audit.read(severity="ALERT")],
+            ["firewall_error"],
+        )
+        warns = self.audit.read(severity="warn")
+        self.assertEqual([row["event"] for row in warns], ["sajat_esemeny"])
+        row = self.audit.read(event="sajat_esemeny")[0]
+        self.assertEqual(row["severity"], "warn")
+        # A régi, severity nélküli sorok info szintűnek számítanak.
+        legacy = os.path.join(self.tmp.name, "legacy.jsonl")
+        with open(legacy, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"ts": 1, "event": "login_success"}) + "\n")
+        legacy_log = gateway.AuditLog(legacy, logger=lambda *_: None)
+        self.assertEqual(len(legacy_log.read(severity="info")), 1)
+        self.assertEqual(legacy_log.read(severity="alert"), [])
+
+
 class HttpTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -2146,6 +3548,8 @@ class HttpTests(unittest.TestCase):
             rate_limiter=gateway.RateLimiter(window=60, maximum=1000),
             fail2ban=cls.fail2ban,
         )
+        # A 2FA-jegyek életciklusa a HTTP-teszt naplójába írjon.
+        server.LOGIN_TICKETS.set_audit(cls.audit)
         cls.server = server.AppServer(("127.0.0.1", 0), cls.gw)
         import threading
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
@@ -2157,6 +3561,8 @@ class HttpTests(unittest.TestCase):
         cls.server.shutdown()
         cls.server.server_close()
         cls.thread.join(timeout=5)
+        server.LOGIN_TICKETS.revoke_all()
+        server.LOGIN_TICKETS.set_audit(None)
         gateway.CONNTRACK_BIN = cls._old_conntrack
         gateway.POW_DIFFICULTY = cls._old_difficulty
         gateway.PORTAL_URL = cls._old_portal_url
@@ -2308,6 +3714,29 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(headers["Content-Type"], "image/png")
         self.assertTrue(body.startswith(b"\x89PNG"))
 
+    def test_page_and_status_expose_version(self) -> None:
+        status, _, body = self.get("/")
+        self.assertEqual(status, 200)
+        self.assertIn(f"v{gateway.APP_VERSION}".encode(), body)
+        self.assertNotIn(b"__VERSION__", body)
+
+        # A nyilvános állapotvégpont a verziót is megadja.
+        status, _, body = self.get("/api/status")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            json.loads(body)["version"], gateway.APP_VERSION
+        )
+
+        # Bejelentkezve ugyanaz a verzió szerepel a válaszban.
+        status, headers, body = self.login("alice", "hosszu-jelszo-1")
+        self.assertEqual(status, 200, body)
+        cookie = self.cookie_from(headers)
+        status, _, body = self.get("/api/status", headers={"Cookie": cookie})
+        self.assertEqual(status, 200)
+        data = json.loads(body)
+        self.assertTrue(data["authenticated"])
+        self.assertEqual(data["version"], gateway.APP_VERSION)
+
     def test_unknown_api_is_404(self) -> None:
         status, _, body = self.get("/api/nincs")
         self.assertEqual(status, 404)
@@ -2360,7 +3789,9 @@ class HttpTests(unittest.TestCase):
         ):
             self.assertIn(line, script)
         # Az egyedi web szabály nem nyit host SSH-t.
-        self.assertFalse(any("host_ssh_v4" in line for line in script), script)
+        self.assertFalse(
+            any("allowed_input_tcp" in line for line in script), script
+        )
         self.assertFalse(
             any(". 53 " in line or ". 853 " in line for line in script), script
         )
@@ -2388,6 +3819,352 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertFalse(json.loads(body)["ok"])
         self.assertIn("munkamenet", json.loads(body)["error"])
+
+    def test_access_grant_of_host_rule_audits_direction(self) -> None:
+        self.rules.create("host-25566", {
+            "label": "mpwerks host", "direction": "input",
+            "tcp": [25566],
+            "default_ttl": 3600, "max_ttl": 3600,
+        })
+        self.users.add(
+            "host-audit-user", "hosszu-jelszo-3", rules=("host-25566",)
+        )
+        self.addCleanup(lambda: self.rules.delete("host-25566"))
+        self.addCleanup(lambda: self.users.remove("host-audit-user"))
+        self.addCleanup(
+            lambda: self.gw.sessions.revoke_user("host-audit-user")
+        )
+
+        started = time.time()
+        status, headers, _ = self.login(
+            "host-audit-user", "hosszu-jelszo-3"
+        )
+        self.assertEqual(status, 200)
+        cookie = self.cookie_from(headers)
+        status, _, body = self.access(cookie, "host-25566", 60)
+        self.assertEqual(status, 200)
+        data = json.loads(body)
+        self.assertEqual(data["grant"]["direction"], "input")
+
+        rows = [
+            row for row in audit_since(self.audit, started)
+            if row.get("event") == "access_granted"
+            and row.get("user") == "host-audit-user"
+        ]
+        self.assertEqual(len(rows), 1, rows)
+        self.assertEqual(rows[0]["direction"], "input")
+        self.assertEqual(rows[0]["rule"], "host-25566")
+        self.assertTrue(
+            any(
+                "add element inet hatarvedelem allowed_input_tcp "
+                "{ 127.0.0.1 . 25566 timeout 60s }" in line
+                for line in self.tools.script()
+            ),
+            self.tools.script(),
+        )
+
+    def test_access_multi_rule_union(self) -> None:
+        source = "127.0.0.41"
+        status, headers, body = self.login_from(
+            "alice", "hosszu-jelszo-1", source
+        )
+        self.assertEqual(status, 200, body)
+        cookie = self.cookie_from(headers)
+        started = time.time()
+        status, _, body = self.post_json(
+            "/api/access",
+            {
+                "rules": ["web-only", "icmp-only"],
+                "rule": "web-only",
+                "ttl": 60,
+            },
+            cookie=cookie,
+            source=source,
+        )
+        self.assertEqual(status, 200, body)
+        data = json.loads(body)
+        self.assertTrue(data["authorized"])
+        self.assertEqual(data["selected_rules"], ["web-only", "icmp-only"])
+        self.assertEqual(
+            data["selected_rule_labels"], ["Csak web", "Csak ping"]
+        )
+        # A régi mezők az első választást tükrözik.
+        self.assertEqual(data["rule"], "web-only")
+        self.assertEqual(data["rule_label"], "Csak web")
+        self.assertEqual(data["grant"]["tcp"], [80, 443])
+        self.assertTrue(data["grant"]["icmp"])
+        self.assertIn("(Csak web, Csak ping)", data["message"])
+        self.assertEqual(len(data["grants"]), 1)
+        grant = data["grants"][0]
+        self.assertEqual(grant["direction"], "forward")
+        self.assertEqual(grant["tcp"], [80, 443])
+        self.assertEqual(grant["udp"], [443])
+        self.assertTrue(grant["icmp"])
+        self.assertFalse(grant["full"])
+
+        script = self.tools.script()
+        for line in (
+            "add element inet hatarvedelem allowed_tcp "
+            "{ 127.0.0.41 . 80 timeout 60s }",
+            "add element inet hatarvedelem allowed_tcp "
+            "{ 127.0.0.41 . 443 timeout 60s }",
+            "add element inet hatarvedelem allowed_icmp "
+            "{ 127.0.0.41 timeout 60s }",
+        ):
+            self.assertIn(line, script)
+
+        rows = [
+            row for row in audit_since(self.audit, started)
+            if row.get("event") == "access_granted"
+            and row.get("user") == "alice"
+        ]
+        self.assertEqual(len(rows), 1, rows)
+        self.assertEqual(rows[0]["rules"], "web-only,icmp-only")
+        self.assertEqual(rows[0]["rule_labels"], "Csak web,Csak ping")
+        self.assertEqual(rows[0]["rule_count"], 2)
+        self.assertEqual(rows[0]["direction"], "forward")
+        self.assertEqual(rows[0]["tcp"], "80,443")
+        self.assertTrue(rows[0]["icmp"])
+        self.assertNotIn("removed_rules", rows[0])
+        self.addCleanup(self.gw.sessions.revoke_user, "alice")
+
+    def test_access_legacy_single_rule_still_works(self) -> None:
+        source = "127.0.0.42"
+        status, headers, body = self.login_from(
+            "alice", "hosszu-jelszo-1", source
+        )
+        self.assertEqual(status, 200, body)
+        cookie = self.cookie_from(headers)
+        status, _, body = self.access(
+            cookie, "web-only", 60, source=source
+        )
+        self.assertEqual(status, 200, body)
+        data = json.loads(body)
+        self.assertEqual(data["selected_rules"], ["web-only"])
+        self.assertEqual(data["selected_rule_labels"], ["Csak web"])
+        self.assertEqual(data["rule"], "web-only")
+        self.assertEqual(data["rule_label"], "Csak web")
+        self.assertEqual(data["grant"]["tcp"], [80, 443])
+        self.assertEqual(data["grant"]["udp"], [443])
+        self.assertEqual(len(data["grants"]), 1)
+        self.assertEqual(data["grants"][0]["direction"], "forward")
+        self.assertEqual(data["grants"][0]["tcp"], [80, 443])
+        self.assertEqual(data["grants"][0]["udp"], [443])
+        self.assertFalse(data["grants"][0]["icmp"])
+        self.addCleanup(self.gw.sessions.revoke_user, "alice")
+
+    def test_access_multi_rule_validation(self) -> None:
+        source = "127.0.0.43"
+        status, headers, body = self.login_from(
+            "alice", "hosszu-jelszo-1", source
+        )
+        self.assertEqual(status, 200, body)
+        cookie = self.cookie_from(headers)
+        started = time.time()
+        bad_requests = [
+            {"rules": [], "ttl": 60},
+            {"rules": "web-only", "ttl": 60},
+            {"rules": ["web-only", 5], "ttl": 60},
+            {"rules": ["web-only", ""], "ttl": 60},
+            {
+                "rules": [f"ismeretlen-{index}" for index in range(17)],
+                "ttl": 60,
+            },
+        ]
+        for payload in bad_requests:
+            status, _, body = self.post_json(
+                "/api/access", payload, cookie=cookie, source=source
+            )
+            self.assertEqual(status, 400, (payload, body))
+            self.assertFalse(json.loads(body)["ok"])
+
+        # Ismeretlen, de jól formált azonosító: egyik szabály sem jut be.
+        before_unknown = list(self.tools.lines())
+        status, _, body = self.post_json(
+            "/api/access",
+            {"rules": ["web-only", "nincs-ilyen"], "ttl": 60},
+            cookie=cookie,
+            source=source,
+        )
+        self.assertEqual(status, 400, body)
+        self.assertEqual(self.tools.lines(), before_unknown)
+        denied = [
+            row for row in audit_since(self.audit, started)
+            if row.get("event") == "access_denied"
+        ]
+        self.assertGreaterEqual(len(denied), len(bad_requests) + 1)
+
+        # Az ismétlődő azonosító nem számít bele a 16-os korlátba.
+        status, _, body = self.post_json(
+            "/api/access",
+            {"rules": ["web-only"] * 17, "ttl": 60},
+            cookie=cookie,
+            source=source,
+        )
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body)["selected_rules"], ["web-only"])
+        self.addCleanup(self.gw.sessions.revoke_user, "alice")
+
+    def test_access_multi_rule_modification_revokes_removed(self) -> None:
+        source = "127.0.0.44"
+        status, headers, body = self.login_from(
+            "alice", "hosszu-jelszo-1", source
+        )
+        self.assertEqual(status, 200, body)
+        cookie = self.cookie_from(headers)
+        status, _, body = self.access(
+            cookie, "web-only", 60, source=source
+        )
+        self.assertEqual(status, 200, body)
+        # Csak a módosítás tűzfal-hívásait vizsgáljuk.
+        self.tools.clear()
+        started = time.time()
+        status, _, body = self.post_json(
+            "/api/access", {"rules": ["icmp-only"], "ttl": 60},
+            cookie=cookie,
+            source=source,
+        )
+        self.assertEqual(status, 200, body)
+        data = json.loads(body)
+        self.assertEqual(data["selected_rules"], ["icmp-only"])
+        self.assertEqual(data["selected_rule_labels"], ["Csak ping"])
+        self.assertEqual(data["rule"], "icmp-only")
+        self.assertEqual(data["rule_label"], "Csak ping")
+        self.assertEqual(
+            [grant["direction"] for grant in data["grants"]], ["forward"]
+        )
+        self.assertTrue(data["grants"][0]["icmp"])
+
+        deletes = self.tools.deletes()
+        for line in (
+            "nft delete element inet hatarvedelem allowed_tcp "
+            "{ 127.0.0.44 . 80 }",
+            "nft delete element inet hatarvedelem allowed_tcp "
+            "{ 127.0.0.44 . 443 }",
+            "nft delete element inet hatarvedelem allowed_udp "
+            "{ 127.0.0.44 . 443 }",
+        ):
+            self.assertIn(line, deletes)
+        self.assertIn(
+            "add element inet hatarvedelem allowed_icmp "
+            "{ 127.0.0.44 timeout 60s }",
+            self.tools.script(),
+        )
+        self.assertFalse(
+            any(
+                "add element" in line and "allowed_tcp" in line
+                for line in self.tools.lines()
+            ),
+            self.tools.lines(),
+        )
+
+        rows = [
+            row for row in audit_since(self.audit, started)
+            if row.get("event") == "access_modified"
+            and row.get("user") == "alice"
+        ]
+        self.assertEqual(len(rows), 1, rows)
+        self.assertEqual(rows[0]["removed_rules"], "web-only")
+        self.assertEqual(rows[0]["rule_count"], 1)
+        self.assertEqual(rows[0]["rules"], "icmp-only")
+        self.assertEqual(rows[0]["rule_labels"], "Csak ping")
+        self.assertEqual(rows[0]["direction"], "forward")
+        self.assertEqual(rows[0]["tcp"], "")
+        self.assertTrue(rows[0]["icmp"])
+        self.addCleanup(self.gw.sessions.revoke_user, "alice")
+
+    def test_status_reports_multi_selection(self) -> None:
+        source = "127.0.0.45"
+        status, headers, body = self.login_from(
+            "alice", "hosszu-jelszo-1", source
+        )
+        self.assertEqual(status, 200, body)
+        login_data = json.loads(body)
+        self.assertFalse(login_data["authorized"])
+        self.assertNotIn("selected_rules", login_data)
+        cookie = self.cookie_from(headers)
+
+        status, _, body = self.get(
+            "/api/status", headers={"Cookie": cookie}, source=source
+        )
+        self.assertEqual(status, 200, body)
+        pending = json.loads(body)
+        self.assertFalse(pending["authorized"])
+        self.assertNotIn("selected_rules", pending)
+        self.assertNotIn("selected_rule_labels", pending)
+        self.assertNotIn("grants", pending)
+
+        status, _, body = self.post_json(
+            "/api/access",
+            {"rules": ["web-only", "icmp-only"], "ttl": 60},
+            cookie=cookie,
+            source=source,
+        )
+        self.assertEqual(status, 200, body)
+        status, _, body = self.get(
+            "/api/status", headers={"Cookie": cookie}, source=source
+        )
+        self.assertEqual(status, 200, body)
+        data = json.loads(body)
+        self.assertTrue(data["authorized"])
+        self.assertEqual(data["selected_rules"], ["web-only", "icmp-only"])
+        self.assertEqual(
+            data["selected_rule_labels"], ["Csak web", "Csak ping"]
+        )
+        self.assertEqual(data["rule"], "web-only")
+        self.assertEqual(data["rule_label"], "Csak web")
+        self.assertEqual(data["grant"]["tcp"], [80, 443])
+        self.assertEqual(len(data["grants"]), 1)
+        self.assertEqual(data["grants"][0]["direction"], "forward")
+        self.assertEqual(data["grants"][0]["tcp"], [80, 443])
+        self.assertTrue(data["grants"][0]["icmp"])
+        self.addCleanup(self.gw.sessions.revoke_user, "alice")
+
+    def test_admin_session_listing_shows_multi_selection(self) -> None:
+        source = "127.0.0.46"
+        admin_source = "127.0.0.47"
+        admin_name = "multi-admin"
+        self.users.add(
+            admin_name, "multi-admin-jelszo-1",
+            role=gateway.ROLE_ADMIN, rules=("web-only",),
+        )
+        self.addCleanup(self.users.remove, admin_name)
+        self.addCleanup(self.gw.sessions.revoke_user, admin_name)
+
+        status, headers, body = self.login_from(
+            "alice", "hosszu-jelszo-1", source
+        )
+        self.assertEqual(status, 200, body)
+        cookie = self.cookie_from(headers)
+        status, _, body = self.post_json(
+            "/api/access",
+            {"rules": ["web-only", "icmp-only"], "ttl": 60},
+            cookie=cookie,
+            source=source,
+        )
+        self.assertEqual(status, 200, body)
+
+        status, admin_headers, body = self.login_from(
+            admin_name, "multi-admin-jelszo-1", admin_source
+        )
+        self.assertEqual(status, 200, body)
+        admin_cookie = self.cookie_from(admin_headers)
+        status, _, body = self.get(
+            "/api/admin/sessions",
+            headers={"Cookie": admin_cookie},
+            source=admin_source,
+        )
+        self.assertEqual(status, 200, body)
+        rows = json.loads(body)["sessions"]
+        row = next(
+            item for item in rows
+            if item["user"] == "alice" and item["ip"] == source
+        )
+        self.assertEqual(row["selected_rules"], ["web-only", "icmp-only"])
+        self.assertEqual(
+            row["selected_rule_labels"], ["Csak web", "Csak ping"]
+        )
+        self.addCleanup(self.gw.sessions.revoke_user, "alice")
 
     def test_access_validation(self) -> None:
         status, headers, _ = self.login("alice", "hosszu-jelszo-1")
@@ -3042,6 +4819,366 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(rows[0]["count"], 1)
         self.assertEqual(rows[0]["user"], "bob")
 
+    def test_totp_ticket_issued_is_audited_without_secrets(self) -> None:
+        self.require_totp("alice")
+        source = "127.0.0.60"
+        started = time.time()
+        status, headers, body = self.login_from(
+            "alice", "hosszu-jelszo-1", source
+        )
+        self.assertEqual(status, 200, body)
+        offer = json.loads(body)
+        self.assertTrue(offer["totp_enroll_required"])
+        self.assertNotIn("Set-Cookie", headers)
+        rows = audit_since(self.audit, started)
+        issued = [
+            row for row in rows if row.get("event") == "totp_ticket_issued"
+        ]
+        self.assertEqual(len(issued), 1, rows)
+        row = issued[0]
+        self.assertEqual(row["user"], "alice")
+        self.assertEqual(row["purpose"], "enroll")
+        self.assertTrue(row["secret_generated"])
+        self.assertEqual(row["ttl"], server.LOGIN_TICKETS.ttl)
+        self.assertEqual(
+            row["ticket_hash"],
+            hashlib.sha256(offer["ticket"].encode("utf-8")).hexdigest()[:12],
+        )
+        self.assertEqual(row["severity"], "info")
+        dump = json.dumps(rows, ensure_ascii=False)
+        self.assertNotIn(offer["ticket"], dump)
+        self.assertNotIn(offer["secret"], dump)
+        self.assertNotIn("otpauth", dump.lower())
+
+    def test_totp_verify_ticket_issued_is_audited(self) -> None:
+        self.require_totp("alice")
+        source = "127.0.0.61"
+        self.enroll_totp("alice", "hosszu-jelszo-1", source)
+        started = time.time()
+        status, headers, body = self.login_from(
+            "alice", "hosszu-jelszo-1", source
+        )
+        self.assertEqual(status, 200, body)
+        offer = json.loads(body)
+        self.assertEqual(offer["mode"], "verify")
+        self.assertNotIn("Set-Cookie", headers)
+        rows = audit_since(self.audit, started)
+        issued = [
+            row for row in rows if row.get("event") == "totp_ticket_issued"
+        ]
+        self.assertEqual(len(issued), 1, rows)
+        row = issued[0]
+        self.assertEqual(row["user"], "alice")
+        self.assertEqual(row["purpose"], "verify")
+        self.assertNotIn("secret_generated", row)
+        self.assertEqual(
+            row["ticket_hash"],
+            hashlib.sha256(offer["ticket"].encode("utf-8")).hexdigest()[:12],
+        )
+        self.assertNotIn(offer["ticket"], json.dumps(rows, ensure_ascii=False))
+
+    def test_totp_failures_and_lock_are_audited(self) -> None:
+        self.require_totp("alice")
+        source = "127.0.0.62"
+        store = server.LoginTicketStore(max_attempts=3)
+        store.set_audit(self.audit)
+        with mock.patch.object(server, "LOGIN_TICKETS", store):
+            with mock.patch.object(
+                self.gw.fail2ban, "record_failure", return_value=None
+            ):
+                secret, _, _, _ = self.enroll_totp(
+                    "alice", "hosszu-jelszo-1", source
+                )
+                status, _, body = self.login_from(
+                    "alice", "hosszu-jelszo-1", source
+                )
+                self.assertEqual(status, 200, body)
+                ticket = json.loads(body)["ticket"]
+                started = time.time()
+                wrong = wrong_totp_code(secret)
+                for remaining in (2, 1, 0):
+                    status, headers, body = self.post_json(
+                        "/api/login/totp",
+                        {"ticket": ticket, "code": wrong},
+                        source=source,
+                    )
+                    self.assertEqual(status, 403, body)
+                    self.assertEqual(json.loads(body)["remaining"], remaining)
+                    self.assertNotIn("Set-Cookie", headers)
+
+        rows = audit_since(self.audit, started)
+        failed = [
+            row for row in rows if row.get("event") == "totp_failed"
+        ]
+        self.assertEqual(len(failed), 3, rows)
+        chronological = list(reversed(failed))
+        self.assertEqual(
+            [row["remaining"] for row in chronological], [2, 1, 0]
+        )
+        self.assertEqual(
+            [row["attempts"] for row in chronological], [1, 2, 3]
+        )
+        self.assertEqual(
+            [row["severity"] for row in chronological], ["warn", "warn", "alert"]
+        )
+        expected_hash = hashlib.sha256(
+            ticket.encode("utf-8")
+        ).hexdigest()[:12]
+        for row in failed:
+            self.assertEqual(row["user"], "alice")
+            self.assertEqual(row["method"], "totp")
+            self.assertEqual(row["purpose"], "verify")
+            self.assertEqual(row["ticket_hash"], expected_hash)
+            self.assertFalse(row["banned"])
+        locked = [
+            row for row in rows if row.get("event") == "totp_ticket_locked"
+        ]
+        self.assertEqual(len(locked), 1, rows)
+        self.assertEqual(locked[0]["attempts"], 3)
+        self.assertEqual(locked[0]["reason"], "too_many_attempts")
+        self.assertEqual(locked[0]["ticket_hash"], expected_hash)
+        self.assertEqual(locked[0]["severity"], "alert")
+        self.assertNotIn(wrong, json.dumps(rows, ensure_ascii=False))
+        self.assertNotIn(ticket, json.dumps(rows, ensure_ascii=False))
+
+    def test_totp_ticket_rejection_reasons_are_audited(self) -> None:
+        self.require_totp("alice")
+        source = "127.0.0.63"
+        other = "127.0.0.64"
+        clock = [time.time()]
+        store = server.LoginTicketStore(clock=lambda: clock[0])
+        store.set_audit(self.audit)
+        unknown = "soha-nem-letezo-jegy"
+        with mock.patch.object(server, "LOGIN_TICKETS", store):
+            secret, _, _, _ = self.enroll_totp(
+                "alice", "hosszu-jelszo-1", source
+            )
+            started = time.time()
+
+            # Hiányzó jelszó utáni jegy/kód: bad_request.
+            status, _, _ = self.post_json(
+                "/api/login/totp", {}, source=source
+            )
+            self.assertEqual(status, 400)
+
+            # Ismeretlen jegy: unknown.
+            status, _, _ = self.post_json(
+                "/api/login/totp",
+                {"ticket": unknown, "code": "123456"},
+                source=source,
+            )
+            self.assertEqual(status, 403)
+
+            status, _, body = self.login_from(
+                "alice", "hosszu-jelszo-1", source
+            )
+            self.assertEqual(status, 200, body)
+            ticket = json.loads(body)["ticket"]
+
+            # Jó jegy, rossz végpont: wrong_purpose.
+            status, _, _ = self.post_json(
+                "/api/login/totp/enroll",
+                {"ticket": ticket, "code": "123456"},
+                source=source,
+            )
+            self.assertEqual(status, 403)
+
+            # Jó jegy, idegen forrás-IP: ip_mismatch.
+            status, _, _ = self.post_json(
+                "/api/login/totp",
+                {"ticket": ticket, "code": "123456"},
+                source=other,
+            )
+            self.assertEqual(status, 403)
+
+            # Sikeres felhasználás, majd ugyanaz a jegy: already_consumed.
+            code = fresh_totp_code(
+                secret,
+                after_step=self.users.record("alice").totp_last_step,
+            )
+            status, _, body = self.post_json(
+                "/api/login/totp",
+                {"ticket": ticket, "code": code},
+                source=source,
+            )
+            self.assertEqual(status, 200, body)
+            status, _, _ = self.post_json(
+                "/api/login/totp",
+                {"ticket": ticket, "code": code},
+                source=source,
+            )
+            self.assertEqual(status, 403)
+
+            # Lejárt jegy: expired (és közben totp_ticket_expired is).
+            status, _, body = self.login_from(
+                "alice", "hosszu-jelszo-1", source
+            )
+            self.assertEqual(status, 200, body)
+            expired = json.loads(body)["ticket"]
+            clock[0] += store.ttl + 1
+            status, _, _ = self.post_json(
+                "/api/login/totp",
+                {"ticket": expired, "code": "123456"},
+                source=source,
+            )
+            self.assertEqual(status, 403)
+
+        rows = audit_since(self.audit, started)
+        rejected = [
+            row for row in rows
+            if row.get("event") == "totp_ticket_rejected"
+        ]
+        reasons = [row["reason"] for row in reversed(rejected)]
+        self.assertEqual(
+            reasons,
+            [
+                "bad_request", "unknown", "wrong_purpose",
+                "ip_mismatch", "already_consumed", "expired",
+            ],
+            rows,
+        )
+        for row in rejected:
+            self.assertEqual(row["purpose"], "verify")
+        by_reason = {row["reason"]: row for row in rejected}
+        self.assertNotIn("ticket_hash", by_reason["bad_request"])
+        self.assertEqual(
+            by_reason["unknown"]["ticket_hash"],
+            hashlib.sha256(unknown.encode("utf-8")).hexdigest()[:12],
+        )
+        self.assertEqual(by_reason["wrong_purpose"]["user"], "alice")
+        self.assertNotIn("user", by_reason["ip_mismatch"])
+        dump = json.dumps(rows, ensure_ascii=False)
+        for token in (unknown, ticket, expired):
+            self.assertNotIn(token, dump)
+        self.assertTrue(
+            any(
+                row.get("event") == "totp_ticket_expired"
+                and row.get("ticket_hash")
+                == hashlib.sha256(expired.encode("utf-8")).hexdigest()[:12]
+                for row in rows
+            ),
+            rows,
+        )
+
+    def test_totp_enrollment_audit_has_no_material(self) -> None:
+        self.require_totp("alice")
+        source = "127.0.0.65"
+        started = time.time()
+        secret, ticket, _, data = self.enroll_totp(
+            "alice", "hosszu-jelszo-1", source
+        )
+        rows = audit_since(self.audit, started)
+        issued = [
+            row for row in rows
+            if row.get("event") == "totp_ticket_issued"
+        ]
+        self.assertEqual(len(issued), 1, rows)
+        self.assertEqual(issued[0]["purpose"], "enroll")
+        self.assertTrue(issued[0]["secret_generated"])
+        self.assertEqual(
+            issued[0]["ticket_hash"],
+            hashlib.sha256(ticket.encode("utf-8")).hexdigest()[:12],
+        )
+        enrolled = [
+            row for row in rows if row.get("event") == "totp_enrolled"
+        ]
+        self.assertEqual(len(enrolled), 1, rows)
+        self.assertEqual(enrolled[0]["user"], "alice")
+        self.assertEqual(enrolled[0]["target"], "alice")
+        self.assertEqual(enrolled[0]["recovery_codes"], 10)
+        dump = json.dumps(rows, ensure_ascii=False)
+        self.assertNotIn(secret, dump)
+        self.assertNotIn(ticket, dump)
+        self.assertNotIn("otpauth", dump.lower())
+        for code in data["recovery_codes"]:
+            self.assertNotIn(code, dump)
+            self.assertNotIn(
+                gateway.hash_recovery_code(code), dump
+            )
+
+    def test_session_replacement_and_revocation_are_audited(self) -> None:
+        source = "127.0.0.66"
+        started = time.time()
+        status, headers, body = self.login_from(
+            "alice", "hosszu-jelszo-1", source
+        )
+        self.assertEqual(status, 200, body)
+        first_cookie = self.cookie_from(headers)
+        status, _, body = self.access(
+            first_cookie, "web-only", 60, source=source
+        )
+        self.assertEqual(status, 200, body)
+
+        status, _, body = self.login_from(
+            "alice", "hosszu-jelszo-1", source
+        )
+        self.assertEqual(status, 200, body)
+        rows = audit_since(self.audit, started)
+        replaced = [
+            row for row in rows if row.get("event") == "session_replaced"
+        ]
+        self.assertEqual(len(replaced), 1, rows)
+        row = replaced[0]
+        self.assertEqual(row["old_user"], "alice")
+        self.assertEqual(row["new_user"], "alice")
+        self.assertEqual(row["ip"], source)
+        self.assertTrue(row["old_authorized"])
+        self.assertEqual(row["old_rule"], "web-only")
+        self.assertEqual(row["reason"], "new_login_same_ip")
+        revoked = [
+            row for row in rows if row.get("event") == "access_revoked"
+        ]
+        self.assertEqual(len(revoked), 1, rows)
+        token = first_cookie.split("=", 1)[1]
+        self.assertNotIn(token, json.dumps(rows, ensure_ascii=False))
+
+    def test_auto_ban_is_audited_without_password(self) -> None:
+        source = "127.0.0.67"
+        drops = gateway.droplog.DropLogService(
+            os.path.join(self.tmp.name, "auto-ban-drops.jsonl"),
+            enabled=False, logger=lambda *_: None,
+        )
+        original_drops = self.gw.drops
+        self.gw.drops = drops
+        self.addCleanup(setattr, self.gw, "drops", original_drops)
+        self.gw.fail2ban = fail2ban_mod.Fail2ban(
+            self.fw,
+            path=os.path.join(self.tmp.name, "auto-ban.json"),
+            audit=self.audit,
+            logger=lambda *_: None,
+            enabled=True,
+            max_attempts=1,
+            window_seconds=600,
+            ban_seconds=600,
+            drop_enabled=False,
+            on_ban=lambda record: self.gw._on_fail2ban_ban(record),
+        )
+        self.addCleanup(self.reset_fail2ban)
+        password = "auto-ban-titkos-jelszo-9"
+        started = time.time()
+        status, headers, body = self.login_from("alice", password, source)
+        self.assertEqual(status, 403, body)
+        self.assertNotIn("Set-Cookie", headers)
+        rows = audit_since(self.audit, started)
+        bans = [
+            row for row in rows if row.get("event") == "fail2ban_ban"
+        ]
+        self.assertEqual(len(bans), 1, rows)
+        row = bans[0]
+        self.assertEqual(row["ip"], source)
+        self.assertEqual(row["user"], "alice")
+        self.assertFalse(row["manual"])
+        self.assertEqual(row["source"], "login")
+        self.assertEqual(row["attempts"], 1)
+        self.assertGreater(row["until"], time.time())
+        self.assertEqual(row["severity"], "alert")
+        dump = json.dumps(rows, ensure_ascii=False)
+        self.assertNotIn(password, dump)
+        self.assertFalse(
+            any("password" in key.lower() for key in row for row in rows),
+            rows,
+        )
+
     def test_totp_static_markup_present(self) -> None:
         status, _, body = self.get("/")
         self.assertEqual(status, 200)
@@ -3119,6 +5256,7 @@ class RegistrationHttpTests(unittest.TestCase):
             rate_limiter=gateway.RateLimiter(window=60, maximum=1000),
             fail2ban=self.fail2ban,
         )
+        server.LOGIN_TICKETS.set_audit(self.audit)
         self.server = server.AppServer(("127.0.0.1", 0), self.gw)
         self.thread = threading.Thread(
             target=self.server.serve_forever, daemon=True
@@ -3130,6 +5268,8 @@ class RegistrationHttpTests(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=5)
+        server.LOGIN_TICKETS.revoke_all()
+        server.LOGIN_TICKETS.set_audit(None)
         for name, value in self._globals:
             setattr(gateway, name, value)
         self.tmp.cleanup()
@@ -3521,11 +5661,11 @@ class RuleGroupStoreTests(unittest.TestCase):
         self.assertEqual(updated.tcp, (53, 80, 443))
         self.assertEqual(updated.udp, (53, 443))
         with self.assertRaises(gateway.RuleStoreError):
-            self.rules.create(gateway.ADMIN_RULE_ID, {"tcp": [80]})
+            self.rules.create(gateway.LEGACY_ADMIN_RULE_ID, {"tcp": [80]})
         with self.assertRaises(gateway.RuleStoreError):
-            self.rules.update(gateway.ADMIN_RULE_ID, {"tcp": [80]})
+            self.rules.update(gateway.LEGACY_ADMIN_RULE_ID, {"tcp": [80]})
         with self.assertRaises(gateway.RuleStoreError):
-            self.rules.delete(gateway.ADMIN_RULE_ID)
+            self.rules.delete(gateway.LEGACY_ADMIN_RULE_ID)
         self.rules.delete("web-only")
         self.assertIsNone(self.rules.get("web-only"))
 
@@ -3535,9 +5675,8 @@ class RuleGroupStoreTests(unittest.TestCase):
             json.dump({"rules": {}}, fh)
         store = gateway.RuleStore(path, catalog=CATALOG, logger=lambda *_: None)
         self.assertEqual(store.persisted_rules(), [])
-        self.assertEqual(
-            [rule.id for rule in store.all_rules()], [gateway.ADMIN_RULE_ID]
-        )
+        self.assertEqual(store.all_rules(), [])
+        self.assertIsNone(store.get(gateway.LEGACY_ADMIN_RULE_ID))
 
     def test_legacy_services_are_migrated_with_backup(self) -> None:
         path = os.path.join(self.tmp.name, "legacy-rules.json")
@@ -3548,7 +5687,7 @@ class RuleGroupStoreTests(unittest.TestCase):
                         "label": "Csak web", "services": ["web"],
                         "default_ttl": 60, "max_ttl": 600,
                     },
-                    "admin-full": {"services": ["all"]},
+                    gateway.LEGACY_ADMIN_RULE_ID: {"services": ["all"]},
                 }
             }, fh)
         store = gateway.RuleStore(path, catalog=CATALOG, logger=lambda *_: None)
@@ -3557,18 +5696,255 @@ class RuleGroupStoreTests(unittest.TestCase):
         self.assertEqual(rule.tcp, (80, 443))
         self.assertEqual(rule.udp, (443,))
         self.assertFalse(rule.full)
+        self.assertIsNone(store.get(gateway.LEGACY_ADMIN_RULE_ID))
         with open(path, encoding="utf-8") as fh:
-            stored = json.load(fh)["rules"]["web-only"]
-        self.assertEqual(stored["tcp"], [80, 443])
-        self.assertEqual(stored["udp"], [443])
-        self.assertNotIn("services", stored)
+            stored_rules = json.load(fh)["rules"]
+        self.assertNotIn(gateway.LEGACY_ADMIN_RULE_ID, stored_rules)
+        self.assertEqual(stored_rules["web-only"]["tcp"], [80, 443])
+        self.assertEqual(stored_rules["web-only"]["udp"], [443])
+        self.assertNotIn("services", stored_rules["web-only"])
         backups = list(Path(self.tmp.name).glob(
-            "legacy-rules.json.services-backup-*"
+            "legacy-rules.json.admin-full-backup-*"
         ))
         self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
         with open(backups[0], encoding="utf-8") as fh:
-            legacy = json.load(fh)["rules"]["web-only"]
-        self.assertEqual(legacy["services"], ["web"])
+            legacy = json.load(fh)["rules"]
+        self.assertEqual(legacy["web-only"]["services"], ["web"])
+        self.assertIn(gateway.LEGACY_ADMIN_RULE_ID, legacy)
+
+    def test_legacy_admin_full_only_file_becomes_empty_without_reseed(self) -> None:
+        path = os.path.join(self.tmp.name, "legacy-admin-only.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({
+                "rules": {
+                    gateway.LEGACY_ADMIN_RULE_ID: {"services": ["all"]},
+                }
+            }, fh)
+        store = gateway.RuleStore(path, catalog=CATALOG, logger=lambda *_: None)
+        self.assertEqual(store.persisted_rules(), [])
+        self.assertEqual(store.all_rules(), [])
+        with open(path, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["rules"], {})
+        backups = list(Path(self.tmp.name).glob(
+            "legacy-admin-only.json.admin-full-backup-*"
+        ))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
+
+    def test_whitespace_legacy_rule_ids_are_normalized_and_removed(self) -> None:
+        path = os.path.join(self.tmp.name, "whitespace-legacy.json")
+        base = {"default_ttl": 60, "max_ttl": 600, "created": 1}
+        variants = {
+            "admin-full ": {
+                "label": "Trailing", "direction": "input",
+                "tcp": [22], **base,
+            },
+            " admin-full": {
+                "label": "Leading", "direction": "input",
+                "tcp": [22], **base,
+            },
+            "admin-full\t": {
+                "label": "Tab", "direction": "input",
+                "tcp": [22], **base,
+            },
+        }
+        raw = dict(variants)
+        raw["web-only"] = {"label": "Web", "tcp": [80], **base}
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"rules": raw}, fh)
+
+        store = gateway.RuleStore(
+            path, catalog=CATALOG, logger=lambda *_: None
+        )
+        legacy = gateway.LEGACY_ADMIN_RULE_ID
+        self.assertIsNone(store.get(legacy))
+        for collection in (store.persisted_rules(), store.all_rules()):
+            self.assertNotIn(legacy, [rule.id for rule in collection])
+        self.users.add("legacy", "hosszu-jelszo-1")
+        self.assertNotIn(
+            legacy,
+            [
+                rule.id
+                for rule in store.effective_for(
+                    self.users.record("legacy"), []
+                )
+            ],
+        )
+        self.assertEqual(
+            [rule.id for rule in store.persisted_rules()], ["web-only"]
+        )
+
+        # A tisztított fájlból a whitespace-es változatok is eltűntek.
+        with open(path, encoding="utf-8") as fh:
+            stored = json.load(fh)["rules"]
+        self.assertEqual(set(stored), {"web-only"})
+        for key in variants:
+            self.assertNotIn(key, stored)
+        backups = list(Path(self.tmp.name).glob(
+            "whitespace-legacy.json.admin-full-backup-*"
+        ))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
+        with open(backups[0], encoding="utf-8") as fh:
+            backup = json.load(fh)["rules"]
+        for key in variants:
+            self.assertIn(key, backup)
+
+    def test_whitespace_legacy_only_file_becomes_empty_without_reseed(self) -> None:
+        path = os.path.join(self.tmp.name, "whitespace-legacy-only.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({
+                "rules": {
+                    "admin-full\t": {
+                        "label": "Legacy", "direction": "input",
+                        "tcp": [22], "default_ttl": 60, "max_ttl": 600,
+                    },
+                }
+            }, fh)
+        store = gateway.RuleStore(
+            path, catalog=CATALOG, logger=lambda *_: None
+        )
+        self.assertEqual(store.persisted_rules(), [])
+        self.assertEqual(store.all_rules(), [])
+        with open(path, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["rules"], {})
+        backups = list(Path(self.tmp.name).glob(
+            "whitespace-legacy-only.json.admin-full-backup-*"
+        ))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].stat().st_mode & 0o777, 0o600)
+
+    def test_normalized_duplicate_id_is_a_parse_error_and_keeps_first(self) -> None:
+        path = os.path.join(self.tmp.name, "duplicate-normalized.json")
+        base = {"default_ttl": 60, "max_ttl": 600, "created": 1}
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({
+                "rules": {
+                    gateway.LEGACY_ADMIN_RULE_ID: {"services": ["all"]},
+                    "dup": {"label": "First", "tcp": [80], **base},
+                    " dup ": {"label": "Second", "tcp": [443], **base},
+                }
+            }, fh)
+        logs: list[str] = []
+        store = gateway.RuleStore(path, catalog=CATALOG, logger=logs.append)
+        # Az első érvényes bejegyzés marad; a második nem írja felül.
+        self.assertEqual(store.get("dup").tcp, (80,))
+        self.assertEqual(
+            [rule.id for rule in store.persisted_rules()], ["dup"]
+        )
+        self.assertTrue(
+            any("ismétlődő szabály-azonosító" in line for line in logs),
+            logs,
+        )
+        # A normalizálási ütközés parse hibának számít: nincs átírás és
+        # nincs biztonsági másolat, a fájl nyers tartalma megmarad.
+        with open(path, encoding="utf-8") as fh:
+            raw = json.load(fh)["rules"]
+        self.assertIn(gateway.LEGACY_ADMIN_RULE_ID, raw)
+        self.assertIn("dup", raw)
+        self.assertIn(" dup ", raw)
+        self.assertFalse(list(Path(self.tmp.name).glob(
+            "duplicate-normalized.json.admin-full-backup-*"
+        )))
+        self.assertTrue(
+            any("nem írom át" in line for line in logs), logs
+        )
+
+    def test_legacy_admin_id_is_filtered_from_user_and_group_rules(self) -> None:
+        self.users.add("alice", "hosszu-jelszo-1", rules=("browse",))
+        self.groups.create("staff", {
+            "label": "Staff", "rules": ["browse"], "members": ["alice"],
+        })
+        # Régi fájlokban még szerepelhet a fenntartott azonosító. A betöltés
+        # kiszűri, a meglévő többi szabály és a rules_set jelző megmarad.
+        with open(self.users.path, encoding="utf-8") as fh:
+            users_raw = json.load(fh)
+        users_raw["alice"]["rules"].append(gateway.LEGACY_ADMIN_RULE_ID)
+        with open(self.users.path, "w", encoding="utf-8") as fh:
+            json.dump(users_raw, fh)
+        with open(self.groups.path, encoding="utf-8") as fh:
+            groups_raw = json.load(fh)
+        groups_raw["groups"]["staff"]["rules"].append(
+            gateway.LEGACY_ADMIN_RULE_ID
+        )
+        with open(self.groups.path, "w", encoding="utf-8") as fh:
+            json.dump(groups_raw, fh)
+
+        record = self.users.record("alice")
+        self.assertEqual(record.rules, ("browse",))
+        self.assertTrue(record.rules_set)
+        group = gateway.GroupStore(
+            self.groups.path, logger=lambda *_: None
+        ).get("staff")
+        self.assertEqual(group.rules, ("browse",))
+        # A szerkesztés nem akad el a kiszűrt azonosítón.
+        self.users.set_metadata("alice", rules=("browse",))
+        self.groups.update("staff", {
+            "label": "Staff", "rules": ["browse"], "members": ["alice"],
+        })
+        self.assertNotIn(
+            gateway.LEGACY_ADMIN_RULE_ID,
+            self.users.record("alice").rules,
+        )
+        self.assertNotIn(
+            gateway.LEGACY_ADMIN_RULE_ID,
+            self.groups.get("staff").rules,
+        )
+
+    def test_whitespace_legacy_id_is_filtered_from_assignments(self) -> None:
+        """A users.json/groups.json whitespace-es változata is kiszűrve."""
+        self.users.add("alice", "hosszu-jelszo-1", rules=("browse",))
+        self.groups.create("staff", {
+            "label": "Staff", "rules": ["browse"], "members": ["alice"],
+        })
+        with open(self.users.path, encoding="utf-8") as fh:
+            users_raw = json.load(fh)
+        users_raw["alice"]["rules"].append("admin-full ")
+        with open(self.users.path, "w", encoding="utf-8") as fh:
+            json.dump(users_raw, fh)
+        with open(self.groups.path, encoding="utf-8") as fh:
+            groups_raw = json.load(fh)
+        groups_raw["groups"]["staff"]["rules"].append(" admin-full\t")
+        with open(self.groups.path, "w", encoding="utf-8") as fh:
+            json.dump(groups_raw, fh)
+
+        record = gateway.UserStore(
+            self.users.path, iterations=10_000
+        ).record("alice")
+        self.assertEqual(record.rules, ("browse",))
+        self.assertTrue(record.rules_set)
+        group = gateway.GroupStore(
+            self.groups.path, logger=lambda *_: None
+        ).get("staff")
+        self.assertEqual(group.rules, ("browse",))
+
+    def test_legacy_admin_rule_is_reserved_and_invisible(self) -> None:
+        legacy = gateway.LEGACY_ADMIN_RULE_ID
+        self.assertIsNone(self.rules.get(legacy))
+        self.assertNotIn(
+            legacy, [rule.id for rule in self.rules.persisted_rules()]
+        )
+        self.assertNotIn(legacy, [rule.id for rule in self.rules.all_rules()])
+        for action in (
+            lambda: self.rules.create(legacy, {"tcp": [80]}),
+            lambda: self.rules.update(legacy, {"tcp": [80]}),
+            lambda: self.rules.delete(legacy),
+            lambda: self.rules.duplicate(legacy),
+            lambda: self.rules.create("tag", {
+                "collection": True, "members": [legacy],
+            }),
+        ):
+            with self.assertRaises(gateway.RuleStoreError) as caught:
+                action()
+            self.assertIn("fenntartott", str(caught.exception))
+            self.assertNotIn("beépített", str(caught.exception))
+        # Admin sem kap automatikus szabályt.
+        self.users.add("root", "hosszu-jelszo-1", role=gateway.ROLE_ADMIN)
+        root = self.users.record("root")
+        self.assertEqual(self.rules.effective_for(root, []), [])
+        self.assertEqual(root.rules, ())
+        self.assertFalse(root.rules_set)
 
     def test_legacy_migration_is_skipped_on_parse_error(self) -> None:
         path = os.path.join(self.tmp.name, "broken-legacy.json")
@@ -3640,7 +6016,15 @@ class RuleGroupStoreTests(unittest.TestCase):
             ["browse", "dns-only"],
         )
         root_rules = [rule.id for rule in self.rules.effective_for(root, [])]
-        self.assertEqual(root_rules, [gateway.ADMIN_RULE_ID])
+        # Az admin sem kap automatikus hozzáférést: csak a kifejezetten
+        # kiosztott szabályok érvényesek.
+        self.assertEqual(root_rules, [])
+        self.users.set_metadata("root", rules=("browse",))
+        root = self.users.record("root")
+        self.assertEqual(
+            [rule.id for rule in self.rules.effective_for(root, [])],
+            ["browse"],
+        )
         with self.assertRaises(gateway.AccessError):
             self.rules.resolve_for(empty, [], "browse")
         self.assertEqual(
@@ -3654,6 +6038,138 @@ class RuleGroupStoreTests(unittest.TestCase):
         )
         self.groups.remove_rule_everywhere("dns-only")
         self.assertEqual(self.groups.get("staff").rules, ())
+
+    def test_legacy_fallback_is_forward_only(self) -> None:
+        """Kiosztás nélküli régi fiók nem örökölhet host (input) szabályt."""
+        self.rules.create("host-ssh", {
+            "label": "Host SSH", "direction": "input", "tcp": [22],
+            "default_ttl": 60, "max_ttl": 600,
+        })
+        self.rules.create("forward-web", {"label": "Web", "tcp": [80]})
+        self.rules.create("forward-full", {"label": "Full", "full": True})
+        self.rules.create("mixed-col", {
+            "label": "Mixed", "collection": True,
+            "members": ["forward-web", "host-ssh"],
+        })
+        self.rules.create("input-col", {
+            "label": "Only input", "collection": True,
+            "members": ["host-ssh"],
+        })
+        # Régi fiók: a users.json-ban nincs rules kulcs.
+        self.users.add("legacy", "hosszu-jelszo-1")
+        legacy = self.users.record("legacy")
+        self.assertEqual(legacy.rules, ())
+        self.assertFalse(legacy.rules_set)
+
+        effective = self.rules.effective_for(legacy, [])
+        ids = [rule.id for rule in effective]
+        # Az ordinary forward szabályok (a forward full is) megmaradnak.
+        self.assertIn("forward-web", ids)
+        self.assertIn("forward-full", ids)
+        # Az input szabály és a input tagot tartalmazó gyűjtők kimaradnak.
+        self.assertNotIn("host-ssh", ids)
+        self.assertNotIn("mixed-col", ids)
+        self.assertNotIn("input-col", ids)
+        self.assertFalse(
+            any(
+                part.direction == "input"
+                for rule in effective
+                for part in rule.grants
+            )
+        )
+
+        # A host szabály a fallbacken keresztül nem kérhető/engedélyezhető.
+        for rule_id in ("host-ssh", "mixed-col", "input-col"):
+            with self.subTest(rule_id=rule_id):
+                with self.assertRaises(gateway.AccessError):
+                    self.rules.resolve_for(legacy, [], rule_id)
+
+        # Az effektív szabályokból képzett tűzfalelemek között nincs
+        # (IP, 22) input pár.
+        address = "192.168.50.20"
+        firewall = gateway.Firewall(dry_run=True, logger=lambda *_: None)
+        elements = [
+            element
+            for rule in effective
+            for element in firewall._elements(address, rule.ports)
+        ]
+        self.assertNotIn(
+            (firewall.input_tcp_set, f"{address} . 22"), elements
+        )
+        self.assertFalse(
+            any(
+                set_name == firewall.input_tcp_set
+                for set_name, _element in elements
+            ),
+            elements,
+        )
+
+        # Kifejezett kiosztással viszont választható és (IP, 22)-t ad.
+        self.users.set_metadata("legacy", rules=("host-ssh",))
+        assigned = self.users.record("legacy")
+        self.assertTrue(assigned.rules_set)
+        self.assertEqual(
+            [rule.id for rule in self.rules.effective_for(assigned, [])],
+            ["host-ssh"],
+        )
+        resolved = self.rules.resolve_for(assigned, [], "host-ssh")
+        self.assertEqual(
+            firewall._elements(address, resolved.ports),
+            [(firewall.input_tcp_set, f"{address} . 22")],
+        )
+
+        class _RecordingFirewall:
+            def __init__(self) -> None:
+                self.granted: list[tuple] = []
+
+            def revoke_all(self, ip: str, grants=()) -> None:
+                pass
+
+            def grant_all(self, ip, grants, ttl) -> None:
+                self.granted.append((ip, tuple(grants), ttl))
+
+        manager = gateway.SessionManager(
+            _RecordingFirewall(), ttl=600, pending_ttl=60
+        )
+        session = manager.login("legacy", address)
+        authorized = manager.authorize(
+            session.token, address, resolved, resolved.max_ttl
+        )
+        self.assertEqual(authorized.grant_parts, resolved.grants)
+        self.assertEqual(
+            resolved.grants,
+            (gateway.Ports((22,), (), False, False, "input"),),
+        )
+        self.assertEqual(
+            firewall._elements(address, authorized.grant_parts[0]),
+            [(firewall.input_tcp_set, f"{address} . 22")],
+        )
+
+        # Csoporton keresztüli kifejezett kiosztás is működik.
+        self.users.set_metadata("legacy", rules=())
+        group = self.groups.create("ssh-staff", {
+            "label": "SSH", "rules": ["host-ssh"], "members": ["legacy"],
+        })
+        grouped = self.users.record("legacy")
+        self.assertEqual(
+            [
+                rule.id
+                for rule in self.rules.effective_for(grouped, [group])
+            ],
+            ["host-ssh"],
+        )
+        self.assertEqual(
+            self.rules.resolve_for(grouped, [group], "host-ssh").id,
+            "host-ssh",
+        )
+
+        # Az admin továbbra sem kap automatikus szabályt.
+        self.users.add(
+            "root", "hosszu-jelszo-1", role=gateway.ROLE_ADMIN
+        )
+        root = self.users.record("root")
+        self.assertEqual(self.rules.effective_for(root, []), [])
+        self.assertFalse(root.rules_set)
 
     def test_collection_union_resolution_and_persistence(self) -> None:
         web = self.rules.create("col-web", {
@@ -3685,10 +6201,12 @@ class RuleGroupStoreTests(unittest.TestCase):
             stored = json.load(fh)["rules"]["col-combo"]
         self.assertEqual(
             set(stored),
-            {"label", "description", "members", "default_ttl", "max_ttl", "created"},
+            {"label", "description", "members", "default_ttl",
+             "max_ttl", "created"},
         )
         self.assertEqual(stored["members"], ["col-web", "col-dns"])
-        for forbidden in ("tcp", "udp", "icmp", "full"):
+        # A gyűjtőszabálynak nincs saját iránya a tárolt alakban sem.
+        for forbidden in ("direction", "tcp", "udp", "icmp", "full"):
             self.assertNotIn(forbidden, stored)
 
         reloaded = gateway.RuleStore(
@@ -3702,19 +6220,246 @@ class RuleGroupStoreTests(unittest.TestCase):
         self.assertTrue(loaded.icmp)
         self.assertFalse(loaded.full)
 
+    def test_host_rule_create_and_persistence(self) -> None:
+        rule = self.rules.create("mpwerks-host", {
+            "label": "mpwerks host", "direction": "input",
+            "tcp": [25566], "udp": [25566],
+            "default_ttl": 60, "max_ttl": 600,
+        })
+        self.assertEqual(rule.direction, "input")
+        self.assertEqual(rule.ports.direction, "input")
+        self.assertEqual(rule.ports.public()["direction"], "input")
+        self.assertEqual(rule.public()["direction"], "input")
+
+        tcp_only = self.rules.create("host-tcp-only", {
+            "label": "Host TCP", "direction": "input", "tcp": [25566],
+        })
+        self.assertEqual(tcp_only.direction, "input")
+        self.assertEqual(tcp_only.udp, ())
+
+        with open(self.rules.path, encoding="utf-8") as fh:
+            stored = json.load(fh)["rules"]
+        self.assertEqual(stored["mpwerks-host"]["direction"], "input")
+        self.assertEqual(stored["host-tcp-only"]["direction"], "input")
+        # A direction nélküli (régi) szabály továbbra is forward.
+        default = self.rules.create("plain-forward", {
+            "label": "Plain", "tcp": [25566],
+        })
+        self.assertEqual(default.direction, "forward")
+        with open(self.rules.path, encoding="utf-8") as fh:
+            self.assertEqual(
+                json.load(fh)["rules"]["plain-forward"]["direction"], "forward"
+            )
+
+        reloaded = gateway.RuleStore(
+            self.rules.path, catalog=CATALOG, logger=lambda *_: None
+        )
+        loaded = reloaded.get("mpwerks-host")
+        self.assertIsNotNone(loaded)
+        self.assertEqual(loaded.direction, "input")
+        self.assertEqual(loaded.ports.direction, "input")
+        self.assertEqual(loaded.public()["direction"], "input")
+
+    def test_host_rule_validation_messages(self) -> None:
+        cases = (
+            (
+                {"direction": "input", "full": True},
+                "host szabály nem lehet teljes hozzáférésű",
+            ),
+            (
+                {"direction": "input", "icmp": True},
+                "host szabály nem tartalmazhat ICMP-t",
+            ),
+            (
+                {"direction": "input", "services": ["web"]},
+                "host szabály nem használhat szolgáltatáslistát",
+            ),
+            (
+                {"direction": "input"},
+                "host szabályhoz legalább egy TCP vagy UDP port kell",
+            ),
+            (
+                {"direction": "input", "tcp": [8100]},
+                "a 8100-as port (portál) nem nyitható meg host szabállyal",
+            ),
+            (
+                {"direction": "input", "udp": [8100]},
+                "a 8100-as port (portál) nem nyitható meg host szabállyal",
+            ),
+            (
+                {"direction": "oldalra", "tcp": [25566]},
+                "direction: forward vagy input érték kell",
+            ),
+        )
+        for index, (payload, message) in enumerate(cases):
+            with self.subTest(payload=payload):
+                with self.assertRaises(gateway.RuleStoreError) as caught:
+                    self.rules.create(f"host-bad-{index}", payload)
+                self.assertEqual(str(caught.exception), message)
+
+        # Forward szabályoknál a teljes hozzáférés, az ICMP és a
+        # szolgáltatáslista továbbra is érvényes.
+        self.rules.create("forward-full", {"label": "F", "full": True})
+        self.rules.create("forward-icmp", {"label": "I", "icmp": True})
+        legacy = self.rules.create("forward-legacy", {
+            "label": "L", "services": ["web"],
+        })
+        self.assertEqual(legacy.direction, "forward")
+        self.assertEqual(legacy.tcp, (80, 443))
+
+        # A 22-es port admin által létrehozott host szabállyal TCP-n és
+        # UDP-n is megnyitható. A szabály nem teljes hozzáférésű, és a
+        # tűzfal a külön input halmazokba teszi, soha nem a forward
+        # halmazokba.
+        fw = gateway.Firewall(dry_run=True, logger=lambda *_: None)
+        host_cases = (
+            ("host-ssh-tcp", "tcp", fw.input_tcp_set),
+            ("host-ssh-udp", "udp", fw.input_udp_set),
+        )
+        for rule_id, proto, expected_set in host_cases:
+            with self.subTest(proto=proto):
+                rule = self.rules.create(rule_id, {
+                    "label": f"SSH {proto}", "direction": "input",
+                    proto: [22],
+                })
+                self.assertEqual(rule.direction, "input")
+                self.assertEqual(rule.ports.direction, "input")
+                self.assertFalse(rule.full)
+                self.assertIn(22, getattr(rule, proto))
+                elements = fw._elements("192.168.50.20", rule.ports)
+                self.assertEqual(
+                    elements, [(expected_set, "192.168.50.20 . 22")]
+                )
+                set_names = {name for name, _ in elements}
+                for forbidden in (fw.tcp_set, fw.udp_set):
+                    self.assertNotIn(forbidden, set_names)
+
+    def test_collection_mixed_directions(self) -> None:
+        self.rules.create("host-a", {
+            "label": "A", "direction": "input", "tcp": [25566],
+        })
+        self.rules.create("host-b", {
+            "label": "B", "direction": "input", "udp": [25566],
+        })
+        self.rules.create("forward-member", {"label": "F", "tcp": [80]})
+        # A gyűjtő payloadjában szereplő elavult/hibás irányt figyelmen
+        # kívül hagyjuk: kizárólag a tagok iránya dönt.
+        mixed = self.rules.create("mixed-col", {
+            "label": "Mixed", "collection": True,
+            "direction": "oldalra",
+            "members": ["host-a", "host-b", "forward-member"],
+            "default_ttl": 60, "max_ttl": 600,
+        })
+        self.assertEqual(mixed.direction, "mixed")
+        self.assertEqual(mixed.tcp, (80,))
+        self.assertEqual(mixed.udp, ())
+        self.assertEqual(mixed.input_tcp, (25566,))
+        self.assertEqual(mixed.input_udp, (25566,))
+        self.assertEqual(
+            {part.direction for part in mixed.grants}, {"forward", "input"}
+        )
+        forward_part = next(
+            part for part in mixed.grants if part.direction == "forward"
+        )
+        input_part = next(
+            part for part in mixed.grants if part.direction == "input"
+        )
+        self.assertEqual(forward_part.tcp, (80,))
+        self.assertEqual(forward_part.udp, ())
+        self.assertEqual(input_part.tcp, (25566,))
+        self.assertEqual(input_part.udp, (25566,))
+        self.assertEqual(
+            mixed.public()["ports_label"],
+            "TCP 80, 25566 · UDP 25566",
+        )
+        # A gyűjtőnek nincs saját iránya a nyilvános vagy tárolt alakban.
+        self.assertNotIn("direction", mixed.public())
+        with open(self.rules.path, encoding="utf-8") as fh:
+            stored = json.load(fh)["rules"]["mixed-col"]
+        self.assertNotIn("direction", stored)
+        self.assertNotIn("tcp", stored)
+        self.assertNotIn("udp", stored)
+
+        reloaded = gateway.RuleStore(
+            self.rules.path, catalog=CATALOG, logger=lambda *_: None
+        )
+        loaded = reloaded.get("mixed-col")
+        self.assertIsNotNone(loaded)
+        self.assertEqual(loaded.direction, "mixed")
+        self.assertEqual(loaded.tcp, (80,))
+        self.assertEqual(loaded.input_tcp, (25566,))
+        self.assertEqual(loaded.input_udp, (25566,))
+        self.assertEqual(loaded.grants, mixed.grants)
+
+        # Csak input tagok: a gyűjtő iránya input, engedélye csak input.
+        input_col = self.rules.create("input-col", {
+            "label": "Input collection", "collection": True,
+            "members": ["host-a", "host-b"],
+        })
+        self.assertEqual(input_col.direction, "input")
+        self.assertEqual(input_col.tcp, ())
+        self.assertEqual(input_col.input_tcp, (25566,))
+        self.assertEqual(
+            [part.direction for part in input_col.grants], ["input"]
+        )
+
+        # Egy tag is elég, és a csak forward tagok forward gyűjtőt adnak.
+        forward_col = self.rules.create("forward-col", {
+            "label": "Forward collection", "collection": True,
+            "members": ["forward-member"],
+        })
+        self.assertEqual(forward_col.direction, "forward")
+        self.assertEqual(forward_col.tcp, (80,))
+        self.assertEqual(forward_col.input_tcp, ())
+        self.assertEqual(
+            [part.direction for part in forward_col.grants], ["forward"]
+        )
+
+        # A tag iránya a gyűjtő alatt is megváltozhat; a függő gyűjtők
+        # visszajönnek, hogy a szerver a munkameneteiket visszavonhassa.
+        updated, dependents = self.rules.update_with_dependents("host-a", {
+            "label": "A", "direction": "forward", "tcp": [25566],
+        })
+        self.assertEqual(updated.direction, "forward")
+        self.assertEqual(set(dependents), {"mixed-col", "input-col"})
+        refreshed = self.rules.get("mixed-col")
+        # host-a most forward, host-b továbbra is input, a forward tag mellett.
+        self.assertEqual(refreshed.direction, "mixed")
+        self.assertEqual(refreshed.tcp, (80, 25566))
+        self.assertEqual(refreshed.input_tcp, ())
+        self.assertEqual(refreshed.input_udp, (25566,))
+        refreshed_input = self.rules.get("input-col")
+        self.assertEqual(refreshed_input.direction, "mixed")
+        self.assertEqual(refreshed_input.tcp, (25566,))
+        self.assertEqual(refreshed_input.input_udp, (25566,))
+
     def test_collection_validation_rejects_bad_members(self) -> None:
         self.rules.create("member-a", {"label": "A", "tcp": [80]})
         self.rules.create("member-b", {"label": "B", "udp": [53]})
+        self.rules.create("host-member", {
+            "label": "H", "direction": "input", "tcp": [2525],
+        })
         self.rules.create("member-full", {"label": "Full", "full": True})
         self.rules.create("nested", {
             "label": "Nested", "collection": True,
             "members": ["member-a", "member-b"],
         })
+        # Egyetlen tag is elég, forward és host (input) változatban is.
+        single = self.rules.create("single-member", {
+            "label": "X", "collection": True, "members": ["member-a"],
+        })
+        self.assertEqual(single.members, ("member-a",))
+        self.assertEqual(single.tcp, (80,))
+        self.assertEqual(single.direction, "forward")
+        single_host = self.rules.create("single-host-member", {
+            "label": "X", "collection": True, "members": ["host-member"],
+        })
+        self.assertEqual(single_host.direction, "input")
+        self.assertEqual(single_host.input_tcp, (2525,))
+        self.assertEqual(
+            [part.direction for part in single_host.grants], ["input"]
+        )
         invalid = {
-            "one member": (
-                {"label": "X", "collection": True, "members": ["member-a"]},
-                "legalább 2 és legfeljebb 64",
-            ),
             "unknown member": (
                 {"label": "X", "members": ["member-a", "missing"]},
                 "ismeretlen szabály a gyűjtőszabályban: missing",
@@ -3733,7 +6478,7 @@ class RuleGroupStoreTests(unittest.TestCase):
             ),
             "empty members": (
                 {"label": "X", "collection": True},
-                "2–64 szabály-azonosítóból álló lista kell",
+                "members: 1–64 szabály-azonosítóból álló lista kell",
             ),
             "ports with collection": (
                 {
@@ -3757,10 +6502,11 @@ class RuleGroupStoreTests(unittest.TestCase):
                 "nem tartalmazhatja önmagát",
             ),
         }
-        for name, (payload, expected) in invalid.items():
+        for index, (name, (payload, expected)) in enumerate(invalid.items()):
+            target = "selfref" if name == "self reference" else f"bad-{index}"
             with self.subTest(name=name):
                 with self.assertRaises(gateway.RuleStoreError) as caught:
-                    self.rules.create("selfref", payload)
+                    self.rules.create(target, payload)
                 self.assertIn(expected, str(caught.exception))
         self.assertIsNone(self.rules.get("selfref"))
 
@@ -3801,14 +6547,11 @@ class RuleGroupStoreTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.granted = []
 
-            def revoke_host_ssh(self, ip: str) -> None:
-                pass
-
             def revoke_all(self, ip: str, grants=()) -> None:
                 pass
 
-            def grant(self, ip, ports, ttl) -> None:
-                self.granted.append((ip, ports, ttl))
+            def grant_all(self, ip, grants, ttl) -> None:
+                self.granted.append((ip, tuple(grants), ttl))
 
         firewall = _FakeFirewall()
         manager = gateway.SessionManager(
@@ -3824,9 +6567,10 @@ class RuleGroupStoreTests(unittest.TestCase):
         )
         self.assertEqual(authorized.rule, "col-combo")
         self.assertEqual(authorized.ports, resolved.ports)
+        self.assertEqual(authorized.grant_parts, resolved.grants)
         self.assertEqual(
             firewall.granted[-1],
-            ("192.168.50.10", resolved.ports, resolved.max_ttl),
+            ("192.168.50.10", resolved.grants, resolved.max_ttl),
         )
 
     def test_delete_blocks_collection_member_and_collections_containing(self) -> None:
@@ -3923,7 +6667,7 @@ class RuleGroupStoreTests(unittest.TestCase):
         with self.assertRaises(gateway.RuleStoreError):
             self.rules.duplicate("dupe-web", new_id="dupe-web-copy")
         with self.assertRaises(gateway.RuleStoreError):
-            self.rules.duplicate(gateway.ADMIN_RULE_ID)
+            self.rules.duplicate(gateway.LEGACY_ADMIN_RULE_ID)
         with self.assertRaises(gateway.RuleStoreError):
             self.rules.duplicate("nincs-ilyen")
 
@@ -3948,9 +6692,11 @@ class RuleGroupStoreTests(unittest.TestCase):
             stored = json.load(fh)["rules"]["dupe-collection-copy"]
         self.assertEqual(
             set(stored),
-            {"label", "description", "members", "default_ttl", "max_ttl", "created"},
+            {"label", "description", "members", "default_ttl",
+             "max_ttl", "created"},
         )
         self.assertNotIn("tcp", stored)
+        self.assertNotIn("direction", stored)
 
     def test_load_drops_invalid_persisted_collections(self) -> None:
         """Hibás perzisztált gyűjtők ne jelenjenek meg és ne adjanak jogot."""
@@ -4012,6 +6758,45 @@ class RuleGroupStoreTests(unittest.TestCase):
         with self.assertRaises(gateway.AccessError) as caught:
             store.resolve_for(direct, [], "bad-missing")
         self.assertIn("nem tartozik hozzád", str(caught.exception))
+
+    def test_load_mixed_collection_and_ignore_stale_direction(self) -> None:
+        path = os.path.join(self.tmp.name, "mixed-collections.json")
+        base = {"default_ttl": 60, "max_ttl": 600, "created": 1}
+        raw = {
+            "lm-fwd": {"label": "F", "tcp": [80], **base},
+            "lm-host": {
+                "label": "H", "direction": "input",
+                "tcp": [25566], "udp": [25566], **base,
+            },
+            # Elavult/hibás direction a gyűjtőn: a tagok döntenek.
+            "lm-mixed": {
+                "label": "Mixed", "direction": "oldalra",
+                "members": ["lm-fwd", "lm-host"], **base,
+            },
+            "lm-stale": {
+                "label": "Stale", "direction": "input",
+                "members": ["lm-fwd"], **base,
+            },
+        }
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"rules": raw}, fh)
+
+        store = gateway.RuleStore(path, catalog=CATALOG, logger=lambda *_: None)
+        mixed = store.get("lm-mixed")
+        self.assertIsNotNone(mixed)
+        self.assertEqual(mixed.direction, "mixed")
+        self.assertEqual(mixed.tcp, (80,))
+        self.assertEqual(mixed.input_tcp, (25566,))
+        self.assertEqual(mixed.input_udp, (25566,))
+        self.assertEqual(
+            {part.direction for part in mixed.grants}, {"forward", "input"}
+        )
+        self.assertNotIn("direction", mixed.public())
+
+        # A gyűjtőn tárolt elavult direction nem írja felül a tagokat.
+        stale = store.get("lm-stale")
+        self.assertEqual(stale.direction, "forward")
+        self.assertEqual([part.direction for part in stale.grants], ["forward"])
 
     def test_unassigned_collection_cannot_be_authorized(self) -> None:
         self.rules.create("neg-a", {"label": "A", "tcp": [80]})
@@ -4261,6 +7046,10 @@ class AdminHttpTests(unittest.TestCase):
             "label": "Csak web", "tcp": [80, 443], "udp": [443],
             "default_ttl": 120, "max_ttl": 600,
         })
+        cls.rules.create("host-ssh", {
+            "label": "Host SSH", "tcp": [22], "direction": "input",
+            "default_ttl": 300, "max_ttl": 900,
+        })
         cls.groups = gateway.GroupStore(
             os.path.join(cls.tmp.name, "groups.json"), logger=lambda *_: None
         )
@@ -4270,6 +7059,7 @@ class AdminHttpTests(unittest.TestCase):
         cls.users.add(
             "root", "root-jelszo-1", role=gateway.ROLE_ADMIN
         )
+        cls.users.set_metadata("root", rules=("host-ssh",))
         cls.users.add("alice", "alice-jelszo-1", rules=("web-only",))
         cls.users.add("resetme", "resetme-jelszo-1", rules=("web-only",))
         cls.fw = gateway.Firewall(
@@ -4296,6 +7086,7 @@ class AdminHttpTests(unittest.TestCase):
             rate_limiter=gateway.RateLimiter(window=60, maximum=1000),
             settings=cls.settings, drops=cls.drops, fail2ban=cls.fail2ban,
         )
+        server.LOGIN_TICKETS.set_audit(cls.audit)
         cls.server = server.AppServer(("127.0.0.1", 0), cls.gw)
         import threading
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
@@ -4307,6 +7098,8 @@ class AdminHttpTests(unittest.TestCase):
         cls.server.shutdown()
         cls.server.server_close()
         cls.thread.join(timeout=5)
+        server.LOGIN_TICKETS.revoke_all()
+        server.LOGIN_TICKETS.set_audit(None)
         gateway.CONNTRACK_BIN = cls._old_conntrack
         gateway.POW_DIFFICULTY = cls._old_difficulty
         gateway.PORTAL_URL = cls._old_portal_url
@@ -4515,8 +7308,10 @@ class AdminHttpTests(unittest.TestCase):
         self.assertEqual(row["ports_label"], "TCP 80, 443 · UDP 443")
         self.assertEqual([entry["port"] for entry in row["tcp"]], [80, 443])
         self.assertEqual([entry["port"] for entry in row["udp"]], [443])
-        # Az egyedi web szabály nem vár host SSH-t, és a kernelben sincs.
-        self.assertIsNone(row["host_ssh"])
+        # Az egyedi web szabály nem vár host SSH-t; a nézetben nincs külön
+        # host_ssh mező, a 22-es port csak közönséges input bejegyzésként
+        # jelenhet meg.
+        self.assertNotIn("host_ssh", row)
         self.assertTrue(row["in_sync"], row)
         self.assertEqual(row["rules"][0]["label"], "Csak web")
         self.assertEqual(row["sessions"][0]["user"], "alice")
@@ -4629,10 +7424,6 @@ class AdminHttpTests(unittest.TestCase):
         deletes = self.tools.deletes()
         self.assertIn(
             "nft delete element inet hatarvedelem allowed_tcp { 127.0.0.2 . 80 }",
-            deletes,
-        )
-        self.assertIn(
-            "nft delete element inet hatarvedelem host_ssh_v4 { 127.0.0.2 }",
             deletes,
         )
         self.assertTrue(
@@ -4810,46 +7601,270 @@ class AdminHttpTests(unittest.TestCase):
         self.assertEqual(status, 200, body)
         self.assertTrue(self.users.record("alice").enabled)
 
-    def test_admin_state_and_admin_full_access(self) -> None:
+    def test_admin_update_failure_revokes_and_restores_password(self) -> None:
+        cookie = self.admin_cookie()
+        # Saját, friss felhasználó: a osztályszintű tárban más tesztek
+        # módosíthatják a jelszót, ezért a „resetme” használata
+        # teszt-sorrendtől függően elbukna.
+        name = "updatefail-user"
+        self.users.remove(name)
+        self.users.add(name, "updatefail-jelszo-1")
+        try:
+            user_cookie, _ = self.login(
+                name, "updatefail-jelszo-1", source="127.0.0.2"
+            )
+            before = self.users.record(name)
+            self.assertIsNotNone(before)
+            original_metadata = self.users.set_metadata
+
+            def failing_metadata(target, **kwargs):
+                raise gateway.UserStoreError("szimulált íráshiba")
+
+            self.users.set_metadata = failing_metadata
+            try:
+                status, _, body = self.post(
+                    "/api/admin/users",
+                    {
+                        "action": "update", "name": name,
+                        "password": "updatefail-uj-jelszo-9", "enabled": True,
+                    },
+                    cookie=cookie, source="127.0.0.5",
+                )
+            finally:
+                self.users.set_metadata = original_metadata
+            self.assertEqual(status, 400, body)
+
+            # A köztes hiba után a jelszó-hash és a must_change jelző az
+            # eredeti állapotra állt vissza, a munkamenet viszont megszűnt.
+            after = self.users.record(name)
+            self.assertIsNotNone(after)
+            self.assertEqual(after.salt, before.salt)
+            self.assertEqual(after.digest, before.digest)
+            self.assertEqual(after.iterations, before.iterations)
+            self.assertEqual(
+                after.must_change_password, before.must_change_password
+            )
+            self.assertTrue(
+                self.users.verify(name, "updatefail-jelszo-1")
+            )
+            self.assertFalse(
+                self.users.verify(name, "updatefail-uj-jelszo-9")
+            )
+
+            status, _, body = self.get(
+                "/api/status", cookie=user_cookie, source="127.0.0.2"
+            )
+            self.assertFalse(json.loads(body)["authenticated"])
+
+            failures = [
+                row for row in self.audit.read(
+                    event="admin_user_update_failed"
+                )
+                if row.get("target") == name
+            ]
+            self.assertTrue(failures)
+            self.assertEqual(failures[-1].get("stage"), "metadata")
+            self.assertTrue(failures[-1].get("password_changed"))
+            self.assertGreaterEqual(
+                int(failures[-1].get("sessions_revoked", 0)), 1
+            )
+            self.assertFalse(
+                any(
+                    "updatefail-uj-jelszo-9" in json.dumps(row)
+                    for row in failures
+                )
+            )
+        finally:
+            self.users.remove(name)
+    def test_cli_local_delete_removes_group_membership(self) -> None:
+        name = "cli-delete-user"
+        self.users.add(name, "cli-delete-jelszo-1", rules=("web-only",))
+        self.groups.create(
+            "cli-delete-group",
+            {"label": "CLI törlés", "rules": ["web-only"], "members": [name]},
+        )
+        original = (
+            server._control_mutation,
+            gateway.UserStore,
+            gateway.GroupStore,
+            gateway.AuditLog,
+        )
+        server._control_mutation = lambda payload: (False, 0)
+        gateway.UserStore = lambda *args, **kwargs: self.users
+        gateway.GroupStore = lambda *args, **kwargs: self.groups
+        gateway.AuditLog = lambda *args, **kwargs: self.audit
+        try:
+            code = server._user_cli(["del", name])
+        finally:
+            (
+                server._control_mutation,
+                gateway.UserStore,
+                gateway.GroupStore,
+                gateway.AuditLog,
+            ) = original
+            if self.groups.groups_for(name):
+                self.groups.remove_member_everywhere(name)
+            self.groups.delete("cli-delete-group")
+        self.assertEqual(code, 0)
+        self.assertIsNone(self.users.record(name))
+        self.assertEqual(self.groups.groups_for(name), [])
+
+    def test_admin_state_and_host_ssh_access(self) -> None:
         cookie = self.admin_cookie()
         status, _, body = self.get("/api/admin/state", cookie=cookie, source="127.0.0.5")
         self.assertEqual(status, 200, body)
         state = json.loads(body)
         self.assertTrue(state["ok"])
-        self.assertEqual(state["builtin_rule"], gateway.ADMIN_RULE_ID)
+        self.assertNotIn("builtin_rule", state)
         names = [user["name"] for user in state["users"]]
         self.assertIn("alice", names)
         root = next(user for user in state["users"] if user["name"] == "root")
-        self.assertIn(gateway.ADMIN_RULE_ID, root["effective_rules"])
+        self.assertEqual(root["effective_rules"], ["host-ssh"])
         alice = next(user for user in state["users"] if user["name"] == "alice")
         self.assertEqual(alice["rules"], ["web-only"])
 
+        status, _, body = self.get(
+            "/api/status", cookie=cookie, source="127.0.0.5"
+        )
+        self.assertEqual(status, 200, body)
+        status_rules = [
+            rule.get("id") for rule in json.loads(body).get("rules", [])
+        ]
+        self.assertNotIn(gateway.LEGACY_ADMIN_RULE_ID, status_rules)
+        self.assertEqual(status_rules, ["host-ssh"])
+
+        # A fenntartott régi azonosító nem kérhető, még adminként sem.
         status, _, body = self.post(
-            "/api/access", {"rule": gateway.ADMIN_RULE_ID, "ttl": 60},
+            "/api/access", {"rule": gateway.LEGACY_ADMIN_RULE_ID, "ttl": 60},
+            cookie=cookie, source="127.0.0.5",
+        )
+        self.assertEqual(status, 400, body)
+        self.assertIn("nem tartozik", json.loads(body)["error"])
+
+        # A kifejezetten kiosztott host SSH szabály viszont megnyitja a
+        # 22-es TCP-portot az input halmazban, teljes hozzáférés nélkül.
+        status, _, body = self.post(
+            "/api/access", {"rule": "host-ssh", "ttl": 60},
             cookie=cookie, source="127.0.0.5",
         )
         self.assertEqual(status, 200, body)
         data = json.loads(body)
-        self.assertEqual(data["rule"], gateway.ADMIN_RULE_ID)
-        self.assertTrue(data["grant"]["full"])
+        self.assertEqual(data["rule"], "host-ssh")
+        self.assertFalse(data["grant"]["full"])
+        self.assertEqual(data["grant"]["direction"], "input")
         script = self.tools.script()
         self.assertIn(
-            "add element inet hatarvedelem allowed_v4 { 127.0.0.5 timeout 60s }",
+            "add element inet hatarvedelem allowed_input_tcp "
+            "{ 127.0.0.5 . 22 timeout 60s }",
             script,
         )
-        self.assertIn(
-            "add element inet hatarvedelem host_ssh_v4 { 127.0.0.5 timeout 60s }",
-            script,
+        self.assertFalse(
+            any("allowed_v4" in line for line in script), script
         )
 
-    def test_user_cannot_request_admin_rule(self) -> None:
+    def test_user_cannot_request_legacy_admin_rule(self) -> None:
         cookie, _ = self.login("alice", "alice-jelszo-1")
         status, _, body = self.post(
-            "/api/access", {"rule": gateway.ADMIN_RULE_ID, "ttl": 60},
+            "/api/access", {"rule": gateway.LEGACY_ADMIN_RULE_ID, "ttl": 60},
             cookie=cookie,
         )
         self.assertEqual(status, 400, body)
         self.assertIn("nem tartozik", json.loads(body)["error"])
+
+    def test_admin_rule_mutations_audit_input_direction_and_sync_ports(self) -> None:
+        cookie = self.admin_cookie()
+        source = "127.0.0.5"
+
+        def admin_post(payload: dict):
+            return self.post(
+                "/api/admin/rules", payload, cookie=cookie, source=source
+            )
+
+        try:
+            status, _, body = admin_post({
+                "action": "create", "id": "host-audit",
+                "label": "Host audit", "direction": "input",
+                "tcp": [25566], "udp": [25566],
+                "default_ttl": 60, "max_ttl": 600,
+            })
+            self.assertEqual(status, 200, body)
+            rules = self.gw.rules.get("host-audit")
+            self.assertIsNotNone(rules)
+            self.assertEqual(rules.direction, "input")
+            # A host portok azonnal a kerneloldali, csak bővülő védőhalmazba
+            # kerülnek (a portál nem üríti őket).
+            script = self.tools.script()
+            self.assertIn(
+                "add element inet hatarvedelem host_service_tcp "
+                "{ 22, 25566 }",
+                script,
+            )
+            self.assertIn(
+                "add element inet hatarvedelem host_service_udp { 25566 }",
+                script,
+            )
+
+            self.tools.clear()
+            status, _, body = admin_post({
+                "action": "update", "id": "host-audit",
+                "direction": "input", "tcp": [25566, 25568], "udp": [],
+            })
+            self.assertEqual(status, 200, body)
+            script = self.tools.script()
+            self.assertIn(
+                "add element inet hatarvedelem host_service_tcp "
+                "{ 22, 25566, 25568 }",
+                script,
+            )
+            self.assertNotIn("host_service_udp", script)
+
+            status, _, body = admin_post({
+                "action": "duplicate", "id": "host-audit",
+                "new_id": "host-audit-copy",
+            })
+            self.assertEqual(status, 200, body)
+            copied = self.gw.rules.get("host-audit-copy")
+            self.assertIsNotNone(copied)
+            self.assertEqual(copied.direction, "input")
+
+            for event, target in (
+                ("admin_rule_created", "host-audit"),
+                ("admin_rule_updated", "host-audit"),
+                ("admin_rule_duplicated", "host-audit-copy"),
+            ):
+                status, _, body = self.get(
+                    f"/api/admin/logs?limit=200&event={event}",
+                    cookie=cookie, source=source,
+                )
+                self.assertEqual(status, 200, body)
+                entries = [
+                    entry for entry in json.loads(body)["logs"]
+                    if entry.get("target") == target
+                ]
+                self.assertTrue(entries, event)
+                self.assertEqual(entries[-1].get("direction"), "input")
+
+            # A törlés auditja is hordozza az irányt, hogy a host és a
+            # forward szabály azonos portok mellett is megkülönböztethető
+            # legyen a naplóban.
+            status, _, body = admin_post({
+                "action": "delete", "id": "host-audit-copy",
+            })
+            self.assertEqual(status, 200, body)
+            status, _, body = self.get(
+                "/api/admin/logs?limit=200&event=admin_rule_deleted",
+                cookie=cookie, source=source,
+            )
+            self.assertEqual(status, 200, body)
+            entries = [
+                entry for entry in json.loads(body)["logs"]
+                if entry.get("target") == "host-audit-copy"
+            ]
+            self.assertTrue(entries)
+            self.assertEqual(entries[-1].get("direction"), "input")
+        finally:
+            for rule_id in ("host-audit-copy", "host-audit"):
+                admin_post({"action": "delete", "id": rule_id})
 
     def test_rule_group_user_crud_and_logs(self) -> None:
         cookie = self.admin_cookie()
@@ -5183,6 +8198,78 @@ class AdminHttpTests(unittest.TestCase):
         latest = entries[-1]
         self.assertIn("col-combo", latest.get("collections_affected", ""))
         self.assertGreaterEqual(int(latest.get("sessions_revoked", 0)), 1)
+
+    def test_rule_available_detects_member_direction_change(self) -> None:
+        """Ugyanazok a portok, de más irány => más grants, újra kell választani."""
+        try:
+            self.rules.create("rc-host", {
+                "label": "H", "direction": "input", "tcp": [25566],
+            })
+            self.rules.create("rc-col", {
+                "label": "C", "collection": True, "members": ["rc-host"],
+            })
+            self.users.add(
+                "rulecheck", "rulecheck-jelszo-1", rules=("rc-col",)
+            )
+            record = self.users.record("rulecheck")
+            selected = self.rules.resolve_for(record, [], "rc-col")
+            self.assertTrue(self.gw._rule_available("rulecheck", selected))
+
+            # A tag iránya azonos port mellett megváltozik: a feloldott
+            # engedély már a forward halmazba kerülne, ezért a régi
+            # választás érvénytelen.
+            self.rules.update("rc-host", {
+                "label": "H", "direction": "forward", "tcp": [25566],
+            })
+            self.assertFalse(self.gw._rule_available("rulecheck", selected))
+            current = self.rules.resolve_for(
+                self.users.record("rulecheck"), [], "rc-col"
+            )
+            self.assertTrue(self.gw._rule_available("rulecheck", current))
+        finally:
+            self.users.remove("rulecheck")
+            for rule_id in ("rc-col", "rc-host"):
+                try:
+                    self.rules.delete(rule_id)
+                except gateway.RuleStoreError:
+                    pass
+
+    def test_sync_host_ports_collects_mixed_collection_input(self) -> None:
+        try:
+            self.rules.create("mix-sync-fwd", {
+                "label": "F", "tcp": [80],
+            })
+            self.rules.create("mix-sync-host", {
+                "label": "H", "direction": "input",
+                "tcp": [25566], "udp": [25566],
+            })
+            self.rules.create("mix-sync-col", {
+                "label": "C", "collection": True,
+                "members": ["mix-sync-fwd", "mix-sync-host"],
+            })
+            self.tools.clear()
+            self.gw.sync_host_ports()
+            script = self.tools.script()
+            self.assertIn(
+                "add element inet hatarvedelem host_service_tcp "
+                "{ 22, 25566 }",
+                script,
+            )
+            self.assertIn(
+                "add element inet hatarvedelem host_service_udp "
+                "{ 25566 }",
+                script,
+            )
+            self.assertNotIn(
+                "add element inet hatarvedelem host_service_tcp { 80 }",
+                script,
+            )
+        finally:
+            for rule_id in ("mix-sync-col", "mix-sync-host", "mix-sync-fwd"):
+                try:
+                    self.rules.delete(rule_id)
+                except gateway.RuleStoreError:
+                    pass
 
     def test_collection_update_and_delete_revoke_its_sessions(self) -> None:
         cookie = self.admin_cookie()
@@ -5721,11 +8808,49 @@ class AdminHttpTests(unittest.TestCase):
         self.assertEqual(data["fail2ban"]["window_seconds"], 120)
         self.assertEqual(data["fail2ban"]["ban_seconds"], 900)
 
+        # Nem alapértelmezett küszöbök, hogy a kikapcsolás utáni
+        # megőrzés ellenőrzése ne legyen tautologikus.
+        status, _, body = self.post(
+            "/api/admin/fail2ban",
+            {"action": "config", "drop_max": 7, "drop_ports": 9},
+            cookie=cookie, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+        custom = json.loads(body)["fail2ban"]
+        self.assertEqual(custom["drop_max"], 7)
+        self.assertEqual(custom["drop_ports"], 9)
+
+        status, _, body = self.post(
+            "/api/admin/fail2ban",
+            {"action": "config",
+             "drop_count_enabled": False, "drop_ports_enabled": False},
+            cookie=cookie, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+        data = json.loads(body)["fail2ban"]
+        self.assertEqual(data["drop_max"], 7)
+        self.assertEqual(data["drop_ports"], 9)
+        self.assertFalse(data["drop_count_enabled"])
+        self.assertFalse(data["drop_ports_enabled"])
+        self.assertFalse(data["drop_count_active"])
+        self.assertFalse(data["drop_ports_active"])
+        self.assertFalse(data["drop_enabled"])
+        self.assertEqual(data["limits"]["min_drop_max"], 1)
+        self.assertEqual(data["limits"]["min_drop_ports"], 1)
+
         for payload in (
             {"action": "config", "max_attempts": 0},
             {"action": "config", "window_seconds": 5},
             {"action": "config", "ban_seconds": 5},
             {"action": "config", "enabled": "igen"},
+            {"action": "config", "drop_count_enabled": "igen"},
+            {"action": "config", "drop_ports_enabled": 1},
+            {"action": "config", "drop_max": 0},
+            {"action": "config", "drop_max": -1},
+            {"action": "config", "drop_ports": 0},
+            {"action": "config", "drop_ports": -1},
+            {"action": "config", "drop_max": 10001},
+            {"action": "config", "drop_ports": 4097},
             {"action": "ban", "ip": "127.0.0.1"},
             {"action": "ban", "ip": "127.0.0.5"},
             {"action": "ban", "ip": "10.0.0.0/8"},
@@ -5919,9 +9044,13 @@ class AdminHttpTests(unittest.TestCase):
         self.assertEqual(events[0]["user"], "alice")
         self.assertFalse(events[0]["manual"])
 
-        # A belépőoldal a nyilvános állapotból tudja, hogy a kliens tiltva van.
-        status, _, body = self.get("/api/status", source=source)
-        self.assertEqual(status, 200, body)
+        # A belépőoldal a tiltott állapotot 403-as, közös tiltásválaszból
+        # tudja meg; munkamenet-adat nem szivárog ki.
+        status, status_headers, body = self.get(
+            "/api/status", source=source
+        )
+        self.assertEqual(status, 403, body)
+        self.assertIn("Retry-After", status_headers)
         status_data = json.loads(body)
         self.assertFalse(status_data["authenticated"])
         self.assertTrue(status_data["banned"])
@@ -5929,6 +9058,7 @@ class AdminHttpTests(unittest.TestCase):
         self.assertGreater(status_data["ban_until"], 0)
         self.assertEqual(status_data["ban_source"], "login")
         self.assertEqual(status_data["ban_attempts"], 3)
+        self.assertNotIn("user", status_data)
 
         # A tiltott IP a helyes jelszóval is elutasításra kerül.
         _, _, challenge_body = self.get("/api/challenge", source=source)
@@ -5981,9 +9111,13 @@ class AdminHttpTests(unittest.TestCase):
         self.assertIsNotNone(view)
         self.assertEqual(view["source"], "drop")
 
-        status, _, body = self.get("/api/status", source=source)
-        self.assertEqual(status, 200, body)
+        status, status_headers, body = self.get(
+            "/api/status", source=source
+        )
+        self.assertEqual(status, 403, body)
+        self.assertIn("Retry-After", status_headers)
         data = json.loads(body)
+        self.assertFalse(data["authenticated"])
         self.assertTrue(data["banned"])
         self.assertEqual(data["ban_source"], "drop")
         self.assertEqual(data["ban_detail"], "input-wan")
@@ -6335,6 +9469,217 @@ class AdminHttpTests(unittest.TestCase):
                        "email"):
             self.assertNotIn(hidden.encode(), body)
 
+    def test_status_exposes_site_name_publicly(self) -> None:
+        status, _, body = self.get("/api/status")
+        self.assertEqual(status, 200, body)
+        data = json.loads(body)
+        self.assertEqual(data["site_name"], "")
+        self.assertNotIn("error", data)
+
+        self.settings.set_site_name("Északi Torony")
+        status, _, body = self.get("/api/status")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body)["site_name"], "Északi Torony")
+
+        cookie, _ = self.login("alice", "alice-jelszo-1")
+        status, _, body = self.get("/api/status", cookie=cookie)
+        self.assertEqual(status, 200, body)
+        data = json.loads(body)
+        self.assertTrue(data["authenticated"])
+        self.assertEqual(data["site_name"], "Északi Torony")
+        self.assertNotIn("error", data)
+
+    def test_admin_site_name_setting_saves_without_nft(self) -> None:
+        admin = self.admin_cookie()
+        before = list(self.tools.lines())
+        started = time.time()
+
+        status, _, body = self.post(
+            "/api/admin/settings",
+            {"action": "site_name", "name": "  Északi Torony  "},
+            cookie=admin, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+        data = json.loads(body)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["settings"]["site_name"], "Északi Torony")
+        self.assertEqual(data["message"], "A tűzfal neve mentve.")
+        # A név mentése nem megy át az nftables-en.
+        self.assertEqual(self.tools.lines(), before)
+
+        reloaded = gateway.settings_store.SettingsStore(
+            self.settings.path, logger=lambda *_: None
+        )
+        self.assertEqual(reloaded.snapshot()["site_name"], "Északi Torony")
+
+        status, _, body = self.get("/api/status")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body)["site_name"], "Északi Torony")
+
+        rows = [
+            row for row in audit_since(self.audit, started)
+            if row.get("event") == "admin_settings_changed"
+            and row.get("action") == "site_name"
+        ]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].get("user"), "root")
+        self.assertEqual(rows[0].get("target"), "site_name")
+        self.assertEqual(rows[0].get("site_name"), "Északi Torony")
+
+        for value in ("x" * 65, "a\x01b", 5, None):
+            with self.subTest(value=value):
+                status, _, body = self.post(
+                    "/api/admin/settings",
+                    {"action": "site_name", "name": value},
+                    cookie=admin, source="127.0.0.5",
+                )
+                self.assertEqual(status, 400, body)
+                self.assertFalse(json.loads(body)["ok"])
+                self.assertEqual(
+                    self.settings.snapshot()["site_name"], "Északi Torony"
+                )
+        self.assertEqual(self.tools.lines(), before)
+
+        status, _, body = self.post(
+            "/api/admin/settings",
+            {"action": "site_name", "name": ""},
+            cookie=admin, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body)["settings"]["site_name"], "")
+        self.assertEqual(self.settings.snapshot()["site_name"], "")
+        rows = [
+            row for row in audit_since(self.audit, started)
+            if row.get("event") == "admin_settings_changed"
+            and row.get("action") == "site_name"
+        ]
+        self.assertEqual(len(rows), 2)
+        self.assertIn("", [row.get("site_name") for row in rows])
+
+    def test_admin_proxy_setting_saves_without_nft(self) -> None:
+        self.addCleanup(self.settings.set_proxy, [], [])
+        admin = self.admin_cookie()
+        before = list(self.tools.lines())
+        started = time.time()
+        status, _, body = self.post(
+            "/api/admin/settings",
+            {"action": "proxy", "proxy_domains": ["Z1.Example.com"],
+             "proxy_routes": [{"name": "owui", "root": "z1.example.com",
+                               "port": 3000, "enabled": True}]},
+            cookie=admin, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+        data = json.loads(body)
+        self.assertEqual(data["settings"]["proxy_domains"], ["z1.example.com"])
+        self.assertEqual(data["message"], "A proxy beállításai mentve.")
+        self.assertEqual(self.tools.lines(), before)
+        rows = [
+            row for row in audit_since(self.audit, started)
+            if row.get("event") == "admin_settings_changed"
+            and row.get("action") == "proxy"
+        ]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].get("proxy_routes"), "owui.z1.example.com:3000")
+        self.assertEqual(rows[0].get("proxy_domains"), "z1.example.com")
+
+        status, _, body = self.post(
+            "/api/admin/settings",
+            {"action": "proxy", "proxy_domains": ["z1.example.com"],
+             "proxy_routes": [{"name": "ssh", "root": "z1.example.com",
+                               "port": 22}]},
+            cookie=admin, source="127.0.0.5",
+        )
+        self.assertEqual(status, 400, body)
+        self.assertEqual(
+            self.settings.snapshot()["proxy_routes"][0]["name"], "owui"
+        )
+
+        # Domain szabály csak létező bejegyzésre hivatkozhat, és amíg
+        # hivatkozik, a bejegyzés nem törölhető.
+        status, _, body = self.post(
+            "/api/admin/rules",
+            {"action": "create", "id": "dom-x", "label": "X",
+             "domains": ["nincs.z1.example.com"]},
+            cookie=admin, source="127.0.0.5",
+        )
+        self.assertEqual(status, 400, body)
+        self.assertIn("ismeretlen proxy-bejegyzés", json.loads(body)["error"])
+        status, _, body = self.post(
+            "/api/admin/rules",
+            {"action": "create", "id": "dom-owui", "label": "OWUI",
+             "domains": ["owui.z1.example.com"]},
+            cookie=admin, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+        listed = next(
+            rule for rule in json.loads(body)["rules"]
+            if rule["id"] == "dom-owui"
+        )
+        self.assertEqual(listed["hosts"], ["owui.z1.example.com"])
+        self.assertEqual(listed["ports_label"], "Domain: owui.z1.example.com")
+        created = [
+            row for row in audit_since(self.audit, started)
+            if row.get("event") == "admin_rule_created"
+        ]
+        self.assertEqual(created[-1].get("domains"), "owui.z1.example.com")
+        before = list(self.tools.lines())
+        status, _, body = self.post(
+            "/api/admin/settings",
+            {"action": "proxy", "proxy_domains": ["z1.example.com"],
+             "proxy_routes": []},
+            cookie=admin, source="127.0.0.5",
+        )
+        self.assertEqual(status, 400, body)
+        self.assertIn("domain szabály hivatkozik rá", json.loads(body)["error"])
+        self.assertEqual(len(self.settings.snapshot()["proxy_routes"]), 1)
+        status, _, body = self.post(
+            "/api/admin/rules", {"action": "delete", "id": "dom-owui"},
+            cookie=admin, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+        status, _, body = self.post(
+            "/api/admin/settings",
+            {"action": "proxy", "proxy_domains": ["z1.example.com"],
+             "proxy_routes": []},
+            cookie=admin, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+
+    def test_totp_enrollment_issuer_uses_site_name(self) -> None:
+        self.addCleanup(self.restore_root_totp)
+        self.users.reset_totp("root")
+        self.users.set_totp_required("root", True)
+        source = "127.0.0.5"
+
+        status, _, body = self.password_login(
+            "root", "root-jelszo-1", source
+        )
+        self.assertEqual(status, 200, body)
+        offer = json.loads(body)
+        self.assertEqual(offer["issuer"], gateway.TOTP_ISSUER)
+        expected_label = urllib.parse.quote(
+            f"{gateway.TOTP_ISSUER}:root", safe=""
+        )
+        self.assertEqual(
+            urllib.parse.urlparse(offer["otpauth_uri"]).path,
+            "/" + expected_label,
+        )
+
+        self.settings.set_site_name("Északi Torony")
+        status, _, body = self.password_login(
+            "root", "root-jelszo-1", source
+        )
+        self.assertEqual(status, 200, body)
+        offer = json.loads(body)
+        self.assertTrue(offer["totp_enroll_required"])
+        self.assertEqual(offer["issuer"], "Északi Torony")
+        parsed = urllib.parse.urlparse(offer["otpauth_uri"])
+        self.assertEqual(parsed.path, "/%C3%89szaki%20Torony%3Aroot")
+        self.assertEqual(
+            urllib.parse.parse_qs(parsed.query)["issuer"],
+            ["Északi Torony"],
+        )
+
     def test_admin_state_and_approve_pending_request(self) -> None:
         admin = self.admin_cookie()
         name = "pendingalice"
@@ -6606,6 +9951,77 @@ class AdminHttpTests(unittest.TestCase):
         self.assertTrue(root.enabled)
 
 
+    def test_admin_logs_manual_read_is_audited(self) -> None:
+        admin = self.admin_cookie()
+        started = time.time()
+        status, _, body = self.get(
+            "/api/admin/logs?manual=1&limit=10&severity=warn",
+            cookie=admin, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+        payload = json.loads(body)
+        rows = audit_since(self.audit, started)
+        reads = [
+            row for row in rows if row.get("event") == "admin_logs_read"
+        ]
+        self.assertEqual(len(reads), 1, rows)
+        row = reads[0]
+        self.assertEqual(row["user"], "root")
+        self.assertEqual(row["limit"], 10)
+        self.assertEqual(row["severity_filter"], "warn")
+        self.assertEqual(row["event_filter"], "")
+        self.assertEqual(row["user_filter"], "")
+        self.assertFalse(row["q_present"])
+        self.assertFalse(row["before_present"])
+        self.assertEqual(row["count"], payload["count"])
+        self.assertEqual(row["severity"], "info")
+
+        # Az automatikus (manual nélküli) frissítés nem kerül a naplóba.
+        status, _, body = self.get(
+            "/api/admin/logs?limit=10", cookie=admin, source="127.0.0.5"
+        )
+        self.assertEqual(status, 200, body)
+        reads = [
+            item for item in audit_since(self.audit, started)
+            if item.get("event") == "admin_logs_read"
+        ]
+        self.assertEqual(len(reads), 1, reads)
+
+    def test_admin_invalid_origin_is_audited(self) -> None:
+        admin = self.admin_cookie()
+        password = "admin-origin-titok-4"
+        started = time.time()
+        conn = self.conn("127.0.0.5")
+        conn.request(
+            "POST",
+            "/api/admin/users",
+            body=json.dumps({
+                "action": "create", "name": "ujuser", "password": password,
+            }),
+            headers={
+                "Content-Type": "application/json",
+                "Cookie": admin,
+                "Origin": "http://evil.example",
+            },
+        )
+        resp = conn.getresponse()
+        body = resp.read()
+        conn.close()
+        self.assertEqual(resp.status, 403, body)
+        rows = audit_since(self.audit, started)
+        rejected = [
+            row for row in rows
+            if row.get("event") == "admin_request_rejected"
+        ]
+        self.assertEqual(len(rejected), 1, rows)
+        row = rejected[0]
+        self.assertEqual(row["reason"], "invalid_origin")
+        self.assertEqual(row["path"], "/api/admin/users")
+        self.assertEqual(row["user"], "")
+        self.assertEqual(row["severity"], "warn")
+        self.assertNotIn(password, json.dumps(rows, ensure_ascii=False))
+
+
 class RateLimitHttpTests(unittest.TestCase):
     def test_second_attempt_is_429(self) -> None:
         tmp = tempfile.TemporaryDirectory()
@@ -6657,6 +10073,7 @@ class TotpCliTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.users_path = os.path.join(self.tmp.name, "users.json")
+        self.audit_path = os.path.join(self.tmp.name, "audit-cli.jsonl")
         self.users = gateway.UserStore(self.users_path, iterations=10_000)
         self.users.add("cliuser", "cliuser-jelszo-1")
         self.users.set_totp_required("cliuser", True)
@@ -6669,7 +10086,11 @@ class TotpCliTests(unittest.TestCase):
         )
 
     def run_cli(self, *args: str) -> subprocess.CompletedProcess:
-        env = {**os.environ, "HV_USERS": self.users_path}
+        env = {
+            **os.environ,
+            "HV_USERS": self.users_path,
+            "HV_AUDIT_LOG": self.audit_path,
+        }
         return subprocess.run(
             [sys.executable, str(ROOT / "server.py"), *args],
             cwd=str(ROOT),
@@ -6780,6 +10201,137 @@ class TotpCliTests(unittest.TestCase):
         )
 
 
+class CliAuditTests(unittest.TestCase):
+    """A parancssori felhasználó- és fail2ban-műveletek auditja."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.users_path = os.path.join(self.tmp.name, "users.json")
+        self.audit_path = os.path.join(self.tmp.name, "audit-cli.jsonl")
+        self.tools = FakeTools(self.tmp.name)
+        self.audit = gateway.AuditLog(
+            self.audit_path, logger=lambda *_: None
+        )
+
+    def run_cli(
+        self, *args: str, input_text: str = ""
+    ) -> subprocess.CompletedProcess:
+        env = {
+            **os.environ,
+            "HV_USERS": self.users_path,
+            "HV_AUDIT_LOG": self.audit_path,
+            "HV_STATE_DIR": self.tmp.name,
+            "HV_NFT_BIN": str(self.tools.nft),
+        }
+        return subprocess.run(
+            [sys.executable, str(ROOT / "server.py"), *args],
+            cwd=str(ROOT),
+            env=env,
+            input=input_text,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+    def events(self, name: str) -> list[dict]:
+        # Az AuditLog.read esemény-szűrője részleges (családokhoz), itt
+        # viszont pontos egyezést akarunk: a cli_fail2ban_ban nem azonos a
+        # fail2ban_ban eseménnyel.
+        return [
+            row for row in self.audit.read()
+            if row.get("event") == name
+        ]
+
+    def test_user_cli_events_have_no_passwords(self) -> None:
+        first = "cli-audit-jelszo-1"
+        second = "cli-audit-jelszo-2"
+        result = self.run_cli(
+            "user", "add", "cliuser2", "--password-stdin",
+            input_text=first + "\n",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        created = self.events("cli_user_created")
+        self.assertEqual(len(created), 1)
+        self.assertEqual(created[0]["target"], "cliuser2")
+        self.assertEqual(created[0]["actor"], "cli")
+        self.assertEqual(created[0]["role"], "user")
+
+        result = self.run_cli(
+            "user", "passwd", "cliuser2", "--password-stdin",
+            input_text=second + "\n",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        changed = self.events("cli_password_changed")
+        self.assertEqual(len(changed), 1)
+        self.assertEqual(changed[0]["target"], "cliuser2")
+        self.assertEqual(changed[0]["actor"], "cli")
+        self.assertEqual(changed[0]["severity"], "warn")
+
+        result = self.run_cli("user", "del", "cliuser2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        deleted = self.events("cli_user_deleted")
+        self.assertEqual(len(deleted), 1)
+        self.assertEqual(deleted[0]["target"], "cliuser2")
+        self.assertEqual(deleted[0]["severity"], "warn")
+
+        result = self.run_cli("user", "del", "cliuser2")
+        self.assertEqual(result.returncode, 1)
+        failed = self.events("cli_action_failed")
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0]["action"], "del")
+        self.assertEqual(failed[0]["target"], "cliuser2")
+        self.assertEqual(failed[0]["reason"], "nincs ilyen felhasználó")
+
+        dump = Path(self.audit_path).read_text(encoding="utf-8")
+        self.assertNotIn(first, dump)
+        self.assertNotIn(second, dump)
+        for row in self.audit.read():
+            self.assertNotIn("password", row)
+
+    def test_fail2ban_cli_events(self) -> None:
+        ip = "203.0.113.9"
+        result = self.run_cli(
+            "fail2ban", "ban", ip, "--seconds", "120"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        bans = self.events("fail2ban_ban")
+        self.assertEqual(len(bans), 1)
+        self.assertEqual(bans[0]["ip"], ip)
+        self.assertTrue(bans[0]["manual"])
+        self.assertEqual(bans[0]["source"], "cli")
+        self.assertEqual(bans[0]["seconds"], 120)
+        self.assertEqual(bans[0]["actor"], "cli")
+        self.assertEqual(bans[0]["severity"], "alert")
+        cli_bans = self.events("cli_fail2ban_ban")
+        self.assertEqual(len(cli_bans), 1)
+        self.assertEqual(cli_bans[0]["target"], ip)
+        self.assertEqual(cli_bans[0]["seconds"], 120)
+        self.assertEqual(cli_bans[0]["actor"], "cli")
+
+        result = self.run_cli("fail2ban", "unban", ip)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        unbans = self.events("fail2ban_unban")
+        self.assertEqual(len(unbans), 1)
+        self.assertEqual(unbans[0]["ip"], ip)
+        self.assertTrue(unbans[0]["removed"])
+        self.assertEqual(unbans[0]["actor"], "cli")
+        cli_unbans = self.events("cli_fail2ban_unban")
+        self.assertEqual(len(cli_unbans), 1)
+        self.assertEqual(cli_unbans[0]["target"], ip)
+        self.assertTrue(cli_unbans[0]["removed"])
+
+        # Nem tiltott IP feloldása nem hiba, de naplózott művelet.
+        result = self.run_cli("fail2ban", "unban", ip)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        failed = self.events("cli_action_failed")
+        self.assertEqual(len(failed), 1)
+        self.assertEqual(failed[0]["action"], "unban")
+        self.assertEqual(failed[0]["target"], ip)
+        self.assertEqual(failed[0]["reason"], "not_banned")
+
+
 class StaticUiTests(unittest.TestCase):
     """A fiókkérés és a QR-beiratkozás statikus frontend-jelölői."""
 
@@ -6867,6 +10419,44 @@ class StaticUiTests(unittest.TestCase):
         self.assertIn("gateway.format_duration(ttl)", server_source)
         self.assertIn("gateway.format_duration(gateway.MAX_TTL)", server_source)
 
+    def test_site_name_ui_and_no_inner_html(self) -> None:
+        for token in (
+            'id="login-site-name"',
+            'id="topbar-site-name"',
+            "function applySiteName(raw)",
+            "applySiteName(data.site_name)",
+            "applySiteName(settings.site_name)",
+            "id: 'site-name-input'",
+            "action: 'site_name'",
+            "name: siteNameInput.value",
+            "A tűzfal neve mentve.",
+            "Tűzfal neve",
+        ):
+            self.assertIn(token, self.source, token)
+        # A nevet csak textContent adja a DOM-ba, nem innerHTML.
+        start = self.source.index("function applySiteName(raw)")
+        end = self.source.index("\n}", start)
+        self.assertNotIn("innerHTML", self.source[start:end])
+        start = self.source.index("const siteSection")
+        end = self.source.index("adminPanel.append(siteSection)", start)
+        self.assertNotIn("innerHTML", self.source[start:end])
+        en, de, _, _ = self._i18n_sections()
+        for text in (
+            "Tűzfal neve",
+            "A tűzfal neve mentve.",
+            "A név a portál fejlécében, a böngésző címében és az új "
+            "2FA-beiratkozások hitelesítő-bejegyzésében jelenik meg. "
+            "Üresen a Dropjak név érvényes.",
+            "Tűzfalnév, bejelentkezés előtt nyitva lévő és blokkolt célok.",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(
+                    f"'{text}':", en, f"hiányzó angol fordítás: {text}"
+                )
+                self.assertIn(
+                    f"'{text}':", de, f"hiányzó német fordítás: {text}"
+                )
+
     def test_qr_markup_and_inline_library_present(self) -> None:
         for token in (
             "qrcodegen",
@@ -6941,6 +10531,37 @@ class StaticUiTests(unittest.TestCase):
             self.assertIn("Elutasítod:", section)
 
 
+    def test_legacy_rule_fallback_label_is_accurate(self) -> None:
+        """A kiosztás nélküli fiók címkéje csak a forward öröklést jelzi."""
+        for old in (
+            "nincs beállítva (alap: mind)",
+            "not set (default: all)",
+            "nicht gesetzt (Standard: alle)",
+        ):
+            with self.subTest(old=old):
+                self.assertNotIn(old, self.source, old)
+        en, de, _, _ = self._i18n_sections()
+        for source_text, english, german in (
+            (
+                "nincs közvetlen beállítás (a forward szabályok öröklődnek)",
+                "no direct assignment (forward rules are inherited)",
+                "keine direkte Zuweisung (Forward-Regeln werden geerbt)",
+            ),
+            (
+                "nincs közvetlen beállítás (csoportból örökölve)",
+                "no direct assignment (inherited from groups)",
+                "keine direkte Zuweisung (von Gruppen geerbt)",
+            ),
+        ):
+            with self.subTest(text=source_text):
+                self.assertIn(source_text, self.source, source_text)
+                self.assertIn(f"'{source_text}': '{english}'", en, source_text)
+                self.assertIn(f"'{source_text}': '{german}'", de, source_text)
+        # A régi fallback csak kiosztás nélküli fiókra vonatkozik, ezért a
+        # csoportos öröklést külön címke jelzi.
+        self.assertIn("(user.groups || []).length", self.source)
+
+
     def test_admin_password_generator_markup_and_translations(self) -> None:
         """Az admin felhasználóűrlap jelszó-generátora és a hozzá tartozó UI."""
         for token in (
@@ -6995,21 +10616,24 @@ class StaticUiTests(unittest.TestCase):
         for token in (
             "name: 'collection'",
             "pickedValues(box, 'members')",
-            "collection: true, members",
+            "submit({ ...base, collection: true, members })",
             "collection: false",
             "tcpField.hidden = collection",
             "udpField.hidden = collection",
             "accessField.hidden = collection",
             "membersField.hidden = !collection",
+            "directionField.hidden = collection",
             "action: 'duplicate'",
             "Duplikálás",
             "Tartalmazott szabályok",
-            "Legalább két egyedi szabályt válassz a gyűjtőszabályhoz.",
+            "Legalább egy egyedi szabályt válassz a gyűjtőszabályhoz.",
             "rule.collection ?",
             "tr('gyűjtő')",
             "tr('másolat')",
         ):
             self.assertIn(token, self.source, token)
+        # A gyűjtő payloadja nem tartalmaz saját irányt.
+        self.assertNotIn("direction,\n      default_ttl", self.source)
         en, de, pen, pde = self._i18n_sections()
         sources = (
             "Gyűjtőszabály",
@@ -7017,16 +10641,17 @@ class StaticUiTests(unittest.TestCase):
             "Duplikálás",
             "másolat",
             "gyűjtő",
-            "Legalább két egyedi szabályt válassz a gyűjtőszabályhoz.",
+            "Legalább egy egyedi szabályt válassz a gyűjtőszabályhoz.",
             "A gyűjtőszabály portjai a tagok uniója. Teljes hozzáférésű és "
             "gyűjtő szabály nem választható tagként.",
             "Szabály duplikálva.",
             "gyűjtőszabályhoz nem adható meg port, ICMP vagy teljes hozzáférés",
             "a gyűjtőszabály nem tartalmazhatja önmagát",
-            "a beépített admin szabály nem lehet gyűjtőszabály tagja",
-            "a beépített admin szabály nem duplikálható",
+            "ez egy fenntartott, régi azonosító, nem lehet gyűjtőszabály tagja",
+            "ez egy fenntartott, régi azonosító, nem duplikálható",
             "members: ismétlődő szabály-azonosító",
-            "members: legalább 2 és legfeljebb 64 egyedi szabály kell",
+            "members: 1–64 szabály-azonosítóból álló lista kell",
+            "members: legalább 1 és legfeljebb 64 egyedi szabály kell",
             "collection: logikai érték kell",
         )
         for text in sources:
@@ -7038,6 +10663,79 @@ class StaticUiTests(unittest.TestCase):
             self.assertIn("nem törölhető", section)
             self.assertIn("gyűjtőszabályoknak", section)
 
+
+    def test_rule_direction_markup_and_translations(self) -> None:
+        for token in (
+            "name: 'direction'",
+            "el('option', { value: 'forward', text: tr('Forward') })",
+            "el('option', { value: 'input', text: tr('Input (host)') })",
+            "directionSelect.value = draftValue(",
+            "directionSelect.addEventListener('change', syncMode)",
+            "direction,",
+            "directionField.hidden = collection",
+            "accessField.hidden = collection || host",
+            "hostNote.hidden = !host",
+            "!rule.collection && rule.direction === 'input'",
+            "rule.direction || 'forward'",
+            "class: 'dir-badge'",
+            "A gyűjtőszabály tagjai különböző irányúak is lehetnek; "
+            "minden tag a saját irányában kap engedélyt.",
+            "A host szabály a portálgép saját szolgáltatásait nyitja meg "
+            "a belépett kliens IP-jének. Csak a szükséges portokat add "
+            "meg; a 8100 (portál) fenntartott.",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, self.source)
+        # Az admin táblában és a hozzáférési kártyán is csak egyedi
+        # szabálynál jelenik meg a Host jelzés.
+        self.assertEqual(
+            self.source.count("!rule.collection && rule.direction === 'input'"),
+            2,
+        )
+
+        en, de, pen, pde = self._i18n_sections()
+        sources = (
+            "Irány",
+            "Forward",
+            "Input (host)",
+            "Host",
+            "A gyűjtőszabály tagjai különböző irányúak is lehetnek; "
+            "minden tag a saját irányában kap engedélyt.",
+            "A host szabály a portálgép saját szolgáltatásait nyitja meg "
+            "a belépett kliens IP-jének. Csak a szükséges portokat add "
+            "meg; a 8100 (portál) fenntartott.",
+            "host szabály nem lehet teljes hozzáférésű",
+            "host szabály nem tartalmazhat ICMP-t",
+            "host szabály nem használhat szolgáltatáslistát",
+            "host szabályhoz legalább egy TCP vagy UDP port kell",
+            "a 8100-as port (portál) nem nyitható meg host szabállyal",
+            "direction: forward vagy input érték kell",
+        )
+        for text in sources:
+            with self.subTest(text=text):
+                self.assertIn(
+                    f"'{text}':", en, f"hiányzó angol fordítás: {text}"
+                )
+                self.assertIn(
+                    f"'{text}':", de, f"hiányzó német fordítás: {text}"
+                )
+        # A 22-es port tiltásának fordítása eltűnt; a 8100-as megmaradt.
+        for section in (en, de):
+            self.assertNotIn(
+                "a 22-es port (SSH) nem nyitható meg host szabállyal",
+                section,
+            )
+            self.assertIn(
+                "'a 8100-as port (portál) nem nyitható meg host szabállyal':",
+                section,
+            )
+        for section in (en, de, pen, pde):
+            self.assertNotIn("azonos irányúak lehetnek", section)
+            self.assertNotIn("szabály iránya nem módosítható", section)
+        for section in (pen, pde):
+            self.assertIn(
+                "host szabály nem használhat szolgáltatáslistát", section
+            )
 
     @staticmethod
     def _js_function(name: str, source: str) -> str:
@@ -7144,6 +10842,586 @@ class StaticUiTests(unittest.TestCase):
         ):
             self.assertIn(token, window, token)
 
+    def test_version_placeholder_in_footer(self) -> None:
+        self.assertIn(
+            '<span class="version" aria-label="Verzió">v__VERSION__</span>',
+            self.source,
+        )
+        self.assertNotIn(">v2.0<", self.source)
+
+
+    def test_multi_select_ttl_hint_lists_all_rules_and_binding(self) -> None:
+        """Több kiválasztott szabálynál minden címke és a kötő szabály látszik."""
+        start = self.source.index("function ttlBounds()")
+        end = self.source.index("function selectRule(", start)
+        section = self.source[start:end]
+        # A függvény a kiválasztott szabályokat és a felső korlátot adó(ka)t
+        # is visszaadja; azonos maximum esetén mindet összegyűjti.
+        self.assertIn("const capped = [];", section)
+        self.assertIn("} else if (value === ruleCap) {", section)
+        self.assertIn(
+            "return { minSec, maxSec, rule, rules, binding };", section
+        )
+        self.assertIn("maxSec = Math.min(maxSec, value);", section)
+        self.assertIn("const { rules, binding } = ttlBounds();", section)
+        self.assertIn(
+            "const labels = rules.map(item => ruleDisplayLabel(item.label || item.id));",
+            section,
+        )
+        # Az egy szabályos forma változatlan, a több szabályos minden címkét
+        # kiírja (3 után +N-nel), a teljes lista pedig a title-ben van.
+        self.assertIn(
+            "ttlHint.title = labels.length > 1 ? labels.join(' · ') : '';",
+            section,
+        )
+        self.assertIn("const visible = labels.slice(0, 3);", section)
+        self.assertIn(
+            "if (hidden > 0) text += ` · +${hidden} ${tr('további')}`;",
+            section,
+        )
+        self.assertIn(
+            "text += ` · ${tr('felső korlát')}: ${names.join(', ')}`;",
+            section,
+        )
+        # A kötő szabályok listája csak szigorú részhalmaz esetén jelenik meg,
+        # így ha minden kiválasztott szabály kötő, a címkék nem ismétlődnek.
+        self.assertIn(
+            "if (binding.length && binding.length < rules.length) {", section
+        )
+        # Az időtartam beviteli mező mellett statikus mértékegység-suffix áll.
+        self.assertIn(
+            '<span class="ttl-unit" data-i18n="óra">óra</span>', self.source
+        )
+        self.assertIn(
+            ".ttl-unit{font-size:12px;font-weight:600;color:#666;"
+            "white-space:nowrap;user-select:none}",
+            self.source,
+        )
+        self.assertIn(
+            ':root[data-theme="dark"] .ttl-unit{color:#b7b9bb}', self.source
+        )
+        self.assertIn("} else if (labels.length === 1) {", section)
+        self.assertIn("text += ` · ${labels[0]}`;", section)
+        self.assertIn(
+            "text = tr(`Beállítható: ${min}–${max} óra`);", section
+        )
+        # Egy óránál rövidebb szabály több kiválasztásnál többes számú üzenet.
+        self.assertIn("text = rules.length > 1", section)
+        self.assertIn(
+            "A kiválasztott szabályok közül legalább egy legalább 1 órás "
+            "időtartamot igényel.",
+            section,
+        )
+        en, de, _, _ = self._i18n_sections()
+        for text, english, german in (
+            ("felső korlát", "upper limit", "Obergrenze"),
+            ("további", "more", "weitere"),
+            (
+                "A kiválasztott szabályok közül legalább egy legalább 1 "
+                "órás időtartamot igényel.",
+                "At least one of the selected rules requires a duration of "
+                "at least 1 hour.",
+                "Mindestens eine der ausgewählten Regeln erfordert eine "
+                "Dauer von mindestens 1 Stunde.",
+            ),
+        ):
+            with self.subTest(text=text):
+                self.assertIn(f"'{text}': '{english}'", en)
+                self.assertIn(f"'{text}': '{german}'", de)
+
+    def test_audit_event_select_manual_render_and_raw_code(self) -> None:
+        """Az eseményszűrő legördülő, a kézi betöltés pedig mindig rajzol."""
+        for token in (
+            "const eventSelect = el('select'",
+            "Object.keys(AUDIT_EVENT_LABELS)",
+            ".sort((a, b) => auditEventLabel(a).localeCompare(",
+            "if (logFilter.event && !eventCodes.includes(logFilter.event))",
+            "value: '', text: tr('összes esemény')",
+            "text: `${auditEventLabel(code)} (${code})`",
+            "event: eventSelect.value",
+            "['Esemény', eventSelect]",
+            "for (const node of [userInput, qInput])",
+            "class: 'log-event-code muted'",
+            "text: entry.event",
+            "const searchPhrase = 'keresés a látható értékekben "
+            "(esemény, felhasználó, IP, szabály, ok)';",
+        ):
+            self.assertIn(token, self.source, token)
+        # A régi szabad szöveges esemény-mező és annak Enter-kezelője eltűnt.
+        self.assertNotIn("placeholder: tr('esemény')", self.source)
+        self.assertNotIn(
+            "for (const node of [eventInput, userInput, qInput])",
+            self.source,
+        )
+        logs_start = self.source.index("async function loadLogs")
+        logs_end = self.source.index("function scheduleLogs", logs_start)
+        self.assertIn(
+            "if (manual || !typing)", self.source[logs_start:logs_end]
+        )
+        drops_start = self.source.index("async function loadDrops")
+        drops_end = self.source.index("function scheduleDrops", drops_start)
+        drops = self.source[drops_start:drops_end]
+        self.assertIn("async function loadDrops(manual = false)", drops)
+        self.assertIn("if (manual || !typing)", drops)
+        # A szűrő gombjai kézi betöltésként rajzolnak.
+        filter_start = self.source.index("function dropFiltersBar()")
+        filter_end = self.source.index("function dropTimeCell(", filter_start)
+        filter = self.source[filter_start:filter_end]
+        self.assertGreaterEqual(filter.count("loadDrops(true)"), 2)
+        en, de, _, _ = self._i18n_sections()
+        for text, english, german in (
+            ("összes esemény", "all events", "alle Ereignisse"),
+            ("eseménykód", "event code", "Ereignis-Code"),
+            (
+                "keresés a látható értékekben (esemény, felhasználó, IP, "
+                "szabály, ok)",
+                "search visible values (event, user, IP, rule, reason)",
+                "sichtbare Werte durchsuchen (Ereignis, Benutzer, IP, "
+                "Regel, Grund)",
+            ),
+        ):
+            with self.subTest(text=text):
+                self.assertIn(f"'{text}': '{english}'", en)
+                self.assertIn(f"'{text}': '{german}'", de)
+
+    def test_fail2ban_drop_metric_switches_and_disabled_rendering(self) -> None:
+        """A három jelzés külön kapcsolható; nincs 0 = kikapcsolva."""
+        start = self.source.index("function fail2banConfigForm(fb)")
+        end = self.source.index("function fail2banBanForm(fb)", start)
+        form = self.source[start:end]
+        # A tiltás hossza nem a belépés-csoportban van: a ban_seconds a
+        # drop-alapú tiltásokat is szabályozza, ezért közös csoportba került.
+        enabled_start = form.index("'enabled', fb.enabled !== false")
+        enabled_end = form.index("makeGroup(", enabled_start)
+        enabled_group = form[enabled_start:enabled_end]
+        self.assertNotIn("ban_minutes", enabled_group)
+        self.assertIn("max_attempts", enabled_group)
+        self.assertIn("window_minutes", enabled_group)
+        self.assertIn("tr('Közös beállítások')", form)
+        self.assertIn("class: 'f2b-group-title'", form)
+        shared_start = form.index("tr('Közös beállítások')")
+        shared_end = form.index("class: 'form-actions'", shared_start)
+        shared_group = form[shared_start:shared_end]
+        self.assertIn("name: 'ban_minutes'", shared_group)
+        self.assertIn("name: 'drop_window_minutes'", shared_group)
+        self.assertIn(
+            "fail2banDraftError('Adj meg érvényes számokat a küszöbhöz "
+            "és az időtartamokhoz.')",
+            form,
+        )
+        self.assertNotIn("küszöbökhöz", form)
+        for token in (
+            "type: 'checkbox', name",
+            "'enabled', fb.enabled !== false",
+            "'drop_count_enabled', fb.drop_count_enabled !== false",
+            "'drop_ports_enabled', fb.drop_ports_enabled !== false",
+            "drop_count_enabled: dropCountEnabled",
+            "drop_ports_enabled: dropPortsEnabled",
+            "min: limits.min_drop_max ?? 1",
+            "min: limits.min_drop_ports ?? 1",
+            "class: 'f2b-group'",
+            "class: 'f2b-toggle'",
+            "class: 'f2b-fields'",
+            "classList.toggle('is-off', !on)",
+            "node.disabled = !on",
+            "tr('Sikertelen belépés a tiltásig')",
+            "'Sikertelen belépések'",
+            "'Eldobott csomagok'",
+            "'Különböző célportok'",
+            "tr('Mindkét drop-mérőszám ezt az időablakot használja.')",
+        ):
+            self.assertIn(token, form, token)
+        # A régi drop-mesterkapcsoló és a 0 = kikapcsolva mechanizmus eltűnt.
+        self.assertNotIn("name: 'drop_enabled'", form)
+        self.assertNotIn("drop_enabled: boolValue", form)
+        self.assertNotIn("0 = kikapcsolva", self.source)
+        # A belépés és a drop-figyelés független a státuszkártyákon is.
+        self.assertIn(
+            "const loginActive = fb.enabled !== false;", self.source
+        )
+        self.assertIn(
+            "const dropMaster = fb.drop_enabled !== false;", self.source
+        )
+        self.assertIn(
+            "const dropRunning = countActive || portsActive;",
+            self.source,
+        )
+        self.assertIn(
+            "const running = loginActive || dropRunning;", self.source
+        )
+        self.assertIn("fb.drop_count_active", self.source)
+        self.assertIn("fb.drop_ports_active", self.source)
+        self.assertIn("tr('csomagszám')", self.source)
+        self.assertIn("tr('portszám')", self.source)
+        # A várakozó drop-táblában a kikapcsolt mérőszám nem / 0 alakot kap.
+        pending_start = self.source.index("function fail2banDropPendingTable(")
+        pending_end = self.source.index("async function fail2banUnban(", pending_start)
+        pending = self.source[pending_start:pending_end]
+        self.assertIn("row.drop_count_active", pending)
+        self.assertIn("row.drop_ports_active", pending)
+        self.assertIn(
+            "text: countActive ? `${row.count} / ${row.max_drops}` : tr('kikapcsolva')",
+            pending,
+        )
+        en, de, _, _ = self._i18n_sections()
+        for text, english, german in (
+            ("Közös beállítások", "Shared settings", "Gemeinsame Einstellungen"),
+            (
+                "Minden automatikus tiltásra érvényes, a drop-alapúakra is.",
+                "Applies to every automatic ban, including drop-based ones.",
+                "Gilt für jede automatische Sperre, auch für drop-basierte.",
+            ),
+            (
+                "Adj meg érvényes számokat a küszöbhöz és az időtartamokhoz.",
+                "Enter valid numbers for the threshold and durations.",
+                "Gib gültige Zahlen für Schwelle und Zeiträume ein.",
+            ),
+            ("Sikertelen belépések", "Failed sign-ins", "Fehlgeschlagene Anmeldungen"),
+            (
+                "Hibás jelszavas belépések; a captcha- és a gyakorisági "
+                "hibák nem számítanak.",
+                "Failed password sign-ins; captcha and rate-limit failures "
+                "do not count.",
+                "Fehlgeschlagene Passwort-Anmeldungen; Captcha- und "
+                "Ratenlimit-Fehler zählen nicht.",
+            ),
+            (
+                "A bejelentkezés nélküli forgalom eldobott csomagjait "
+                "számolja.",
+                "Counts dropped packets in traffic without a sign-in.",
+                "Zählt verworfene Pakete im Verkehr ohne Anmeldung.",
+            ),
+            (
+                "Különböző célportok",
+                "Distinct destination ports",
+                "Verschiedene Zielports",
+            ),
+            (
+                "Portszkennerek észlelése a különböző célportok alapján.",
+                "Detects port scanners by the number of distinct "
+                "destination ports.",
+                "Erkennt Portscanner anhand der Anzahl verschiedener "
+                "Zielports.",
+            ),
+            (
+                "Mindkét drop-mérőszám ezt az időablakot használja.",
+                "Both drop metrics use this window.",
+                "Beide Drop-Metriken verwenden dieses Zeitfenster.",
+            ),
+            (
+                "A kikapcsolt mérőszám nem számol és nem tilt; a meglévő "
+                "tiltások a megadott idő elteltével normálisan lejárnak.",
+                "A disabled metric neither counts nor bans; existing bans "
+                "expire normally after the configured time.",
+                "Eine deaktivierte Metrik zählt nicht und sperrt nicht; "
+                "bestehende Sperren laufen nach der festgelegten Zeit "
+                "normal ab.",
+            ),
+        ):
+            with self.subTest(text=text):
+                self.assertIn(f"'{text}': '{english}'", en)
+                self.assertIn(f"'{text}': '{german}'", de)
+        # A kiváltott régi kulcsok már nem szerepelnek a fordításokban.
+        for removed in (
+            "0 = kikapcsolva",
+            "Drop-alapú tiltás",
+            "bejelentkezés nélküli portszkennerek tiltása",
+            "eldobott csomagok számlálása",
+            "portszkennelés számlálása",
+        ):
+            with self.subTest(removed=removed):
+                self.assertNotIn(f"'{removed}':", en)
+                self.assertNotIn(f"'{removed}':", de)
+
+
+    def test_status_poll_refreshes_access_without_navigation(self) -> None:
+        refresh_start = self.source.index("async function refreshStatus()")
+        session_start = self.source.index(
+            "if (activeView === 'session') {", refresh_start
+        )
+        access_start = self.source.index(
+            "if (activeView === 'access') {", refresh_start
+        )
+        self.assertLess(access_start, session_start)
+        access_branch = self.source[access_start:session_start]
+        self.assertIn("refreshAccessFromStatus(data);", access_branch)
+        self.assertIn("return;", access_branch)
+        # A módosítás nézetben a poll nem navigál és nem hívja a session-nézetet.
+        self.assertNotIn("showAccess(", access_branch)
+        self.assertNotIn("showSession(", access_branch)
+
+        start = self.source.index("function refreshAccessFromStatus(data)")
+        end = self.source.index("async function refreshStatus()", start)
+        section = self.source[start:end]
+        for token in (
+            "const previousRules = Array.isArray(previous.rules) "
+            "? previous.rules : [];",
+            "const freshRules = Array.isArray(data.rules) "
+            "? data.rules : previousRules;",
+            "rulesSignature(previousRules) !== rulesSignature(freshRules)",
+            "const before = new Map(",
+            "const after = new Map(",
+            "const previousServer = Array.isArray(previous.selectedRules)",
+            "const freshServer = statusSelection(data, previousServer);",
+            "for (const id of previousServer) {",
+            "if (!freshServer.includes(id)) revoked.add(id);",
+            "renderAuth(data);",
+            "selectedRuleIds = selectedRuleIds.filter(",
+            "id => !revoked.has(id) && after.has(id)",
+            "if (!selectedRuleIds.length) "
+            "selectedRuleIds = chooseDefaultRules();",
+            "if (catalogChanged || revoked.size) renderRules();",
+            "updateTtlBounds();",
+        ):
+            self.assertIn(token, section, token)
+        # A folyamatban lévő érvényes kijelölést nem törli a poll, és a
+        # kártyák csak valódi katalógusváltozásnál rajzolódnak újra.
+        self.assertIn("catalogChanged", section)
+        self.assertIn("revoked.size", section)
+        # A visszavonás azonnal látható a módosítás nézetben.
+        self.assertIn(
+            "Az új szabálydefiníció csak külön engedélyezéssel lép "
+            "életbe; engedélyezd újra a hozzáférést.",
+            section,
+        )
+
+        # Engedélyezés előtt (pending) is megmarad a képernyő és a
+        # folyamatban lévő kijelölés; csak a katalógus változásakor rajzol.
+        pending_start = self.source.index(
+            "if (activeView !== 'access') showAccess(data);", refresh_start
+        )
+        pending_end = self.source.index("} catch (e) {", pending_start)
+        pending = self.source[pending_start:pending_end]
+        for token in (
+            "const previousRules = auth && Array.isArray(auth.rules) "
+            "? auth.rules : [];",
+            "const freshRules = Array.isArray(data.rules) "
+            "? data.rules : previousRules;",
+            "rulesSignature(previousRules) !== rulesSignature(freshRules)",
+            "renderAuth(data, true);",
+            "selectedRuleIds = selectedRuleIds.filter(",
+            "if (!selectedRuleIds.length) "
+            "selectedRuleIds = chooseDefaultRules();",
+            "if (catalogChanged) renderRules();",
+            "updateTtlBounds();",
+        ):
+            self.assertIn(token, pending, token)
+
+    def test_status_poll_keeps_session_view_fresh_and_notifies(self) -> None:
+        refresh_start = self.source.index("async function refreshStatus()")
+        session_start = self.source.index(
+            "if (activeView === 'session') {", refresh_start
+        )
+        notice_call = "if (sessionRevokedNotice) "
+        notice_end = self.source.index(notice_call, session_start)
+        notice_end = self.source.index(
+            "showSessionMsg(sessionRevokedNotice);",
+            notice_end,
+        ) + len("showSessionMsg(sessionRevokedNotice);")
+        section = self.source[session_start:notice_end]
+        for token in (
+            "const revoked = auth",
+            "!sameSelection(",
+            "statusSelection(data, auth.selectedRules)",
+            "showSession(data);",
+            "if (Array.isArray(data.rules)) auth.rules = data.rules;",
+            "auth.rulesSignature = rulesSignature(auth.rules);",
+            "sessionRevokedNotice = ",
+            "if (sessionRevokedNotice) "
+            "showSessionMsg(sessionRevokedNotice);",
+        ):
+            self.assertIn(token, section, token)
+        # A visszavonási értesítés a session-nézetben is megmarad a
+        # következő pollok alatt, de új belépéskor/módosításkor törlődik.
+        self.assertIn(
+            "Az új szabálydefiníció csak külön engedélyezéssel lép "
+            "életbe; a módosítás oldalon újra engedélyezheted.",
+            section,
+        )
+        access_start = self.source.index("function showAccess(data)")
+        access_end = self.source.index("function showSession(", access_start)
+        self.assertIn(
+            "sessionRevokedNotice = '';",
+            self.source[access_start:access_end],
+        )
+        end_start = self.source.index("function endSession(")
+        end_end = self.source.index("function updateTimer()", end_start)
+        self.assertIn(
+            "sessionRevokedNotice = '';",
+            self.source[end_start:end_end],
+        )
+        grant_start = self.source.index("accessForm.addEventListener('submit'")
+        grant_end = self.source.index("function cachedAccessPayload()", grant_start)
+        grant_handler = self.source[grant_start:grant_end]
+        self.assertIn(
+            "sessionRevokedNotice = '';\n    showSession(data);",
+            grant_handler,
+        )
+
+    def test_modify_button_fetches_fresh_status_before_access_view(self) -> None:
+        start = self.source.index("modifyBtn.addEventListener")
+        end = self.source.index("accessBack.addEventListener", start)
+        handler = self.source[start:end]
+        for token in (
+            "modifyBtn.addEventListener('click', async () => {",
+            "if (!auth) return;",
+            "await fetch('/api/status', { cache: 'no-store' })",
+            "data = await res.json();",
+            "if (data && data.authenticated === true) {",
+            "showAccess(data);",
+            "if (data && data.authenticated === false) {",
+            "await refreshStatus();",
+            "showAccess(cachedAccessPayload());",
+        ):
+            self.assertIn(token, handler, token)
+        # Hálózati hibánál a gyorsítótárazott pillanatkép marad, de nem
+        # navigálunk el a session-nézetbe.
+        self.assertNotIn("showSession(", handler)
+        self.assertNotIn("location.", handler)
+        helper_start = self.source.index("function cachedAccessPayload()")
+        helper = self.source[helper_start:start]
+        for token in (
+            "expires_in: Math.max(0, (auth.expiresAt - Date.now()) / 1000)",
+            "selected_rules: auth.selectedRules",
+            "selected_rule_labels: auth.selectedRuleLabels",
+            "grants: auth.grants",
+        ):
+            self.assertIn(token, helper, token)
+
+    def test_rule_signature_helpers_are_order_insensitive(self) -> None:
+        functions = "\n".join(
+            self._js_function(name, self.source)
+            for name in (
+                "ruleSignature",
+                "rulesSignature",
+                "sameSelection",
+                "statusSelection",
+            )
+        )
+        script = functions + """
+const ruleA = { id: 'a', label: 'A', tcp: [22], max_ttl: 3600 };
+const ruleAReordered = { max_ttl: 3600, tcp: [22], label: 'A', id: 'a' };
+const ruleB = { id: 'b', label: 'B', udp: [53], max_ttl: 7200 };
+const out = {
+  keyOrderStable: ruleSignature(ruleA) === ruleSignature(ruleAReordered),
+  ruleOrderInsensitive:
+    rulesSignature([ruleA, ruleB]) === rulesSignature([ruleB, ruleA]),
+  changedDefinition:
+    ruleSignature(ruleA) !== ruleSignature({ ...ruleA, tcp: [23] }),
+  removedRule:
+    rulesSignature([ruleA, ruleB]) !== rulesSignature([ruleA]),
+  sameOrderInsensitive: sameSelection(['b', 'a'], ['a', 'b']),
+  sameDifferent: !sameSelection(['a'], ['a', 'b']),
+  selectedRulesPreferred:
+    JSON.stringify(statusSelection(
+      { selected_rules: ['b', 'a'], rule: 'a' }, ['x'])) ===
+    JSON.stringify(['b', 'a']),
+  ruleFallback:
+    JSON.stringify(statusSelection({ rule: 'a' }, ['x'])) ===
+    JSON.stringify(['a']),
+  fallback:
+    JSON.stringify(statusSelection({}, ['x', 'y'])) ===
+    JSON.stringify(['x', 'y'])
+};
+process.stdout.write(JSON.stringify(out));
+"""
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node nem érhető el a JS-helper teszthez")
+        result = subprocess.run(
+            [node, "-e", script],
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        for name, value in data.items():
+            with self.subTest(name=name):
+                self.assertIs(value, True)
+
+    def test_live_rule_notice_translations_present(self) -> None:
+        en, de, _, _ = self._i18n_sections()
+        for text, english, german in (
+            (
+                "A módosított szabály miatt az érintett hozzáférés azonnal "
+                "visszavonásra került. Az új szabálydefiníció csak külön "
+                "engedélyezéssel lép életbe; engedélyezd újra a "
+                "hozzáférést.",
+                "The affected access was revoked immediately because the "
+                "rule was modified. The new rule definition only takes "
+                "effect with a separate authorization; authorize access "
+                "again.",
+                "Der betroffene Zugriff wurde wegen der geänderten Regel "
+                "sofort widerrufen. Die neue Regeldefinition wird nur mit "
+                "einer gesonderten Autorisierung wirksam; autorisiere den "
+                "Zugriff erneut.",
+            ),
+            (
+                "A módosított szabály miatt az érintett hozzáférés azonnal "
+                "visszavonásra került. Az új szabálydefiníció csak külön "
+                "engedélyezéssel lép életbe; a módosítás oldalon újra "
+                "engedélyezheted.",
+                "The affected access was revoked immediately because the "
+                "rule was modified. The new rule definition only takes "
+                "effect with a separate authorization; you can authorize "
+                "it again on the modify screen.",
+                "Der betroffene Zugriff wurde wegen der geänderten Regel "
+                "sofort widerrufen. Die neue Regeldefinition wird nur mit "
+                "einer gesonderten Autorisierung wirksam; du kannst ihn "
+                "auf der Änderungsseite erneut autorisieren.",
+            ),
+        ):
+            with self.subTest(text=text):
+                self.assertIn(f"'{text}': '{english}'", en)
+                self.assertIn(f"'{text}': '{german}'", de)
+
+
+class VersionMetadataTests(unittest.TestCase):
+    """A verzió egyetlen forrásból, a VERSION fájlból származik."""
+
+    def test_version_file_and_gateway_agree(self) -> None:
+        text = (ROOT / "VERSION").read_text(encoding="utf-8")
+        value = text.strip()
+        self.assertRegex(value, r"^\d+\.\d+\.\d+$")
+        self.assertEqual(value, gateway.APP_VERSION)
+        self.assertTrue(text.endswith("\n"))
+
+    def test_changelog_top_matches_version(self) -> None:
+        changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        match = re.search(
+            r"^## \[(\d+\.\d+\.\d+)\] - \d{4}-\d{2}-\d{2}$",
+            changelog,
+            re.M,
+        )
+        self.assertIsNotNone(match, "hiányzó CHANGELOG-verziócím")
+        self.assertEqual(match.group(1), gateway.APP_VERSION)
+
+    def test_dockerfile_copies_version(self) -> None:
+        dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        copy_line = next(
+            line for line in dockerfile.splitlines()
+            if line.startswith("COPY ") and "gateway.py" in line
+        )
+        self.assertIn("VERSION", copy_line.split())
+
+    def test_read_version_is_strict_semver(self) -> None:
+        with mock.patch(
+            "builtins.open", mock.mock_open(read_data="2.9.0\n")
+        ):
+            self.assertEqual(gateway._read_version(), "2.9.0")
+        # Csak a szigorú x.y.z alak fogadható el; bármi más 0.0.0 lesz,
+        # így tetszőleges tartalom nem kerülhet a HTML-be.
+        for content in (
+            "2.9", "v2.9.0", "<script>", "", "2.9.0-rc1",
+            "2.١.0", "２.10.0",
+        ):
+            with self.subTest(content=content):
+                with mock.patch(
+                    "builtins.open", mock.mock_open(read_data=content)
+                ):
+                    self.assertEqual(gateway._read_version(), "0.0.0")
+        with mock.patch("builtins.open", side_effect=OSError("nincs")):
+            self.assertEqual(gateway._read_version(), "0.0.0")
+
 
 class TotpQrCodegenTests(unittest.TestCase):
     """A beágyazott qrcodegen valódi mátrixot állít elő (node-dal)."""
@@ -7228,6 +11506,7 @@ process.stdout.write(JSON.stringify({
         for row in rows:
             self.assertEqual(len(row), self.EXPECTED_SIZE)
             self.assertEqual(set(row) - {"0", "1"}, set())
+
 
 
 # ---------------------------------------------------- drop log és beállítások
@@ -7786,9 +12065,65 @@ class SettingsStoreTests(unittest.TestCase):
                     self.store.set_registration_enabled(value)
         self.assertIs(self.store.snapshot()["registration_enabled"], False)
 
+    def test_site_name_default_set_persist_and_clear(self) -> None:
+        self.assertEqual(self.store.snapshot()["site_name"], "")
+        self.assertEqual(
+            gateway.settings_store.validate_state({})["site_name"], ""
+        )
+
+        result = self.store.set_site_name("  Északi Torony  ")
+        self.assertEqual(result["site_name"], "Északi Torony")
+        self.assertEqual(
+            self.store.snapshot()["site_name"], "Északi Torony"
+        )
+        raw = json.loads(Path(self.path).read_text(encoding="utf-8"))
+        self.assertEqual(raw["site_name"], "Északi Torony")
+
+        reloaded = gateway.settings_store.SettingsStore(
+            self.path, logger=lambda *_: None
+        )
+        self.assertEqual(reloaded.snapshot()["site_name"], "Északi Torony")
+
+        cleared = self.store.set_site_name("")
+        self.assertEqual(cleared["site_name"], "")
+        self.assertIs(
+            gateway.settings_store.SettingsStore(
+                self.path, logger=lambda *_: None
+            ).snapshot()["site_name"],
+            "",
+        )
+
+    def test_site_name_validation_and_legacy_files(self) -> None:
+        for value in (
+            None, 1, True, [], {}, b"dropjak", "x" * 65, "a\nb", "a\x01b",
+            "a\x7fb",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(gateway.settings_store.SettingsError):
+                    self.store.set_site_name(value)
+        self.assertEqual(self.store.snapshot()["site_name"], "")
+
+        # A régi fájlban nincs site_name: alapértelmezésként üresen töltődik,
+        # és a regisztrációs beállítás továbbra is olvasható.
+        Path(self.path).write_text(
+            json.dumps({"registration_enabled": True}), encoding="utf-8"
+        )
+        legacy = gateway.settings_store.SettingsStore(
+            self.path, logger=lambda *_: None
+        )
+        snapshot = legacy.snapshot()
+        self.assertEqual(snapshot["site_name"], "")
+        self.assertIs(snapshot["registration_enabled"], True)
+
+        # A 64 karakteres név érvényes, a mentés megőrzi.
+        maximum = "x" * gateway.settings_store.MAX_SITE_NAME
+        self.assertEqual(
+            legacy.set_site_name(maximum)["site_name"], maximum
+        )
+
 
 class HostSshPolicyRemovedTests(unittest.TestCase):
-    """A régi, állítható host SSH politika eltűnt, a tűzfal-plumbing maradt."""
+    """A régi, állítható host SSH politika és a külön SSH-plumbing eltűnt."""
 
     def _text(self, name: str) -> str:
         return (ROOT / name).read_text(encoding="utf-8")
@@ -7826,21 +12161,26 @@ class HostSshPolicyRemovedTests(unittest.TestCase):
         self.assertNotIn("host_ssh", page)
         self.assertNotIn("Host SSH", page)
 
-    def test_firewall_plumbing_remains(self) -> None:
+    def test_firewall_plumbing_is_gone(self) -> None:
         source = self._text("gateway.py")
-        self.assertIn('self.ssh_set = "host_ssh_v4"', source)
-        self.assertIn("def grant_host_ssh(", source)
-        self.assertIn("def revoke_host_ssh(", source)
-        self.assertIn('add_simple("host_ssh_v4", "host_ssh")', source)
+        self.assertNotIn('self.ssh_set = "host_ssh_v4"', source)
+        self.assertNotIn("def grant_host_ssh(", source)
+        self.assertNotIn("def revoke_host_ssh(", source)
+        self.assertNotIn('add_simple("host_ssh_v4", "host_ssh")', source)
 
         nft = self._text("deploy/hatarvedelem.nft")
-        self.assertIn("add set inet hatarvedelem host_ssh_v4 {", nft)
-        self.assertIn("ip saddr @host_ssh_v4 tcp dport 22 accept", nft)
-        self.assertIn(
+        self.assertNotIn("host_ssh_v4", nft)
+        self.assertNotIn("add set inet hatarvedelem host_ssh_v4", nft)
+        self.assertNotIn("\n        tcp dport 22 accept", nft)
+        ssh_guard = (
             "tcp dport 22 ct state established,related "
-            "ip saddr != @host_ssh_v4 drop",
-            nft,
+            "ip saddr . tcp dport != @allowed_input_tcp"
         )
+        # A naplózó és az eldobó szabály is kizárólag a rendes host
+        # szabályból származó engedélyt nézi.
+        self.assertEqual(nft.count(ssh_guard), 2)
+        self.assertEqual(nft.count(ssh_guard + " drop"), 1)
+        self.assertIn(ssh_guard + " limit rate 30/minute", nft)
 
 
 class FirewallCustomTests(unittest.TestCase):
@@ -8058,6 +12398,291 @@ class RulesetTemplateTests(unittest.TestCase):
             self.forward.index("ip saddr @banned_v4 drop"),
             self.forward.index("jump preauth"),
         )
+
+    def test_host_input_sets_and_accepts(self) -> None:
+        input_chain = self.text.split("chain input {", 1)[1].split(
+            "chain prerouting {", 1
+        )[0]
+        prerouting = self.text.split("chain prerouting {", 1)[1]
+        for token in (
+            "add set inet hatarvedelem allowed_input_tcp {",
+            "add set inet hatarvedelem allowed_input_udp {",
+            "ip saddr . tcp dport @allowed_input_tcp "
+            "tcp dport != 8100 accept",
+            "ip saddr . udp dport @allowed_input_udp "
+            "udp dport != 8100 accept",
+            "ip saddr . tcp dport @allowed_input_tcp "
+            "ip saddr . ether saddr != @client_mac drop",
+            "ip saddr . udp dport @allowed_input_udp "
+            "ip saddr . ether saddr != @client_mac drop",
+            "iifname \"__LAN_IF__\" meta l4proto tcp "
+            "ip saddr . ct original proto-dst @allowed_input_tcp return",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, self.text)
+
+        accept = input_chain.index(
+            "ip saddr . tcp dport @allowed_input_tcp "
+            "tcp dport != 8100 accept"
+        )
+        # A 22-es port szándékosan nincs kizárva a host elfogadásból: azt
+        # admin által létrehozott host szabály megnyithatja. Csak a 8100
+        # (portál) fenntartott, és az UDP elfogadás is csak azt zárja ki.
+        accept_line = input_chain.splitlines()[input_chain[:accept].count("\n")]
+        self.assertIn("tcp dport != 8100", accept_line)
+        self.assertNotIn("tcp dport != 22", accept_line)
+        self.assertIn(
+            "ip saddr . udp dport @allowed_input_udp "
+            "udp dport != 8100 accept",
+            input_chain,
+        )
+        # A tiltás és a MAC-kötés előbb fut, mint a host elfogadás.
+        self.assertLess(input_chain.index("ip saddr @banned_v4 drop"), accept)
+        self.assertLess(
+            input_chain.index(
+                "ip saddr . tcp dport @allowed_input_tcp "
+                "ip saddr . ether saddr != @client_mac drop"
+            ),
+            accept,
+        )
+        # A host TCP 80 megkerüli a portál-átirányítást.
+        self.assertLess(
+            prerouting.index(
+                "ip saddr . ct original proto-dst @allowed_input_tcp return"
+            ),
+            prerouting.index(
+                "meta l4proto tcp ct original proto-dst 80 redirect"
+            ),
+        )
+
+    def test_host_revocation_guard_sets_and_order(self) -> None:
+        # A host portok csak bővülő kerneloldali halmazai.
+        self.assertIn(
+            "add set inet hatarvedelem host_service_tcp {\n"
+            "    type inet_service",
+            self.text,
+        )
+        self.assertIn(
+            "add set inet hatarvedelem host_service_udp {\n"
+            "    type inet_service",
+            self.text,
+        )
+        input_chain = self.text.split("chain input {", 1)[1].split(
+            "chain prerouting {", 1
+        )[0]
+        # A host-őr csomagszintű: az input lánc csak a kliens→host irányt
+        # látja, a portál-átirányított csomagok célportja pedig már 8100.
+        # Protokollonként egy naplózó és egy eldobó szabály.
+        tcp_guard = input_chain.index("tcp dport @host_service_tcp")
+        udp_guard = input_chain.index("udp dport @host_service_udp")
+        generic_accept = input_chain.index(
+            "ct state established,related accept"
+        )
+        guard_block = input_chain[tcp_guard:generic_accept]
+        self.assertEqual(
+            guard_block.count("tcp dport @host_service_tcp"), 2
+        )
+        self.assertEqual(
+            guard_block.count("udp dport @host_service_udp"), 2
+        )
+        self.assertEqual(
+            guard_block.count(
+                "ip saddr . tcp dport != @allowed_input_tcp"
+            ),
+            2,
+        )
+        self.assertEqual(
+            guard_block.count(
+                "ip saddr . udp dport != @allowed_input_udp"
+            ),
+            2,
+        )
+        # A TCP 22-es portot az általános host-őr szándékosan kiveszi: a
+        # host_service_tcp csak bővül, ezért a 22 bekerülhet egy host
+        # szabály miatt, és a kivétel nélkül a host-22 engedélyt is
+        # eldobná. A 22-t kizárólag a fenti SSH-specifikus őr kezeli.
+        tcp_guard_line = (
+            "tcp dport @host_service_tcp tcp dport != 22 "
+            "ct state established,related"
+        )
+        self.assertEqual(guard_block.count(tcp_guard_line), 2)
+        # Az UDP őr nem kap ilyen kivételt: az SSH-őr TCP-only, a UDP 22
+        # közönséges host-szabály-port.
+        self.assertNotIn("udp dport != 22", guard_block)
+        # Az eredeti tuple-ra épülő, széles forward-kivételek helyett a
+        # csomag szintű dport a kulcs; ezek nem szerepelhetnek az őrben.
+        for forbidden in (
+            "ct original",
+            "meta l4proto",
+            "@allowed_v4",
+            "@allowed_tcp",
+            "@allowed_udp",
+            "udp sport != 68",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, guard_block)
+
+        # A host-DNS established kivételei szűken, csak a 53-as portra
+        # érvényesek, és az őr előtt futnak.
+        dns_accepts = (
+            'iifname "__LAN_IF__" tcp dport 53 ct state established,'
+            "related ip saddr @allowed_v4 accept",
+            'iifname "__LAN_IF__" tcp dport 53 ct state established,'
+            "related ip saddr . tcp dport @allowed_tcp accept",
+            'iifname "__LAN_IF__" udp dport 53 ct state established,'
+            "related ip saddr @allowed_v4 accept",
+            'iifname "__LAN_IF__" udp dport 53 ct state established,'
+            "related ip saddr . udp dport @allowed_udp accept",
+        )
+        for rule in dns_accepts:
+            with self.subTest(rule=rule):
+                self.assertIn(rule, input_chain)
+                self.assertLess(input_chain.index(rule), tcp_guard)
+        self.assertLess(
+            input_chain.index("reason=dns-revoked"),
+            input_chain.index(dns_accepts[0]),
+        )
+        # A DHCP-elfogadás a host-őr előtt, pontosan egyszer szerepel az
+        # SSH-őr utáni szakaszban; a fail2ban-kivételként korábban álló
+        # azonos szabály változatlanul megmarad. A generikus established-
+        # accept után már nem lehet DHCP-elfogadás (a régi másolat törölve).
+        ssh_guard = input_chain.index("reason=ssh-revoked")
+        dhcp_accept = (
+            'iifname "__LAN_IF__" udp sport 68 udp dport 67 accept'
+        )
+        self.assertEqual(
+            input_chain[ssh_guard:tcp_guard].count(dhcp_accept), 1
+        )
+        self.assertLess(
+            input_chain.index(dhcp_accept, ssh_guard), tcp_guard
+        )
+        self.assertNotIn(dhcp_accept, input_chain[generic_accept:])
+
+        # Az SSH-őr után, de az általános established-accept előtt futnak,
+        # különben a meglévő kapcsolat megkerülné a host engedélyt.
+        self.assertLess(ssh_guard, tcp_guard)
+        self.assertLess(tcp_guard, udp_guard)
+        self.assertLess(udp_guard, generic_accept)
+        self.assertIn("reason=host-revoked", input_chain)
+
+    def test_dns_revoked_guard_spares_authorized_host_tcp_53(self) -> None:
+        start = self.text.index("A meglévő TCP DNS-kapcsolat")
+        end = self.text.index("Meglévő SSH-kapcsolat")
+        block = self.text[start:end]
+        # A naplózó és az eldobó szabály is kiveszi az engedélyezett host
+        # TCP 53 kapcsolatot; a valódi jogosultságot a host_service_* őr
+        # ellenőrzi.
+        self.assertEqual(
+            block.count("ip saddr . tcp dport != @allowed_input_tcp"),
+            2,
+        )
+        self.assertIn("reason=dns-revoked", block)
+
+    def test_entrypoint_warns_about_lockout_before_firewall(self) -> None:
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "docker",
+            "entrypoint.sh",
+        )
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        start = text.index("warn_lockout() {")
+        end = text.index("\n}", start)
+        warning = text[start:end]
+        for token in (
+            'log "FIGYELEM', "SSH", "22/TCP", "admin",
+            "HV_ADMIN_ENABLED", "HV_ADMIN_PASSWORD_FILE", "konzol",
+        ):
+            self.assertIn(token, warning, token)
+        main = text[text.index("skip_firewall=$(env_bool HV_SKIP_FIREWALL 0)"):]
+        self.assertLess(
+            main.index("warn_lockout"), main.index("load_firewall")
+        )
+        # A HV_SKIP_FIREWALL=1 ágban nincs figyelmeztetés (nincs tűzfal).
+        skip_branch = main[
+            main.index('if [ "$skip_firewall" = "1" ]; then'):
+            main.index("else")
+        ]
+        self.assertNotIn("warn_lockout", skip_branch)
+
+    def test_entrypoint_flushes_input_sets_but_keeps_service_sets(self) -> None:
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "docker",
+            "entrypoint.sh",
+        )
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        flush_loop = text.split("for hv_set in ", 1)[1].split("; do", 1)[0]
+        for set_name in ("allowed_input_tcp", "allowed_input_udp"):
+            self.assertIn(set_name, flush_loop)
+        # A host_service_* halmazok add-only védőhalmazok: újraindításkor
+        # sem szabad őket kiüríteni.
+        self.assertNotIn("host_service_tcp", flush_loop)
+        self.assertNotIn("host_service_udp", flush_loop)
+
+    def test_entrypoint_stale_ssh_set_failure_only_warns(self) -> None:
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "docker",
+            "entrypoint.sh",
+        )
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        start = text.index(
+            'if "$NFT_BIN" list set inet hatarvedelem host_ssh_v4'
+        )
+        end = text.index("# A hoston korán betöltött", start)
+        block = text[start:end]
+        # A meglévő halmazt továbbra is csak a list set sikeressége után
+        # töröljük, és a sikeres törlést naplózzuk.
+        self.assertIn("list set inet hatarvedelem host_ssh_v4", block)
+        self.assertIn("delete set inet hatarvedelem host_ssh_v4", block)
+        self.assertIn('log "a régi host_ssh_v4 halmaz törölve"', block)
+        # Hiba esetén viszont nem szabad leállítani az indulást: a
+        # szabálykészlet már betöltődött, a portálnak el kell indulnia.
+        self.assertIn("FIGYELEM", block)
+        self.assertNotIn("die ", block)
+        self.assertNotIn("exit ", block)
+
+    def test_entrypoint_lockout_warning_accepts_env_bool_spellings(self) -> None:
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "docker",
+            "entrypoint.sh",
+        )
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        start = text.index("warn_lockout() {")
+        end = text.index("\n}", start) + 2
+        function = text[start:end]
+        script = (
+            "log() { printf '%s\\n' \"$*\"; }\n"
+            + function
+            + "\nwarn_lockout\n"
+        )
+        message = "nincs beállított induláskori admin"
+
+        def run(enabled: str) -> str:
+            env = os.environ.copy()
+            env.pop("HV_ADMIN_PASSWORD_FILE", None)
+            env["HV_ADMIN_ENABLED"] = enabled
+            env["HV_ADMIN_PASSWORD"] = "titok"
+            result = subprocess.run(
+                ["sh", "-c", script],
+                env=env, capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return result.stdout
+
+        # A gateway.py _env_bool() által elfogadott igaz értékek nem
+        # kelthetnek hamis kizárási figyelmeztetést.
+        for value in ("1", "true", "TRUE", "yes", "Yes", "on", "ON", " on "):
+            with self.subTest(value=value):
+                self.assertNotIn(message, run(value))
+        for value in ("0", "false", "off", ""):
+            with self.subTest(value=value):
+                self.assertIn(message, run(value))
 
     def test_banned_packets_are_logged_with_rate_limit(self) -> None:
         # A tiltás alatti forgalom mintavételezve naplózódik, hogy a
@@ -8476,8 +13101,11 @@ class Fail2banTests(unittest.TestCase):
         bans = {row["ip"] for row in snapshot["bans"]}
         self.assertEqual(bans, {login_ip, "192.0.2.68"})
 
-        # Újra bekapcsolva a drop-számlálás ismét tilt.
-        manager.configure({"drop_enabled": True})
+        # Újra bekapcsolva a két mérőszámot a drop-számlálás ismét tilt.
+        manager.configure({
+            "drop_count_enabled": True,
+            "drop_ports_enabled": True,
+        })
         self.assertIsNotNone(manager.record_drop(
             "192.0.2.69", proto="tcp", dport=22, reason="input-wan"
         ))

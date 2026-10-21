@@ -7,10 +7,10 @@
 dropjak is a captive-portal firewall for Linux. It runs as a Docker
 container in host network mode and controls the host's nftables forwarding
 plane. All client traffic is **blocked by default**: a client gets network
-access only after signing in through the portal and choosing an access rule
-and a TTL in whole hours (up to 30 days). Only the ports and services
-allowed by that rule are opened for the client's IP address. Logout or expiry
-revokes access immediately.
+access only after signing in through the portal and choosing one or more
+access rules and a TTL in whole hours (up to 30 days). Only the ports and
+services allowed by the selected rules are opened for the client's IP
+address. Logout or expiry revokes access immediately.
 
 The portal is available in Hungarian, English and German. It follows the
 system light/dark preference and the theme can be switched manually in the
@@ -21,7 +21,8 @@ bottom-right corner.
 - The `forward` chain is fail-closed; the portal is the only publicly
   reachable service.
 - A correct password alone does not grant network access. Sign-in is
-  two-phase: authenticate, then explicitly select an access rule and TTL.
+  two-phase: authenticate, then explicitly select one or more access rules
+  and a TTL.
 - Account requests are optional and off by default. When an admin enables
   **Fiókkérelmek** in **Admin → Settings**, the login page shows **Fiók
   kérése** and a visitor can submit a username, password and email after the
@@ -29,21 +30,33 @@ bottom-right corner.
   access; an admin approves or rejects it in **Admin → Users**. The email is
   stored as contact data only and is never sent or logged.
   See [docs/account-requests.md](docs/account-requests.md).
-- Admins can duplicate any non-built-in rule and combine existing individual
+- Admins can duplicate any stored rule and combine existing individual
   rules into a **collection rule** whose TCP/UDP/ICMP permissions are the
-  union of its members. Collections can be assigned to users and groups like
+  union of its members. The full-access identifier reserved by pre-3.0.0
+  releases is not a rule and cannot be created, assigned, duplicated or
+  used as a member. Collections can be assigned to users and groups like
   any other rule. See [docs/rule-collections.md](docs/rule-collections.md).
 - Grants are implemented with nftables dynamic sets (`allowed_v4`,
-  `allowed_tcp`, `allowed_udp`, `allowed_icmp`, `host_ssh_v4`, `client_mac`).
-  Entries expire in the kernel even if the portal stops.
+  `allowed_tcp`, `allowed_udp`, `allowed_input_tcp`, `allowed_input_udp`,
+  `allowed_icmp`, `client_mac`). Entries expire in the kernel
+  even if the portal stops. The separate `host_service_tcp` /
+  `host_service_udp` sets record every port ever declared by a host rule;
+  they are add-only and are not flushed at startup, so they keep guarding
+  established host connections across reloads.
 - Each grant is bound to the client's IP **and MAC address**. The MAC is read
   from the host ARP table at authorization time; if it cannot be resolved,
   access is refused. Source-IP spoofing and DHCP lease takeover alone do not
   inherit an existing grant.
-- Host SSH is also gated: only the source IP of an active, authorized portal
-  session that selected the built-in **admin-full** rule can connect to port
-  22. Custom full-access rules and collection rules do not open SSH, and
-  there is no environment switch for the host SSH policy.
+- Host SSH is gated by the portal session. An admin-created **input (host)**
+  rule must explicitly list TCP 22; the portal then opens the `(IP, 22)`
+  pair in `allowed_input_tcp` for an active, authorized session from the
+  same source IP. UDP 22 is an ordinary host-rule port and does not open
+  SSH. Custom full-access rules never open SSH, and a collection opens TCP
+  22 only through an input member that explicitly lists it. Keep a provider
+  console available: there is no separate host SSH switch. The `admin`
+  service in `services.json` is outbound client SSH (forward direction), not
+  host SSH. A restart flushes the dynamic sets, so clients must sign in and
+  authorize again.
 - Docker-published containers work too: forward rules match the pre-DNAT
   destination port, so the grant reaches the container. Forwarded packets
   are marked by the firewall; Docker's `DOCKER-USER` chain accepts only
@@ -59,10 +72,58 @@ bottom-right corner.
   reachable so the client can see why it was banned and does not lose its IP
   address. Bans are persisted in `fail2ban.json` and survive a restart; manual
   bans can be created and lifted in the admin UI.
-- Every restart flushes the dynamic sets; users must sign in again. Persistent
-  state (users, groups, rules, audit log, bans) lives in a Docker volume.
+- Every restart flushes the dynamic sets; users must sign in again. The
+  add-only `host_service_tcp` / `host_service_udp` guard sets are deliberately
+  not flushed, so they can cut established host connections during startup.
+  Persistent state (users, groups, rules, audit log, bans) lives in a Docker
+  volume.
 - The container uses `network_mode: host` because the host's `forward` chain
   cannot be managed from a Docker bridge namespace. Only one instance can run.
+
+### Forward vs host rules
+
+Every rule has a **direction**:
+
+- **Forward** (default) sends traffic through the gateway: internet access or
+  a Docker-published service. The rule matches the pre-DNAT destination port.
+- **Input (host)** opens a service that runs **on the portal machine itself**,
+  such as a game server listening on TCP/UDP 25566. Forward rules never make
+  such a service reachable, because the traffic terminates on the host instead
+  of passing through it.
+
+Host rules are per-user and TTL-bound like any other rule. The portal adds the
+authorized client IP to the `allowed_input_tcp` / `allowed_input_udp` sets, and
+on the LAN the usual MAC binding also applies. Fail2ban bans and the anti-spoof
+drops run before the host accept, so a banned client cannot reach the service
+either.
+
+Revocation, expiry and the conntrack flush close established connections. As a
+second, in-kernel guard, every port ever declared by a host rule is recorded
+in the add-only `host_service_tcp` / `host_service_udp` sets. The input chain
+matches established client-to-host packets by their destination port against
+these sets and drops the flow when the source IP is no longer in
+`allowed_input_tcp` / `allowed_input_udp`. The existing LAN host-DNS/53 accepts
+and DHCP renewals run before this guard, so forward DNS and address renewal
+keep working. This closes the connection even if the conntrack flush fails or
+the kernel recreates the flow (`nf_conntrack_tcp_loose`). Only port 8100
+(portal) is excluded by both validation and the kernel host accept. TCP 22 is
+deliberately left out of the generic host guard: established SSH is governed
+solely by the SSH-specific guard, which accepts a source while it has the
+`(IP, 22)` pair in `allowed_input_tcp` (an explicit host rule). UDP 22 is not
+SSH and has no special guard.
+
+Host rules accept explicit TCP/UDP ports only. Full access, ICMP and the legacy
+service list are rejected. Only port 8100 (portal) is reserved; an
+admin-created host rule may explicitly open TCP 22, which is the only way to
+reach host SSH. UDP 22 is an ordinary host-rule port and is not SSH. Custom
+full-access rules never open SSH, and collection members that are full access
+are rejected; a collection can grant TCP 22 only through an input member that
+explicitly lists it. Only administrators can create rules. The service must
+listen on `0.0.0.0` (or the external interface), not only on `127.0.0.1`.
+Collection rules have no direction of their own and may contain 1–64 members
+with mixed directions; each member grants access in its own direction. See
+[docs/host-rules.md](docs/host-rules.md) for the 25566 example and a quick
+`nc` test.
 
 ## Requirements
 
@@ -127,6 +188,23 @@ Find interface names with `ip -br link`. All other settings are documented in
 
 ### 4. Start
 
+> **Lockout warning — read before the first start.**
+>
+> Loading the firewall cuts host SSH. Port 22/TCP remains reachable only
+> from the same source IP that has an active, authorized portal session and
+> an admin-created host (input) rule that explicitly lists TCP 22. The first
+> ruleset load therefore cuts SSH unless such a rule is already assigned;
+> have the provider console ready or start once with `HV_SKIP_FIREWALL=1`.
+> Starting the container over SSH can terminate the current SSH session.
+>
+> Set up the admin account first: put the `HV_ADMIN_ENABLED=1`,
+> `HV_ADMIN_USER` and `HV_ADMIN_PASSWORD` (or `HV_ADMIN_PASSWORD_FILE`)
+> values from step 5 into `.env` before the first `docker compose up`.
+> Without an existing admin account the portal login is impossible, so the
+> Admin panel is unreachable and host SSH stays closed. Keep the
+> provider/out-of-band console available so you can recover if the portal
+> does not start.
+
 ```bash
 docker compose up -d --build
 docker compose ps
@@ -159,6 +237,10 @@ docker compose up -d
 The account is created (or its password updated) on container start. The
 initial password must be changed at first sign-in. The **Admin** tab then
 provides user, group, rule and audit-log management.
+
+Always set these admin values **before** the first start: without an
+existing admin account the portal login is impossible, and host SSH remains
+closed. Keep the provider console available as the recovery path.
 
 A user can also be added from the CLI:
 
@@ -206,12 +288,15 @@ the file lock) and prints only a status line, never secrets. It does not
 revoke an already-open in-memory session, because the running server owns
 session state; use the admin UI while the server is up.
 
-The `otpauth://` issuer/label defaults to `Dropjak`; set `HV_TOTP_ISSUER` to
-change it (see `.env.example`).
+The `otpauth://` issuer/label for new enrollments comes from the **Admin →
+Settings → Firewall name** field. When it is empty, `HV_TOTP_ISSUER`
+(default `Dropjak`) is used as the fallback (see `.env.example`). Changing
+the name does not rename existing authenticator entries; re-enroll to pick
+up the new issuer.
 
 TOTP only creates the portal session. Network access still requires the
-second phase: select an access rule and TTL, then authorize the grant. The
-second factor alone does not open the firewall.
+second phase: select one or more access rules and a TTL, then authorize the
+grant. The second factor alone does not open the firewall.
 
 ## Operations
 
@@ -224,7 +309,8 @@ docker compose up -d --build
 
 The entry point reloads the firewall rules idempotently. On portal start the
 dynamic sets are flushed (`HV_FLUSH_ON_START=1`), so every user has to sign in
-again. State in the Docker volume is preserved.
+again. The add-only `host_service_*` guard sets are kept. State in the Docker
+volume is preserved.
 
 ### Status and logs
 
@@ -276,12 +362,26 @@ packet threshold or tries the configured number of distinct destination
 ports. WAN-side traffic (`wan-drop`, `input-wan`) counts toward both tests;
 LAN-side traffic (`no-grant`, `input-lan`) counts only toward the distinct-
 port test, so a signed-out browser retrying a few connections is not banned.
-DNS (TCP 53) and the portal port are ignored. Drop banning has its own
-enable switch, thresholds and window (`drop_enabled`, `drop_max`,
-`drop_ports`, `drop_window_seconds`, or `HV_FAIL2BAN_DROP*`), all editable
-in the admin tab; it reuses the login ban duration. The pending drop events
-are listed separately, and a drop-based ban is marked `drop` in the ban
-list and on the ban screen.
+DNS (TCP 53) and the portal port are ignored. The admin tab has three
+independent switches: failed sign-ins (`enabled`), dropped packets
+(`drop_count_enabled`) and distinct destination ports
+(`drop_ports_enabled`). Each signal has its own threshold; the drop
+thresholds and the shared drop window are `drop_max`, `drop_ports` and
+`drop_window_seconds`. `HV_FAIL2BAN_DROP` only gates both drop metrics on
+first start, and `HV_FAIL2BAN_DROP_COUNT_ENABLED` /
+`HV_FAIL2BAN_DROP_PORTS_ENABLED` provide their first-start defaults.
+Thresholds must be at least 1: there is no `0 = disabled` mode, and a
+persisted legacy 0 is migrated on load to a disabled metric with the
+default threshold. `drop_enabled` remains in the API as a computed
+compatibility field (`drop_count_enabled or drop_ports_enabled`).
+
+The three switches are independent. Turning failed-sign-in monitoring off
+leaves both drop metrics counting and banning, and it releases only
+login-sourced automatic bans. Turning both drop metrics off releases only
+drop-sourced bans; manual bans are never released. Switching a metric off
+does not otherwise lift bans that already exist; they expire normally. The
+pending drop events are listed separately, and a drop-based ban is marked
+`drop` in the ban list and on the ban screen.
 
 If the admin UI is unreachable, the ban list can be managed from the CLI:
 
@@ -296,10 +396,38 @@ commands call `nft` and need `NET_ADMIN`. The running portal reloads
 `fail2ban.json` when it changes, so CLI changes appear in the admin UI within
 a few seconds without a restart.
 
+### Audit log
+
+The **Logs** admin tab shows the JSON Lines security audit log
+(`audit.jsonl` in the state volume): sign-ins, 2FA ticket lifecycle, access
+and session changes, fail2ban and admin operations, plus CLI maintenance.
+Every row has an `info`/`warn`/`alert` severity badge, and the **Szint**
+selector filters by it, and the **Esemény** picker lists the known event codes
+with their localized labels, so entries are searchable by event without
+typing the raw code. The free-text search matches field values (not JSON key
+names) and tolerates underscores, hyphens and spaces interchangeably. Opening
+the tab, **Frissítés** and **Szűrők törlése** count as manual reads and are
+themselves audited; the 5-second auto-refresh is not.
+
+The log rotates by size (`HV_AUDIT_MAX_BYTES`, default 10 MiB;
+`HV_AUDIT_KEEP`, default 5 files) and never contains passwords, TOTP codes or
+secrets, recovery codes, cookies, full tokens or email addresses. Pending
+2FA tickets appear only as a 12-character hash. Audit write failures are
+reported in the process log and never block sign-in or admin actions. See
+[docs/audit-log.md](docs/audit-log.md) for the event families, severity
+rules, redaction guarantees and retention details.
+
 ### Firewall customization
 
-The **Settings** admin tab manages two things:
+The **Settings** admin tab manages three things:
 
+- **Firewall name** — a display name for this Dropjak instance (at most 64
+  characters; empty means `Dropjak`). It appears in the portal header and
+  browser title, and it is the TOTP issuer/label for *new* authenticator
+  enrollments. Existing authenticator entries keep their old issuer;
+  re-enroll to pick up the new name. When no site name is set,
+  `HV_TOTP_ISSUER` (default `Dropjak`) is used. Changing the name does not
+  touch nftables.
 - **Pre-auth rules** — destination (IP/CIDR, optional) and ports that are
   reachable from the LAN *before* portal sign-in. From the WAN side they
   apply only to DNATed (published Docker) services. An empty destination
@@ -310,13 +438,83 @@ The **Settings** admin tab manages two things:
   overrides pre-auth: banned sources are dropped before the pre-auth chain,
   and an explicit ban drop is also the first rule inside that chain. Only
   the portal and DHCP remain reachable for a banned client.
-- **Block rules** — destination/ports that are always dropped. The block is
-  evaluated before pre-auth, so it overrides a pre-auth entry.
+- **Block rules** — destination/ports that are always dropped. The block chain
+  is evaluated before every grant: it covers forwarded traffic in both
+  directions on all interfaces (LAN, WAN/DNAT and the Docker container bridge)
+  and traffic addressed to the host itself (host rules such as SSH and DNS).
+  The only exemptions are loopback, the breakglass chain, DHCP and the portal,
+  which are accepted earlier so a block entry cannot lock out management or
+  the login page. Every packet is checked against the block chain, so adding
+  or removing a block needs no conntrack flush: an active session or
+  established flow cannot bypass a block, and removing a block immediately
+  restores any still-valid grant without re-authorization (block changes do
+  not revoke grants). A block overrides a pre-auth entry as well. Like
+  pre-auth rules, the destination is matched against the pre-DNAT (original)
+  tuple: for a published Docker service use the VM's public address and
+  published host port, not the container's internal address — a block on the
+  post-DNAT address does not match the forwarded path.
 
 Changes are validated, applied to nftables, and only then written atomically
 to `firewall-settings.json`; if the nftables update fails, the previous rules
 are restored. Invalid or corrupted settings fall back to an empty pre-auth
-list (fail-closed).
+list (fail-closed), while the last-known-good block chains stay installed.
+
+### Subdomain proxy (Caddy)
+
+An optional `caddy` service (Docker only) publishes local services on the
+firewall host under subdomains with automatic HTTPS, e.g.
+`https://owui.z1.example.com` → host port 3000, or a private-network host
+behind the firewall (`forward`, e.g. `192.168.10.20:5001`). Each entry is
+**private** (default) or **public**. A private entry lets through only clients
+whose active, authorized session selected a **domain rule** listing that entry
+(and that are not fail2ban-banned); full-access rules and the admin role grant
+no domains. A public entry is open to every client IP that is not
+fail2ban-banned, without a session. Everyone else sees a "Nincs hozzáférés"
+page with a **Bejelentkezés** button that links to `https://<root>/` (the
+entry's own root). Each root domain serves the portal itself over HTTPS
+(e.g. `https://z1.example.com/`), with a `Secure` session cookie.
+Several root domains can be configured (up to 16);
+an entry belongs to one of them and is identified by its full hostname, so
+`owui.z1.example.com` and `owui.z2.example.org` are separate entries.
+
+1. DNS ("DNS only", no CDN proxy, so Caddy sees the real client IP), for
+   every root: `A z1.example.com` and `A *.z1.example.com` → the host's
+   public IPv4. No AAAA records: inbound IPv6 is dropped.
+2. `.env`: `HV_PROXY=1` (opens TCP 80/443 in the input chain, after the
+   fail2ban, block and MAC-binding drops; from the LAN only with a bound
+   IP+MAC) and `COMPOSE_PROFILES=proxy` (starts `caddy`), then
+   `docker compose up -d`.
+3. Admin → **Domainek**: add the root domains and the entries: subdomain,
+   root domain, type (`input` = host port, `forward` = private IPv4 + port)
+   and port. Changes take effect immediately; nothing is reloaded. A root
+   domain that still has entries cannot be deleted; delete or move them
+   first.
+4. Admin → Rules: create a rule of type **Domain (proxy)** listing the
+   entries, and assign it to users/groups. It opens no firewall port; it can
+   be combined with port rules in the portal or used in collections. The
+   rule stores full hostnames; an entry referenced by a domain rule cannot be
+   deleted, renamed or moved to another root.
+
+[`deploy/Caddyfile`](deploy/Caddyfile) is static (`admin off`). Caddy asks the
+portal's loopback-only endpoints on every request: `/api/proxy/ask` allows
+on-demand certificates only for the configured names, and `/api/proxy/auth`
+(forward_auth) checks the client IP's selected domain rules and returns the
+upstream (`127.0.0.1:<port>` or `<ip>:<port>`). The portal, SSH, DNS, DHCP,
+80/443 and 2019 cannot be `input` targets. Caddy reaches `forward` targets
+from the host itself (output path, no forward chain). For a root domain
+`/api/proxy/auth` returns the portal itself (`127.0.0.1:<PORT>`); the
+`/api/proxy/*` paths are not reachable through Caddy.
+
+Client IP behind Caddy: the portal trusts `X-Forwarded-For` only when the raw
+socket peer is exactly `127.0.0.1` or `::1` (the host's Caddy, which replaces
+any client-sent value with the real remote IP); then the last entry is the
+client IP for sessions, rate limits, fail2ban and the audit log. From any other
+peer the header is ignored. The `/api/proxy/*` loopback guard always uses the
+raw peer. `HV_PORTAL_URL` stays the LAN/IP captive URL: LAN clients that are
+not yet authorized keep using the plain-HTTP captive portal (LAN 443 is open
+only for MAC-bound authorized clients), and fail2ban-banned WAN IPs are
+dropped by nftables before reaching Caddy, so they see the ban screen only on
+the plain-HTTP portal port.
 
 ### Backup
 
@@ -334,15 +532,47 @@ docker run --rm -v dropjak_hatarvedelem-state:/data -v "$PWD":/backup \
 The volume name depends on the Compose project name. `docker compose down -v`
 deletes the volume; without `-v` it is kept.
 
+## Native installation (systemd)
+
+`install.sh` (run as root) installs the portal and the firewall as systemd
+units. The runtime layout is `/opt/hatarvedelem`; the rendered ruleset is
+written to `/etc/nftables/hatarvedelem.nft`. Besides the Python modules, the
+installer copies `index.html`, `icon.png`, `blocked.png`, `services.json` and
+`VERSION`, so the portal serves its assets and `/api/status` reports the
+packaged version instead of `0.0.0`.
+
+The ruleset template contains `__FWD_MARK__` and `__DROP_LOG_GROUP__` in
+addition to the network placeholders. `install.sh` fills every placeholder
+from the selected interfaces and networks, `HV_FWD_MARK` (default
+`0x44524a4b`) and `HV_DROP_LOG_GROUP` (default `5`), matching
+`docker/entrypoint.sh`. The same two values are passed to the portal unit
+through a systemd drop-in so the portal and the drop-log listener agree with
+the rendered ruleset.
+
+The `deploy/hv` helper is a Docker Compose convenience wrapper and is **not**
+installed by `install.sh`; it hard-codes the `/root/hatarvedelem` checkout
+and Docker volume paths. Native installations use
+`systemctl status hatarvedelem`, `journalctl -u hatarvedelem`, and
+`/opt/hatarvedelem/server.py` for user and ban management. Installing `hv`
+is optional and requires adapting those paths.
+
+## Versioning
+
+The running version is stored in [`VERSION`](VERSION), and release history is
+recorded in [`CHANGELOG.md`](CHANGELOG.md). The portal footer shows the version,
+and `GET /api/status` exposes the same value as `version`.
+
 ## Security notes
 
 - Forwarding is fail-closed. If the portal or Docker fails to start, traffic
   stays blocked.
-- Host SSH is opened only for the source IP of an active, authorized portal
-  session that selected the built-in **admin-full** rule. Custom full-access
-  rules and collection rules do not open SSH. Always keep an out-of-band
-  console (provider console) available so you can recover if the portal does
-  not start.
+- Host SSH opens only for the source IP of an active, authorized portal
+  session, through an admin-created host (input) rule that explicitly lists
+  TCP 22 (`allowed_input_tcp`). UDP 22 is an ordinary host-rule port, not
+  SSH. Custom full-access rules never open SSH, and a collection can grant
+  TCP 22 only through an input member that explicitly lists it. Always keep
+  an out-of-band console (provider console) available so you can recover if
+  the portal does not start.
 - The portal speaks plain HTTP. If it is reachable from an untrusted network,
   terminate TLS in front of it (reverse proxy) and set
   `HV_COOKIE_SECURE=1`; otherwise restrict `HV_PORTAL_NET` to a trusted

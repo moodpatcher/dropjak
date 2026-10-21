@@ -45,13 +45,17 @@ services:
       HV_WAN_IF: ${HV_WAN_IF:-}
       HV_LAN_NET: ${HV_LAN_NET:-}
       # Csak visszafelé kompatibilis alapérték a HV_PORTAL_NET-hez; SSH-t
-      # önmagában már nem engedélyez.
+      # önmagában nem engedélyez (ahhoz TCP 22-t nyitó host szabály kell).
       HV_MGMT_NET: ${HV_MGMT_NET:-}
       # A portál forrás-hálózata. Üresen a HV_MGMT_NET értékét használja.
       # Nyilvános portálhoz: HV_PORTAL_NET=0.0.0.0/0.
       HV_PORTAL_NET: ${HV_PORTAL_NET:-}
       # Induláskori admin fiók. HV_ADMIN_ENABLED=1 esetén a konténer
       # létrehozza a felhasználót, vagy a megadott jelszóra frissíti.
+      # FIGYELEM: admin fiók nélkül a portál Admin panelje elérhetetlen, és a
+      # host SSH zárva marad. Az első indulás előtt állítsd be a fiókot; a
+      # portálon hozz létre és rendelj hozzá egy TCP 22-t engedélyező host
+      # (input) szabályt, és tartsd nyitva a szolgáltatói konzolt.
       HV_ADMIN_ENABLED: ${HV_ADMIN_ENABLED:-0}
       HV_ADMIN_USER: ${HV_ADMIN_USER:-}
       HV_ADMIN_PASSWORD: ${HV_ADMIN_PASSWORD:-}
@@ -75,7 +79,8 @@ services:
       HV_MIN_TTL: ${HV_MIN_TTL:-60}
       HV_MAX_TTL: ${HV_MAX_TTL:-2592000}
       HV_AUTH_TTL: ${HV_AUTH_TTL:-600}
-      # A TOTP 2FA otpauth:// URI issuer/címkéje (alapból Dropjak).
+      # A TOTP 2FA otpauth:// URI issuer/címkéje, ha a portálon nincs
+      # beállított tűzfalnév (alapból Dropjak).
       HV_TOTP_ISSUER: ${HV_TOTP_ISSUER:-Dropjak}
       HV_CHALLENGE_TTL: ${HV_CHALLENGE_TTL:-600}
       HV_POW_DIFFICULTY: ${HV_POW_DIFFICULTY:-4}
@@ -83,6 +88,10 @@ services:
       HV_RATE_WINDOW: ${HV_RATE_WINDOW:-60}
       HV_RATE_MAX: ${HV_RATE_MAX:-10}
       HV_FLUSH_ON_START: ${HV_FLUSH_ON_START:-1}
+      # Alapértelmezés: 0 (biztonságos). 1 esetén az újraindítás előtti
+      # kernel-engedélyek munkamenet nélkül, a TTL-ig (akár 30 napig)
+      # életben maradhatnak; ez kifejezetten NEM biztonságos.
+      HV_ALLOW_STALE_GRANTS_ON_START: ${HV_ALLOW_STALE_GRANTS_ON_START:-0}
       # Drop log: az nftables által eldobott csomagok NFLOG-csoportja és a
       # JSONL-napló a state-köteten. HV_DROP_LOG=0 esetén a portál nem
       # figyeli a csoportot (az nft-szabályok naplózása megmarad).
@@ -102,7 +111,11 @@ services:
       HV_FAIL2BAN_BAN: ${HV_FAIL2BAN_BAN:-3600}
       HV_FAIL2BAN_STATE: ${HV_FAIL2BAN_STATE:-/var/lib/hatarvedelem/fail2ban.json}
       # Drop-alapú tiltás: bejelentkezés nélküli portszkennerek/botok.
+      # Első indulásnál mindkét mérőszámot kapuzza; futásidőben külön
+      # kapcsolhatók. A küszöb legalább 1, nincs 0 = kikapcsolva mód.
       HV_FAIL2BAN_DROP: ${HV_FAIL2BAN_DROP:-1}
+      HV_FAIL2BAN_DROP_COUNT_ENABLED: ${HV_FAIL2BAN_DROP_COUNT_ENABLED:-1}
+      HV_FAIL2BAN_DROP_PORTS_ENABLED: ${HV_FAIL2BAN_DROP_PORTS_ENABLED:-1}
       HV_FAIL2BAN_DROP_MAX: ${HV_FAIL2BAN_DROP_MAX:-120}
       HV_FAIL2BAN_DROP_PORTS: ${HV_FAIL2BAN_DROP_PORTS:-12}
       HV_FAIL2BAN_DROP_WINDOW: ${HV_FAIL2BAN_DROP_WINDOW:-180}
@@ -110,6 +123,11 @@ services:
       HV_FWD_MARK: ${HV_FWD_MARK:-0x44524a4b}
       HV_COOKIE_SECURE: ${HV_COOKIE_SECURE:-0}
       HV_DRY_RUN: ${HV_DRY_RUN:-0}
+      # A tűzfal-figyelő ki-/bekapcsolása (0: kikapcsolva).
+      HV_FIREWALL_WATCHDOG: ${HV_FIREWALL_WATCHDOG:-1}
+      # 1: a tűzfal megnyitja a TCP 80/443-at a caddy proxy-szolgáltatásnak
+      # (COMPOSE_PROFILES=proxy mellett). Lásd a .env.example fájlt.
+      HV_PROXY: ${HV_PROXY:-0}
       HV_SKIP_FIREWALL: ${HV_SKIP_FIREWALL:-0}
       HV_RUN_AS_ROOT: ${HV_RUN_AS_ROOT:-0}
       TURNSTILE_SITEKEY: ${TURNSTILE_SITEKEY:-}
@@ -142,5 +160,37 @@ services:
       options:
         tag: hatarvedelem
 
+  # Portállal védett aldomain-proxy automatikus HTTPS-sel. Csak a
+  # COMPOSE_PROFILES=proxy beállítással indul; a 80/443 megnyitásához a
+  # HV_PROXY=1 is kell. A Caddyfile statikus (nincs admin API): az útvonalakat
+  # és a jogosultságot kérésenként a portál loopback-végpontjai adják.
+  caddy:
+    image: caddy:2.10.2-alpine
+    profiles: ["proxy"]
+    restart: unless-stopped
+    network_mode: host
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      PORT: ${PORT:-8100}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      hatarvedelem:
+        condition: service_healthy
+    logging:
+      driver: journald
+      options:
+        tag: hatarvedelem-caddy
+
 volumes:
   hatarvedelem-state:
+  caddy-data:
+  caddy-config:
