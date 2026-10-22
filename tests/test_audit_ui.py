@@ -10,7 +10,10 @@ eseménynevek is helyesen számítanak.
 from __future__ import annotations
 
 import ast
+import json
 import re
+import shutil
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -57,6 +60,15 @@ def _parse_event_labels(source: str) -> dict[str, tuple[str, str, str]]:
     for match in LABEL_ENTRY_RE.finditer(body):
         labels[match.group(1)] = match.group(2, 3, 4)
     return labels
+
+
+def _js_function(name: str, source: str) -> str:
+    match = re.search(
+        rf"function {re.escape(name)}\([^)]*\) \{{.*?\n\}}", source, re.S
+    )
+    if match is None:
+        raise AssertionError(f"hiányzó JS függvény: {name}")
+    return match.group(0)
 
 
 def _constant_strings(node: ast.AST | None) -> list[str]:
@@ -207,12 +219,14 @@ class AuditUiStaticTests(unittest.TestCase):
         # Az eseményszűrő a címkézett kódokból épül, ismeretlen/legacy
         # értéket megtartva, és a select értékét használja a szűrés.
         for token in (
-            "const eventSelect = el('select'",
+            "const eventSelect = multiSelect({",
+            "options: auditEventOptions(logFilter.events)",
+            "events: (logFilter.events || []).join(',')",
+            "adminPanel.append(eventSelect.chips);",
             "Object.keys(AUDIT_EVENT_LABELS)",
-            "if (logFilter.event && !eventCodes.includes(logFilter.event))",
-            "value: '', text: tr('összes esemény')",
-            "text: `${auditEventLabel(code)} (${code})`",
-            "event: eventSelect.value",
+            "for (const code of extra || []) if (!codes.includes(code)) codes.push(code);",
+            "placeholder: 'összes esemény'",
+            "onChange: events => { logFilter.events = events; apply(); }",
             "['Esemény', eventSelect]",
             "for (const node of [userInput, qInput, ipInput])",
             # IP/CIDR szűrő és a proxy-események kiemelt hostja.
@@ -243,6 +257,84 @@ class AuditUiStaticTests(unittest.TestCase):
         drops = self.source[drops_start:drops_end]
         self.assertIn("async function loadDrops(manual = false)", drops)
         self.assertIn("if (manual || !typing)", drops)
+
+    def test_pure_helpers_in_node(self) -> None:
+        """hostHref, auditEventGroup és az élő lista új-sor számlálója."""
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node nem érhető el a JS-helper teszthez")
+        regex = re.search(r"const HOSTNAME_RE = .*;", self.source)
+        groups = re.search(
+            r"const AUDIT_EVENT_GROUPS = \[.*?\n\];", self.source, re.S
+        )
+        self.assertIsNotNone(regex)
+        self.assertIsNotNone(groups)
+        functions = "\n".join(
+            _js_function(name, self.source)
+            for name in ("hostHref", "auditEventGroup", "liveKey", "liveNewCount")
+        )
+        script = regex.group(0) + "\n" + groups.group(0) + "\n" + functions + """
+const rows = [{ ts: 30 }, { ts: 20 }];
+process.stdout.write(JSON.stringify({
+  ok: hostHref('Owui.Z1.Example.com'),
+  trimmed: hostHref(' a.b.hu '),
+  bad: ['', 'localhost', '1.2.3.4', 'a..b.hu', '-a.b.hu', 'a.b.hu/x',
+    'a.b.hu"><x', 'javascript:alert(1)', 'a_b.example.com',
+    'x'.repeat(64) + '.hu'].map(hostHref),
+  groups: ['login_failed', 'proxy_page_opened', 'totp_failed', 'session_ended',
+    'fail2ban_ban', 'conntrack_failed', 'admin_rule_deleted', 'cli_user_created',
+    'control_denied', 'service_start', 'mystery_event'].map(auditEventGroup),
+  fresh: liveNewCount(rows, [{ ts: 40 }, { ts: 31 }, { ts: 30 }, { ts: 20 }]),
+  none: liveNewCount(rows, rows),
+  first: liveNewCount([], [{ ts: 1 }]),
+  key: liveKey({ ts: 1.5, event: 'logout', user: 'a', ip: '10.0.0.1' }),
+}));
+"""
+        result = subprocess.run(
+            [node, "-e", script], capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data["ok"], "https://owui.z1.example.com/")
+        self.assertEqual(data["trimmed"], "https://a.b.hu/")
+        self.assertEqual(data["bad"], [""] * 10)
+        self.assertEqual(data["groups"], [
+            "Belépés és hozzáférés", "Proxy", "2FA", "Munkamenetek",
+            "Fail2ban és tűzfal", "Fail2ban és tűzfal", "Adminisztráció",
+            "Parancssor", "Vezérlőcsatorna", "Szolgáltatás", "Egyéb",
+        ])
+        self.assertEqual(data["fresh"], 2)
+        self.assertEqual(data["none"], 0)
+        self.assertEqual(data["first"], 1)
+        self.assertEqual(data["key"], "1.5|logout|a|10.0.0.1|||")
+
+    def test_live_list_and_host_links_markup(self) -> None:
+        for token in (
+            "if (!manual && liveHold('logs', logRows, fresh))",
+            "if (!manual && liveHold('drops', dropRows, fresh, data.status || null))",
+            "adminPanel.append(livePill('logs'));",
+            "adminPanel.append(livePill('drops'));",
+            "class: 'table-wrap live-wrap'",
+            "class: 'table-wrap drop-table-wrap live-wrap'",
+            "target: '_blank', rel: 'noopener noreferrer'",
+            "hostLink(entry.host)",
+            "hostLink(host, 'mono')",
+            "'Keresés a proxy-bejegyzések között…',\n      proxyHost\n",
+            "const ok = await copyText(host.textContent);",
+        ):
+            self.assertIn(token, self.source, token)
+        self.assertNotIn("Minecraft", self.source)
+        for hungarian in (
+            "Megnyitás új lapon", "Hostnév másolása", "Másolva", "Egyik sem",
+            "Eltávolítás", "Keresés az események között…", "Tudnivalók",
+            "Belépés és hozzáférés", "Fail2ban és tűzfal", "Adminisztráció",
+            "Parancssor", "Vezérlőcsatorna", "Szolgáltatás",
+        ):
+            with self.subTest(text=hungarian):
+                self.assertEqual(self.source.count(f"'{hungarian}': '"), 2)
+        self.assertEqual(
+            self.source.count("/^(\\d+) új bejegyzés — mutasd$/"), 2
+        )
 
     def test_event_filter_translations_present(self) -> None:
         for hungarian, english, german in (

@@ -117,6 +117,15 @@ class AuditSearchUnitTests(unittest.TestCase):
         rows = self.audit.read(event="login")
         self.assertEqual(events(rows), ["login_success", "login_success"])
 
+    def test_events_filter_is_exact_set(self) -> None:
+        rows = self.audit.read(events=["login_success", "admin_rule_deleted"])
+        self.assertEqual(timestamps(rows), [500.0, 400.0, 300.0])
+        # Pontos egyezés: az előtag nem család-szűrő.
+        self.assertEqual(self.audit.read(events=["login"]), [])
+        # A régi egyes szűrővel együtt mindkettőnek teljesülnie kell.
+        rows = self.audit.read(events=["login_success"], user="carol")
+        self.assertEqual(timestamps(rows), [500.0])
+
     def test_q_matches_space_and_underscore_forms(self) -> None:
         for needle in ("access granted", "access_granted", "ACCESS-GRANTED"):
             with self.subTest(q=needle):
@@ -347,6 +356,33 @@ class AuditSearchApiTests(unittest.TestCase):
                 self.assertEqual(status, 400, data)
                 self.assertIs(data["ok"], False)
                 self.assertIn("CIDR", data["error"])
+
+    def test_api_multi_event_filter(self) -> None:
+        for query, expected in (
+            ("events=login_success,admin_rule_deleted", [500.0, 400.0, 300.0]),
+            ("events=login_success&events=access_granted",
+             [500.0, 300.0, 200.0, 100.0]),
+            ("event=login_success&event=admin_rule_deleted",
+             [500.0, 400.0, 300.0]),
+            ("events=" + urllib.parse.quote(" LOGIN_SUCCESS , ,"), [500.0, 300.0]),
+            # Egyetlen event= a régi részleges egyezés marad.
+            ("event=login", [500.0, 300.0]),
+            ("events=login", []),
+            ("events=", [500.0, 400.0, 300.0, 200.0, 100.0]),
+        ):
+            with self.subTest(query=query):
+                status, data = self.get_logs(query)
+                self.assertEqual(status, 200, data)
+                self.assertEqual(timestamps(data["logs"]), expected)
+        for bad in ("login success", "admin-rule", "x;y", "a" * 65, "1abc"):
+            with self.subTest(events=bad):
+                status, data = self.get_logs("events=" + urllib.parse.quote(bad))
+                self.assertEqual(status, 400, data)
+                self.assertIs(data["ok"], False)
+        status, data = self.get_logs(
+            "events=" + ",".join(f"e{index}" for index in range(201))
+        )
+        self.assertEqual(status, 400, data)
 
     def test_api_unknown_event_is_empty_and_ok(self) -> None:
         status, data = self.get_logs("event=nincs_ilyen")

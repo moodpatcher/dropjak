@@ -15,9 +15,39 @@ set -eu
 
 APP_DIR=${HV_APP_DIR:-/opt/hatarvedelem}
 TEMPLATE="$APP_DIR/deploy/hatarvedelem.nft"
+BOOT_NFT=${HV_BOOT_NFT:-$APP_DIR/deploy/hatarvedelem-boot.nft}
 STATE_DIR=${HV_STATE_DIR:-/var/lib/hatarvedelem}
 PYTHON=${HV_PYTHON:-python3}
 APP_USER=hatarvedelem
+
+# A régi host_service_* halmaz elemeit "22, 80, 8000-8100" alakban írja ki
+# a tábla újraépítése előtt. Csak számokat ad ki, ezért shell-változóba
+# tehető; hibás vagy ismeretlen JSON esetén üresen marad.
+HOST_PORTS_JSON='
+import json, sys
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+parts = []
+for top in data.get("nftables", []):
+    item = top.get("set") if isinstance(top, dict) else None
+    for raw in (item or {}).get("elem") or []:
+        value = raw
+        for _ in range(3):
+            if not isinstance(value, dict):
+                break
+            if isinstance(value.get("range"), list) and len(value["range"]) == 2:
+                low, high = value["range"]
+                if all(isinstance(v, int) and not isinstance(v, bool) for v in (low, high)):
+                    parts.append(str(low) if low == high else f"{low}-{high}")
+                value = None
+                break
+            value = value.get("elem", value.get("val"))
+        if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 65535:
+            parts.append(str(value))
+print(", ".join(parts))
+'
 
 log() { printf '[hatarvedelem] %s\n' "$*"; }
 die() { printf '[hatarvedelem] HIBA: %s\n' "$*" >&2; exit 1; }
@@ -93,6 +123,19 @@ ensure_state_dir() {
         chown -R "$APP_USER:$APP_USER" "$STATE_DIR" \
             || die "az állapotkönyvtár tulajdonosa nem állítható be: $STATE_DIR"
         chmod 0750 "$STATE_DIR" || true
+    fi
+}
+
+ensure_tunnel_run_dir() {
+    # A WireGuard-kulcsok 0600-os ideiglenes fájljai ide kerülnek; a portál
+    # nem rootként fut, ezért a könyvtárat itt hozzuk létre a jogával.
+    _dir=${HV_TUNNEL_RUN_DIR:-/run/dropjak}
+    if [ "$(id -u)" -eq 0 ]; then
+        mkdir -p "$_dir" \
+            || die "az alagút kulcskönyvtára nem hozható létre: $_dir"
+        chown "$APP_USER:$APP_USER" "$_dir" \
+            || die "az alagút kulcskönyvtárának tulajdonosa nem állítható be: $_dir"
+        chmod 0700 "$_dir" || true
     fi
 }
 
@@ -317,6 +360,52 @@ warn_lockout() {
     fi
 }
 
+ensure_boot_guard() {
+    # A régi tábla törlése és az új betöltése közötti időben a host csak a
+    # korai boot-védelem (fail-closed) alatt maradhat.
+    if "$NFT_BIN" list table inet hatarvedelem_boot >/dev/null 2>&1; then
+        return 0
+    fi
+    [ -r "$BOOT_NFT" ] \
+        || die "a korai boot-védelem nem található ($BOOT_NFT); a régi nft tábla nem törölhető biztonságosan"
+    "$NFT_BIN" -f "$BOOT_NFT" \
+        || die "a korai boot-védelem betöltése nem sikerült: $BOOT_NFT"
+    log "korai boot-védelem betöltve a régi nft tábla újraépítéséhez"
+}
+
+# A 3.14.0 interval flagjei miatt a régi halmazok nem frissíthetők helyben
+# (a meglévő set flagje nem változtatható, a hivatkozott set pedig nem
+# törölhető). Ezért a meglévő táblát a korai boot-védelem alatt töröljük,
+# MIELŐTT a szabályfájlt ellenőriznénk: a régi set-ek mellett az `nft -c`
+# "existing set lacks interval flag" hibával elbukna, a konténer pedig
+# crash-loopba kerülne, miközben az input lánc szabályok nélkül, policy
+# dropdal áll. A host_service_* őrportokat előbb kimentjük, hogy a meglévő
+# host-kapcsolatok ne maradjanak nyitva a frissítés után.
+migrate_interval_sets() {
+    migrated=0
+    saved_tcp=""
+    saved_udp=""
+    for hv_set in allowed_tcp allowed_udp allowed_input_tcp \
+            allowed_input_udp host_service_tcp host_service_udp; do
+        if "$NFT_BIN" list set inet hatarvedelem "$hv_set" 2>/dev/null \
+                | grep -q 'flags interval'; then
+            continue
+        fi
+        if "$NFT_BIN" list set inet hatarvedelem "$hv_set" >/dev/null 2>&1; then
+            migrated=1
+        fi
+    done
+    [ "$migrated" = "1" ] || return 0
+    ensure_boot_guard
+    saved_tcp=$("$NFT_BIN" -j list set inet hatarvedelem host_service_tcp \
+        2>/dev/null | "$PYTHON" -c "$HOST_PORTS_JSON" 2>/dev/null || true)
+    saved_udp=$("$NFT_BIN" -j list set inet hatarvedelem host_service_udp \
+        2>/dev/null | "$PYTHON" -c "$HOST_PORTS_JSON" 2>/dev/null || true)
+    log "a régi nft set-flagek miatt a hatarvedelem tábla újraépül"
+    "$NFT_BIN" delete table inet hatarvedelem \
+        || die "a régi nft tábla törlése nem sikerült; a korai boot-védelem érvényben maradt"
+}
+
 load_firewall() {
     NFT_BIN=${HV_NFT_BIN:-}
     if [ -z "$NFT_BIN" ]; then
@@ -328,12 +417,35 @@ load_firewall() {
 
     render_ruleset
 
+    # A migráció ellenőrzése és a régi tábla törlése az `nft -c` ELŐTT fut,
+    # különben a régi set-flagek miatt a validálás elbukna.
+    migrate_interval_sets
+
     log "szabályok ellenőrzése"
-    "$NFT_BIN" -c -f "$RENDERED" \
-        || die "az nftables szabályok érvénytelenek"
+    if ! "$NFT_BIN" -c -f "$RENDERED"; then
+        if [ "$migrated" = "1" ]; then
+            die "az nftables szabályok érvénytelenek; a régi tábla már törölve, a korai boot-védelem érvényben maradt (fail-closed)"
+        fi
+        die "az nftables szabályok érvénytelenek"
+    fi
+
     log "szabályok betöltése (host hálózati névtér)"
-    "$NFT_BIN" -f "$RENDERED" \
-        || die "a szabályok betöltése sikertelen"
+    if ! "$NFT_BIN" -f "$RENDERED"; then
+        if [ "$migrated" = "1" ]; then
+            die "a szabályok betöltése sikertelen; a korai boot-védelem érvényben maradt (fail-closed)"
+        fi
+        die "a szabályok betöltése sikertelen"
+    fi
+    if [ -n "$saved_tcp" ]; then
+        "$NFT_BIN" add element inet hatarvedelem host_service_tcp \
+            "{ $saved_tcp }" \
+            || log "FIGYELEM: a régi host_service_tcp portok visszatöltése nem sikerült"
+    fi
+    if [ -n "$saved_udp" ]; then
+        "$NFT_BIN" add element inet hatarvedelem host_service_udp \
+            "{ $saved_udp }" \
+            || log "FIGYELEM: a régi host_service_udp portok visszatöltése nem sikerült"
+    fi
     "$NFT_BIN" list table inet hatarvedelem >/dev/null 2>&1 \
         || die "a hatarvedelem tábla nem jött létre"
 
@@ -403,6 +515,7 @@ load_firewall() {
 # ------------------------------------------------------------------------ main
 
 ensure_state_dir
+ensure_tunnel_run_dir
 ensure_caddy_admin_dir
 export HV_STATE_DIR="$STATE_DIR"
 

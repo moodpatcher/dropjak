@@ -219,6 +219,31 @@ class BlockPrecedenceTemplateTests(unittest.TestCase):
             grant = self.input.index(rule)
             self.assertLess(block, grant, rule)
 
+    def test_input_jumps_preauth_input_after_block_before_portal(self) -> None:
+        # A pre-auth_input lánc a blokk UTÁN fut (a blokk felülbírálja), de a
+        # portál- és SSH-szabályok ELŐTT, hogy a host-port belépés előtt
+        # elérhető legyen.
+        self.assertIn(
+            "add chain inet hatarvedelem preauth_input", self.template
+        )
+        block = self.only_jump(self.input, "block")
+        preauth_input = self.only_jump(self.input, "preauth_input")
+        self.assertLess(block, preauth_input)
+
+        for rule in (
+            'iifname "__LAN_IF__" tcp dport __PORT__ accept',
+            "ip saddr __PORTAL_NET__ tcp dport __PORT__ accept",
+            "reason=ssh-revoked",
+            "reason=host-revoked",
+            "ip saddr . tcp dport @allowed_input_tcp "
+            "tcp dport != 8100 accept",
+        ):
+            hits = self.indices(self.input, rule)
+            self.assertTrue(hits, rule)
+            # A korai portál-kivételek szándékosan a blokk előtt vannak; a
+            # pre-auth után a lánc későbbi, érdemi szabályai következnek.
+            self.assertLess(preauth_input, hits[-1], rule)
+
     # -- prerouting / block_nat -------------------------------------------
 
     def test_block_nat_remains_lan_scoped_and_precedes_redirect(self) -> None:

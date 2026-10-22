@@ -18,11 +18,13 @@ from __future__ import annotations
 
 import argparse
 import base64
+import copy
 import getpass
 import hashlib
 import hmac
 import html
 import http.client
+import io
 import ipaddress
 import json
 import os
@@ -34,6 +36,8 @@ import socketserver
 import stat
 import struct
 import sys
+import tarfile
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -44,6 +48,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import gateway
 import fail2ban as fail2ban_mod
 import settings_store
+import tunnel as tunnel_mod
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 
@@ -53,11 +58,14 @@ STATIC_FILES = {
     "blocked.png": ("image/png", "public, max-age=3600"),
     "unauthorized.png": ("image/png", "public, max-age=3600"),
     "sus.png": ("image/png", "public, max-age=3600"),
+    "ok.png": ("image/png", "public, max-age=3600"),
 }
 
 # A proxy-végpontokat csak a hoston futó Caddy hívhatja (a nyers socket
 # peer, nem az X-Forwarded-For alapján; lásd _peer_ip).
 PROXY_LOOPBACK = ("127.0.0.1", "::1")
+# A többes naplószűrő elemei: az eseménykódok alakja (kisbetű, számjegy, _).
+AUDIT_EVENT_CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 
 # A 80-as port átirányításának Hostja: hostnév/IPv4 vagy [IPv6], opcionális
 # porttal; minden más (CRLF, szóköz, userinfo, %-scope) érvénytelen.
@@ -67,28 +75,33 @@ _REDIRECT_HOST_RE = re.compile(
 )
 
 # A proxy tiltó- és challenge-oldala közös váz; a {mező} helyőrzőket a
-# _proxy_page tölti ki.
+# _proxy_page tölti ki. Látható szöveg nincs: az állapotot ikon jelzi.
 PROXY_PAGE = """<!doctype html>
-<html lang="hu"><head><meta charset="utf-8">
+<html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title}</title>
 <style>
 body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
 font-family:system-ui,sans-serif;background:#111418;color:#e8eaed;text-align:center}
 main{max-width:420px;padding:24px}
-img{width:min(320px,80vw);height:auto}
-h1{font-size:1.5rem;margin:16px 0 8px}
-p{color:#b0b6bd;line-height:1.5}
-a{display:inline-block;margin-top:12px;padding:10px 22px;border-radius:8px;
-background:#2f6fde;color:#fff;text-decoration:none;font-weight:600}
+img{display:block;width:min(320px,80vw);height:auto;margin:0 auto}
+a.login{display:flex;width:max-content;align-items:center;justify-content:center;margin:20px auto 0;
+padding:12px 18px;border-radius:8px;background:#2f6fde;color:#fff;text-decoration:none}
+a.login:hover{background:#3f7cea}
+a.login:focus-visible{outline:3px solid #9fc3ff;outline-offset:2px}
 {style}</style></head><body><main>
 <img src="/__dropjak/{image}" alt="">
-<h1>{title}</h1>
-<p>{text}</p>
 {body}
 </main></body></html>
 """
-_PROXY_PAGE_FIELD = re.compile(r"\{(title|style|image|text|body)\}")
+_PROXY_PAGE_FIELD = re.compile(r"\{(title|style|image|body)\}")
+
+# Belépés gomb: nyíl az ajtón át; a szöveget az aria-label adja.
+PROXY_LOGIN_ICON = """<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h8"/>
+<path d="M10 12h11"/>
+<path d="m18 8 4 4-4 4"/>
+</svg>"""
 
 
 def _proxy_page(**values: str) -> bytes:
@@ -149,7 +162,7 @@ async function verify(captcha) {
     return;
   }
   const data = await res.json().catch(() => ({}));
-  const error = new Error(data.error || 'Az ellenőrzés nem sikerült.');
+  const error = new Error('Verification failed.');
   error.shown = true;
   throw error;
 }
@@ -159,14 +172,14 @@ if (CFG.mode === 'turnstile') {
   s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
   s.async = true;
   s.onload = () => window.turnstile.render('#turnstile', {
-    sitekey: CFG.sitekey, theme: 'dark', language: 'hu',
+    sitekey: CFG.sitekey, theme: 'dark', language: 'en',
     callback: token => verify({ token }).catch(e => {
-      show(e.shown ? e.message : 'Az ellenőrzés nem sikerült.');
+      show(e.shown ? e.message : 'Verification failed.');
       try { window.turnstile.reset('#turnstile'); } catch (_) { /* nincs widget */ }
     }),
-    'error-callback': () => show('A captcha nem töltődött be. Frissítsd az oldalt.')
+    'error-callback': () => show('The captcha could not load. Reload the page.')
   });
-  s.onerror = () => show('A captcha nem töltődött be (hálózat).');
+  s.onerror = () => show('The captcha could not load (network).');
   document.head.appendChild(s);
 } else {
   slot.innerHTML = `
@@ -177,7 +190,7 @@ if (CFG.mode === 'turnstile') {
                stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5 9.5 18 20 6.5"/></svg>
         </span>
         <span class="spinner"></span>
-        <span class="captcha-text" id="powtext">Nem vagyok robot</span>
+        <span class="captcha-text" id="powtext">I'm not a robot</span>
       </div>
       <div class="bar"><i id="powbar"></i></div>
     </div>`;
@@ -188,7 +201,7 @@ if (CFG.mode === 'turnstile') {
   const start = async () => {
     if (box.dataset.state === 'busy' || box.dataset.state === 'done') return;
     box.dataset.state = 'busy';
-    text.textContent = 'Ellenőrzés…';
+    text.textContent = 'Checking…';
     show('');
     try {
       const res = await fetch('/__dropjak/challenge', { cache: 'no-store' });
@@ -216,14 +229,14 @@ if (CFG.mode === 'turnstile') {
       }
       box.dataset.state = 'done';
       box.setAttribute('aria-checked', 'true');
-      text.textContent = 'Ellenőrizve';
+      text.textContent = 'Verified';
       await verify({ ...ch, number: found });
     } catch (e) {
       box.dataset.state = '';
       box.setAttribute('aria-checked', 'false');
-      text.textContent = 'Nem vagyok robot';
+      text.textContent = "I'm not a robot";
       bar.style.width = '0%';
-      show(e.shown ? e.message : 'Az ellenőrzés nem indult el. Próbáld újra.');
+      show(e.shown ? e.message : 'Verification could not start. Try again.');
     }
   };
   box.addEventListener('click', start);
@@ -255,9 +268,8 @@ def _proxy_challenge_page() -> bytes:
         "__CFG__", json.dumps(config).replace("<", "\\u003c")
     )
     return _proxy_page(
-        title="Ellenőrzés",
+        title="Dropjak",
         image="sus.png",
-        text="Erősítsd meg, hogy nem vagy robot.",
         style=css + "\n" + PROXY_CHALLENGE_STYLE,
         body=(
             '<div id="slot"></div>\n<p id="msg" role="alert"></p>\n'
@@ -313,6 +325,63 @@ def _proxy_burst(ip: str, host: str, now: float, count: bool) -> float:
                 _PROXY_BURST.clear()
         _PROXY_BURST[key] = (hits, flagged)
         return flagged
+
+
+def _portal_parent_root(portal: str, roots) -> str:
+    """A Dropjak-cím gyökérdomainje; a mentés ezt garantálja, de futásidejű
+    állapotból is biztonságosan ""-t ad, ha nincs."""
+    return next((root for root in roots if portal.endswith("." + root)), "")
+
+
+def _tunnel_domain_target(settings: dict, host: str):
+    """Egy domaines alagút-szolgáltatás szintetikus proxy-célja és gyökere.
+
+    Csak bekapcsolt ügynök bekapcsolt szolgáltatása oldódik fel. A Caddy a
+    ``10.77.0.2:<belső port>`` címre továbbít; az ügynök a wg0 felől DNAT-ol
+    a szolgáltatás konténerére. Nincs WAN-port és nincs WAN-DNAT.
+    """
+    if not host:
+        return None
+    roots = settings.get("proxy_domains", [])
+    # A leghosszabb illeszkedő gyökér nyer (a mentés ezt garantálja).
+    root = max(
+        (item for item in roots if host.endswith("." + item)),
+        key=len, default="",
+    )
+    if not root:
+        return None
+    tunnels = settings.get("tunnels")
+    if not isinstance(tunnels, dict):
+        return None
+    for agent in tunnels.get("agents", []):
+        if not isinstance(agent, dict) or not agent.get("enabled", True):
+            continue
+        for service in agent.get("services", []):
+            if not isinstance(service, dict):
+                continue
+            if not service.get("enabled", True):
+                continue
+            if service.get("domain", "") != host:
+                continue
+            try:
+                ports = settings_store.tunnel_service_ports(service)
+            except settings_store.SettingsError:
+                return None
+            if len(ports) != 1:
+                return None
+            return {
+                "type": "forward",
+                "ip": agent.get("address", ""),
+                "port": ports[0]["tunnel_port"],
+                "visibility": (
+                    "public" if service.get("public") else "private"
+                ),
+                "enabled": True,
+                "tunnel": True,
+                **({"challenge": service["challenge"]}
+                   if service.get("challenge") else {}),
+            }, root
+    return None
 
 
 def _proxy_pass_lifetime(challenge: dict) -> int:
@@ -708,10 +777,498 @@ def _access_rule_ids(data: dict) -> tuple[list[str], str]:
     return [rule_id], ""
 
 
+# ------------------------------------------------------------ konfigurációs csomag
+
+CONFIG_FORMAT = "dropjak-config"
+# 2: a settings szakasz tunnels (WireGuard-alagút) részt is tartalmaz. Az
+# 1. verziójú csomagokat továbbra is elfogadjuk: a hiányzó tunnels szakaszt
+# alapértelmezéssel töltjük ki (nincs ügynök, a WireGuard port zárva).
+CONFIG_FORMAT_VERSION = 2
+CONFIG_FORMAT_MIN_VERSION = 1
+CONFIG_MAX_BYTES = 8 * 1024 * 1024
+CONFIG_SECTIONS = ("settings", "rules", "groups", "users", "certs", "fail2ban")
+_FAIL2BAN_CONFIG_KEYS = frozenset({
+    "enabled", "max_attempts", "window_seconds", "ban_seconds",
+    "drop_enabled", "drop_count_enabled", "drop_ports_enabled",
+    "drop_max", "drop_ports", "drop_window_seconds",
+    "proxy_enabled", "proxy_max", "proxy_window_seconds",
+})
+
+
+class ConfigBundleError(ValueError):
+    """A konfigurációs csomag érvénytelen vagy nem támogatott."""
+
+
+def _fail2ban_config(snapshot: dict) -> dict:
+    """Csak a beállítások, tiltások és számlálók nélkül."""
+    return {key: snapshot[key] for key in _FAIL2BAN_CONFIG_KEYS}
+
+
+def _config_bundle(gw) -> dict:
+    """A teljes, exportálható konfiguráció (naplók és futásidejű állapot nélkül)."""
+    try:
+        settings = gw.settings.snapshot()
+        error = settings.pop("error", "")
+        if error:
+            raise ConfigBundleError(f"a beállításfájl hibás: {error}")
+        settings = settings_store.validate_state(settings)
+        sections = {
+            "settings": settings,
+            "rules": gw.rules.export_records(),
+            "groups": gw.groups.export_records(),
+            "users": gw.users.export_records(),
+            "certs": gw.certs.export_all(),
+            "fail2ban": _fail2ban_config(gw.fail2ban.snapshot()),
+        }
+    except ConfigBundleError:
+        raise
+    except (
+        settings_store.SettingsError,
+        gateway.RuleStoreError,
+        gateway.GroupStoreError,
+        gateway.UserStoreError,
+        fail2ban_mod.Fail2banError,
+        OSError,
+        ValueError,
+    ) as exc:
+        raise ConfigBundleError(str(exc)) from exc
+    return {
+        "format": CONFIG_FORMAT,
+        "format_version": CONFIG_FORMAT_VERSION,
+        "app_version": gateway.APP_VERSION,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "sections": sections,
+    }
+
+
+def _validate_config_bundle(gw, bundle) -> dict:
+    """A teljes csomag ellenőrzése írás nélkül; a normalizált szakaszokat adja."""
+    if not isinstance(bundle, dict):
+        raise ConfigBundleError("a csomag JSON-objektum kell")
+    if bundle.get("format") != CONFIG_FORMAT:
+        raise ConfigBundleError("ez nem Dropjak konfigurációs csomag")
+    version = bundle.get("format_version")
+    if isinstance(version, bool) or not isinstance(version, int) \
+            or not CONFIG_FORMAT_MIN_VERSION <= version <= CONFIG_FORMAT_VERSION:
+        # A nyers értéket szándékosan nem idézzük vissza: a csomag tartalma
+        # ne szivárogjon a hibaüzenetbe.
+        raise ConfigBundleError(
+            "nem támogatott formátumverzió; ez a portál az "
+            f"{CONFIG_FORMAT_MIN_VERSION}–{CONFIG_FORMAT_VERSION}. verziót "
+            "ismeri (az 1-esnél a hiányzó tunnels szakasz alapértelmezéssel "
+            "töltődik)"
+        )
+    raw_sections = bundle.get("sections")
+    if not isinstance(raw_sections, dict):
+        raise ConfigBundleError("a sections mező JSON-objektum kell")
+    missing = [name for name in CONFIG_SECTIONS if name not in raw_sections]
+    if missing:
+        raise ConfigBundleError(
+            "hiányzó szakasz(ok): " + ", ".join(missing)
+        )
+    unknown = sorted(set(raw_sections) - set(CONFIG_SECTIONS))
+    if unknown:
+        raise ConfigBundleError(
+            "ismeretlen szakasz(ok): " + ", ".join(unknown)
+        )
+    raw_fail2ban = raw_sections["fail2ban"]
+    if not isinstance(raw_fail2ban, dict) \
+            or set(raw_fail2ban) != _FAIL2BAN_CONFIG_KEYS:
+        raise ConfigBundleError(
+            "a fail2ban szakasz hiányos vagy ismeretlen mezőt tartalmaz"
+        )
+    raw_settings = raw_sections["settings"]
+    if version == 1 and isinstance(raw_settings, dict) \
+            and "tunnels" not in raw_settings:
+        raw_settings = dict(raw_settings)
+        raw_settings["tunnels"] = settings_store.default_tunnels()
+    elif version >= 2 and isinstance(raw_settings, dict) \
+            and "tunnels" not in raw_settings:
+        raise ConfigBundleError(
+            "a(z) 2. verziójú csomag beállításaiból hiányzik a tunnels szakasz"
+        )
+    try:
+        settings = settings_store.validate_state(raw_settings)
+        users = gw.users.validate_import_records(raw_sections["users"])
+        rules = gw.rules.validate_import_records(raw_sections["rules"])
+        groups = gw.groups.validate_import_records(raw_sections["groups"])
+    except (
+        settings_store.SettingsError,
+        gateway.RuleStoreError,
+        gateway.GroupStoreError,
+        gateway.UserStoreError,
+        ValueError,
+    ) as exc:
+        raise ConfigBundleError(str(exc)) from exc
+
+    # A tanúsítványok külön, mert a CertStore csak a saját hibáját dobja.
+    raw_certs = raw_sections["certs"]
+    if not isinstance(raw_certs, dict):
+        raise ConfigBundleError("a certs szakasz JSON-objektum kell")
+    checked_certs: dict[str, dict] = {}
+    for raw_root, item in raw_certs.items():
+        if not isinstance(item, dict):
+            raise ConfigBundleError(f"{raw_root}: hibás tanúsítványbejegyzés")
+        try:
+            meta = gw.certs.validate_import(
+                raw_root, item.get("cert"), item.get("key")
+            )
+        except settings_store.SettingsError as exc:
+            raise ConfigBundleError(f"{raw_root}: {exc}") from exc
+        if not isinstance(meta, dict):
+            raise ConfigBundleError(f"{raw_root}: hibás tanúsítvány")
+        root = raw_root.strip().lower()
+        if root in checked_certs:
+            raise ConfigBundleError(f"duplikált gyökérdomain: {root}")
+        checked_certs[root] = {
+            "cert": item.get("cert"), "key": item.get("key"),
+        }
+    try:
+        fail2ban_config = fail2ban_mod.validate_config(raw_fail2ban)
+    except fail2ban_mod.Fail2banError as exc:
+        raise ConfigBundleError(f"fail2ban: {exc}") from exc
+
+    # Hivatkozási integritás: szabály -> proxy host, felhasználó -> szabály,
+    # csoport -> szabály/tag, tanúsítvány -> gyökérdomain.
+    route_hosts = {
+        settings_store.route_host(route)
+        for route in settings["proxy_routes"]
+    }
+    for rule in rules.values():
+        missing_hosts = [name for name in rule.domains if name not in route_hosts]
+        if missing_hosts:
+            raise ConfigBundleError(
+                f"{rule.id}: nincs ilyen proxy útvonal: "
+                + ", ".join(missing_hosts)
+            )
+    for name, item in users.items():
+        missing_rules = [
+            rule_id for rule_id in item.get("rules", ()) if rule_id not in rules
+        ]
+        if missing_rules:
+            raise ConfigBundleError(
+                f"{name}: ismeretlen szabály: " + ", ".join(missing_rules)
+            )
+    for group in groups.values():
+        missing_rules = [rid for rid in group.rules if rid not in rules]
+        if missing_rules:
+            raise ConfigBundleError(
+                f"{group.id}: ismeretlen szabály: " + ", ".join(missing_rules)
+            )
+        missing_users = [name for name in group.members if name not in users]
+        if missing_users:
+            raise ConfigBundleError(
+                f"{group.id}: ismeretlen tag: " + ", ".join(missing_users)
+            )
+    for root in checked_certs:
+        if root not in settings["proxy_domains"]:
+            raise ConfigBundleError(
+                f"{root}: a tanúsítványhoz nincs ilyen gyökérdomain"
+            )
+    if not any(
+        item["role"] == gateway.ROLE_ADMIN
+        and item["enabled"] and not item["pending"]
+        for item in users.values()
+    ):
+        raise ConfigBundleError(
+            "a csomag nem tartalmaz legalább egy engedélyezett admin fiókot"
+        )
+    return {
+        "settings": settings,
+        "rules": rules,
+        "groups": groups,
+        "users": users,
+        "certs": checked_certs,
+        "fail2ban": fail2ban_config,
+    }
+
+
+def _apply_config_bundle(gw, bundle: dict) -> None:
+    """A már ellenőrzött szakaszok írása a meglévő tároló-utakon."""
+    gw.users.replace_all(bundle["users"])
+    gw.rules.replace_all(bundle["rules"])
+    gw.groups.replace_all(bundle["groups"])
+    gw.apply_settings(bundle["settings"])
+    # A szabályok a beállítások előtt íródtak, ezért a csomagban érkező új
+    # alagút-szolgáltatásokra hivatkozó szabályok feloldott portjai még
+    # üresek lehetnek. A beállítások telepítése után azonnal újraszámoljuk
+    # őket (és a függő gyűjtőket), hogy az importált szabály ne csak
+    # újraindítás után legyen használható. A visszaszámolt portok nem
+    # perzisztáltak, ezért nincs szükség további fájlírásra.
+    refreshed = gw.rules.reflect_services()
+    if refreshed:
+        gw.sessions.revoke_rules(refreshed)
+    gw.certs.replace_all(bundle["certs"])
+    gw.fail2ban.configure(bundle["fail2ban"])
+    gw.sync_host_ports()
+
+
+def _config_counts(bundle: dict) -> dict:
+    """Csak darabszámok az auditba (soha nem tartalom vagy titok)."""
+    settings = bundle["settings"]
+    return {
+        "users": len(bundle["users"]),
+        "rules": len(bundle["rules"]),
+        "groups": len(bundle["groups"]),
+        "certs": len(bundle["certs"]),
+        "preauth": len(settings["preauth"]),
+        "block": len(settings["block"]),
+        "proxy_domains": len(settings["proxy_domains"]),
+        "proxy_routes": len(settings["proxy_routes"]),
+        "port_proxies": len(settings["port_proxies"]),
+        "tunnel_agents": len(settings["tunnels"]["agents"]),
+        "tunnel_services": sum(
+            len(agent["services"]) for agent in settings["tunnels"]["agents"]
+        ),
+    }
+
+
+_TUNNEL_CONFIG_FORMAT = "dropjak-agent"
+_TUNNEL_CONFIG_VERSION = 1
+_TUNNEL_SYNC_PATH = "/api/tunnel/config"
+_TUNNEL_ACTIONS = frozenset({
+    "tunnel_settings",
+    "tunnel_agent_add",
+    "tunnel_agent_update",
+    "tunnel_agent_delete",
+    "tunnel_service_save",
+    "tunnel_service_delete",
+    "tunnel_service_test",
+})
+_TUNNEL_SYNC_MIN_SECONDS = 5.0
+# Az elérhetőségi teszt felső korlátai: a leképezések párhuzamosan futnak,
+# így egy halott cél nem sokszorozza meg a várakozást. A TCP 2 s alatt
+# eldől, az UDP-próba legfeljebb 0,6 s-ot vár válaszra.
+_TUNNEL_TEST_MAX_MAPPINGS = 4
+_TUNNEL_TEST_TCP_TIMEOUT = 2.0
+_TUNNEL_TEST_UDP_WAIT = 0.6
+_TUNNEL_TEST_DEADLINE = 6.0
+
+
+def _tunnel_agent_bundle_dir() -> str:
+    """Az ügynök-csomag forrásfájljai (Docker-layout: ./tunnel-agent)."""
+    base = os.path.dirname(os.path.abspath(__file__))
+    for path in (os.path.join(base, "tunnel-agent"),
+                 os.path.join(base, "deploy", "tunnel-agent")):
+        if os.path.isfile(os.path.join(path, "agent.py")):
+            return path
+    return ""
+
+
+def _tar_member(tar: tarfile.TarFile, name: str, data: bytes,
+                mode: int) -> None:
+    """Egy fájl a memóriabeli tar.gz csomagban (nincs temp fájl)."""
+    info = tarfile.TarInfo(name)
+    info.size = len(data)
+    info.mode = mode
+    info.mtime = int(time.time())
+    tar.addfile(info, io.BytesIO(data))
+
+
+def _tunnel_service_public(service: dict) -> dict:
+    """Egy szolgáltatás admin nézete a származtatott portokkal."""
+    try:
+        ports = settings_store.tunnel_service_ports(service)
+    except settings_store.SettingsError:
+        ports = []
+    return {
+        "id": service["id"],
+        "label": service["label"],
+        "target_host": service["target_host"],
+        "enabled": service["enabled"],
+        "public": bool(service.get("public", False)),
+        "domain": service.get("domain", ""),
+        "challenge": service.get("challenge"),
+        "mappings": [dict(mapping) for mapping in service.get("mappings", [])],
+        "ports": [
+            {
+                "proto": item["proto"],
+                "listen_port": item["listen_port"],
+                "target_port": item["target_port"],
+            }
+            for item in ports
+        ],
+    }
+
+
+def _tunnels_public(gw, settings: dict) -> dict:
+    """Az alagút-ügynökök admin nézete: kulcs és token nélkül."""
+    tunnels = settings.get("tunnels")
+    if not isinstance(tunnels, dict):
+        tunnels = settings_store.default_tunnels()
+    try:
+        status = gw.tunnels.status(tunnels)
+    except Exception:
+        status = {"error": "", "agents": []}
+    rows = {row.get("id"): row for row in status.get("agents", [])}
+    # Az ügynök utolsó sikeres konfiguráció-szinkronjának kora másodpercben.
+    # A szinkronidők monotonic órával készülnek; a pillanatkép a zár alatt
+    # készül, hogy a frissítés ne olvasson félkész állapotot.
+    now = time.monotonic()
+    lock = getattr(gw, "tunnel_sync_lock", None)
+    sync_times = getattr(gw, "tunnel_sync_times", {}) or {}
+    if lock is not None:
+        with lock:
+            sync_times = dict(sync_times)
+    else:
+        sync_times = dict(sync_times)
+    agents = []
+    for agent in tunnels.get("agents", []):
+        row = rows.get(agent["id"], {})
+        last = sync_times.get(agent["id"])
+        agents.append({
+            "id": agent["id"],
+            "label": agent["label"],
+            "address": agent["address"],
+            "enabled": agent["enabled"],
+            "online": bool(row.get("online")),
+            "last_handshake": int(row.get("last_handshake") or 0),
+            "last_sync": (
+                max(0, int(now - last)) if last else None
+            ),
+            "rx_bytes": int(row.get("rx_bytes") or 0),
+            "tx_bytes": int(row.get("tx_bytes") or 0),
+            "config_url": f"/api/admin/tunnels/{agent['id']}/config",
+            "bundle_url": f"/api/admin/tunnels/{agent['id']}/bundle",
+            "services": [
+                _tunnel_service_public(service)
+                for service in agent.get("services", [])
+            ],
+        })
+    return {
+        "port": tunnels["port"],
+        "endpoint": tunnels["endpoint"],
+        "error": str(status.get("error") or ""),
+        "agents": agents,
+    }
+
+
+def _tunnel_error_field(error: str, fallback: str = "") -> str:
+    """A validációs hiba szövegéből a mező neve (a felület jelöléséhez)."""
+    for needle, field in (
+        ("hallgató port", "listen_port"),
+        ("belső port", "tunnel_port"),
+        ("célport", "target"),
+        ("célhost", "target_host"),
+        ("portleképezés", "mappings"),
+        ("leképezés", "mappings"),
+        ("mappings", "mappings"),
+        ("cél", "target"),
+        ("protokoll", "proto"),
+        ("ügynökcím", "address"),
+        ("ügynök-azonosító", "id"),
+        ("ügynök", "agents"),
+        ("token", "token"),
+        ("privát kulcs", "server_private_key"),
+        ("megosztott kulcs", "preshared_key"),
+        ("WireGuard-kulcs", "server_private_key"),
+        ("WireGuard port", "port"),
+        ("végpont", "endpoint"),
+        ("címke", "label"),
+    ):
+        if needle in error:
+            return field
+    return fallback
+
+
+def _effective_site_name(gw) -> str:
+    value = gw.settings.snapshot().get("site_name")
+    return value.strip() if isinstance(value, str) and value.strip() else "Dropjak"
+
+
+def _config_state_nonempty(gw) -> bool:
+    """Van-e olyan állapot, amit import előtt gépelt névvel kell védeni?
+
+    A .env-ből létrehozott admin nem számít felhasználói állapotnak: friss
+    telepítésnél ez az egyetlen fiók, és az újraindulás úgyis újra létrehozza.
+    A kezdő (seedelt) szabályok szintén nem számítanak.
+    """
+    try:
+        for name in gw.users.names():
+            record = gw.users.record(name)
+            if record is not None and record.is_admin \
+                    and gw.users.provisioned_from(name):
+                continue
+            return True
+        if gw.groups.all_groups() or gw.certs.export_all():
+            return True
+    except (gateway.UserStoreError, gateway.GroupStoreError,
+            settings_store.SettingsError, OSError):
+        # Ha nem tudjuk biztosan üresnek látni, kérjünk megerősítést.
+        return True
+    snapshot = gw.settings.snapshot()
+    if snapshot.get("error"):
+        return True
+    if any(snapshot.get(key) for key in (
+        "site_name", "motd_text", "motd_expires_at",
+        "proxy_domains", "proxy_routes", "port_proxies", "preauth", "block",
+    )):
+        return True
+    return bool(
+        snapshot.get("registration_enabled") or snapshot.get("proxy_acme") is False
+    )
+
+
+def _config_confirm_ok(gw, data: dict) -> bool:
+    if not _config_state_nonempty(gw):
+        return True
+    provided = data.get("confirm")
+    return isinstance(provided, str) and provided.strip() == _effective_site_name(gw)
+
+
+def _config_backup_path(gw) -> str:
+    directory = os.path.dirname(gw.users.path) or "."
+    stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+    path = os.path.join(directory, f"config-backup-{stamp}.json")
+    index = 1
+    while os.path.exists(path):
+        path = os.path.join(directory, f"config-backup-{stamp}-{index}.json")
+        index += 1
+    return path
+
+
+def _write_private_json(path: str, data: dict) -> None:
+    """A csomag mentése 0600-mal, atomikusan (a könyvtárat nem hozzuk létre)."""
+    directory = os.path.dirname(path) or "."
+    fd, tmp = tempfile.mkstemp(
+        dir=directory, prefix=".config-backup-", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _request_service_restart(delay: float = 0.5) -> None:
+    """SIGTERM a saját folyamatnak; a compose ``restart: unless-stopped`` indítja újra.
+
+    Nem Docker alatt a folyamat egyszerűen leáll (a felület ezt jelzi).
+    """
+    def _stop() -> None:
+        try:
+            os.kill(os.getpid(), signal.SIGTERM)
+        except OSError:
+            pass
+
+    timer = threading.Timer(delay, _stop)
+    timer.daemon = True
+    timer.start()
+
+
 # -------------------------------------------------------------------- HTTP réteg
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "Hatarvedelem/2"
+    server_version = "Dropjak/2"
     sys_version = ""
     protocol_version = "HTTP/1.1"
     # Lassú/beragadt kapcsolatok ne foglalják örökre a szálakat.
@@ -985,6 +1542,10 @@ class Handler(BaseHTTPRequestHandler):
             ]
             users.append(item)
         settings = self.gw.settings.snapshot()
+        tunnels = _tunnels_public(self.gw, settings)
+        # A nyers tunnels szakasz privát kulcsokat és tokeneket tartalmaz;
+        # a felület csak a fenti, titok nélküli nézetet kapja.
+        settings.pop("tunnels", None)
         caddy = getattr(self.gw, "caddy", None)
         return {
             "ok": True,
@@ -996,6 +1557,7 @@ class Handler(BaseHTTPRequestHandler):
             "limits": self._limits(),
             "roles": [gateway.ROLE_USER, gateway.ROLE_ADMIN],
             "settings": settings,
+            "tunnels": tunnels,
             # Csak metaadat: a kulcs és a PEM soha nem kerül a válaszba.
             "proxy_certs": self.gw.certs.public(settings),
             # A Caddy admin API állapota (None: nincs domain proxy).
@@ -1073,6 +1635,105 @@ class Handler(BaseHTTPRequestHandler):
                 out.append(value)
         return out
 
+    def _rule_users(self, data: dict) -> list[str] | None:
+        """A szabály közvetlen felhasználó-kiosztásai (opcionális ``users``)."""
+        if "users" not in data:
+            return None
+        raw = data.get("users")
+        if not isinstance(raw, list) or len(raw) > 512:
+            raise gateway.UserStoreError(
+                "a users mező legfeljebb 512 elemű lista"
+            )
+        out: list[str] = []
+        for value in raw:
+            if not isinstance(value, str) or not value.strip():
+                raise gateway.UserStoreError("érvénytelen felhasználónév")
+            value = value.strip()
+            record = self.gw.users.record(value)
+            if record is None:
+                raise gateway.UserStoreError(
+                    f"ismeretlen felhasználó: {value}"
+                )
+            if record.pending:
+                raise gateway.UserStoreError(
+                    "a jóváhagyásra váró fiók nem rendelhető szabályhoz"
+                )
+            if value not in out:
+                out.append(value)
+        return out
+
+    def _apply_rule_assignments(
+        self, rule_id: str, users, groups
+    ) -> dict:
+        """A szabály közvetlen felhasználó- és csoportkiosztásainak alkalmazása.
+
+        A hívó már ellenőrizte az azonosítókat és elmentette a szabályt. A
+        két tár külön fájl, ezért a részleges hiba esetén a már alkalmazott
+        felet visszaállítjuk: így a szabály elmentve marad, de a kiosztások
+        nem maradnak félig módosítva. Visszatérés: az audit mezői.
+        """
+        if users is None and groups is None:
+            return {}
+        original_users = None
+        original_groups = None
+        if users is not None:
+            original_users = [
+                record.name for record in self.gw.users.details()
+                if rule_id in record.rules
+            ]
+        if groups is not None:
+            original_groups = [
+                group.id for group in self.gw.groups.all_groups()
+                if rule_id in group.rules
+            ]
+        result = {
+            "users_added": (), "users_removed": (),
+            "groups_added": (), "groups_removed": (),
+        }
+        stage = "users"
+        try:
+            if users is not None:
+                added, removed = self.gw.users.set_rule_membership(
+                    rule_id, users
+                )
+                result["users_added"] = added
+                result["users_removed"] = removed
+            stage = "groups"
+            if groups is not None:
+                added, removed = self.gw.groups.set_rule_groups(
+                    rule_id, groups
+                )
+                result["groups_added"] = added
+                result["groups_removed"] = removed
+        except Exception as exc:
+            rollback_failed = False
+            try:
+                if stage == "groups" and users is not None \
+                        and original_users is not None:
+                    self.gw.users.set_rule_membership(
+                        rule_id, original_users
+                    )
+            except Exception as rollback_exc:
+                rollback_failed = True
+                print(
+                    "[szabályok] a felhasználói kiosztás visszaállítása "
+                    f"nem sikerült: {rollback_exc}",
+                    flush=True,
+                )
+            message = (
+                "a szabály elmentve, de a kiosztás alkalmazása nem "
+                f"sikerült: {exc}"
+            )
+            if rollback_failed:
+                message += " (a részleges módosítás visszaállítása sem sikerült)"
+            raise gateway.RuleStoreError(message) from exc
+        return {
+            "users_added": ",".join(result["users_added"]),
+            "users_removed": ",".join(result["users_removed"]),
+            "groups_added": ",".join(result["groups_added"]),
+            "groups_removed": ",".join(result["groups_removed"]),
+        }
+
     def _portal_host_matches(self) -> bool:
         # A gyökérdomaineken a Caddy HTTPS-en a portált szolgálja ki.
         if not gateway.PORTAL_URL or self._via_proxy():
@@ -1104,15 +1765,19 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return ""
         root = roots[0]
+        # A saját cím bekapcsolva: a közvetlen HTTP-portál is oda vált.
+        host = settings.get("portal_domain") or root
+        if host != root:
+            root = _portal_parent_root(host, roots)
         if not settings.get("proxy_acme", True) \
-                and self.gw.certs.bundle(root, root) is None:
+                and self.gw.certs.bundle(host, root) is None:
             return ""
         if self.gw.fail2ban.banned(ip) is not None \
                 or self.gw.fail2ban.proxy_banned(ip) is not None:
             return ""
         parts = urllib.parse.urlsplit(self.path)
         return urllib.parse.urlunsplit(
-            ("https", root, parts.path or "/", parts.query, "")
+            ("https", host, parts.path or "/", parts.query, "")
         )
 
     # -- GET / HEAD ------------------------------------------------------------
@@ -1125,8 +1790,18 @@ class Handler(BaseHTTPRequestHandler):
             return self._challenge()
         if path == "/api/status":
             return self._status()
+        if path == _TUNNEL_SYNC_PATH:
+            return self._tunnel_config_sync()
+        if path.startswith("/api/admin/tunnels/") and path.endswith("/config"):
+            return self._admin_tunnel_config(path)
+        if path.startswith("/api/admin/tunnels/") and path.endswith("/bundle"):
+            return self._admin_tunnel_bundle(path)
+        if path == "/api/admin/tunnels/status":
+            return self._admin_tunnels_status()
         if path == "/api/admin/state":
             return self._admin_state_api()
+        if path == "/api/admin/preview":
+            return self._admin_preview()
         if path == "/api/admin/logs":
             return self._admin_logs()
         if path == "/api/admin/sessions":
@@ -1141,6 +1816,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._admin_settings_api()
         if path == "/api/admin/fail2ban":
             return self._admin_fail2ban_api()
+        if path == "/api/admin/config/export":
+            return self._admin_config_export()
         if path.startswith("/api/proxy/"):
             return self._proxy_api(path)
         if path.startswith("/api/gate/"):
@@ -1172,7 +1849,7 @@ class Handler(BaseHTTPRequestHandler):
             )
 
         if path in ("/", "/index.html") or path not in (
-            "/icon.png", "/favicon.ico", "/blocked.png"
+            "/icon.png", "/favicon.ico", "/blocked.png", "/ok.png"
         ):
             if self.command == "GET":
                 session = self._session()
@@ -1190,6 +1867,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._static("icon.png")
         if path == "/blocked.png":
             return self._static("blocked.png")
+        if path == "/ok.png":
+            return self._static("ok.png")
         # Bármely más útvonalra a belépőoldalt adjuk (captive viselkedés).
         return self._static("index.html")
 
@@ -1198,13 +1877,34 @@ class Handler(BaseHTTPRequestHandler):
     # -- Caddy aldomain-proxy (csak loopbackről) ------------------------------
 
     def _proxy_target(self, host: str):
-        """A host proxy-célja ("root", a bejegyzés vagy None) és gyökere."""
+        """A host proxy-célja ("root", a bejegyzés, a portál vagy None) és gyökere."""
         settings = self.gw.settings.snapshot()
-        if host and host in settings.get("proxy_domains", []):
-            return "root", host
+        portal = settings.get("portal_domain", "")
+        if portal and host == portal:
+            # A saját címén a portál egy publikus bejegyzésként viselkedik:
+            # a challenge-feltételek ugyanúgy érvényesek rá.
+            target = {
+                "type": "input", "port": gateway.PORT,
+                "visibility": "public", "enabled": True, "portal": True,
+            }
+            challenge = settings.get("portal_challenge")
+            if challenge:
+                target["challenge"] = challenge
+            return target, _portal_parent_root(
+                portal, settings.get("proxy_domains", [])
+            )
+        # A bejegyzések elsőbbséget élveznek: üres nevű bejegyzés a gyökérre
+        # szól, és a gyökér csak saját portálcím nélkül szolgálja ki a portált.
         for route in settings.get("proxy_routes", []):
-            if route["enabled"] and host == f"{route['name']}.{route['root']}":
+            if route["enabled"] and host == settings_store.route_host(route):
                 return route, route["root"]
+        # Domaines alagút-szolgáltatás: a Caddy ugyanazon a forward_auth
+        # úton kérdez, a cél pedig az ügynök belső alagút-portja.
+        tunnel = _tunnel_domain_target(settings, host)
+        if tunnel is not None:
+            return tunnel
+        if host and host in settings.get("proxy_domains", []) and not portal:
+            return "root", host
         return None, ""
 
     def _proxy_unknown_root(self, host: str) -> str:
@@ -1244,14 +1944,24 @@ class Handler(BaseHTTPRequestHandler):
         if not (uri.startswith("/") and uri.isascii() and uri.isprintable()
                 and " " not in uri):
             uri = "/"
-        roots = self.gw.settings.snapshot().get("proxy_domains", [])
+        settings = self.gw.settings.snapshot()
+        roots = settings.get("proxy_domains", [])
+        portal = settings.get("portal_domain", "")
+        if host and portal and host in roots \
+                and self._proxy_target(host)[0] is None:
+            # Saját portálcím mellett a gyökér már nem a portálé: bejegyzés
+            # nélkül nincs hozzá tanúsítvány, ezért nem irányítunk rá.
+            return self._send(404, b"", "text/plain; charset=utf-8")
         if host and (
             self._proxy_target(host)[0] is not None
             or self._proxy_unknown_root(host) or not roots
         ):
             code, location = 308, f"https://{host}{uri}"
         elif roots:
-            root = next((r for r in roots if host.endswith("." + r)), roots[0])
+            # Ismeretlen név: a portál (vagy annak híján a tartalmazó gyökér).
+            root = portal or next(
+                (r for r in roots if host.endswith("." + r)), roots[0]
+            )
             code, location = 302, f"https://{root}/"
         else:
             return self._send(400, b"", "text/plain; charset=utf-8")
@@ -1349,12 +2059,32 @@ class Handler(BaseHTTPRequestHandler):
                 403, _proxy_challenge_page(), "text/html; charset=utf-8"
             )
         login = f"https://{root}/"
+        settings = self.gw.settings.snapshot()
+        portal = settings.get("portal_domain", "")
+        if portal:
+            login = f"https://{portal}/"
+        # A portál saját címe ugyanazt a loopback-védelmet kapja: a Caddy a
+        # portálhoz továbbít, így a /api/proxy/ végpontok különben elérhetők
+        # lennének (a peer ott is loopback).
+        if isinstance(target, dict) and target.get("portal"):
+            uri = self.headers.get("X-Forwarded-Uri") or "/"
+            if urllib.parse.urlsplit(uri).path.startswith("/api/proxy/"):
+                return self._send(404, b"", "text/plain; charset=utf-8")
         if target == "root":
             # A gyökérdomain maga a portál. A Caddyn át a proxy-végpontok
             # nem érhetők el (ott a peer is loopback lenne).
             uri = self.headers.get("X-Forwarded-Uri") or "/"
             if urllib.parse.urlsplit(uri).path.startswith("/api/proxy/"):
                 return self._send(404, b"", "text/plain; charset=utf-8")
+            if portal:
+                # A felület a saját címére költözött; a gyökér oda irányít.
+                if not (uri.startswith("/") and uri.isascii()
+                        and uri.isprintable() and " " not in uri):
+                    uri = "/"
+                return self._send(
+                    302, b"", "text/plain; charset=utf-8",
+                    headers={"Location": f"https://{portal}{uri}"},
+                )
             return self._send(
                 200, b"", "text/plain; charset=utf-8",
                 headers={"X-Dropjak-Upstream": f"127.0.0.1:{gateway.PORT}"},
@@ -1424,13 +2154,13 @@ class Handler(BaseHTTPRequestHandler):
                 )
         self.gw.record_proxy_drop(ip, host, page_path)
         page = _proxy_page(
-            title="Nincs hozzáférés",
+            title="Dropjak",
             image="unauthorized.png",
-            text=(
-                "Ez a szolgáltatás csak a Dropjak tűzfalon történő "
-                "bejelentkezés után érhető el."
+            body=(
+                f'<a class="login" href="{html.escape(login, quote=True)}" '
+                'aria-label="Log in" title="Log in">'
+                f"{PROXY_LOGIN_ICON}</a>"
             ),
-            body=f'<a href="{html.escape(login, quote=True)}">Bejelentkezés</a>',
         )
         return self._send(401, page, "text/html; charset=utf-8")
 
@@ -1600,17 +2330,83 @@ class Handler(BaseHTTPRequestHandler):
             "min_ttl": gateway.MIN_TTL,
             "max_ttl": gateway.MAX_TTL,
             "default_ttl": self.gw.sessions.ttl,
+            "max_rules": MAX_SESSION_RULES,
         }
 
     def _rule_payload(self, rule) -> dict:
         return self._with_hosts(rule.public())
 
+    def _service_index(self) -> dict:
+        """A jelenlegi beállítások szolgáltatás-indexe hivatkozás szerint."""
+        try:
+            tunnels = self.gw.settings.snapshot().get("tunnels")
+        except Exception:
+            return {}
+        if not isinstance(tunnels, dict):
+            return {}
+        return settings_store.tunnel_service_index(tunnels)
+
+    def _services_payload(self, refs) -> list[dict]:
+        """A kiválasztott szolgáltatások feloldott, megjelenítési alakja."""
+        index = self._service_index()
+        out: list[dict] = []
+        for ref in refs:
+            item = index.get(ref)
+            if item is None:
+                out.append({
+                    "ref": ref, "label": ref, "tcp": [], "udp": [],
+                    "domain": None,
+                })
+                continue
+            out.append({
+                "ref": ref,
+                "label": item.get("label") or ref,
+                "tcp": list(item.get("tcp", ())),
+                "udp": list(item.get("udp", ())),
+                # Domain-módú szolgáltatás: nincs portja, a proxy-gapun
+                # keresztül a domainje nyílik meg.
+                "domain": item.get("domain") or None,
+            })
+        return out
+
+    @staticmethod
+    def _services_label(services: list[dict]) -> str:
+        parts: list[str] = []
+        for service in services:
+            pieces: list[str] = []
+            if service.get("domain"):
+                # Domain-módú szolgáltatás: a port helyett a hostnév.
+                pieces.append(str(service["domain"]))
+            if service.get("tcp"):
+                pieces.append(
+                    "TCP " + ", ".join(str(port) for port in service["tcp"])
+                )
+            if service.get("udp"):
+                pieces.append(
+                    "UDP " + ", ".join(str(port) for port in service["udp"])
+                )
+            detail = " · ".join(pieces) if pieces else "nincs elérhető port"
+            parts.append(f"{service.get('label') or service.get('ref')} ({detail})")
+        return "Szolgáltatás: " + ", ".join(parts)
+
     def _with_hosts(self, payload: dict) -> dict:
-        """A domain-választás teljes hostnevei a megjelenítéshez.
+        """A domain- és szolgáltatás-választás megjelenítési mezői.
 
         A ``ports_label`` domain szabálynál a hostneveket mutatja (portos
         résszel együtt ``·`` elválasztással), a ``hosts`` a teljes neveket.
+        Szolgáltatás-szabálynál a ``services`` a beállításokból feloldott
+        címkéket és portokat tartalmazza, a ``ports_label`` pedig ezeket
+        mutatja a nyers portok helyett.
         """
+        refs = [
+            ref for ref in (payload.get("service_refs") or [])
+            if isinstance(ref, str)
+        ]
+        if refs:
+            services = self._services_payload(refs)
+            payload["services"] = services
+            if not payload.get("collection") and not payload.get("domains"):
+                payload["ports_label"] = self._services_label(services)
         domains = payload.get("domains") or []
         if not domains:
             return payload
@@ -1640,11 +2436,16 @@ class Handler(BaseHTTPRequestHandler):
         domains = list(dict.fromkeys(
             name for part in session.selections() for name in part.domains
         ))
+        service_refs = list(dict.fromkeys(
+            ref for part in session.selections()
+            for ref in getattr(part, "service_refs", ())
+        ))
         return {
             "selected_rules": selected_rules,
             "selected_rule_labels": selected_labels,
             "grants": [part.public() for part in session.grants],
             "hosts": self._with_hosts({"domains": domains}).get("hosts", []),
+            "services": self._services_payload(service_refs),
         }
 
     def _ban_fields(self) -> dict:
@@ -1747,6 +2548,11 @@ class Handler(BaseHTTPRequestHandler):
             "site_name": site_name,
             "version": gateway.APP_VERSION,
         }
+        # Csak a még érvényes közlemény hagyja el a szervert; a lejárt
+        # vagy kikapcsolt MOTD nem kerül a válaszba.
+        motd = settings_store.active_motd(settings)
+        if motd:
+            payload["motd"] = motd
         if session.authorized:
             payload["rule"] = session.rule
             payload["rule_label"] = session.rule_label
@@ -1760,6 +2566,51 @@ class Handler(BaseHTTPRequestHandler):
         if self._admin_guard() is None:
             return
         self._json(200, self._admin_state())
+
+    def _admin_preview(self) -> None:
+        """Egy felhasználó portál-hozzáférési nézetének csak olvasható előnézete.
+
+        Szándékosan nem hoz létre munkamenetet és nem nyit nft-engedélyt:
+        ugyanazokat a szabályokat, limiteket és állapotmezőket adja vissza,
+        amelyeket a ``/api/status`` adna a felhasználónak. Az előnézet
+        megnyitása mindig audit-bejegyzést ír.
+        """
+        if not self._origin_ok():
+            self._admin_request_rejected("invalid_origin")
+            return self._json(
+                403, {"ok": False, "error": "érvénytelen kérés-eredet"}
+            )
+        session = self._admin_guard()
+        if session is None:
+            return
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        name = (query.get("user") or [""])[0].strip()[:128]
+        record = self.gw.users.record(name) if name else None
+        if record is None:
+            self._admin_action_error(
+                "user_preview", gateway.UserStoreError("ismeretlen felhasználó"),
+                target=name,
+            )
+            return self._json(
+                404, {"ok": False, "error": "ismeretlen felhasználó"}
+            )
+        rules = self.gw.effective_rules(record.name)
+        self._audit("admin_user_preview", user=session.user, target=record.name)
+        self._json(200, {
+            "ok": True,
+            "preview": True,
+            "user": record.name,
+            "role": record.role,
+            "admin": record.is_admin,
+            "enabled": record.enabled,
+            "pending": record.pending,
+            "must_change_password": record.must_change_password,
+            "totp_required": record.totp_required,
+            "totp_enrolled": record.totp_enrolled,
+            "authorized": False,
+            "limits": self._limits(),
+            "rules": [self._rule_payload(rule) for rule in rules],
+        })
 
     def _sessions_payload(self, current: gateway.Session | None) -> dict:
         rows = self.gw.sessions.active_sessions()
@@ -1917,7 +2768,24 @@ class Handler(BaseHTTPRequestHandler):
             before = float(before_raw) if before_raw else None
         except ValueError:
             before = None
-        event_filter = first("event")
+        # Többes eseményszűrő: ``events=a,b`` (ismételhető) vagy ismételt
+        # ``event=``. Egyetlen ``event=`` a régi részleges egyezés marad.
+        event_values = query.get("event") or []
+        multi = list(query.get("events") or [])
+        if len(event_values) > 1:
+            multi += event_values
+            event_values = []
+        event_filter = event_values[0] if event_values else ""
+        events = list(dict.fromkeys(
+            code.strip().lower()
+            for value in multi for code in value.split(",") if code.strip()
+        ))
+        if len(events) > 200 or not all(
+            AUDIT_EVENT_CODE_RE.fullmatch(code) for code in events
+        ):
+            return self._json(400, {
+                "ok": False, "error": "érvénytelen eseménykód a szűrőben",
+            })
         user_filter = first("user")
         q_filter = first("q")
         severity_filter = first("severity").strip().lower()
@@ -1939,6 +2807,7 @@ class Handler(BaseHTTPRequestHandler):
             before=before,
             severity=severity_filter,
             ip=ip_filter,
+            events=events,
         )
         manual = first("manual").strip().lower() in ("1", "true", "yes")
         if manual:
@@ -1948,7 +2817,7 @@ class Handler(BaseHTTPRequestHandler):
                 "admin_logs_read",
                 user=session.user,
                 limit=limit,
-                event_filter=event_filter[:120],
+                event_filter=(event_filter or ",".join(events))[:120],
                 user_filter=user_filter[:120],
                 severity_filter=severity_filter[:16],
                 ip_filter=str(ip_filter or ""),
@@ -2025,12 +2894,301 @@ class Handler(BaseHTTPRequestHandler):
     def _admin_settings_api(self) -> None:
         if self._admin_guard() is None:
             return
+        settings = self.gw.settings.snapshot()
+        tunnels = _tunnels_public(self.gw, settings)
+        settings.pop("tunnels", None)
         self._json(
             200,
             {
                 "ok": True,
-                "settings": self.gw.settings.snapshot(),
+                "settings": settings,
+                "tunnels": tunnels,
                 "drop_log": self.gw.drops.status(),
+            },
+        )
+
+    def _tunnel_endpoint_host(self) -> str:
+        """A letöltött konfiguráció nyilvános végpontja (Host, majd PORTAL_URL)."""
+        host = (self.headers.get("Host") or "").strip()
+        if host:
+            try:
+                name = urllib.parse.urlsplit("//" + host).hostname
+            except ValueError:
+                name = None
+            if name:
+                return name
+        if gateway.PORTAL_URL:
+            try:
+                return urllib.parse.urlsplit(gateway.PORTAL_URL).hostname or ""
+            except ValueError:
+                return ""
+        return ""
+
+    def _tunnel_download(self, agent_id: str):
+        """A letöltésekhez tartozó beállítás és ügynök (hiányzó: None)."""
+        snapshot = self.gw.settings.snapshot()
+        tunnels = snapshot.get("tunnels")
+        if not isinstance(tunnels, dict):
+            tunnels = settings_store.default_tunnels()
+        agent = next(
+            (
+                item for item in tunnels.get("agents", [])
+                if item["id"] == agent_id
+            ),
+            None,
+        )
+        return tunnels, agent
+
+    def _tunnel_agent_config(self, agent: dict, tunnels: dict):
+        """Az ügynök konfigurációja (WireGuard-kulcsokkal) és a szolgáltatásai."""
+        endpoint = tunnels.get("endpoint") or self._tunnel_endpoint_host()
+        services = [
+            {
+                "id": f"p{item['listen_port']}", "label": item["label"],
+                "proto": item["proto"],
+                "tunnel_port": item["tunnel_port"],
+                "target": f"{item['target_host']}:{item['target_port']}",
+                "enabled": True,
+            }
+            for item in settings_store.agent_services_expanded(agent)
+        ]
+        config = {
+            "format": _TUNNEL_CONFIG_FORMAT,
+            "version": _TUNNEL_CONFIG_VERSION,
+            "agent": {
+                "id": agent["id"], "label": agent["label"],
+                "address": agent["address"],
+            },
+            "wireguard": {
+                "private_key": agent["private_key"],
+                "address": f"{agent['address']}/24",
+                "peer_public_key": tunnels.get("server_public_key", ""),
+                "preshared_key": agent["preshared_key"],
+                "endpoint": (
+                    f"{endpoint}:{tunnels['port']}" if endpoint else ""
+                ),
+                "allowed_ips": [f"{settings_store.TUNNEL_SERVER_ADDRESS}/32"],
+                "persistent_keepalive": 25,
+            },
+            "sync": {
+                "url": (
+                    f"http://{settings_store.TUNNEL_SERVER_ADDRESS}:"
+                    f"{settings_store.PORTAL_PORT}{_TUNNEL_SYNC_PATH}"
+                ),
+                "token": agent["token"],
+                "interval_seconds": 30,
+            },
+            "services": services,
+        }
+        return config, len(services)
+
+    def _admin_tunnel_agent_rejected(self, session, agent_id: str,
+                                     reason: str) -> None:
+        self._audit(
+            "tunnel_config_failed", user=session.user,
+            target=agent_id[:64], reason=reason,
+        )
+
+    def _admin_tunnels_status(self) -> None:
+        """Csak olvasó állapotfrissítés az ügynök-listához.
+
+        A beállításfájlt nem írja és az nftables-t sem érinti: ugyanazt a
+        titok nélküli nézetet adja vissza, mint az admin állapot, friss
+        ``checked_at`` időbélyeggel. A felület ezzel kéri újra a
+        kézfogás- és szinkronadatokat anélkül, hogy a teljes admin
+        állapotot újratöltené.
+        """
+        if self._admin_guard() is None:
+            return
+        snapshot = self.gw.settings.snapshot()
+        if snapshot.get("error"):
+            self._json(
+                503,
+                {
+                    "ok": False,
+                    "error": f"a beállításfájl hibás: {snapshot['error']}",
+                },
+            )
+            return
+        self._json(
+            200,
+            {
+                "ok": True,
+                "checked_at": int(time.time()),
+                "tunnels": _tunnels_public(self.gw, snapshot),
+            },
+        )
+
+    def _admin_tunnel_config(self, path: str) -> None:
+        """Egy ügynök letölthető konfigurációja (kulcsokkal, csak adminnak)."""
+        session = self._admin_guard()
+        if session is None:
+            return
+        if not self._origin_ok():
+            self._audit(
+                "tunnel_config_failed", user=session.user,
+                reason="invalid_origin",
+            )
+            return self._json(
+                403, {"ok": False, "error": "érvénytelen kérés-eredet"}
+            )
+        agent_id = path[
+            len("/api/admin/tunnels/"):-len("/config")
+        ].strip("/")
+        tunnels, agent = self._tunnel_download(agent_id)
+        if agent is None:
+            self._admin_tunnel_agent_rejected(
+                session, agent_id, "unknown_agent"
+            )
+            return self._json(
+                404, {"ok": False, "error": "nincs ilyen ügynök"}
+            )
+        config, count = self._tunnel_agent_config(agent, tunnels)
+        body = json.dumps(config, ensure_ascii=False, indent=2).encode("utf-8")
+        self._audit(
+            "tunnel_agent_config_downloaded",
+            user=session.user, target=agent["id"], services=count,
+        )
+        self._send(
+            200, body, "application/json; charset=utf-8",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="dropjak-agent-{agent["id"]}.json"'
+                ),
+            },
+        )
+
+    def _admin_tunnel_bundle(self, path: str) -> None:
+        """A letölthető ügynök-telepítő: egyetlen önkitömörítő shell script.
+
+        A script eleje a selfinstall.sh, utána a tar.gz csomag (compose,
+        agent.json, forrás). Így a másik gépre egy fájlt kell átvinni.
+        """
+        session = self._admin_guard()
+        if session is None:
+            return
+        if not self._origin_ok():
+            self._audit(
+                "tunnel_config_failed", user=session.user,
+                reason="invalid_origin",
+            )
+            return self._json(
+                403, {"ok": False, "error": "érvénytelen kérés-eredet"}
+            )
+        agent_id = path[
+            len("/api/admin/tunnels/"):-len("/bundle")
+        ].strip("/")
+        tunnels, agent = self._tunnel_download(agent_id)
+        if agent is None:
+            self._admin_tunnel_agent_rejected(
+                session, agent_id, "unknown_agent"
+            )
+            return self._json(
+                404, {"ok": False, "error": "nincs ilyen ügynök"}
+            )
+        directory = _tunnel_agent_bundle_dir()
+        contents = {}
+        try:
+            with open(
+                os.path.join(directory, "compose.agent.yml"), encoding="utf-8"
+            ) as fh:
+                compose = fh.read()
+            with open(
+                os.path.join(directory, "selfinstall.sh"), "rb"
+            ) as fh:
+                header = fh.read()
+            for name in ("Dockerfile", "agent.py", "check-containment.sh"):
+                with open(os.path.join(directory, name), "rb") as fh:
+                    contents[name] = fh.read()
+        except OSError:
+            self._admin_tunnel_agent_rejected(
+                session, agent_id, "bundle_missing"
+            )
+            return self._json(
+                500, {"ok": False, "error": "az ügynök-csomag nem elérhető"}
+            )
+        config, count = self._tunnel_agent_config(agent, tunnels)
+        payload = io.BytesIO()
+        with tarfile.open(fileobj=payload, mode="w:gz") as tar:
+            _tar_member(tar, "compose.yml", compose.encode("utf-8"), 0o644)
+            _tar_member(
+                tar, "agent.json",
+                json.dumps(config, ensure_ascii=False, indent=2).encode("utf-8"),
+                0o600,
+            )
+            for name, mode in (
+                ("Dockerfile", 0o644), ("agent.py", 0o755),
+                ("check-containment.sh", 0o755),
+            ):
+                _tar_member(tar, name, contents[name], mode)
+        self._audit(
+            "tunnel_agent_config_downloaded",
+            user=session.user, target=agent["id"], services=count,
+            bundle=True,
+        )
+        self._send(
+            200, header + payload.getvalue(), "application/x-sh",
+            headers={
+                "Content-Disposition": (
+                    "attachment; filename="
+                    f'"dropjak-agent-{agent["id"]}.sh"'
+                ),
+            },
+        )
+
+    def _tunnel_config_sync(self) -> None:
+        """Az ügynök konfiguráció-szinkronja: forrás-IP + Bearer token.
+
+        Nem admin-végpont: kizárólag a WireGuard-alagút forrás-IP-jéről
+        (a nyers socket peer, nem X-Forwarded-For) és a token birtokában
+        hívható. Minden más kérés részletek nélküli 403.
+        """
+        peer = self._peer_ip()
+        snapshot = self.gw.settings.snapshot()
+        tunnels = snapshot.get("tunnels")
+        if not isinstance(tunnels, dict):
+            tunnels = {}
+        agent = next(
+            (
+                item for item in tunnels.get("agents", [])
+                if item.get("enabled") and item.get("address") == peer
+            ),
+            None,
+        )
+        header = self.headers.get("Authorization") or ""
+        scheme, _, token = header.partition(" ")
+        authorized = False
+        if agent is not None and scheme.lower() == "bearer":
+            authorized = hmac.compare_digest(
+                token.strip().encode("utf-8", "replace"),
+                str(agent.get("token", "")).encode("utf-8", "replace"),
+            )
+        if not authorized:
+            return self._json(403, {"ok": False})
+        now = time.monotonic()
+        with self.gw.tunnel_sync_lock:
+            last = self.gw.tunnel_sync_times.get(agent["id"], 0.0)
+            if now - last < _TUNNEL_SYNC_MIN_SECONDS:
+                return self._json(
+                    429, {"ok": False}, headers={"Retry-After": "5"}
+                )
+            self.gw.tunnel_sync_times[agent["id"]] = now
+        services = [
+            {
+                "id": f"p{item['listen_port']}", "label": item["label"],
+                "proto": item["proto"],
+                "tunnel_port": item["tunnel_port"],
+                "target": f"{item['target_host']}:{item['target_port']}",
+                "enabled": True,
+            }
+            for item in settings_store.agent_services_expanded(agent)
+        ]
+        self._json(
+            200,
+            {
+                "ok": True,
+                "agent": {"id": agent["id"], "label": agent["label"]},
+                "services": services,
             },
         )
 
@@ -2051,6 +3209,302 @@ class Handler(BaseHTTPRequestHandler):
         caddy = getattr(self.gw, "caddy", None)
         if caddy is not None:
             caddy.request_restart()
+
+    # -- konfigurációs csomag --------------------------------------------------
+
+    def _admin_config_export(self) -> None:
+        session = self._admin_guard()
+        if session is None:
+            return
+        if not self._origin_ok():
+            self._audit(
+                "config_export_failed", user=session.user,
+                reason="invalid_origin",
+            )
+            return self._json(
+                403, {"ok": False, "error": "érvénytelen kérés-eredet"}
+            )
+        try:
+            bundle = _config_bundle(self.gw)
+        except ConfigBundleError as exc:
+            # A részletes hiba a válaszba mehet, a naplóba nem.
+            self._audit(
+                "config_export_failed", user=session.user,
+                reason="export_failed",
+            )
+            gateway.log(f"[konfiguráció] export sikertelen: {exc}")
+            return self._json(
+                500,
+                {"ok": False, "error": f"az export nem sikerült: {exc}"},
+            )
+        body = json.dumps(bundle, ensure_ascii=False, indent=2).encode("utf-8")
+        self._audit(
+            "config_exported", user=session.user, size=len(body),
+            **_config_counts(bundle["sections"]),
+        )
+        filename = (
+            f"dropjak-config-{gateway.APP_VERSION}-"
+            f"{time.strftime('%Y%m%d-%H%M%S')}.json"
+        )
+        self._send(
+            200, body, "application/json; charset=utf-8",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+            },
+        )
+
+    def _admin_config_import(self) -> None:
+        session = self._admin_guard()
+        if session is None:
+            return
+        if not self._origin_ok():
+            self._audit(
+                "config_import_failed", user=session.user,
+                reason="invalid_origin",
+            )
+            return self._json(
+                403, {"ok": False, "error": "érvénytelen kérés-eredet"}
+            )
+        data = self._read_json(CONFIG_MAX_BYTES)
+        if data is None or not isinstance(data.get("bundle"), dict):
+            self._audit(
+                "config_import_failed", user=session.user, reason="bad_request"
+            )
+            return self._json(
+                400, {"ok": False, "error": "hiányzó vagy hibás konfigurációs csomag"}
+            )
+        if not _config_confirm_ok(self.gw, data):
+            self._audit(
+                "config_import_failed", user=session.user,
+                reason="confirmation_required",
+            )
+            return self._json(
+                400,
+                {
+                    "ok": False,
+                    "error": (
+                        "a felülíráshoz gépeld be a jelenlegi oldalnevet"
+                    ),
+                    "confirm_required": True,
+                    "site_name": _effective_site_name(self.gw),
+                },
+            )
+        try:
+            checked = _validate_config_bundle(self.gw, data["bundle"])
+        except ConfigBundleError as exc:
+            self._audit(
+                "config_import_failed", user=session.user,
+                reason="invalid_bundle",
+            )
+            return self._json(
+                400,
+                {"ok": False, "error": f"a csomag érvénytelen: {str(exc)[:300]}"},
+            )
+
+        # Az admin_lock sorosít az egyes admin-műveletekkel: a teljes csere
+        # alatt más írás ne csúszhasson be a mentés és az alkalmazás közé.
+        with self.gw.admin_lock:
+            # Biztonsági mentés az első írás előtt; ennek kudarca esetén
+            # semmi nem változik.
+            try:
+                backup_path = _config_backup_path(self.gw)
+                _write_private_json(backup_path, _config_bundle(self.gw))
+            except (OSError, ConfigBundleError) as exc:
+                self._audit(
+                    "config_import_failed", user=session.user,
+                    reason="backup_failed",
+                )
+                gateway.log(f"[konfiguráció] az import előtti mentés nem sikerült: {exc}")
+                return self._json(
+                    500,
+                    {
+                        "ok": False,
+                        "error": (
+                            "az import előtti biztonsági mentés nem sikerült; "
+                            "semmi nem változott"
+                        ),
+                    },
+                )
+
+            try:
+                _apply_config_bundle(self.gw, checked)
+            except Exception as exc:
+                rollback_error = ""
+                try:
+                    with open(backup_path, "r", encoding="utf-8") as fh:
+                        backup = json.load(fh)
+                    _apply_config_bundle(
+                        self.gw, _validate_config_bundle(self.gw, backup)
+                    )
+                except Exception as rollback_exc:
+                    rollback_error = str(rollback_exc)[:300]
+                self._audit(
+                    "config_import_failed", user=session.user,
+                    reason="apply_failed" if not rollback_error else "rollback_failed",
+                    backup=os.path.basename(backup_path),
+                )
+                gateway.log(f"[konfiguráció] import hiba: {exc}")
+                if rollback_error:
+                    gateway.log(f"[konfiguráció] a visszaállítás sem sikerült: {rollback_error}")
+                    return self._json(
+                        500,
+                        {
+                            "ok": False,
+                            "error": (
+                                "az import félbeszakadt, és a biztonsági mentés "
+                                "visszaállítása sem sikerült; a szolgáltatás nem "
+                                f"indul újra. Mentés: {os.path.basename(backup_path)}"
+                            ),
+                        },
+                    )
+                return self._json(
+                    500,
+                    {
+                        "ok": False,
+                        "error": (
+                            "az import nem sikerült; az előző állapot "
+                            "visszaállítva, semmi nem változott"
+                        ),
+                    },
+                )
+
+        counts = _config_counts(checked)
+        try:
+            revoked = self.gw.sessions.shutdown(reason="config_import")
+        except Exception as exc:
+            revoked = 0
+            gateway.log(f"[konfiguráció] a munkamenetek visszavonása nem sikerült: {exc}")
+        LOGIN_TICKETS.revoke_all(reason="config_import")
+        self._audit(
+            "config_imported", user=session.user, revoked=revoked,
+            backup=os.path.basename(backup_path), **counts,
+        )
+        _request_service_restart()
+        return self._json(
+            200,
+            {
+                "ok": True,
+                "message": "a konfiguráció betöltve; a szolgáltatás újraindul",
+                "restarting": True,
+                "counts": counts,
+            },
+        )
+
+    def _admin_config_reset(self) -> None:
+        session = self._admin_guard()
+        if session is None:
+            return
+        if not self._origin_ok():
+            self._audit(
+                "config_reset_failed", user=session.user,
+                reason="invalid_origin",
+            )
+            return self._json(
+                403, {"ok": False, "error": "érvénytelen kérés-eredet"}
+            )
+        data = self._read_json()
+        expected = _effective_site_name(self.gw)
+        provided = data.get("confirm") if data is not None else None
+        if not isinstance(provided, str) or provided.strip() != expected:
+            self._audit(
+                "config_reset_failed", user=session.user,
+                reason="confirmation_required",
+            )
+            self._discard_body()
+            return self._json(
+                400,
+                {
+                    "ok": False,
+                    "error": "a visszaállításhoz gépeld be az oldalnevet",
+                    "confirm_required": True,
+                    "site_name": expected,
+                },
+            )
+
+        with self.gw.admin_lock:
+            # Előbb a futásidejű állapot; ha ez nem megy, semmi nem törlődik.
+            try:
+                revoked = self.gw.sessions.shutdown(reason="config_reset")
+                LOGIN_TICKETS.revoke_all(reason="config_reset")
+                self.gw.fail2ban.unban_all()
+                self.gw.firewall.flush()
+                self.gw.firewall.replace_custom((), ())
+            except Exception as exc:
+                self._audit(
+                    "config_reset_failed", user=session.user,
+                    reason="runtime_flush_failed",
+                )
+                gateway.log(f"[konfiguráció] a visszaállítás előtti tűzfalürítés nem sikerült: {exc}")
+                return self._json(
+                    503,
+                    {
+                        "ok": False,
+                        "error": (
+                            "a tűzfal állapotát nem sikerült törölni; "
+                            "a visszaállítás nem történt meg"
+                        ),
+                    },
+                )
+
+            # A fájlok az egyes tárolók saját, 0600-os írási útján tűnnek el;
+            # a .env, a naplók és a szolgáltatásfájlok érintetlenek maradnak.
+            errors = 0
+            for label, reset in (
+                ("users", self.gw.users.reset),
+                ("rules", self.gw.rules.reset),
+                ("groups", self.gw.groups.reset),
+                ("settings", self.gw.settings.reset),
+                ("fail2ban", self.gw.fail2ban.reset),
+                ("certs", self.gw.certs.reset),
+                # A WireGuard-peerek a settings.reset után is a kernelben
+                # maradnának; a visszaállításnál explicit töröljük őket.
+                ("tunnels", self.gw.tunnels.remove_all),
+            ):
+                try:
+                    reset()
+                except Exception as exc:
+                    errors += 1
+                    gateway.log(f"[konfiguráció] a(z) {label} törlése nem sikerült: {exc}")
+            directory = os.path.dirname(self.gw.users.path) or "."
+            try:
+                names = os.listdir(directory)
+            except OSError:
+                names = []
+            for name in names:
+                if name.startswith("config-backup-") and name.endswith(".json"):
+                    try:
+                        os.unlink(os.path.join(directory, name))
+                    except OSError as exc:
+                        errors += 1
+                        gateway.log(f"[konfiguráció] a(z) {name} törlése nem sikerült: {exc}")
+        try:
+            self.gw.sync_host_ports()
+        except Exception as exc:
+            gateway.log(f"[konfiguráció] a host portok szinkronizálása nem sikerült: {exc}")
+        self._audit(
+            "config_reset", user=session.user, revoked=revoked, errors=errors
+        )
+        _request_service_restart()
+        if errors:
+            return self._json(
+                500,
+                {
+                    "ok": False,
+                    "restarting": True,
+                    "error": (
+                        "a visszaállítás részben nem sikerült; a szolgáltatás "
+                        "újraindul, az eredmény a naplóban látható"
+                    ),
+                },
+            )
+        return self._json(
+            200,
+            {
+                "ok": True,
+                "message": "minden konfiguráció törölve; a szolgáltatás újraindul",
+                "restarting": True,
+            },
+        )
 
     def _admin_certs_action(self) -> None:
         """Gyökérdomain-tanúsítvány feltöltése/cseréje (upload) és törlése."""
@@ -2192,6 +3646,31 @@ class Handler(BaseHTTPRequestHandler):
             payload["message"] = "A tűzfal neve mentve."
             self._json(200, payload)
             return
+        if action == "motd":
+            # A közlemény csak megjelenítési adat: nem megy át az
+            # nftables-előkészítésen és -alkalmazáson.
+            try:
+                with self.gw.admin_lock:
+                    stored = self.gw.settings.set_motd(
+                        data.get("text", ""), data.get("expires_at", "")
+                    )
+                    # A szöveg nem kerül a naplóba, csak a hossza és a lejárat.
+                    self._audit(
+                        "admin_settings_changed",
+                        user=session.user,
+                        action="motd",
+                        target="motd",
+                        motd_length=len(stored["motd_text"]),
+                        motd_expires_at=stored["motd_expires_at"],
+                    )
+            except (settings_store.SettingsError, ValueError) as exc:
+                self._admin_request_rejected("invalid_motd", user=session.user)
+                self._json(400, {"ok": False, "error": str(exc)})
+                return
+            payload = self._admin_state()
+            payload["message"] = "A közlemény mentve."
+            self._json(200, payload)
+            return
         if action == "proxy_acme":
             # A /api/proxy/ask válaszát változtatja; kikapcsoláskor a Caddy
             # újraindul, hogy a már kiadott tanúsítványokat se szolgálja ki.
@@ -2224,6 +3703,39 @@ class Handler(BaseHTTPRequestHandler):
             payload["message"] = "Az automatikus tanúsítvány beállítása mentve."
             self._json(200, payload)
             return
+        if action == "portal_domain":
+            # A Caddy kérésenként kérdezi a portált, ezért nincs újratöltés;
+            # a címnek gyökérdomain alatt kell lennie (a tanúsítvány miatt).
+            value = data.get("domain", "")
+            if not isinstance(value, str):
+                self._admin_request_rejected(
+                    "invalid_portal_domain", user=session.user
+                )
+                self._json(
+                    400,
+                    {"ok": False, "error": "portal_domain: szöveg kell"},
+                )
+                return
+            try:
+                with self.gw.admin_lock:
+                    stored = self.gw.settings.set_portal_domain(value)
+                    self._audit(
+                        "admin_settings_changed",
+                        user=session.user,
+                        action="portal_domain",
+                        target="portal_domain",
+                        portal_domain=stored["portal_domain"],
+                    )
+            except (settings_store.SettingsError, ValueError) as exc:
+                self._admin_request_rejected(
+                    "invalid_portal_domain", user=session.user
+                )
+                self._json(400, {"ok": False, "error": str(exc)})
+                return
+            payload = self._admin_state()
+            payload["message"] = "A Dropjak címe mentve."
+            self._json(200, payload)
+            return
         if action == "proxy":
             # A Caddy kérésenként a portált kérdezi, ezért itt nincs
             # újratöltés és nftables-módosítás sem.
@@ -2235,6 +3747,9 @@ class Handler(BaseHTTPRequestHandler):
                         data.get("proxy_domains", []),
                         data.get("proxy_routes", []),
                         self.gw.rules.domain_references(),
+                        portal_challenge=data.get(
+                            "portal_challenge", settings_store.UNSET
+                        ),
                     )
                     self._audit(
                         "admin_settings_changed",
@@ -2243,7 +3758,7 @@ class Handler(BaseHTTPRequestHandler):
                         target="proxy",
                         proxy_domains=", ".join(stored["proxy_domains"]),
                         proxy_routes=", ".join(
-                            f"{route['name']}.{route['root']}:"
+                            f"{settings_store.route_host(route)}:"
                             + (f"{route['ip']}:" if "ip" in route else "")
                             + f"{route['port']}"
                             + ("" if route["enabled"] else " (off)")
@@ -2272,6 +3787,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if action == "port_proxies":
             return self._admin_port_proxies(session, data)
+        if action in _TUNNEL_ACTIONS:
+            return self._admin_tunnels(session, data, action)
         kind = str(data.get("kind", "")).strip().lower()
         entry_id = data.get("id", "")
         if entry_id is None:
@@ -2392,9 +3909,727 @@ class Handler(BaseHTTPRequestHandler):
         payload["port_proxy_warnings"] = gateway.port_proxy_warnings(
             entries, gateway.listening_ports(),
             self.gw.firewall.docker_published_ports(),
+            set(self.gw.firewall.portproxy_localnet_blocked(entries)),
         )
         payload["message"] = "A port proxy beállításai mentve."
         self._json(200, payload)
+
+    def _tunnel_reference_error(self, refs) -> str:
+        """Hibaüzenet, ha a megadott szolgáltatás-hivatkozásokra szabály épül.
+
+        A hivatkozó szabályokat azonosítóval és címkével sorolja fel, hogy
+        az admin tudja, mit kell előbb módosítania. Üres szöveg, ha nincs
+        hivatkozás (a művelet folytatható).
+        """
+        try:
+            references = self.gw.rules.service_references()
+        except Exception as exc:
+            raise settings_store.SettingsError(
+                "tunnel: a szabályhivatkozások ellenőrzése nem sikerült: "
+                f"{exc}"
+            ) from exc
+        rows: list[str] = []
+        for ref in refs:
+            rule_ids = references.get(ref)
+            if not rule_ids:
+                continue
+            labels: list[str] = []
+            for rule_id in rule_ids:
+                rule = self.gw.rules.get(rule_id)
+                labels.append(
+                    f"{rule.label} ({rule_id})" if rule is not None
+                    else rule_id
+                )
+            rows.append(f"{ref}: {', '.join(labels)}")
+        if not rows:
+            return ""
+        return (
+            "tunnel: a szolgáltatás nem törölhető, mert "
+            "szabály hivatkozik rá; előbb módosítsd vagy töröld a "
+            "hivatkozó szabályokat: " + "; ".join(rows)
+        )
+
+    def _tunnel_domain_reference_error(self, domains) -> str:
+        """Hibaüzenet, ha egy domain szabály hivatkozik a megadott nevekre.
+
+        A proxy-bejegyzéseknél megszokott viselkedést követi: a hivatkozott
+        domain nem tűnhet el csendben, mert a szabály a döntéskori
+        ellenőrzésnél érvénytelenné válna.
+        """
+        try:
+            referenced = self.gw.rules.domain_references()
+        except Exception as exc:
+            raise settings_store.SettingsError(
+                "tunnel: a domain-hivatkozások ellenőrzése nem sikerült: "
+                f"{exc}"
+            ) from exc
+        missing = sorted({
+            domain for domain in domains if domain and domain in referenced
+        })
+        if not missing:
+            return ""
+        return (
+            "tunnel: domain szabály hivatkozik rá, ezért nem törölhető és "
+            "a domainje nem módosítható: " + ", ".join(missing)
+            + "; előbb vedd ki a szabályból"
+        )
+
+    @staticmethod
+    def _tunnel_effective_ports(service) -> object:
+        """A szolgáltatás teljes effektív leképezése; hibánál ``None``.
+
+        A hallgató port mellett a protokollt, a célhostot és a célportot is
+        tartalmazza, hogy a cél átirányítása akkor is változásnak számítson,
+        ha a hallgató portok változatlanok. Domain-módú szolgáltatásnál a
+        domainnév külön ``("domain", 0, név, 0)`` sorként szerepel: a UI a
+        domain szerkesztésekor a belső hallgató portot változatlanul hagyja,
+        ezért a domain átnevezése/törlése csak így számít változásnak, és
+        csak így indul el a hivatkozó szabályok frissítése és a
+        munkamenetek visszavonása.
+        """
+        try:
+            ports = settings_store.tunnel_service_ports(service)
+        except settings_store.SettingsError:
+            return None
+        host = (
+            service.get("target_host", "")
+            if isinstance(service, dict) else ""
+        )
+        rows = [
+            (item["proto"], item["listen_port"], host or "",
+             item["target_port"])
+            for item in ports
+        ]
+        domain = (
+            str(service.get("domain", "") or "")
+            if isinstance(service, dict) else ""
+        )
+        if domain:
+            rows.append(("domain", 0, domain, 0))
+        return tuple(sorted(rows))
+
+    def _admin_tunnels(self, session, data: dict, action: str) -> None:
+        """WireGuard-ügynökök és szolgáltatásaik kezelése.
+
+        A szakasz a prepare_tunnels -> apply_settings úton megy, ezért az
+        nftables (jump + szintetikus forward szabályok) és a WireGuard-peer
+        szinkron ugyanabban a műveletben frissül. A naplóba csak azonosítók,
+        portok és darabszámok kerülnek: kulcs és token soha.
+        """
+        target = str(data.get("id") or data.get("agent_id") or "")[:64]
+        extra: dict = {}
+        message = ""
+        # A letiltás mindig engedélyezett (fail-closed): a hivatkozó
+        # szabályok hozzáférése megszűnik, ezért a művelet után a
+        # érintett munkameneteket bontjuk. A törlés továbbra is tiltott,
+        # amíg szabály hivatkozik az ügynökre/szolgáltatásra.
+        agent_disabled = False
+        agent_toggled = False
+        agent_service_refs: list[str] = []
+        if action == "tunnel_service_test":
+            # Az elérhetőségi teszt csak olvas: nem megy át a beállítás-
+            # előkészítésen és az nftables-alkalmazáson, és nem ír állapotot.
+            self._admin_tunnel_service_test(session, data)
+            return
+        try:
+            with self.gw.admin_lock:
+                snapshot = self.gw.settings.snapshot()
+                if snapshot.get("error"):
+                    raise settings_store.SettingsError(
+                        f"a beállításfájl hibás: {snapshot['error']}"
+                    )
+                tunnels = snapshot.get("tunnels")
+                if not isinstance(tunnels, dict):
+                    tunnels = settings_store.default_tunnels()
+                if action == "tunnel_settings":
+                    if "port" in data:
+                        tunnels["port"] = data.get("port")
+                    if "endpoint" in data:
+                        tunnels["endpoint"] = data.get("endpoint")
+                    message = "Az alagút beállításai mentve."
+                elif action == "tunnel_agent_add":
+                    keys = self.gw.tunnels.generate_keys()
+                    if not (tunnels.get("server_private_key")
+                            and tunnels.get("server_public_key")):
+                        server = self.gw.tunnels.generate_keys()
+                        tunnels["server_private_key"] = server["private_key"]
+                        tunnels["server_public_key"] = server["public_key"]
+                    used = {
+                        agent["address"] for agent in tunnels["agents"]
+                    }
+                    address = ""
+                    for offset in range(2, 255):
+                        candidate = str(
+                            settings_store.TUNNEL_SUBNET.network_address
+                            + offset
+                        )
+                        if candidate not in used:
+                            address = candidate
+                            break
+                    if not address:
+                        raise settings_store.SettingsError(
+                            "tunnel: nincs szabad ügynökcím"
+                        )
+                    agent_id = secrets.token_hex(4)
+                    while any(
+                        agent["id"] == agent_id for agent in tunnels["agents"]
+                    ):
+                        agent_id = secrets.token_hex(4)
+                    tunnels["agents"].append({
+                        "id": agent_id,
+                        "label": data.get("label"),
+                        "address": address,
+                        "private_key": keys["private_key"],
+                        "public_key": keys["public_key"],
+                        "preshared_key": keys["preshared_key"],
+                        "token": secrets.token_urlsafe(32),
+                        "enabled": True,
+                        "services": [],
+                    })
+                    target = agent_id
+                    extra["agent_id"] = agent_id
+                    message = (
+                        "Az ügynök létrejött; töltsd le a konfigurációját."
+                    )
+                elif action == "tunnel_agent_update":
+                    agent = self._tunnel_agent(tunnels, data.get("id"))
+                    agent_disabled = (
+                        "enabled" in data
+                        and data.get("enabled") is False
+                        and agent.get("enabled", True)
+                    )
+                    agent_toggled = (
+                        "enabled" in data
+                        and data.get("enabled") != agent.get("enabled", True)
+                    )
+                    if agent_toggled:
+                        agent_service_refs = [
+                            f"{agent['id']}/{service['id']}"
+                            for service in agent.get("services", [])
+                        ]
+                    if "label" in data:
+                        agent["label"] = data.get("label")
+                    if "enabled" in data:
+                        agent["enabled"] = data.get("enabled")
+                    message = (
+                        "Az ügynök letiltva."
+                        if agent_disabled else "Az ügynök mentve."
+                    )
+                elif action == "tunnel_agent_delete":
+                    agent = next(
+                        (
+                            item for item in tunnels["agents"]
+                            if item["id"] == data.get("id")
+                        ),
+                        None,
+                    )
+                    if agent is None:
+                        raise settings_store.SettingsError(
+                            "tunnel: nincs ilyen ügynök"
+                        )
+                    refs = [
+                        f"{agent['id']}/{service['id']}"
+                        for service in agent.get("services", [])
+                    ]
+                    error = self._tunnel_reference_error(refs)
+                    if error:
+                        raise settings_store.SettingsError(error)
+                    error = self._tunnel_domain_reference_error(
+                        service.get("domain", "")
+                        for service in agent.get("services", [])
+                    )
+                    if error:
+                        raise settings_store.SettingsError(error)
+                    tunnels["agents"] = [
+                        item for item in tunnels["agents"]
+                        if item["id"] != agent["id"]
+                    ]
+                    message = "Az ügynök törölve."
+                elif action == "tunnel_service_save":
+                    agent = self._tunnel_agent(tunnels, data.get("agent_id"))
+                    services = agent["services"]
+                    service_id = data.get("id")
+                    changed_ref: str | None = None
+                    became_disabled = False
+                    enabled_changed = False
+                    if service_id in (None, ""):
+                        service_id = secrets.token_hex(4)
+                        while any(
+                            item["id"] == service_id for item in services
+                        ):
+                            service_id = secrets.token_hex(4)
+                        service = {
+                            "id": service_id,
+                            "label": data.get("label"),
+                            "target_host": data.get("target_host"),
+                            "enabled": data.get("enabled", True),
+                            "mappings": data.get("mappings"),
+                            "public": data.get("public", False),
+                            "domain": data.get("domain", ""),
+                            "challenge": data.get("challenge"),
+                        }
+                        services.append(service)
+                    else:
+                        service = next(
+                            (
+                                item for item in services
+                                if item["id"] == service_id
+                            ),
+                            None,
+                        )
+                        if service is None:
+                            raise settings_store.SettingsError(
+                                "tunnel: nincs ilyen szolgáltatás"
+                            )
+                        old_service = copy.deepcopy(service)
+                        old_ports = self._tunnel_effective_ports(
+                            old_service
+                        )
+                        was_enabled = service.get("enabled", True)
+                        old_domain = old_service.get("domain", "")
+                        for key in (
+                            "label", "target_host", "enabled", "mappings",
+                            "public", "domain", "challenge",
+                        ):
+                            if key in data:
+                                service[key] = data[key]
+                        # A domain elhagyásakor a challenge is törlődik:
+                        # domain nélkül nincs host, amin érvényesülhetne.
+                        if "domain" in data and not service.get("domain"):
+                            service.pop("challenge", None)
+                        ref = f"{agent['id']}/{service_id}"
+                        # A letiltás mindig engedélyezett (fail-closed); a
+                        # hivatkozó szabályok hozzáférése megszűnik. A
+                        # domain-váltás/törlés továbbra is védett, mert a
+                        # domain-szabály a döntéskori ellenőrzésnél
+                        # érvénytelenné válna.
+                        became_disabled = (
+                            was_enabled
+                            and service.get("enabled", True) is False
+                        )
+                        enabled_changed = (
+                            was_enabled != service.get("enabled", True)
+                        )
+                        new_domain = service.get("domain", "")
+                        if old_domain and new_domain != old_domain:
+                            error = self._tunnel_domain_reference_error(
+                                [old_domain]
+                            )
+                            if error:
+                                raise settings_store.SettingsError(error)
+                        new_ports = self._tunnel_effective_ports(service)
+                        if old_ports != new_ports or enabled_changed:
+                            changed_ref = ref
+                    target = f"{agent['id']}/{service_id}"
+                    extra["service_id"] = service_id
+                    message = "A szolgáltatás mentve."
+                elif action == "tunnel_service_delete":
+                    agent = self._tunnel_agent(tunnels, data.get("agent_id"))
+                    service_id = data.get("id")
+                    ref = f"{agent['id']}/{service_id}"
+                    error = self._tunnel_reference_error([ref])
+                    if error:
+                        raise settings_store.SettingsError(error)
+                    doomed = next(
+                        (
+                            item for item in agent["services"]
+                            if item["id"] == service_id
+                        ),
+                        None,
+                    )
+                    if doomed is not None:
+                        error = self._tunnel_domain_reference_error(
+                            [doomed.get("domain", "")]
+                        )
+                        if error:
+                            raise settings_store.SettingsError(error)
+                    before = len(agent["services"])
+                    agent["services"] = [
+                        item for item in agent["services"]
+                        if item["id"] != service_id
+                    ]
+                    if len(agent["services"]) == before:
+                        raise settings_store.SettingsError(
+                            "tunnel: nincs ilyen szolgáltatás"
+                        )
+                    target = ref
+                    message = "A szolgáltatás törölve."
+                new_data = self.gw.settings.prepare_tunnels(tunnels)
+                self.gw.apply_settings(new_data)
+                if action == "tunnel_service_save":
+                    saved_agent = next(
+                        (
+                            item["services"]
+                            for item in new_data["tunnels"]["agents"]
+                            if item["id"] == agent["id"]
+                        ),
+                        [],
+                    )
+                    saved_service = next(
+                        (
+                            item for item in saved_agent
+                            if item["id"] == service_id
+                        ),
+                        None,
+                    )
+                    if saved_service is not None:
+                        mappings = saved_service["mappings"]
+                        extra["mappings"] = len(mappings)
+                        extra["ports"] = ", ".join(
+                            f"{mapping['proto']}:{mapping['listen']}"
+                            f"->{mapping['target']}"
+                            for mapping in mappings
+                        )
+                    # A módosított leképzésre épülő szabályok feloldott
+                    # portjai frissülnek; a megváltozott szabályok
+                    # munkameneteit azonnal bontjuk. Letiltáskor a
+                    # hivatkozó szabályok hozzáférése mindenképpen
+                    # megszűnik, ezért a hivatkozó szabályok munkamenetei
+                    # is bontandók (fail-closed).
+                    if changed_ref is not None:
+                        references = self.gw.rules.service_references()
+                        rule_ids = set(references.get(changed_ref, ()))
+                        if rule_ids:
+                            refreshed = self.gw.rules.reflect_services()
+                            if refreshed:
+                                extra["service_rules_refreshed"] = ",".join(
+                                    refreshed
+                                )
+                            extra["sessions_revoked"] = (
+                                self.gw.sessions.revoke_rules(
+                                    sorted(set(refreshed) | rule_ids)
+                                )
+                            )
+                        if became_disabled:
+                            message = (
+                                "A szolgáltatás letiltva; a hivatkozó "
+                                "szabályok hozzáférése megszűnt."
+                                if rule_ids else "A szolgáltatás letiltva."
+                            )
+                if action == "tunnel_agent_update" and agent_toggled:
+                    # Az ügynök letiltása az összes szolgáltatását elérhetet-
+                    # lenné teszi. A feloldott portok újraszámolása után a
+                    # hivatkozó szabályok (a gyűjtőkön át is) munkamenetei
+                    # azonnal bontandók.
+                    refreshed = self.gw.rules.reflect_services()
+                    try:
+                        references = self.gw.rules.service_references()
+                    except Exception:
+                        references = {}
+                    rule_ids = set(refreshed)
+                    for ref in agent_service_refs:
+                        rule_ids.update(references.get(ref, ()))
+                    if rule_ids:
+                        if refreshed:
+                            extra["service_rules_refreshed"] = ",".join(
+                                refreshed
+                            )
+                        extra["sessions_revoked"] = (
+                            self.gw.sessions.revoke_rules(sorted(rule_ids))
+                        )
+                    if agent_disabled:
+                        if any(
+                            references.get(ref) for ref in agent_service_refs
+                        ):
+                            message = (
+                                "Az ügynök letiltva; a hivatkozó szabályok "
+                                "hozzáférése megszűnt."
+                            )
+                        else:
+                            message = "Az ügynök letiltva."
+                self._audit(
+                    "admin_settings_changed",
+                    user=session.user,
+                    action=action,
+                    target=target,
+                    tunnel_agents=len(new_data["tunnels"]["agents"]),
+                    tunnel_services=sum(
+                        len(agent["services"])
+                        for agent in new_data["tunnels"]["agents"]
+                    ),
+                    **extra,
+                )
+        except tunnel_mod.TunnelError as exc:
+            self._admin_action_error(action, exc, target=target)
+            self._json(
+                503,
+                {
+                    "ok": False,
+                    "field": "wireguard",
+                    "error": f"a WireGuard-kulcsok előállítása nem sikerült: {exc}",
+                },
+            )
+            return
+        except (settings_store.SettingsError, ValueError) as exc:
+            self._admin_action_error(action, exc, target=target)
+            self._json(
+                400,
+                {
+                    "ok": False,
+                    "field": _tunnel_error_field(str(exc)),
+                    "error": str(exc),
+                },
+            )
+            return
+        except (gateway.FirewallError, OSError) as exc:
+            self._admin_action_error(action, exc, target=target)
+            self._json(
+                503,
+                {
+                    "ok": False,
+                    "field": "tunnels",
+                    "error": "a tűzfal-beállítások alkalmazása nem "
+                             f"sikerült: {exc}",
+                },
+            )
+            return
+        payload = self._admin_state()
+        payload.update(extra)
+        payload["message"] = message
+        self._json(200, payload)
+
+    def _tunnel_test_address(self, agent: dict) -> str:
+        """A teszt célcíme; tesztben felülbírálható (pl. 127.0.0.1)."""
+        return str(agent.get("address") or "")
+
+    @staticmethod
+    def _tunnel_probe_tcp(address: str, port: int) -> dict:
+        """Egy TCP-kapcsolat a teljes úton (portál -> WireGuard -> DNAT).
+
+        A sikerhez elég a kapcsolat létrejötte: a port elérhető. A nyitott
+        socketet azonnal bezárjuk, mert a teszt nem küld protokoll-adatot.
+        """
+        try:
+            connection = socket.create_connection(
+                (address, port), timeout=_TUNNEL_TEST_TCP_TIMEOUT
+            )
+            connection.close()
+            return {"ok": True, "detail": "csatlakozás létrejött"}
+        except socket.timeout:
+            return {"ok": False, "detail": "időtúllépés"}
+        except ConnectionRefusedError:
+            return {"ok": False, "detail": "elutasítva"}
+        except OSError as exc:
+            return {"ok": False, "detail": f"hálózati hiba: {exc}"}
+
+    @staticmethod
+    def _tunnel_probe_udp(address: str, port: int) -> dict:
+        """Egyetlen nulla bájt kiküldése UDP-n, rövid válaszvárakozással.
+
+        UDP-n a válasz hiánya nem hiba: a cél nem köteles visszaírni. A
+        ``ConnectionRefusedError`` viszont ICMP port-unreachable-t jelent,
+        vagyis a cél nem hallgat a porton; ezt hibaként jelentjük.
+        """
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.settimeout(_TUNNEL_TEST_UDP_WAIT)
+            probe.connect((address, port))
+            probe.send(b"\x00")
+            try:
+                probe.recv(1)
+            except socket.timeout:
+                return {
+                    "ok": True,
+                    "detail": "kiküldve, UDP-válasz nem várható",
+                }
+            return {"ok": True, "detail": "válasz érkezett"}
+        except ConnectionRefusedError:
+            return {"ok": False, "detail": "elutasítva (ICMP)"}
+        except socket.timeout:
+            # A send/connect várakozása sem tekinthető elutasításnak.
+            return {
+                "ok": True,
+                "detail": "kiküldve, UDP-válasz nem várható",
+            }
+        except OSError as exc:
+            return {"ok": False, "detail": f"hálózati hiba: {exc}"}
+        finally:
+            try:
+                probe.close()
+            except OSError:
+                pass
+
+    def _admin_tunnel_service_test(self, session, data: dict) -> None:
+        """Egy szolgáltatás teljes elérési útjának próbája (csak olvasás).
+
+        A portál host-hálózatú, ezért az ügynök WireGuard-címére
+        (``10.77.0.2:<tunnel_port>``) csatlakozunk: az útvonal a portál
+        hostjától a WireGuard-alagúton át az ügynök DNAT-jáig tart. Nem a
+        nyilvános WAN-címet és nem a loopbacket használjuk, mert az nem
+        ugyanazt az utat járja be. Állapot nem változik, kulcs/token nem
+        kerül a naplóba.
+        """
+        agent_id = str(data.get("agent_id") or "")[:64]
+        service_id = str(data.get("service_id") or "")[:64]
+        if not agent_id or not service_id:
+            self._json(400, {
+                "ok": False,
+                "error": "tunnel: az ügynök- és szolgáltatás-azonosító kell",
+            })
+            return
+        try:
+            snapshot = self.gw.settings.snapshot()
+            if snapshot.get("error"):
+                raise settings_store.SettingsError(
+                    f"a beállításfájl hibás: {snapshot['error']}"
+                )
+            tunnels = snapshot.get("tunnels")
+            if not isinstance(tunnels, dict):
+                tunnels = settings_store.default_tunnels()
+            agent = next(
+                (
+                    item for item in tunnels.get("agents", [])
+                    if item.get("id") == agent_id
+                ),
+                None,
+            )
+            if agent is None:
+                self._json(404, {
+                    "ok": False, "field": "agent_id",
+                    "error": "tunnel: nincs ilyen ügynök",
+                })
+                return
+            service = next(
+                (
+                    item for item in agent.get("services", [])
+                    if item.get("id") == service_id
+                ),
+                None,
+            )
+            if service is None:
+                self._json(404, {
+                    "ok": False, "field": "service_id",
+                    "error": "tunnel: nincs ilyen szolgáltatás",
+                })
+                return
+            if not agent.get("enabled", True):
+                self._json(409, {
+                    "ok": False, "field": "agent_id",
+                    "error": "tunnel: az ügynök ki van kapcsolva",
+                })
+                return
+            if not service.get("enabled", True):
+                self._json(409, {
+                    "ok": False, "field": "service_id",
+                    "error": "tunnel: a szolgáltatás ki van kapcsolva",
+                })
+                return
+            # A kiterjesztett leképezések a tartományokat is felbontják, és
+            # a tcp+udp párt ugyanúgy ``both``-ra vonják össze, mint az
+            # ügynök szinkronja.
+            mappings = [
+                item for item in settings_store.agent_services_expanded(agent)
+                if item.get("service_id") == service_id
+            ]
+        except settings_store.SettingsError as exc:
+            self._admin_action_error(
+                "tunnel_service_test", exc, target=f"{agent_id}/{service_id}",
+            )
+            self._json(400, {"ok": False, "error": str(exc)})
+            return
+        if not mappings:
+            self._json(409, {
+                "ok": False, "field": "service_id",
+                "error": "tunnel: nincs tesztelhető portleképezés",
+            })
+            return
+
+        limited = mappings[:_TUNNEL_TEST_MAX_MAPPINGS]
+        address = self._tunnel_test_address(agent)
+        slots: list[list[dict]] = [[] for _ in limited]
+
+        def probe(index: int, item: dict) -> None:
+            host = str(item.get("target_host") or "—")
+            target = f"{host}:{item.get('target_port')}"
+            listen = int(item["tunnel_port"])
+            proto = item.get("proto")
+            local: list[dict] = []
+            if proto in ("tcp", "both"):
+                outcome = self._tunnel_probe_tcp(address, listen)
+                local.append({
+                    "proto": "tcp", "listen": listen, "target": target,
+                    "ok": bool(outcome["ok"]), "detail": str(outcome["detail"]),
+                })
+            if proto in ("udp", "both"):
+                outcome = self._tunnel_probe_udp(address, listen)
+                local.append({
+                    "proto": "udp", "listen": listen, "target": target,
+                    "ok": bool(outcome["ok"]), "detail": str(outcome["detail"]),
+                })
+            slots[index] = local
+
+        threads = []
+        for index, item in enumerate(limited):
+            thread = threading.Thread(
+                target=probe, args=(index, item), daemon=True,
+                name=f"tunnel-test-{agent_id}-{item['tunnel_port']}",
+            )
+            thread.start()
+            threads.append(thread)
+        deadline = time.monotonic() + _TUNNEL_TEST_DEADLINE
+        for thread in threads:
+            thread.join(max(0.0, deadline - time.monotonic()))
+        results = [row for slot in slots for row in slot]
+        expected = sum(
+            2 if item.get("proto") == "both" else 1 for item in limited
+        )
+        finished = len(results) >= expected
+        # A TCP a mérvadó; ha nincs TCP-próba (tiszta UDP), akkor az UDP.
+        tcp_results = [row for row in results if row["proto"] == "tcp"]
+        authoritative = tcp_results or [
+            row for row in results if row["proto"] == "udp"
+        ]
+        reachable = (
+            finished and bool(authoritative)
+            and all(row["ok"] for row in authoritative)
+        )
+        summary = "a szolgáltatás elérhető"
+        if not reachable:
+            failures = [row for row in authoritative if not row["ok"]]
+            if failures:
+                first = failures[0]
+                summary = (
+                    "a szolgáltatás nem érhető el: "
+                    f"{first['proto'].upper()} {first['listen']} "
+                    f"({first['detail']})"
+                )
+            else:
+                summary = "a szolgáltatás nem érhető el: a teszt nem fejeződött be"
+        if len(mappings) > len(limited):
+            summary += (
+                f"; csak az első {len(limited)} leképezés lett tesztelve"
+            )
+        self._audit(
+            "tunnel_service_test",
+            user=session.user,
+            agent_id=agent_id,
+            service_id=service_id,
+            protos=",".join(row["proto"] for row in results),
+            listen_ports=",".join(str(row["listen"]) for row in results),
+            target_ports=",".join(
+                str(item.get("target_port")) for item in limited
+            ),
+            ok=",".join("1" if row["ok"] else "0" for row in results),
+        )
+        self._json(200, {
+            "ok": True,
+            "service": _tunnel_service_public(service),
+            "results": results,
+            "summary": summary,
+        })
+
+    @staticmethod
+    def _tunnel_agent(tunnels: dict, agent_id) -> dict:
+        agent = next(
+            (
+                item for item in tunnels.get("agents", [])
+                if item["id"] == agent_id
+            ),
+            None,
+        )
+        if agent is None:
+            raise settings_store.SettingsError("tunnel: nincs ilyen ügynök")
+        return agent
 
     def _admin_fail2ban_api(self) -> None:
         if self._admin_guard() is None:
@@ -2589,6 +4824,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._admin_certs_action()
         if path == "/api/admin/fail2ban":
             return self._admin_fail2ban_action()
+        if path == "/api/admin/config/import":
+            return self._admin_config_import()
+        if path == "/api/admin/config/reset":
+            return self._admin_config_reset()
         if path.startswith("/api/gate/"):
             return self._gate_api(path)
         self._discard_body()
@@ -3036,6 +5275,11 @@ class Handler(BaseHTTPRequestHandler):
                 "és azt, mennyi ideig szeretnéd használni a hálózatot."
             ),
         }
+        # A belépés válasza ugyanazt a már érvényes közleményt kapja, mint
+        # a /api/status; lejárt vagy kikapcsolt MOTD nem kerül bele.
+        motd = settings_store.active_motd(self.gw.settings.snapshot())
+        if motd:
+            payload["motd"] = motd
         if extra:
             payload.update(extra)
         self._json(200, payload, headers={"Set-Cookie": cookie})
@@ -3673,8 +5917,8 @@ class Handler(BaseHTTPRequestHandler):
             "rule": session.rule,
             "rule_label": session.rule_label,
             "direction": session.direction,
-            "tcp": ",".join(str(port) for port in session.tcp),
-            "udp": ",".join(str(port) for port in session.udp),
+            "tcp": gateway.format_ports(session.tcp, separator=","),
+            "udp": gateway.format_ports(session.udp, separator=","),
             "icmp": session.icmp,
             "full": session.full,
             "ports": session.ports.label(),
@@ -4363,7 +6607,8 @@ class Handler(BaseHTTPRequestHandler):
                         "unknown_action", user=session.user
                     )
                     raise gateway.RuleStoreError("ismeretlen művelet")
-        except (gateway.RuleStoreError, ValueError) as exc:
+        except (gateway.RuleStoreError, gateway.UserStoreError,
+                gateway.GroupStoreError, ValueError) as exc:
             self._admin_action_error(
                 f"rule_{action}", exc,
                 target=str(data.get("id") or ""),
@@ -4378,7 +6623,12 @@ class Handler(BaseHTTPRequestHandler):
         rule_id = data.get("id")
         if not isinstance(rule_id, str):
             raise gateway.RuleStoreError("hiányzó szabály-azonosító")
+        # A kiosztásokat a mentés ELŐTT ellenőrizzük: érvénytelen azonosító
+        # esetén a szabály ne jöjjön létre.
+        users = self._rule_users(data)
+        groups = self._group_ids(data)
         rule = self.gw.rules.create(rule_id, data)
+        assignments = self._apply_rule_assignments(rule.id, users, groups)
         self._audit(
             "admin_rule_created",
             target=rule.id,
@@ -4386,10 +6636,12 @@ class Handler(BaseHTTPRequestHandler):
             direction=rule.direction,
             ports=rule.ports.label(),
             domains=",".join(rule.domains),
+            service_refs=",".join(rule.service_refs),
             default_ttl=rule.default_ttl,
             max_ttl=rule.max_ttl,
             collection=rule.collection,
             members=len(rule.members),
+            **assignments,
         )
         # A host (input) szabály portjai azonnal kerüljenek a kerneloldali
         # host_service_* védőhalmazokba; egy esetleges hiba csak naplózódik.
@@ -4399,6 +6651,10 @@ class Handler(BaseHTTPRequestHandler):
         rule_id = data.get("id")
         if not isinstance(rule_id, str):
             raise gateway.RuleStoreError("hiányzó szabály-azonosító")
+        # A kiosztásokat a mentés ELŐTT ellenőrizzük: érvénytelen azonosító
+        # esetén a szabály ne módosuljon.
+        users = self._rule_users(data)
+        groups = self._group_ids(data)
         # A függő gyűjtők listáját a szabálytár a módosítással egy záron
         # belül, a commit pontján adja vissza: a közben létrehozott gyűjtő
         # is belekerül, így nem maradhat engedélyezett munkamenet a régi
@@ -4407,6 +6663,7 @@ class Handler(BaseHTTPRequestHandler):
             rule_id.strip(), data
         )
         revoked = self.gw.sessions.revoke_rules((rule.id, *dependents))
+        assignments = self._apply_rule_assignments(rule.id, users, groups)
         self._audit(
             "admin_rule_updated",
             target=rule.id,
@@ -4414,12 +6671,14 @@ class Handler(BaseHTTPRequestHandler):
             direction=rule.direction,
             ports=rule.ports.label(),
             domains=",".join(rule.domains),
+            service_refs=",".join(rule.service_refs),
             default_ttl=rule.default_ttl,
             max_ttl=rule.max_ttl,
             collection=rule.collection,
             members=len(rule.members),
             collections_affected=",".join(dependents),
             sessions_revoked=revoked,
+            **assignments,
         )
         # A feloldott portok a függő gyűjtők miatt is változhattak, ezért a
         # teljes szabálytárból szinkronizálunk (a halmazok csak bővülnek).
@@ -4446,6 +6705,7 @@ class Handler(BaseHTTPRequestHandler):
             direction=rule.direction,
             ports=rule.ports.label(),
             domains=",".join(rule.domains),
+            service_refs=",".join(rule.service_refs),
             collection=rule.collection,
             members=len(rule.members),
         )
@@ -5811,7 +8071,7 @@ def _cli_audit(audit, event: str, **fields) -> None:
 def _user_cli(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="server.py user",
-        description="Felhasználók kezelése a hatarvedelem users.json fájljában.",
+        description="Felhasználók kezelése a Dropjak users.json fájljában.",
     )
     sub = parser.add_subparsers(dest="action", required=True)
 

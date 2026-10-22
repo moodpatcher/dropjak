@@ -145,7 +145,8 @@ case "${1:-}" in
         python3 "$APP/tests/e2e_vm.py"
         ;;
     where)
-        cat "$APP/HELYI-UTMUTATO.md"
+        # A helyi útmutató a DOKUMENTACIO.md 2. szakasza (a következő horgonyig).
+        awk '/^## 2\. /{p=1} p&&/^<a id=/{exit} p' "$APP/DOKUMENTACIO.md"
         ;;
     ""|help|-h|--help)
         usage

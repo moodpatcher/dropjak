@@ -23,6 +23,7 @@ import os
 import re
 import secrets
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -37,6 +38,7 @@ from datetime import datetime, timezone
 import droplog
 import fail2ban as fail2ban_mod
 import settings_store
+import tunnel as tunnel_mod
 
 
 # --------------------------------------------------------------- konfiguráció
@@ -181,7 +183,13 @@ if not re.match(r"^0x[0-9a-f]{1,8}$", FWD_MARK):
 # A pre-auth port 80-as forgalma a preroutingban conntrack-jelölést kap,
 # hogy a portál-átirányítás ne térítse el. Ez nem hozzáférési jelölés.
 PREAUTH_CT_MARK = "0x50524541"
-CUSTOM_CHAINS = ("preauth", "block", "preauth_nat", "block_nat")
+CUSTOM_CHAINS = (
+    "preauth",
+    "preauth_input",
+    "block",
+    "preauth_nat",
+    "block_nat",
+)
 # A port proxy (nftables DNAT) futásidejű láncai. A sablon csak a rájuk
 # ugró szabályokat tartalmazza, a tartalmukat a portál tölti fel:
 #   portproxy_nat:   DNAT/redirect (a -101-es prerouting láncból, a Docker
@@ -189,6 +197,9 @@ CUSTOM_CHAINS = ("preauth", "block", "preauth_nat", "block_nat")
 #   portproxy_input: a redirectelt (input) proxy engedélyezése
 #   portproxy_snat:  a kért forward bejegyzések masquerade-je
 PORTPROXY_CHAINS = ("portproxy_nat", "portproxy_input", "portproxy_snat")
+# A WireGuard-alagút UDP-portjának fogadó lánca. A portál tölti fel; ügynök
+# nélkül üres marad, ezért a WireGuard port zárva van.
+TUNNEL_CHAIN = "tunnel_input"
 
 # Drop-alapú fail2ban: csak a valódi, engedély nélküli TCP-forgalom számít.
 # A MAC/spoof/ipv6/fail2ban/dns/ssh okok kimaradnak (hamis forrás-IP vagy
@@ -207,6 +218,7 @@ RULESET_CHAINS = (
     "prerouting",
     "postrouting",
     "preauth",
+    "preauth_input",
     "block",
     "preauth_nat",
     "block_nat",
@@ -214,6 +226,8 @@ RULESET_CHAINS = (
     "portproxy_nat",
     "portproxy_input",
     "portproxy_snat",
+    "tunnel_input",
+    "loopback_guard",
     "breakglass",
 )
 
@@ -230,6 +244,70 @@ def _enabled_custom_entries(entries) -> list[dict]:
         entry for entry in entries
         if isinstance(entry, dict) and entry.get("enabled", True)
     ]
+
+
+def tunnel_proxy_entries(tunnels) -> list[dict]:
+    """A bekapcsolt alagút-szolgáltatások szintetikus port proxy bejegyzései.
+
+    A DNAT a felhő hallgató portjáról az ügynök WireGuard-címére mutat; a
+    forward engedélyezést a forward lánc meglévő ct original szabálya adja,
+    ezért a bejegyzés ``forward`` típusú. A ``_tunnel`` jelölés választja el
+    a felhasználói port proxy bejegyzésektől (figyelmeztetés, conntrack).
+    """
+    entries: list[dict] = []
+    if not isinstance(tunnels, dict):
+        return entries
+    for agent in tunnels.get("agents", []):
+        if not isinstance(agent, dict) or not agent.get("enabled"):
+            continue
+        for item in settings_store.agent_services_expanded(agent):
+            if item.get("domain"):
+                # Domaines szolgáltatás: nincs WAN-hallgató port és DNAT; a
+                # forgalom a Caddyn át, a WireGuard-alagúton megy.
+                continue
+            entries.append({
+                "id": (
+                    f"tunnel:{agent.get('id', '')}:"
+                    f"{item['proto']}:{item['listen_port']}"
+                ),
+                "label": item["label"],
+                "proto": item["proto"],
+                "type": "forward",
+                "listen_port": item["listen_port"],
+                "target_ip": agent.get("address"),
+                "target_port": item["tunnel_port"],
+                "ifaces": "wan", "snat": False, "enabled": True,
+                "_tunnel": True,
+            })
+    return entries
+
+
+def tunnel_public_preauth(tunnels) -> list[tuple[str, int]]:
+    """A nyilvános, portos alagút-szolgáltatások WAN pre-auth párjai.
+
+    Csak bekapcsolt ügynök bekapcsolt, ``public`` szolgáltatásai kerülnek
+    bele, és csak a port-módúak: a domaines szolgáltatásnak nincs WAN-
+    hallgató portja. Elem: ``(proto, listen_port)``; a ``both`` két
+    protokollra bomlik. A lista determinisztikusan rendezett.
+    """
+    pairs: set[tuple[str, int]] = set()
+    if not isinstance(tunnels, dict):
+        return []
+    for agent in tunnels.get("agents", []):
+        if not isinstance(agent, dict) or not agent.get("enabled"):
+            continue
+        for item in settings_store.agent_services_expanded(agent):
+            if item.get("domain") or not item.get("public"):
+                continue
+            protos = (
+                ("tcp", "udp") if item["proto"] == "both"
+                else (item["proto"],)
+            )
+            for proto in protos:
+                if proto not in ("tcp", "udp"):
+                    continue
+                pairs.add((proto, int(item["listen_port"])))
+    return sorted(pairs, key=lambda pair: (pair[1], pair[0]))
 
 
 _LAN_IF_RE = re.compile(r"^[A-Za-z0-9_.:@+-]{1,15}$")
@@ -305,6 +383,10 @@ MAX_EMAIL = 254
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 _NFT_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,31}$")
 _SERVICE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+# Szolgáltatás-szabály hivatkozása: "<ügynök-azonosító>/<szolgáltatás-azonosító>".
+_SERVICE_REF_RE = re.compile(
+    r"^[a-z0-9][a-z0-9_-]{0,31}/[a-z0-9][a-z0-9_-]{0,31}$"
+)
 
 
 def normalize_email(raw, strict=True) -> str:
@@ -439,9 +521,9 @@ class Ports:
             return "Minden port"
         parts: list[str] = []
         if self.tcp:
-            parts.append("TCP " + ", ".join(str(port) for port in self.tcp))
+            parts.append("TCP " + format_ports(self.tcp, dash="–"))
         if self.udp:
-            parts.append("UDP " + ", ".join(str(port) for port in self.udp))
+            parts.append("UDP " + format_ports(self.udp, dash="–"))
         if self.icmp:
             parts.append("ICMP")
         return " · ".join(parts) or "Nincs port"
@@ -459,8 +541,13 @@ class RuleSelection:
     rule_id: str
     label: str
     grants: tuple[Ports, ...]
-    # A választás által engedélyezett proxy-hostnevek (domain szabály).
+    # A választás által engedélyezett proxy-hostnevek (explicit domain
+    # szabály és domain-módú szolgáltatás együtt).
     domains: tuple[str, ...] = ()
+    # A választáshoz tartozó szolgáltatás-hivatkozások és a belőlük feloldott
+    # domainek; a megjelenítéshez (választott szolgáltatás címkéje) kellenek.
+    service_refs: tuple[str, ...] = ()
+    service_domains: tuple[str, ...] = ()
 
 
 def union_grants(parts) -> tuple[Ports, ...]:
@@ -602,6 +689,25 @@ class Rule:
     # Domain szabály: teljes proxy-hostnevek, portok nélkül; az nftables-hez
     # nem nyúl. Gyűjtőnél a tagok domainjeinek feloldott uniója.
     domains: tuple[str, ...] = ()
+    # Szolgáltatás-szabály: "<ügynök-azonosító>/<szolgáltatás-azonosító>"
+    # hivatkozások. A "services" kulcsot szándékosan nem használjuk, mert az
+    # a régi szolgáltatás-alapú szabályokat jelöli (_is_legacy).
+    service_refs: tuple[str, ...] = ()
+    # A hivatkozásokból feloldott forward portok; nem perzisztált értékek.
+    # Hiányzó/letiltott szolgáltatásnál üresek maradnak (fail-closed).
+    service_tcp: tuple[int, ...] = ()
+    service_udp: tuple[int, ...] = ()
+    # A hivatkozásokból feloldott proxy-hostnevek (csak domain-módú
+    # szolgáltatások); nem perzisztált, a session_domains része.
+    service_domains: tuple[str, ...] = ()
+    # A hivatkozásokból feloldott, teljes leképezés-aláírás:
+    # ``(ref, proto, listen_port, target_host, target_port)`` tuple-ök
+    # rendezett uniója; domain-módú szolgáltatásnál ``proto="domain"`` sor
+    # is szerepel, hogy az átnevezés is érvénytelenítsen. Nem perzisztált,
+    # mint a service_tcp/service_udp. A döntéskori ellenőrzés ezzel észleli
+    # a célhost/célport átirányítást akkor is, ha a hallgató portok
+    # változatlanok.
+    service_signature: tuple[tuple[str, str, int, str, int], ...] = ()
 
     @property
     def ports(self) -> Ports:
@@ -611,6 +717,10 @@ class Rule:
         portok egyesítése, hogy a meglévő megjelenítő kód a teljes uniót
         mutassa; az irány csak megjelenítési érték.
         """
+        if self.service_refs and not self.collection:
+            # A szolgáltatás-szabály mindig forward irányú; a portokat a
+            # hivatkozott szolgáltatások hallgató portjai adják.
+            return Ports(self.service_tcp, self.service_udp, direction="forward")
         if not self.collection:
             return Ports(
                 self.tcp, self.udp, self.icmp, self.full, self.direction
@@ -630,6 +740,12 @@ class Rule:
         egy forward, az input unió egy input Ports-ban. A tűzfal mindig
         ezt használja, soha nem a megjelenítési ports mezőt.
         """
+        if self.service_refs and not self.collection:
+            # Szolgáltatás-szabály: csak akkor ad engedélyt, ha legalább egy
+            # port feloldódott. A hiányzó hivatkozás így nem nyit semmit.
+            if not (self.service_tcp or self.service_udp):
+                return ()
+            return (self.ports,)
         if not self.collection:
             # A domain szabály a proxy-kapun hat, tűzfalengedélye nincs.
             return () if self.domains else (self.ports,)
@@ -645,8 +761,45 @@ class Rule:
         return tuple(parts)
 
     @property
+    def session_domains(self) -> tuple[str, ...]:
+        """A munkamenetben megnyíló proxy-hostnevek.
+
+        Az explicit domain szabály hostnevei és a domain-módú
+        szolgáltatásokból feloldott nevek uniója, az első előfordulás
+        sorrendjében, ismétlődés nélkül.
+        """
+        if not self.service_domains:
+            return self.domains
+        names: list[str] = []
+        for name in (*self.domains, *self.service_domains):
+            if name not in names:
+                names.append(name)
+        return tuple(names)
+
+    @property
     def collection(self) -> bool:
         return bool(self.members)
+
+    def _service_entries(self) -> list[dict]:
+        """A szolgáltatás-hivatkozások megjelenítési alakja.
+
+        A címkét a szerver tölti ki a beállításokból. Egyetlen hivatkozásnál
+        a feloldott portok is ide kerülnek; többnél a feloldás unió, ezért
+        az egyedi portokat a szerver oldja fel.
+        """
+        if not self.service_refs:
+            return []
+        if len(self.service_refs) == 1:
+            return [{
+                "ref": self.service_refs[0],
+                "label": "",
+                "tcp": list(self.service_tcp),
+                "udp": list(self.service_udp),
+            }]
+        return [
+            {"ref": ref, "label": "", "tcp": [], "udp": []}
+            for ref in self.service_refs
+        ]
 
     def public(self) -> dict:
         if self.collection:
@@ -670,8 +823,10 @@ class Rule:
                 "members": list(self.members),
                 "collection": True,
                 "domains": list(self.domains),
+                "service_refs": list(self.service_refs),
+                "services": self._service_entries(),
             }
-        return {
+        payload = {
             "id": self.id,
             "label": self.label,
             "description": self.description,
@@ -688,7 +843,21 @@ class Rule:
             "members": list(self.members),
             "collection": self.collection,
             "domains": list(self.domains),
+            "service_refs": list(self.service_refs),
+            "services": self._service_entries(),
         }
+        if self.service_refs:
+            # A szolgáltatás-szabály nem domain és nem gyűjtő: ezeket a
+            # mezőket szándékosan nem adjuk ki. A portok a hivatkozásokból
+            # feloldott, nem perzisztált értékek, ezért a tcp/udp mezők is
+            # ezeket mutatják (a gyűjtő feloldott nézetéhez hasonlóan).
+            ports = self.ports
+            payload["tcp"] = list(ports.tcp)
+            payload["udp"] = list(ports.udp)
+            payload["ports_label"] = ports.label()
+            payload.pop("members", None)
+            payload.pop("domains", None)
+        return payload
 
 
 @dataclass(frozen=True)
@@ -749,6 +918,8 @@ AUDIT_SEVERITY = {
     "service_start_failed": "alert", "admin_provision_failed": "alert",
     "settings_invalid": "alert", "conntrack_failed": "alert",
     "cli_fail2ban_ban": "alert",
+    "config_export_failed": "warn", "config_import_failed": "warn",
+    "config_reset": "warn", "config_reset_failed": "warn",
 }
 DEFAULT_SEVERITY = "info"
 
@@ -925,9 +1096,15 @@ class AuditLog:
         before: float | None = None,
         severity: str = "",
         ip=None,
+        events=None,
     ) -> list[dict]:
-        """Az ``ip`` egy ipaddress-hálózat (egy cím: /32 vagy /128) vagy None."""
+        """Az ``ip`` egy ipaddress-hálózat (egy cím: /32 vagy /128) vagy None.
+
+        Az ``events`` pontos eseménykódok halmaza (többes szűrő); az
+        ``event`` a régi, részleges egyezésű egyes szűrő.
+        """
         limit = max(1, min(2000, int(limit)))
+        events = frozenset(str(code).lower() for code in events or ())
         event_raw = (event or "").strip().lower()
         event_key = _search_key(event_raw)
         user = (user or "").strip().lower()
@@ -954,6 +1131,10 @@ class AuditLog:
                                     continue
                             except (TypeError, ValueError):
                                 continue
+                        if events and str(
+                            item.get("event", "")
+                        ).lower() not in events:
+                            continue
                         if event_raw:
                             raw_event = str(item.get("event", "")).lower()
                             # A nyers eseménykód részleges egyezése marad az
@@ -1402,12 +1583,85 @@ def _clean_rule_domains(raw, known=None) -> tuple[str, ...]:
     return cleaned
 
 
+def _clean_service_refs(raw, field: str = "service_refs") -> tuple[str, ...]:
+    """Szolgáltatás-szabály hivatkozásai: 1–64 egyedi ``ügynök/szolgáltatás``.
+
+    Az alakot szigorúan ellenőrizzük; a létezést és a bekapcsolt állapotot a
+    hívó (mentéskor a visszahívás) ellenőrzi. Betöltéskor a hiányzó hivatkozás
+    nem dobja el a szabályt, csak üres feloldott portokat ad (fail-closed).
+    """
+    if not isinstance(raw, list):
+        raise ValueError(
+            f"{field}: 1–64 szolgáltatás-hivatkozásból álló lista kell"
+        )
+    values = [
+        value.strip() for value in raw
+        if isinstance(value, str) and value.strip()
+    ]
+    cleaned = _clean_str_list(
+        raw, field, pattern=_SERVICE_REF_RE, maximum=64
+    )
+    if len(values) != len(cleaned):
+        raise ValueError(f"{field}: ismétlődő szolgáltatás-hivatkozás")
+    if not 1 <= len(cleaned) <= 64:
+        raise ValueError(
+            f"{field}: legalább 1 és legfeljebb 64 egyedi szolgáltatás kell"
+        )
+    return cleaned
+
+
+def merge_port_intervals(values) -> list[tuple[int, int]]:
+    """Portok összefüggő intervallumai; az átfedő és szomszédos részek egyesülnek."""
+    merged: list[tuple[int, int]] = []
+    for port in sorted(set(values)):
+        if not isinstance(port, int) or isinstance(port, bool):
+            continue
+        if not 1 <= port <= 65535:
+            continue
+        if merged and port <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], port))
+        else:
+            merged.append((port, port))
+    return merged
+
+
+def format_port_interval(lo: int, hi: int, dash: str = "-") -> str:
+    return str(lo) if lo == hi else f"{lo}{dash}{hi}"
+
+
+def format_ports(values, dash: str = "-", separator: str = ", ") -> str:
+    """Portok tömör szövege; a szomszédos portok tartományként jelennek meg."""
+    return separator.join(
+        format_port_interval(lo, hi, dash)
+        for lo, hi in merge_port_intervals(values)
+    )
+
+
+def _parse_port_token(value, field: str) -> tuple[int, int]:
+    """Egy port vagy ``lo-hi`` tartomány értelmezése (mindkettő zárt)."""
+    text = value.strip().replace("–", "-").replace("—", "-")
+    match = re.fullmatch(r"(\d+)(?:\s*-\s*(\d+))?", text)
+    if match is None:
+        raise ValueError(f"{field}: érvénytelen port: {value!r}")
+    low = int(match.group(1))
+    high = int(match.group(2)) if match.group(2) else low
+    if not 1 <= low <= 65535 or not 1 <= high <= 65535:
+        raise ValueError(f"{field}: a port 1 és 65535 között lehet: {value}")
+    if low > high:
+        raise ValueError(
+            f"{field}: a tartomány kezdete nem lehet nagyobb a végénél: {value}"
+        )
+    return low, high
+
+
 def _clean_ports(raw, field: str, maximum: int = 256) -> tuple[int, ...]:
     """Portlista normalizálása.
 
     Elfogad JSON-listát (a felület ezt küldi), egyetlen egész számot, vagy
-    vessző/szóköz elválasztású szöveget. A portok egyediek és növekvő
-    sorrendűek lesznek.
+    vessző/szóköz elválasztású szöveget. Az elem lehet egy port vagy
+    ``lo-hi`` tartomány. Az átfedő tartományokat összevonjuk, majd a
+    belső, visszafelé kompatibilis alakhoz egyedi, növekvő portokra
+    bontjuk. A korlát a felbontott portok számára vonatkozik.
     """
     if raw is None:
         return ()
@@ -1417,24 +1671,31 @@ def _clean_ports(raw, field: str, maximum: int = 256) -> tuple[int, ...]:
         raw = [raw]
     if not isinstance(raw, (list, tuple)):
         raise ValueError(f"{field}: portlista kell")
-    if len(raw) > maximum:
-        raise ValueError(f"{field}: legfeljebb {maximum} port adható meg")
-    ports: list[int] = []
+    intervals: list[tuple[int, int]] = []
     for value in raw:
         if isinstance(value, str):
             value = value.strip()
             if not value:
                 continue
-            if not value.isdigit():
-                raise ValueError(f"{field}: érvénytelen port: {value!r}")
-            value = int(value)
-        if isinstance(value, bool) or not isinstance(value, int):
+            intervals.append(_parse_port_token(value, field))
+        elif isinstance(value, int) and not isinstance(value, bool):
+            intervals.append(_parse_port_token(str(value), field))
+        else:
             raise ValueError(f"{field}: érvénytelen port: {value!r}")
-        if not 1 <= value <= 65535:
-            raise ValueError(f"{field}: a port 1 és 65535 között lehet: {value}")
-        if value not in ports:
-            ports.append(value)
-    return tuple(sorted(ports))
+    # Előbb összevonunk, hogy egy átfedő listát ne számoljunk kétszer.
+    merged: list[tuple[int, int]] = []
+    for low, high in sorted(intervals):
+        if merged and low <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], high))
+        else:
+            merged.append((low, high))
+    total = sum(high - low + 1 for low, high in merged)
+    if total > maximum:
+        raise ValueError(f"{field}: legfeljebb {maximum} port adható meg")
+    ports: list[int] = []
+    for low, high in merged:
+        ports.extend(range(low, high + 1))
+    return tuple(ports)
 
 
 def _clean_direction(raw) -> str:
@@ -1537,6 +1798,8 @@ class RuleStore:
         catalog: ServiceCatalog | None = None,
         logger=log,
         domain_names=None,
+        service_ports=None,
+        service_domains=None,
     ) -> None:
         self.path = os.path.abspath(path)
         self.catalog = catalog if catalog is not None else ServiceCatalog.load()
@@ -1544,6 +1807,14 @@ class RuleStore:
         # Visszahívás: a létező proxy-bejegyzések teljes hostnevei. Nélküle
         # domain szabály nem menthető (fail-closed).
         self.domain_names = domain_names
+        # Visszahívás: "<ügynök>/<szolgáltatás>" -> {"tcp": (...), "udp": (...)}
+        # vagy None, ha a szolgáltatás hiányzik/le van tiltva. Nélküle a
+        # szolgáltatás-szabály feloldott portjai üresek (fail-closed).
+        self.service_ports = service_ports
+        # Visszahívás: "<ügynök>/<szolgáltatás>" -> feloldott bejegyzés vagy
+        # None (hiányzó/letiltott). A domain-módú szolgáltatások hostnevét
+        # ebből oldjuk fel; nélküle ilyen szolgáltatás nem ad domaint.
+        self.service_domains = service_domains
         # A régi, egyetlen proxy-gyökér: a pont nélküli régi hivatkozások
         # betöltéskor ez alá kerülnek (lásd _resolve_bare_domains).
         self.legacy_proxy_domain = ""
@@ -1696,11 +1967,130 @@ class RuleStore:
             domains.append(value)
         return {**item, "domains": domains}, bool(root)
 
+    def _resolve_service_ports(
+        self, refs
+    ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        """Hivatkozások feloldott TCP/UDP hallgató portjainak uniója.
+
+        Hiányzó vagy letiltott hivatkozásnál a visszahívás ``None``-t ad:
+        az adott ref kimarad, a szabály viszont megmarad (fail-closed).
+        """
+        resolver = self.service_ports
+        tcp: set[int] = set()
+        udp: set[int] = set()
+        if resolver is None:
+            return (), ()
+        for ref in refs:
+            try:
+                resolved = resolver(ref)
+            except Exception as exc:  # a hibás konfiguráció ne nyisson portot
+                self.log(
+                    f"[szabályok] a(z) {ref} szolgáltatás feloldása nem "
+                    f"sikerült: {exc}"
+                )
+                continue
+            if not resolved:
+                continue
+            tcp.update(resolved.get("tcp") or ())
+            udp.update(resolved.get("udp") or ())
+        return tuple(sorted(tcp)), tuple(sorted(udp))
+
+    def _resolve_service_domains(self, refs) -> tuple[str, ...]:
+        """Hivatkozások feloldott proxy-hostnevei.
+
+        Csak a domain-módú szolgáltatások adnak nevet; a port-szolgáltatás
+        bejegyzésében üres a ``domain``. Hiányzó vagy letiltott
+        hivatkozásnál a visszahívás ``None``-t ad, az adott ref kimarad
+        (fail-closed).
+        """
+        resolver = self.service_domains
+        names: list[str] = []
+        if resolver is None:
+            return ()
+        for ref in refs:
+            try:
+                resolved = resolver(ref)
+            except Exception as exc:  # a hibás konfiguráció ne adjon domaint
+                self.log(
+                    f"[szabályok] a(z) {ref} szolgáltatás domainje nem "
+                    f"oldható fel: {exc}"
+                )
+                continue
+            if not resolved:
+                continue
+            name = str(resolved.get("domain", "") or "")
+            if name and name not in names:
+                names.append(name)
+        return tuple(names)
+
+    @staticmethod
+    def _signature_rows(ref: str, resolved: dict) -> tuple:
+        """Egy feloldott hivatkozás aláírás-sorai.
+
+        A ``tunnel_service_index`` a teljes leképezést ``signature``
+        kulcsban adja; a csak portokat ismerő visszahívásoknál (tesztek,
+        régi integrációk) a hallgató portokból és a célhostból képzünk
+        konzervatív, de döntéskor ugyanúgy összevethető sorokat.
+        """
+        rows = resolved.get("signature")
+        if rows is not None:
+            return tuple(
+                (ref, str(proto), int(listen_port), str(target_host),
+                 int(target_port))
+                for proto, listen_port, target_host, target_port in rows
+            )
+        host = str(resolved.get("target_host", "") or "")
+        out = []
+        # A régi/egyszerű visszahívások nem adnak signature-t; a domain-
+        # módú szolgáltatás nevét ilyenkor is a signature részeként
+        # vesszük, hogy az átnevezés érvénytelenítsen.
+        domain = str(resolved.get("domain", "") or "")
+        if domain:
+            out.append((ref, "domain", 0, domain, 0))
+        for proto, key in (("tcp", "tcp"), ("udp", "udp")):
+            for port in resolved.get(key) or ():
+                port = int(port)
+                out.append((ref, proto, port, host, port))
+        return tuple(out)
+
+    def _resolve_service_signature(self, refs) -> tuple:
+        """A hivatkozások feloldott, rendezett leképezés-aláírása.
+
+        Hiányzó/letiltott hivatkozás kimarad; a külön ``service_tcp``/
+        ``service_udp`` ellenőrzés ilyenkor külön fail-closed.
+        """
+        resolver = self.service_ports
+        rows: set[tuple] = set()
+        if resolver is None:
+            return ()
+        for ref in refs:
+            try:
+                resolved = resolver(ref)
+            except Exception as exc:  # a hibás konfiguráció ne nyisson portot
+                self.log(
+                    f"[szabályok] a(z) {ref} szolgáltatás aláírása nem "
+                    f"sikerült: {exc}"
+                )
+                continue
+            if not resolved:
+                continue
+            rows.update(self._signature_rows(ref, resolved))
+        return tuple(sorted(rows))
+
+    def service_signature(self, refs) -> tuple:
+        """A döntéskori összehasonlításhoz használt nyilvános aláírás."""
+        return self._resolve_service_signature(refs)
+
     def _parse_rule(self, rule_id: str, item: dict) -> Rule:
         if not isinstance(item, dict):
             raise RuleStoreError(f"{rule_id}: hibás bejegyzés")
         members: tuple[str, ...] = ()
         domains: tuple[str, ...] = ()
+        service_refs: tuple[str, ...] = ()
+        service_tcp: tuple[int, ...] = ()
+        service_udp: tuple[int, ...] = ()
+        service_domains: tuple[str, ...] = ()
+        service_signature: tuple = ()
         if "members" in item:
             # A gyűjtőszabály tárolt portmezői és iránya nem mérvadók: a
             # portokat és az irányokat a tagokból számoljuk. A fájlban csak
@@ -1718,6 +2108,18 @@ class RuleStore:
                 domains = _clean_rule_domains(item.get("domains"))
             except ValueError as exc:
                 raise RuleStoreError(f"{rule_id}: {exc}") from exc
+            ports = Ports()
+            direction = "forward"
+        elif "service_refs" in item:
+            # Szolgáltatás-szabály: a tárolt portmezők nem mérvadók; a
+            # portokat a hivatkozott szolgáltatások hallgató portjai adják.
+            try:
+                service_refs = _clean_service_refs(item.get("service_refs"))
+            except ValueError as exc:
+                raise RuleStoreError(f"{rule_id}: {exc}") from exc
+            service_tcp, service_udp = self._resolve_service_ports(service_refs)
+            service_domains = self._resolve_service_domains(service_refs)
+            service_signature = self._resolve_service_signature(service_refs)
             ports = Ports()
             direction = "forward"
         else:
@@ -1774,6 +2176,11 @@ class RuleStore:
             members=members,
             direction=direction,
             domains=domains,
+            service_refs=service_refs,
+            service_tcp=service_tcp,
+            service_udp=service_udp,
+            service_domains=service_domains,
+            service_signature=service_signature,
         )
 
     @staticmethod
@@ -1785,6 +2192,8 @@ class RuleStore:
         Egy szintű gyűjtést engedünk: a tagok létező, egyedi, nem teljes
         hozzáférésű szabályok lehetnek, másik gyűjtő nem. A tagok iránya
         vegyes is lehet; minden tag a saját irányában ad engedélyt.
+        Szolgáltatás-szabály (service_refs) szándékosan LEHET gyűjtőtag: a
+        feloldott portjai a forward unióba kerülnek.
         """
         if not rule.members:
             return ""
@@ -1906,6 +2315,28 @@ class RuleStore:
                         f"{collection_id}: {issue}"
                     )
                     del rules[collection_id]
+            # A gyűjtők feloldott szolgáltatás-portjai a tagokból számolt
+            # értékek (nem perzisztáltak). Erre a reflect_services() és a
+            # döntéskori újraellenőrzés is támaszkodik.
+            for collection_id, rule in list(rules.items()):
+                if not rule.members:
+                    continue
+                tcp: set[int] = set()
+                udp: set[int] = set()
+                signature: set[tuple] = set()
+                for member_id in rule.members:
+                    member = rules.get(member_id)
+                    if member is None:
+                        continue
+                    tcp.update(member.service_tcp)
+                    udp.update(member.service_udp)
+                    signature.update(member.service_signature)
+                rules[collection_id] = replace(
+                    rule,
+                    service_tcp=tuple(sorted(tcp)),
+                    service_udp=tuple(sorted(udp)),
+                    service_signature=tuple(sorted(signature)),
+                )
             # Csak az első induláskor (amikor még nincs szabályfájl) seedingelünk.
             # Ha az admin később minden szabályt töröl, az üres fájl megmarad,
             # és a szabályok nem kelnek újra életre a következő indításnál.
@@ -1996,11 +2427,33 @@ class RuleStore:
                 "max_ttl": rule.max_ttl,
                 "created": rule.created,
             }
+        if rule.service_refs:
+            # A feloldott portok és az irány számított értékek: nem kerülnek
+            # a fájlba, különben a szolgáltatás későbbi módosítása elavult
+            # engedélyt hagyna hátra.
+            return {
+                "label": rule.label,
+                "description": rule.description,
+                "service_refs": list(rule.service_refs),
+                "default_ttl": rule.default_ttl,
+                "max_ttl": rule.max_ttl,
+                "created": rule.created,
+            }
         return {
             "label": rule.label,
             "description": rule.description,
-            "tcp": list(rule.tcp),
-            "udp": list(rule.udp),
+            # Az egyes portok változatlan egészek; a tartományokat
+            # visszafelé kompatibilis "lo-hi" szövegként tároljuk.
+            "tcp": [
+                format_port_interval(low, high)
+                if low != high else low
+                for low, high in merge_port_intervals(rule.tcp)
+            ],
+            "udp": [
+                format_port_interval(low, high)
+                if low != high else low
+                for low, high in merge_port_intervals(rule.udp)
+            ],
             "icmp": rule.icmp,
             "full": rule.full,
             "direction": rule.direction,
@@ -2008,6 +2461,89 @@ class RuleStore:
             "max_ttl": rule.max_ttl,
             "created": rule.created,
         }
+
+    # -- konfigurációs csomag --------------------------------------------------
+
+    def export_records(self) -> dict:
+        """Az aktuális szabályok tárolási alakja a konfigurációs csomaghoz."""
+        self._load()
+        with self._lock:
+            return {
+                rule_id: self._rule_storage(rule)
+                for rule_id, rule in self._rules.items()
+            }
+
+    def validate_import_records(self, raw) -> dict[str, Rule]:
+        """A rules szakasz szigorú, írás nélküli ellenőrzése."""
+        if not isinstance(raw, dict):
+            raise RuleStoreError("a rules szakasz JSON-objektum kell")
+        rules: dict[str, Rule] = {}
+        for raw_id, item in raw.items():
+            if not isinstance(raw_id, str):
+                raise RuleStoreError("érvénytelen szabály-azonosító")
+            try:
+                clean_id = _clean_id(raw_id, "szabály-azonosító")
+            except ValueError as exc:
+                raise RuleStoreError(str(exc)) from exc
+            if clean_id != raw_id:
+                raise RuleStoreError(
+                    f"a szabály-azonosító nem normalizált: {raw_id!r}"
+                )
+            if clean_id == LEGACY_ADMIN_RULE_ID:
+                raise RuleStoreError(
+                    "a fenntartott szabály-azonosító nem importálható"
+                )
+            if not isinstance(item, dict):
+                raise RuleStoreError(f"{clean_id}: hibás bejegyzés")
+            if self._is_legacy(item):
+                raise RuleStoreError(
+                    f"{clean_id}: a régi szolgáltatáslista nem importálható"
+                )
+            if "members" in item and "domains" in item:
+                raise RuleStoreError(
+                    f"{clean_id}: a members és a domains egyszerre nem lehet jelen"
+                )
+            if "service_refs" in item:
+                mixed = [
+                    key for key in ("members", "domains", "tcp", "udp",
+                                    "icmp", "full")
+                    if key in item
+                ]
+                if mixed:
+                    raise RuleStoreError(
+                        f"{clean_id}: a service_refs nem kombinálható a "
+                        f"következő mezőkkel: {', '.join(mixed)}"
+                    )
+                # Csak az alakot ellenőrizzük: a hivatkozott alagutak
+                # ugyanabban a csomagban is importálhatók, ezért a
+                # létezést itt szándékosan nem követeljük meg.
+            rules[clean_id] = self._parse_rule(clean_id, item)
+        for rule in rules.values():
+            issue = self._collection_issue(rule, rules)
+            if issue:
+                raise RuleStoreError(f"{rule.id}: {issue}")
+        return rules
+
+    def replace_all(self, rules: dict[str, Rule]) -> None:
+        """A teljes szabálytár cseréje (a hívó már ellenőrizte)."""
+        with self._locked():
+            self._write_raw({
+                rule_id: self._rule_storage(rule)
+                for rule_id, rule in rules.items()
+            })
+            self._rules = dict(rules)
+            self._loaded = True
+
+    def reset(self) -> None:
+        """A fájl törlése és a memóriabeli szabálytár ürítése."""
+        with self._locked():
+            try:
+                os.unlink(self.path)
+            except FileNotFoundError:
+                pass
+            self._rules = {}
+            # Ne seedeljünk újra a folyamatban a leállás előtt.
+            self._loaded = True
 
     # -- olvasás ---------------------------------------------------------------
 
@@ -2041,6 +2577,11 @@ class RuleStore:
         forward_icmp = False
         input_tcp: set[int] = set()
         input_udp: set[int] = set()
+        service_tcp: set[int] = set()
+        service_udp: set[int] = set()
+        service_signature: set[tuple] = set()
+        service_refs: list[str] = []
+        service_domains: list[str] = []
         domains: list[str] = []
         for member_id in rule.members:
             member = self._rules.get(member_id)
@@ -2051,6 +2592,17 @@ class RuleStore:
             resolved = self._resolve_rule(member, seen, cache)
             domains.extend(
                 name for name in resolved.domains if name not in domains
+            )
+            service_domains.extend(
+                name for name in resolved.service_domains
+                if name not in service_domains
+            )
+            service_tcp.update(resolved.service_tcp)
+            service_udp.update(resolved.service_udp)
+            service_signature.update(resolved.service_signature)
+            service_refs.extend(
+                ref for ref in resolved.service_refs
+                if ref not in service_refs
             )
             for parts in resolved.grants:
                 # Védelmi réteg: a validáció már kizárja a teljes
@@ -2085,6 +2637,11 @@ class RuleStore:
             input_tcp=tuple(sorted(input_tcp)),
             input_udp=tuple(sorted(input_udp)),
             domains=tuple(domains),
+            service_refs=tuple(service_refs),
+            service_tcp=tuple(sorted(service_tcp)),
+            service_udp=tuple(sorted(service_udp)),
+            service_domains=tuple(service_domains),
+            service_signature=tuple(sorted(service_signature)),
             # A "mixed" csak megjelenítési/audit érték; a Ports soha nem
             # kapja meg, a ports property normalizálja.
             direction=display_direction,
@@ -2141,14 +2698,17 @@ class RuleStore:
         kizárja az input irányú szabályokat, és azokat a gyűjtőket is,
         amelyeknek legalább egy input irányú tagja van. A gyűjtők
         egy szintűek, ezért a közvetlen tagok vizsgálata elég. A domain
-        szabály (és az azt tartalmazó gyűjtő) is kifejezett kiosztást kér.
+        szabály (és az azt tartalmazó gyűjtő) is kifejezett kiosztást kér,
+        akárcsak a szolgáltatás-szabály.
         """
-        if rule.direction == "input" or rule.domains:
+        if rule.direction == "input" or rule.domains or rule.service_refs:
             return True
         for member_id in rule.members:
             member = self._rules.get(member_id)
             if member is not None and (
-                member.direction == "input" or member.domains
+                member.direction == "input"
+                or member.domains
+                or member.service_refs
             ):
                 return True
         return False
@@ -2159,6 +2719,98 @@ class RuleStore:
         return {
             name for rule in self._rules.values() for name in rule.domains
         }
+
+    def service_references(self) -> dict[str, tuple[str, ...]]:
+        """Szolgáltatás-hivatkozás -> az őt tartalmazó szabályok azonosítói.
+
+        A gyűjtőszabályokra is kiterjed: ha egy gyűjtő tagja szolgáltatás-
+        szabály, a gyűjtő azonosítója is szerepel a hivatkozó szabályok
+        között. Így a törlés/letiltás előtti ellenőrzés a közvetett
+        hivatkozásokat is látja.
+        """
+        self._load()
+        mapping: dict[str, set[str]] = {}
+        for rule_id, rule in self._rules.items():
+            refs = set(rule.service_refs)
+            for member_id in rule.members:
+                member = self._rules.get(member_id)
+                if member is not None:
+                    refs.update(member.service_refs)
+            for ref in refs:
+                mapping.setdefault(ref, set()).add(rule_id)
+        return {
+            ref: tuple(sorted(rule_ids))
+            for ref, rule_ids in mapping.items()
+        }
+
+    def reflect_services(self) -> tuple[str, ...]:
+        """A feloldott szolgáltatás-portok újraszámítása (fájlírás nélkül).
+
+        A szolgáltatás-leképezés módosítása után hívjuk: a szolgáltatás-
+        szabályok és az őket tartalmazó gyűjtők feloldott portjai a
+        visszahívásból frissülnek. Visszaadja a megváltozott szabályok
+        rendezett azonosítóit, hogy a hívó a munkameneteiket visszavonhassa.
+        """
+        self._load()
+        changed: set[str] = set()
+        with self._lock:
+            # Először a közvetlen szolgáltatás-szabályok, hogy a gyűjtők
+            # már a friss tagértékekből számoljanak.
+            for rule_id, rule in list(self._rules.items()):
+                if rule.members or not rule.service_refs:
+                    continue
+                new_tcp, new_udp = self._resolve_service_ports(
+                    rule.service_refs
+                )
+                new_domains = self._resolve_service_domains(
+                    rule.service_refs
+                )
+                new_signature = self._resolve_service_signature(
+                    rule.service_refs
+                )
+                if (new_tcp, new_udp, new_domains, new_signature) != (
+                    rule.service_tcp, rule.service_udp,
+                    rule.service_domains, rule.service_signature,
+                ):
+                    self._rules[rule_id] = replace(
+                        rule, service_tcp=new_tcp, service_udp=new_udp,
+                        service_domains=new_domains,
+                        service_signature=new_signature,
+                    )
+                    changed.add(rule_id)
+            for rule_id, rule in list(self._rules.items()):
+                if not rule.members:
+                    continue
+                tcp: set[int] = set()
+                udp: set[int] = set()
+                domains: list[str] = []
+                signature: set[tuple] = set()
+                for member_id in rule.members:
+                    member = self._rules.get(member_id)
+                    if member is None:
+                        continue
+                    tcp.update(member.service_tcp)
+                    udp.update(member.service_udp)
+                    domains.extend(
+                        name for name in member.service_domains
+                        if name not in domains
+                    )
+                    signature.update(member.service_signature)
+                new_tcp = tuple(sorted(tcp))
+                new_udp = tuple(sorted(udp))
+                new_domains = tuple(domains)
+                new_signature = tuple(sorted(signature))
+                if (new_tcp, new_udp, new_domains, new_signature) != (
+                    rule.service_tcp, rule.service_udp,
+                    rule.service_domains, rule.service_signature,
+                ):
+                    self._rules[rule_id] = replace(
+                        rule, service_tcp=new_tcp, service_udp=new_udp,
+                        service_domains=new_domains,
+                        service_signature=new_signature,
+                    )
+                    changed.add(rule_id)
+        return tuple(sorted(changed))
 
     def effective_for(self, user, groups: list[Group] | tuple[Group, ...]) -> list[Rule]:
         """A felhasználó által választható szabályok.
@@ -2247,7 +2899,16 @@ class RuleStore:
         is_collection = collection_flag is True or bool(members_raw)
         members: tuple[str, ...] = ()
         domains: tuple[str, ...] = ()
+        service_refs: tuple[str, ...] = ()
+        service_tcp: tuple[int, ...] = ()
+        service_udp: tuple[int, ...] = ()
+        service_domains: tuple[str, ...] = ()
+        service_signature: tuple = ()
         ports = Ports()
+        if "service_refs" in data and is_collection:
+            raise RuleStoreError(
+                "a szolgáltatás-szabály nem lehet gyűjtőszabály"
+            )
         if is_collection:
             # A gyűjtőnek nincs saját iránya: a payload direction mezőjét
             # szándékosan figyelmen kívül hagyjuk (nem is validáljuk).
@@ -2294,6 +2955,47 @@ class RuleStore:
                 domains = _clean_rule_domains(data.get("domains"), known)
             except ValueError as exc:
                 raise RuleStoreError(str(exc)) from exc
+        elif "service_refs" in data:
+            # Szolgáltatás-szabály: kizárólag a kiválasztott alagút-
+            # szolgáltatások hallgató portjai, forward irányban.
+            direction = "forward"
+            mixed = [
+                key for key in ("members", "domains", "tcp", "udp",
+                                "icmp", "full")
+                if key in data
+            ]
+            if mixed:
+                raise RuleStoreError(
+                    "szolgáltatás-szabályhoz nem adható meg "
+                    f"{', '.join(mixed)}"
+                )
+            try:
+                service_refs = _clean_service_refs(data.get("service_refs"))
+            except ValueError as exc:
+                raise RuleStoreError(str(exc)) from exc
+            resolver = self.service_ports
+            tcp: set[int] = set()
+            udp: set[int] = set()
+            for ref in service_refs:
+                resolved = resolver(ref) if resolver is not None else None
+                if resolved is None:
+                    raise RuleStoreError(
+                        f"ismeretlen vagy letiltott szolgáltatás: {ref}"
+                    )
+                tcp.update(resolved.get("tcp") or ())
+                udp.update(resolved.get("udp") or ())
+            # A domain-módú szolgáltatásnak nincs hallgató portja, de a
+            # proxy-gapun keresztül a domainjét megnyitja; ilyenkor a
+            # szabály portok nélkül is érvényes.
+            service_domains = self._resolve_service_domains(service_refs)
+            if not tcp and not udp and not service_domains:
+                raise RuleStoreError(
+                    "a kiválasztott szolgáltatásokhoz nincs elérhető port "
+                    "vagy domain"
+                )
+            service_tcp = tuple(sorted(tcp))
+            service_udp = tuple(sorted(udp))
+            service_signature = self._resolve_service_signature(service_refs)
         else:
             try:
                 direction = _clean_direction(data.get("direction"))
@@ -2348,6 +3050,11 @@ class RuleStore:
             members=members,
             direction=direction,
             domains=domains,
+            service_refs=service_refs,
+            service_tcp=service_tcp,
+            service_udp=service_udp,
+            service_domains=service_domains,
+            service_signature=service_signature,
         )
 
     def create(self, rule_id: str, data: dict) -> Rule:
@@ -2808,6 +3515,110 @@ class GroupStore:
                 self._groups = groups
             return changed
 
+    def set_rule_groups(
+        self, rule_id: str, group_ids
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """A szabály közvetlen csoport-kiosztásainak beállítása egy írással.
+
+        Minden csoportra pontosan akkor kerül bele a szabály, ha a kért
+        halmazban szerepel. A többi szabály és a csoportok tagsága változatlan.
+        Visszatérés: (hozzáadott, eltávolított) csoport-azonosítók.
+        """
+        if not isinstance(rule_id, str) or not rule_id.strip():
+            raise GroupStoreError("hiányzó szabály-azonosító")
+        rule_id = rule_id.strip()
+        if rule_id == LEGACY_ADMIN_RULE_ID:
+            raise GroupStoreError(
+                "a fenntartott szabály-azonosító nem rendelhető hozzá"
+            )
+        wanted = set(_clean_str_list(group_ids, "groups", maximum=64))
+        self._load()
+        with self._locked():
+            groups = dict(self._groups)
+            missing = wanted - set(groups)
+            if missing:
+                raise GroupStoreError(
+                    f"ismeretlen csoport: {', '.join(sorted(missing))}"
+                )
+            added: list[str] = []
+            removed: list[str] = []
+            changed = False
+            for group_id, group in list(groups.items()):
+                rules = list(group.rules)
+                if group_id in wanted and rule_id not in rules:
+                    rules.append(rule_id)
+                    groups[group_id] = replace(group, rules=tuple(rules))
+                    added.append(group_id)
+                    changed = True
+                elif group_id not in wanted and rule_id in rules:
+                    groups[group_id] = replace(
+                        group,
+                        rules=tuple(rid for rid in rules if rid != rule_id),
+                    )
+                    removed.append(group_id)
+                    changed = True
+            if changed:
+                self._write_raw(
+                    {gid: self._storage(item) for gid, item in groups.items()}
+                )
+                self._groups = groups
+            return tuple(sorted(added)), tuple(sorted(removed))
+
+    # -- konfigurációs csomag --------------------------------------------------
+
+    def export_records(self) -> dict:
+        """Az aktuális csoportok tárolási alakja a konfigurációs csomaghoz."""
+        self._load()
+        with self._lock:
+            return {
+                group_id: self._storage(group)
+                for group_id, group in self._groups.items()
+            }
+
+    def validate_import_records(self, raw) -> dict[str, Group]:
+        """A groups szakasz szigorú, írás nélküli ellenőrzése."""
+        if not isinstance(raw, dict):
+            raise GroupStoreError("a groups szakasz JSON-objektum kell")
+        groups: dict[str, Group] = {}
+        for raw_id, item in raw.items():
+            if not isinstance(raw_id, str):
+                raise GroupStoreError("érvénytelen csoport-azonosító")
+            try:
+                clean_id = _clean_id(raw_id, "csoport-azonosító")
+            except ValueError as exc:
+                raise GroupStoreError(str(exc)) from exc
+            if clean_id != raw_id:
+                raise GroupStoreError(
+                    f"a csoport-azonosító nem normalizált: {raw_id!r}"
+                )
+            raw_rules = item.get("rules") if isinstance(item, dict) else None
+            if isinstance(raw_rules, list) and LEGACY_ADMIN_RULE_ID in raw_rules:
+                raise GroupStoreError(
+                    f"{clean_id}: a fenntartott szabály-azonosító nem importálható"
+                )
+            groups[clean_id] = self._parse(clean_id, item)
+        return groups
+
+    def replace_all(self, groups: dict[str, Group]) -> None:
+        """A teljes csoporttár cseréje (a hívó már ellenőrizte)."""
+        with self._locked():
+            self._write_raw({
+                group_id: self._storage(group)
+                for group_id, group in groups.items()
+            })
+            self._groups = dict(groups)
+            self._loaded = True
+
+    def reset(self) -> None:
+        """A fájl törlése és a memóriabeli csoporttár ürítése."""
+        with self._locked():
+            try:
+                os.unlink(self.path)
+            except FileNotFoundError:
+                pass
+            self._groups = {}
+            self._loaded = True
+
 
 # --------------------------------------------------------------------- tűzfal
 
@@ -2828,6 +3639,12 @@ class Firewall:
     és allowed_input_udp), a munkamenet TTL-jével. A host SSH is ilyen
     közönséges TCP 22-es host-engedély; nincs külön SSH-halmaz.
     """
+
+    # A port proxy input céljának felderítése (a tesztek felülírják).
+    proc_net = "/proc/net"
+    sysctl_conf = "/proc/sys/net/ipv4/conf"
+    # Az utoljára telepített port proxy szabályok (None: még semmi).
+    portproxy_applied: list[str] | None = None
 
     def __init__(
         self,
@@ -3011,15 +3828,19 @@ class Firewall:
         self._run_script("\n".join(lines) + "\n")
 
     def _custom_rules(
-        self, preauth=(), block=(), *, include_block: bool = True
+        self, preauth=(), block=(), *, include_block: bool = True,
+        tunnel_public=(),
     ) -> list[str]:
         """A pre-auth és blokk szabályok renderelése (végrehajtás nélkül).
 
-        A pre-auth cél üresen minden célra érvényes. A LAN felől a megadott
-        célra/portra nyit; a WAN felől csak DNAT-olt (publikált) forgalomra,
-        így nem válik nyílt továbbítóvá. A blokk a LAN felől induló forgalmat
-        dobja el, a 80-as TCP-portnál a portál-átirányítás előtt is. A
-        kikapcsolt (``enabled: false``) bejegyzések kimaradnak.
+        A pre-auth cél üresen minden célra érvényes. A ``forward`` irány a
+        LAN felől a megadott célra/portra nyit; a WAN felől csak DNAT-olt
+        (publikált) forgalomra, így nem válik nyílt továbbítóvá. Az ``input``
+        irány a portálgép saját portjait nyitja meg a bejelentkezés előtt,
+        ezért közvetlenül fogadja el a csomagot (nincs forward-jelölés és
+        ``preauth_nat`` sem). A blokk a LAN felől induló forgalmat dobja el,
+        a 80-as TCP-portnál a portál-átirányítás előtt is. A kikapcsolt
+        (``enabled: false``) bejegyzések kimaradnak.
 
         ``include_block=False`` esetén a blokk-szabályok nem renderelődnek:
         a hívó a meglévő block/block_nat láncokat érintetlenül hagyja.
@@ -3028,9 +3849,32 @@ class Firewall:
         """
         block = _enabled_custom_entries(block) if include_block else []
         preauth = _enabled_custom_entries(preauth)
-        if preauth and not self.lan_if:
+        forward_preauth: list[dict] = []
+        input_preauth: list[dict] = []
+        for entry in preauth:
+            # A régi bejegyzésekben nincs direction: azok forward irányúak.
+            direction = str(entry.get("direction") or "forward").strip()
+            if direction not in ("forward", "input"):
+                raise FirewallError("érvénytelen pre-auth irány")
+            if direction == "input":
+                input_preauth.append(entry)
+            else:
+                forward_preauth.append(entry)
+        if forward_preauth and not self.lan_if:
             raise FirewallError(
                 "pre-auth szabály csak ismert LAN interfésszel alkalmazható"
+            )
+        # Az input irány a host felé menő forgalom: a bejelentkezés előtt
+        # elérhető host-portok a lényeg, ezért a WAN is számít. Ismert
+        # interfész nélkül a szabály nem lenne biztonságosan korlátozható.
+        input_ifaces: list[str] = []
+        for name in (self.lan_if, self.wan_if):
+            if name and name not in input_ifaces:
+                input_ifaces.append(name)
+        if input_preauth and not input_ifaces:
+            raise FirewallError(
+                "input pre-auth szabály csak ismert LAN vagy WAN interfésszel "
+                "alkalmazható"
             )
         lines: list[str] = []
         # A tiltott forrás a pre-auth lánc első szabályaként is eldobódik.
@@ -3041,6 +3885,12 @@ class Firewall:
         # felülír; csak a portál és a DHCP marad elérhető.
         lines.append(
             f"add rule inet {self.table} preauth "
+            f"ip saddr @{self.ban_set} drop"
+        )
+        # Az input pre-auth lánc első szabálya ugyanígy a tiltott forrásokat
+        # dobja el, hogy a tiltás a host-portokat se nyissa meg.
+        lines.append(
+            f"add rule inet {self.table} preauth_input "
             f"ip saddr @{self.ban_set} drop"
         )
         for entry in block:
@@ -3070,7 +3920,7 @@ class Firewall:
                     f"add rule inet {self.table} block_nat meta l4proto tcp "
                     f"ct original ip daddr {dst} ct original proto-dst 80 drop"
                 )
-        for entry in preauth:
+        for entry in forward_preauth:
             proto = str(entry.get("proto", "")).strip().lower()
             if proto not in ("tcp", "udp"):
                 raise FirewallError("érvénytelen pre-auth bejegyzés")
@@ -3118,6 +3968,60 @@ class Firewall:
                     f"add rule inet {self.table} preauth_nat {nat} "
                     f"ct mark set {PREAUTH_CT_MARK}"
                 )
+        # A nyilvános, port-módú alagút-szolgáltatások WAN-only pre-auth
+        # elfogadásai. A bejegyzések minden alkalmazáskor az élő
+        # beállításokból származnak, ezért a szolgáltatás letiltásakor,
+        # törlésekor vagy priváttá válásakor automatikusan eltűnnek. A LAN
+        # irányt szándékosan nem nyitjuk meg, és a ``related`` szabályt
+        # cél nélkül nem tesszük be (az minden kapcsolódó forgalmat
+        # átengedne). A blokk lánc a base chainben előbb fut, ezért a
+        # tiltás továbbra is felülírja ezeket.
+        if tunnel_public and not self.wan_if:
+            raise FirewallError(
+                "nyilvános alagút-szolgáltatás csak ismert WAN "
+                "interfésszel alkalmazható"
+            )
+        for proto, port in tunnel_public:
+            if proto not in ("tcp", "udp") or isinstance(port, bool) \
+                    or not isinstance(port, int) or not 1 <= port <= 65535:
+                raise FirewallError("érvénytelen nyilvános alagút-port")
+            match = (
+                f"meta l4proto {proto} "
+                f"ct original proto-dst {port}"
+            )
+            lines.append(
+                f'add rule inet {self.table} preauth iifname "{self.wan_if}" '
+                f"ct status dnat {match} "
+                f"meta mark set {self.fwd_mark} accept"
+            )
+            lines.append(
+                f"add rule inet {self.table} preauth ct state established "
+                f"{match} meta mark set {self.fwd_mark} accept"
+            )
+        for entry in input_preauth:
+            proto = str(entry.get("proto", "")).strip().lower()
+            if proto not in ("tcp", "udp"):
+                raise FirewallError("érvénytelen pre-auth bejegyzés")
+            ports = self._custom_ports(entry, "pre-auth")
+            dst = self._custom_dst(entry, "pre-auth")
+            match = f"meta l4proto {proto}"
+            if dst:
+                match += f" ct original ip daddr {dst}"
+            match += f" ct original proto-dst {self._port_set(ports)}"
+            # A csomag a host felé megy, ezért közvetlen accept kell: nincs
+            # forward-jelölés, és a DNAT-os WAN-feltétel sem értelmezhető.
+            # A forrás a bejelentkezés előtt bármely ismert interfész lehet.
+            for iface in input_ifaces:
+                lines.append(
+                    f'add rule inet {self.table} preauth_input '
+                    f'iifname "{iface}" {match} accept'
+                )
+            # A meglévő kapcsolat a szabály élettartama alatt is maradjon
+            # életben (a host_service_* őrök ezt a láncot nem érik el).
+            lines.append(
+                f"add rule inet {self.table} preauth_input "
+                f"ct state established {match} accept"
+            )
         return lines
 
     def _portproxy_ifaces(self, value) -> list[str]:
@@ -3136,6 +4040,45 @@ class Firewall:
             if name not in names:
                 names.append(name)
         return names
+
+    def _portproxy_loopback(self, proto: str, port: int, ifaces) -> str | None:
+        """A loopback DNAT címe, ha a cél csak loopbacken figyel."""
+        address = loopback_target(proto, port, self.proc_net)
+        if address and route_localnet(ifaces, self.sysctl_conf):
+            return address
+        return None
+
+    def _portproxy_input_nat(self, proto: str, port: int, ifaces) -> str:
+        """Input proxy NAT: a csak 127.0.0.1-en figyelő célhoz DNAT, különben redirect.
+
+        A redirect a bejövő interfész elsődleges címére (WAN/LAN IP) ír át;
+        a csak loopbacken figyelő szolgáltatás (például a Docker
+        127.0.0.1-re publikált portja) ott nem válaszol, a kernel RST-t
+        küld. A 127.0.0.1-es DNAT-hoz a route_localnet kell az
+        interfészeken; a sablon loopback_guard lánca minden más, kívülről
+        érkező 127/8 csomagot eldob.
+        """
+        address = self._portproxy_loopback(proto, port, ifaces)
+        if address:
+            return f"dnat ip to {address}:{port}"
+        return f"redirect to :{port}"
+
+    def portproxy_localnet_blocked(self, entries) -> list[tuple[str, int]]:
+        """(protokoll, hallgató port): loopback cél, de a route_localnet ki van kapcsolva."""
+        blocked = []
+        for entry in _enabled_custom_entries(entries):
+            if entry.get("type") != "input":
+                continue
+            proto = entry.get("proto")
+            try:
+                ifaces = self._portproxy_ifaces(entry.get("ifaces"))
+            except FirewallError:
+                continue
+            for p in (("tcp", "udp") if proto == "both" else (proto,)):
+                if loopback_target(p, entry.get("target_port"), self.proc_net) \
+                        and not route_localnet(ifaces, self.sysctl_conf):
+                    blocked.append((p, entry.get("listen_port")))
+        return sorted(blocked)
 
     def _portproxy_rules(self, entries=()) -> list[str]:
         """A port proxy láncok szabályai (végrehajtás nélkül).
@@ -3179,9 +4122,9 @@ class Firewall:
                 ):
                     raise FirewallError("érvénytelen port proxy cél")
                 nat = f"dnat ip to {address}:{target}"
-            else:
-                nat = f"redirect to :{target}"
             for p in (("tcp", "udp") if proto == "both" else (proto,)):
+                if kind == "input":
+                    nat = self._portproxy_input_nat(p, target, ifaces)
                 lines.append(
                     f"add rule inet {table} portproxy_nat {iif} "
                     f"fib daddr type local {p} dport {listen} {nat}"
@@ -3225,6 +4168,68 @@ class Firewall:
                 )
         return lines
 
+    def _tunnel_snat_rules(self, tunnels=()) -> list[str]:
+        """Az alagút-szolgáltatások forrásmaszkolása a dropjak0 felé.
+
+        A forward engedélyt nem itt adjuk: a szintetikus bejegyzések a
+        forward lánc meglévő ``ct original`` szabályán mennek át, tehát a
+        portál-engedély ugyanúgy kötelező, mint a port proxynál. (Aki
+        nyilvános alagutat akar, explicit pre-auth szabályt ad.)
+        """
+        entries = tunnel_proxy_entries(tunnels)
+        if not entries:
+            return []
+        lines: list[str] = []
+        for entry in entries:
+            address = entry.get("target_ip")
+            target = entry.get("target_port")
+            for proto in (
+                ("tcp", "udp") if entry.get("proto") == "both"
+                else (entry.get("proto"),)
+            ):
+                # Az ügynök allowed-ips-e csak 10.77.0.0/24, ezért a kliens
+                # forrását a szerver címére kell maszkolni, különben a
+                # válasz nem az alagúton jön vissza.
+                lines.append(
+                    f"add rule inet {self.table} portproxy_snat "
+                    f"meta l4proto {proto} ct status dnat "
+                    f"ct original proto-dst {entry.get('listen_port')} "
+                    f"ip daddr {address} {proto} dport {target} masquerade"
+                )
+        return lines
+
+    def _tunnel_rules(self, tunnels=()) -> list[str]:
+        """Az alagút fogadó szabályai, ha van bekapcsolt ügynök.
+
+        A WireGuard UDP-port mellett a portál szinkron-végpontja is
+        elérhető az alagútból; a portál input lánca egyébként csak a LAN és
+        a portál-hálózat felől engedné, ezért az ügynök nem tudna
+        szolgáltatáslistát frissíteni.
+        """
+        if not isinstance(tunnels, dict):
+            return []
+        if not any(
+            agent.get("enabled") for agent in tunnels.get("agents", [])
+        ):
+            return []
+        if not self.wan_if:
+            raise FirewallError(
+                "alagút csak ismert WAN interfésszel alkalmazható"
+            )
+        port = tunnels.get("port")
+        if isinstance(port, bool) or not isinstance(port, int) \
+                or not 1 <= port <= 65535:
+            raise FirewallError("érvénytelen WireGuard port")
+        return [
+            f"add rule inet {self.table} {TUNNEL_CHAIN} "
+            f'iifname "{self.wan_if}" '
+            f"udp dport {port} accept",
+            f"add rule inet {self.table} {TUNNEL_CHAIN} "
+            f'iifname "{tunnel_mod.INTERFACE}" '
+            f"ip saddr {settings_store.TUNNEL_SUBNET} "
+            f"tcp dport {settings_store.PORTAL_PORT} accept",
+        ]
+
     def docker_published_ports(self) -> set[tuple[str, int]]:
         """A Docker által DNAT-olt (publikált) host portok; hiba: üres."""
         try:
@@ -3253,7 +4258,7 @@ class Firewall:
 
     def replace_custom(
         self, preauth=(), block=(), *, keep_block: bool = False,
-        port_proxies=(),
+        port_proxies=(), tunnels=None,
     ) -> None:
         """A pre-auth/blokk láncok cseréje egyetlen nft-tranzakcióban.
 
@@ -3267,14 +4272,28 @@ class Firewall:
         block/block_nat láncok érintetlenek maradnak (hibás beállításfájl
         esetén az utolsó ismert jó blokkolás nem tűnhet el).
 
-        A port proxy láncok ugyanebben a tranzakcióban cserélődnek.
+        A port proxy láncok ugyanebben a tranzakcióban cserélődnek. Az
+        alagút-szolgáltatások szintetikus forward bejegyzésként kerülnek a
+        port proxy szabályok közé; a WireGuard UDP-port külön láncba.
         """
-        rules = self._custom_rules(
-            preauth, block, include_block=not keep_block
-        ) + self._portproxy_rules(port_proxies)
+        tunnels = tunnels or {}
+        synthetic = tunnel_proxy_entries(tunnels)
+        proxy_rules = self._portproxy_rules(
+            list(port_proxies) + synthetic
+        )
+        tunnel_rules = self._tunnel_rules(tunnels)
+        rules = (
+            self._custom_rules(
+                preauth, block, include_block=not keep_block,
+                tunnel_public=tunnel_public_preauth(tunnels),
+            )
+            + self._tunnel_snat_rules(tunnels)
+            + tunnel_rules + proxy_rules
+        )
         chains = (
-            ("preauth", "preauth_nat") if keep_block else CUSTOM_CHAINS
-        ) + PORTPROXY_CHAINS
+            ("preauth", "preauth_input", "preauth_nat")
+            if keep_block else CUSTOM_CHAINS
+        ) + PORTPROXY_CHAINS + (TUNNEL_CHAIN,)
         lines = [
             f"add chain inet {self.table} {chain}" for chain in chains
         ]
@@ -3283,6 +4302,7 @@ class Firewall:
         )
         lines.extend(rules)
         self._run_script("\n".join(lines) + "\n")
+        self.portproxy_applied = proxy_rules
 
     def _delete_quiet(self, set_name: str, element: str) -> None:
         """Nem létező elem törlése nem hiba (a kernel már lejárattathatta)."""
@@ -3326,10 +4346,13 @@ class Firewall:
             self.input_udp_set if direction == "input" else self.udp_set
         )
         elements: list[tuple[str, str]] = []
-        for port in ports.tcp:
-            elements.append((tcp_set, f"{address} . {port}"))
-        for port in ports.udp:
-            elements.append((udp_set, f"{address} . {port}"))
+        # Az nft interval halmazban a szomszédos portok egy tartományként
+        # kerülnek be; így egy 8000-8100 szabály egyetlen elemet ad.
+        for set_name, values in ((tcp_set, ports.tcp), (udp_set, ports.udp)):
+            for low, high in merge_port_intervals(values):
+                elements.append(
+                    (set_name, f"{address} . {format_port_interval(low, high)}")
+                )
         if ports.icmp:
             if direction == "input":
                 raise FirewallError(
@@ -3518,8 +4541,196 @@ class Firewall:
                 isinstance(port, int) and not isinstance(port, bool)
                 and 1 <= port <= 65535
             ):
-                values.append(f"{address} . {port}")
+                high = entry.get("port_end", port)
+                if not isinstance(high, int) or isinstance(high, bool):
+                    high = port
+                values.append(
+                    f"{address} . {format_port_interval(port, high)}"
+                )
         return values
+
+    def _list_port_elements_locked(
+        self, set_name: str, address: str
+    ) -> list[tuple[int, int, int]] | None:
+        """Az IP élő ``(lo, hi, hátralévő)`` portintervallumai.
+
+        Listázási vagy értelmezési hiba esetén ``None``; ilyenkor a hívó a
+        régi, pontos elemtörlésre esik vissza. A hiányzó halmaz üres.
+        """
+        result = self._run(
+            ["-j", "list", "set", "inet", self.table, set_name],
+            check=False,
+        )
+        if result.returncode != 0:
+            detail = result.stderr.decode("utf-8", "replace")
+            if "No such file or directory" in detail or "does not exist" in detail:
+                return []
+            return None
+        try:
+            entries = self.parse_set_json(result.stdout, set_name)
+        except FirewallError as exc:
+            self.log(
+                f"[tűzfal] a(z) {set_name} halmaz listázása nem sikerült: {exc}"
+            )
+            return None
+        intervals: list[tuple[int, int, int]] = []
+        for entry in entries:
+            if entry.get("address") != address:
+                continue
+            port = entry.get("port")
+            high = entry.get("port_end", port)
+            if not isinstance(port, int) or isinstance(port, bool):
+                continue
+            if not isinstance(high, int) or isinstance(high, bool):
+                high = port
+            expires = entry.get("expires_in")
+            remaining = (
+                int(expires)
+                if isinstance(expires, int) and not isinstance(expires, bool)
+                else 1
+            )
+            intervals.append((port, high, max(1, remaining)))
+        return intervals
+
+    def _grant_port_elements_locked(
+        self,
+        set_name: str,
+        address: str,
+        desired: list[tuple[int, int]],
+        ttl: int,
+    ) -> None:
+        """Portintervallumok kiadása átfedésbiztos módon.
+
+        A meglévő elemhez nem nyúlunk vakon: csak a még nem fedett részeket
+        adjuk hozzá, az átfedő meglévő elem timeoutját pedig a hosszabbikra
+        állítjuk. Így egy szűkebb új grant nem törli a nagyobb, aktív
+        tartományt, és nem rövidíti le a hosszabb élettartamot.
+        """
+        existing = self._list_port_elements_locked(set_name, address)
+        if existing is None:
+            # Listázási hiba: nem törhetünk vakon, mert az egy nagyobb,
+            # aktív tartományt is elvenne. Az új elem hozzáadása biztonságos
+            # (az átfedő intervallumot a kernel kezeli); ha nem sikerül, a
+            # grant hibát ad, de a meglévő hozzáférés megmarad.
+            self.log(
+                f"[tűzfal] a(z) {set_name} halmaz listázása nem sikerült; "
+                "a meglévő elemek érintetlenek maradnak"
+            )
+            existing = []
+        elif not existing:
+            # Nincs mit egyeztetni: a régi viselkedés (törlés, majd
+            # hozzáadás) indítja újra a timeoutot, és a tesztek is ezt
+            # várják.
+            for low, high in desired:
+                self._delete_quiet(
+                    set_name, f"{address} . {format_port_interval(low, high)}"
+                )
+            lines = [
+                f"add element inet {self.table} {set_name} "
+                f"{{ {address} . {format_port_interval(low, high)} "
+                f"timeout {ttl}s }}\n"
+                for low, high in desired
+            ]
+            self._run_script("".join(lines))
+            return
+        # Csak az átfedő elemeket írjuk újra. A fedetlen részeket a
+        # korábbi, rövidebb timeoutjukkal tartjuk meg; az új grant csak a
+        # saját tartományában hosszabbít. Így egy szűkebb grant nem ad
+        # hosszabb élettartamot a nagyobb, régi tartomány többi portjának.
+        affected = [
+            (low, high, remaining)
+            for low, high, remaining in existing
+            if self._intervals_overlap(desired, low, high)
+        ]
+        if not affected:
+            additions = self._merge_interval_list(desired)
+            lines = [
+                f"add element inet {self.table} {set_name} "
+                f"{{ {address} . {format_port_interval(low, high)} "
+                f"timeout {ttl}s }}\n"
+                for low, high in additions
+            ]
+            if lines:
+                self._run_script("".join(lines))
+            return
+        # Az érintett elemek határait és az új tartomány határait
+        # szegmenshatárokká alakítjuk.
+        points: set[int] = set()
+        for low, high in desired:
+            points.update((low, high + 1))
+        for low, high, _remaining in affected:
+            points.update((low, high + 1))
+        ordered = sorted(points)
+        segments: list[tuple[int, int, int]] = []
+        for start, end in zip(ordered, ordered[1:]):
+            low, high = start, end - 1
+            old = max(
+                (
+                    remaining
+                    for el_low, el_high, remaining in affected
+                    if el_low <= low and high <= el_high
+                ),
+                default=0,
+            )
+            wanted = any(
+                des_low <= low and high <= des_high
+                for des_low, des_high in desired
+            )
+            if not old and not wanted:
+                continue
+            timeout = max(old, ttl) if wanted else old
+            if timeout <= 0:
+                continue
+            if segments and segments[-1][1] + 1 == low \
+                    and segments[-1][2] == timeout:
+                segments[-1] = (segments[-1][0], high, timeout)
+            else:
+                segments.append((low, high, timeout))
+        for low, high, _remaining in affected:
+            self._delete_quiet(
+                set_name, f"{address} . {format_port_interval(low, high)}"
+            )
+        lines = [
+            f"add element inet {self.table} {set_name} "
+            f"{{ {address} . {format_port_interval(low, high)} "
+            f"timeout {timeout}s }}\n"
+            for low, high, timeout in segments
+        ]
+        if lines:
+            self._run_script("".join(lines))
+
+    @staticmethod
+    def _merge_interval_list(
+        intervals: list[tuple[int, int]]
+    ) -> list[tuple[int, int]]:
+        merged: list[tuple[int, int]] = []
+        for low, high in sorted(intervals):
+            if merged and low <= merged[-1][1] + 1:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], high))
+            else:
+                merged.append((low, high))
+        return merged
+
+    @staticmethod
+    def _intervals_overlap(
+        intervals: list[tuple[int, int]], low: int, high: int
+    ) -> bool:
+        return any(lo <= high and low <= hi for lo, hi in intervals)
+
+    @staticmethod
+    def _subtract_intervals(
+        intervals: list[tuple[int, int]], low: int, high: int
+    ) -> list[tuple[int, int]]:
+        result: list[tuple[int, int]] = []
+        for lo, hi in intervals:
+            if high < lo or hi < low:
+                result.append((lo, hi))
+                continue
+            if lo < low:
+                result.append((lo, low - 1))
+            if hi > high:
+                result.append((high + 1, hi))
+        return result
 
     def _input_delete_elements(self, address: str) -> list[tuple[str, str]]:
         """A tiltandó IP összes host (input) halmazeleme."""
@@ -3586,15 +4797,37 @@ class Firewall:
                 self._bind_mac_locked(address, ttl)
             else:
                 self._unbind_mac_locked(address)
-            # Újra hozzáadás előtt töröljük: így a timeout újraindul.
+            port_sets = {
+                self.tcp_set, self.udp_set,
+                self.input_tcp_set, self.input_udp_set,
+            }
+            grouped: dict[str, list[tuple[int, int]]] = {}
+            simple: list[tuple[str, str]] = []
             for set_name, element in elements:
+                if set_name in port_sets and " . " in element:
+                    _address, spec = element.split(" . ", 1)
+                    low, high = _parse_port_token(spec, set_name)
+                    grouped.setdefault(set_name, []).append((low, high))
+                else:
+                    simple.append((set_name, element))
+            # A teljes és ICMP elemeknél marad a törlés + hozzáadás, mert
+            # azoknak nincs átfedő tartományuk.
+            for set_name, element in simple:
                 self._delete_quiet(set_name, element)
-            script = "".join(
-                f"add element inet {self.table} {set_name} "
-                f"{{ {element} timeout {ttl}s }}\n"
-                for set_name, element in elements
-            )
-            self._run_script(script)
+            if simple:
+                script = "".join(
+                    f"add element inet {self.table} {set_name} "
+                    f"{{ {element} timeout {ttl}s }}\n"
+                    for set_name, element in simple
+                )
+                self._run_script(script)
+            for set_name, desired in grouped.items():
+                self._grant_port_elements_locked(
+                    set_name,
+                    address,
+                    self._merge_interval_list(desired),
+                    ttl,
+                )
 
     def ban(self, ip: str, ttl: int, set_name: str = "") -> None:
         """Forrás-IP felvétele a ``banned_v4`` (vagy a megadott) halmazba.
@@ -3651,10 +4884,36 @@ class Firewall:
         self.sync_bans(elements, self.proxy_ban_set)
 
     def _delete_elements(self, elements: list[tuple[str, str]]) -> None:
-        """Elemek törlése; a nem létező elem nem hiba."""
+        """Elemek törlése; a nem létező elem nem hiba.
+
+        A portos halmazokban a törlés intervallumtudatos: ha egy kért
+        tartomány csak részben fed egy meglévő elemet, az elemet kivágjuk,
+        és a megmaradó részt a hátralévő timeouttal visszatesszük. Így egy
+        részleges visszavonás nem törli a másik aktív szabály nagyobb
+        tartományát. Listázási hiba esetén a régi, pontos törlés fut.
+        """
         errors: list[str] = []
+        port_sets = {
+            self.tcp_set, self.udp_set,
+            self.input_tcp_set, self.input_udp_set,
+        }
+        grouped: dict[tuple[str, str], list[tuple[int, int]]] = {}
         with self._lock:
             for set_name, element in elements:
+                if set_name in port_sets and " . " in element:
+                    address, spec = element.split(" . ", 1)
+                    try:
+                        low, high = _parse_port_token(spec, set_name)
+                    except ValueError:
+                        try:
+                            self._delete_quiet(set_name, element)
+                        except FirewallError as exc:
+                            errors.append(str(exc))
+                        continue
+                    grouped.setdefault((set_name, address), []).append(
+                        (low, high)
+                    )
+                    continue
                 try:
                     self._delete_quiet(set_name, element)
                 except FirewallError as exc:
@@ -3663,8 +4922,51 @@ class Firewall:
                     if set_name == self.mac_set:
                         address = element.split(" . ", 1)[0]
                         self._macs.pop(address, None)
+            for (set_name, address), intervals in grouped.items():
+                try:
+                    self._delete_port_elements_locked(
+                        set_name, address, intervals
+                    )
+                except FirewallError as exc:
+                    errors.append(str(exc))
         if errors:
             raise FirewallError("; ".join(errors))
+
+    def _delete_port_elements_locked(
+        self,
+        set_name: str,
+        address: str,
+        cuts: list[tuple[int, int]],
+    ) -> None:
+        """Portintervallumok törlése, a részben fedett elemek megőrzésével."""
+        existing = self._list_port_elements_locked(set_name, address)
+        if existing is None or not existing:
+            for low, high in self._merge_interval_list(cuts):
+                self._delete_quiet(
+                    set_name, f"{address} . {format_port_interval(low, high)}"
+                )
+            return
+        merged_cuts = self._merge_interval_list(cuts)
+        survivors: list[tuple[int, int, int]] = []
+        for low, high, remaining in existing:
+            parts = [(low, high)]
+            for cut_low, cut_high in merged_cuts:
+                parts = self._subtract_intervals(parts, cut_low, cut_high)
+            if parts == [(low, high)]:
+                continue
+            self._delete_quiet(
+                set_name, f"{address} . {format_port_interval(low, high)}"
+            )
+            for part_low, part_high in parts:
+                survivors.append((part_low, part_high, remaining))
+        if survivors:
+            script = "".join(
+                f"add element inet {self.table} {set_name} "
+                f"{{ {address} . {format_port_interval(low, high)} "
+                f"timeout {max(1, remaining)}s }}\n"
+                for low, high, remaining in survivors
+            )
+            self._run_script(script)
 
     def revoke(self, ip: str, ports: Ports) -> None:
         if not is_ipv4(ip):
@@ -3789,27 +5091,59 @@ class Firewall:
         udp = clean(udp_ports)
         if not tcp and not udp:
             return
-        lines: list[str] = []
-        if tcp:
-            lines.append(
-                f"add element inet {self.table} {self.service_tcp_set} "
-                f"{{ {', '.join(str(port) for port in tcp)} }}"
-            )
-        if udp:
-            lines.append(
-                f"add element inet {self.table} {self.service_udp_set} "
-                f"{{ {', '.join(str(port) for port in udp)} }}"
-            )
+        desired = {
+            self.service_tcp_set: merge_port_intervals(tcp),
+            self.service_udp_set: merge_port_intervals(udp),
+        }
         with self._lock:
-            self._run_script("\n".join(lines) + "\n")
+            lines: list[str] = []
+            for set_name, intervals in desired.items():
+                if not intervals:
+                    continue
+                # Az interval halmazban az átfedő hozzáadás hibát ad, ezért
+                # csak a még nem fedett részeket adjuk hozzá.
+                existing = self._list_service_ranges_locked(set_name)
+                additions = list(intervals)
+                if existing is not None:
+                    for low, high in existing:
+                        additions = self._subtract_intervals(
+                            additions, low, high
+                        )
+                additions = self._merge_interval_list(additions)
+                if additions:
+                    lines.append(
+                        f"add element inet {self.table} {set_name} "
+                        f"{{ {', '.join(format_port_interval(low, high) for low, high in additions)} }}"
+                    )
+            if lines:
+                self._run_script("\n".join(lines) + "\n")
 
     @staticmethod
-    def _service_port(raw_element) -> int | None:
-        """Egy ``inet_service`` halmazelem portszáma, ha értelmezhető."""
+    def _service_interval(raw_element) -> tuple[int, int] | None:
+        """Egy ``inet_service`` halmazelem ``(lo, hi)`` párja."""
         value = raw_element
-        if isinstance(value, dict):
-            body = value.get("elem", value)
-            value = body.get("val") if isinstance(body, dict) else body
+        for _unused in range(3):
+            if not isinstance(value, dict):
+                break
+            if isinstance(value.get("range"), list):
+                pair = value["range"]
+                if (
+                    len(pair) == 2
+                    and all(
+                        isinstance(item, int) and not isinstance(item, bool)
+                        for item in pair
+                    )
+                ):
+                    low, high = pair
+                    if 1 <= low <= high <= 65535:
+                        return low, high
+                return None
+            if "elem" in value:
+                value = value["elem"]
+            elif "val" in value:
+                value = value["val"]
+            else:
+                return None
         if isinstance(value, bool):
             return None
         if isinstance(value, int):
@@ -3821,7 +5155,7 @@ class Firewall:
             port = int(text)
         else:
             return None
-        return port if 1 <= port <= 65535 else None
+        return (port, port) if 1 <= port <= 65535 else None
 
     @staticmethod
     def parse_service_set_json(raw: bytes | str, set_name: str) -> set[int]:
@@ -3861,10 +5195,20 @@ class Firewall:
             if not isinstance(raw_elements, list):
                 continue
             for raw_element in raw_elements:
-                port = Firewall._service_port(raw_element)
-                if port is not None:
-                    ports.add(port)
+                interval = Firewall._service_interval(raw_element)
+                if interval is not None:
+                    ports.update(range(interval[0], interval[1] + 1))
         return ports
+
+    @staticmethod
+    def parse_service_set_intervals_json(
+        raw: bytes | str, set_name: str
+    ) -> list[tuple[int, int]]:
+        """Egy ``inet_service`` halmaz intervallumai, összevonva."""
+        ports = Firewall.parse_service_set_json(raw, set_name)
+        return Firewall._merge_interval_list(
+            [(port, port) for port in sorted(ports)]
+        )
 
     def _list_service_ports_locked(self, set_name: str) -> set[int] | None:
         """A host_service_* halmaz elemei; listázási hiba esetén ``None``.
@@ -3898,6 +5242,44 @@ class Firewall:
             return None
         try:
             return self.parse_service_set_json(result.stdout, set_name)
+        except FirewallError as exc:
+            self.log(
+                f"[tűzfal] a(z) {set_name} halmaz kimenete nem értelmezhető: "
+                f"{exc}"
+            )
+            return None
+
+    def _list_service_ranges_locked(
+        self, set_name: str
+    ) -> list[tuple[int, int]] | None:
+        """A host_service_* halmaz intervallumai; hiba esetén ``None``."""
+        try:
+            result = self._run(
+                ["-j", "list", "set", "inet", self.table, set_name],
+                check=False,
+            )
+        except FirewallError as exc:
+            self.log(
+                f"[tűzfal] a(z) {set_name} halmaz listázása nem sikerült: "
+                f"{exc}"
+            )
+            return None
+        detail = result.stderr.decode("utf-8", "replace").strip()
+        if result.returncode != 0:
+            if (
+                "No such file or directory" in detail
+                or "does not exist" in detail
+            ):
+                return []
+            self.log(
+                f"[tűzfal] a(z) {set_name} halmaz listázása nem sikerült: "
+                f"{detail or result.returncode}"
+            )
+            return None
+        try:
+            return self.parse_service_set_intervals_json(
+                result.stdout, set_name
+            )
         except FirewallError as exc:
             self.log(
                 f"[tűzfal] a(z) {set_name} halmaz kimenete nem értelmezhető: "
@@ -4026,13 +5408,13 @@ class Firewall:
         ref_tcp = {int(port) for port in referenced_tcp or ()}
         ref_udp = {int(port) for port in referenced_udp or ()}
         with self._lock:
-            members_tcp = self._list_service_ports_locked(
+            ranges_tcp = self._list_service_ranges_locked(
                 self.service_tcp_set
             )
-            members_udp = self._list_service_ports_locked(
+            ranges_udp = self._list_service_ranges_locked(
                 self.service_udp_set
             )
-            if members_tcp is None or members_udp is None:
+            if ranges_tcp is None or ranges_udp is None:
                 reason = (
                     "a host_service_* halmaz listázása nem sikerült, "
                     "a takarítás kimaradt"
@@ -4041,6 +5423,11 @@ class Firewall:
                 self.log(f"[tűzfal] {reason}")
                 self._audit_prune(audit, reason)
                 return summary
+            # Csak az egyportos elemeket takarítjuk: egy tartomány részleges
+            # törlése a teljes elemet vinné, ezért azok biztonságosan
+            # megmaradnak (ez csak szigorúbb, nem nyit hozzáférést).
+            members_tcp = {low for low, high in ranges_tcp if low == high}
+            members_udp = {low for low, high in ranges_udp if low == high}
             candidates_tcp = members_tcp - ref_tcp
             candidates_udp = members_udp - ref_udp
             candidates = candidates_tcp | candidates_udp
@@ -4166,6 +5553,7 @@ class Firewall:
         value = body.get("val")
         address: str | None = None
         port: int | None = None
+        port_end: int | None = None
         mac: str | None = None
         if isinstance(value, str):
             address = value
@@ -4180,7 +5568,22 @@ class Firewall:
                 if len(concat) > 1:
                     second = concat[1]
                     if isinstance(second, dict):
-                        second = second.get("val")
+                        if (
+                            isinstance(second.get("range"), list)
+                            and len(second["range"]) == 2
+                        ):
+                            low, high = second["range"]
+                            if (
+                                isinstance(low, int)
+                                and not isinstance(low, bool)
+                                and isinstance(high, int)
+                                and not isinstance(high, bool)
+                            ):
+                                port = low
+                                port_end = high
+                            second = None
+                        else:
+                            second = second.get("val")
                     if isinstance(second, int) and not isinstance(second, bool):
                         port = second
                     elif isinstance(second, str):
@@ -4212,6 +5615,12 @@ class Firewall:
             "expires_in": expires_in,
             "timeout": timeout_value,
         }
+        if port_end is not None and (
+            port is None or not (1 <= port_end <= 65535) or port_end <= port
+        ):
+            port_end = None
+        if port_end is not None:
+            entry["port_end"] = port_end
         if mac is not None:
             entry["mac"] = mac
         return entry
@@ -4550,9 +5959,15 @@ def conntrack_flush_removed(
 
 
 def _port_proxy_keys(entries) -> dict[tuple[str, int], tuple]:
-    """Bekapcsolt bejegyzések: (protokoll, hallgató port) -> a hatásuk."""
+    """Bekapcsolt bejegyzések: (protokoll, hallgató port) -> a hatásuk.
+
+    A szintetikus alagút-bejegyzések kimaradnak: nem felhasználói port
+    proxyk, ezért nem adnak figyelmeztetést és conntrack-törlést sem.
+    """
     keys: dict[tuple[str, int], tuple] = {}
     for entry in _enabled_custom_entries(entries):
+        if entry.get("_tunnel"):
+            continue
         proto = entry.get("proto")
         for p in (("tcp", "udp") if proto == "both" else (proto,)):
             keys[(p, entry.get("listen_port"))] = (
@@ -4610,13 +6025,13 @@ def conntrack_flush_port(proto: str, port: int, audit=None) -> bool:
     return True
 
 
-def listening_ports(proc_dir: str = "/proc/net") -> set[tuple[str, int]]:
-    """A hoston figyelő TCP (LISTEN) és kötött UDP portok.
+def _proc_sockets(proc_dir: str = "/proc/net"):
+    """(protokoll, helyi cím, port) a hoston figyelő TCP / kötött UDP socketekre.
 
     A portál host-hálózaton fut, ezért a /proc/net a host socketjeit
-    mutatja (például a docker-proxy publikált portjait is).
+    mutatja (például a docker-proxy publikált portjait is). A cím
+    ``ipaddress`` objektum; a v4-leképezett IPv6 cím IPv4-ként jön.
     """
-    ports: set[tuple[str, int]] = set()
     for proto in ("tcp", "udp"):
         for name in (proto, proto + "6"):
             try:
@@ -4630,29 +6045,90 @@ def listening_ports(proc_dir: str = "/proc/net") -> set[tuple[str, int]]:
                         if fields[3] != ("0A" if proto == "tcp" else "07"):
                             continue
                         try:
-                            ports.add((proto, int(fields[1].rsplit(":", 1)[1], 16)))
-                        except (IndexError, ValueError):
+                            raw, port = fields[1].rsplit(":", 1)
+                            # A kernel a címet 32 bites, natív sorrendű
+                            # szavakként írja ki.
+                            packed = b"".join(
+                                struct.pack("=I", int(raw[i:i + 8], 16))
+                                for i in range(0, len(raw), 8)
+                            )
+                            address = ipaddress.ip_address(packed)
+                            port_number = int(port, 16)
+                        except (ValueError, struct.error):
                             continue
+                        if address.version == 6 and address.ipv4_mapped:
+                            address = address.ipv4_mapped
+                        yield proto, address, port_number
             except OSError:
                 continue
-    return ports
 
 
-def port_proxy_warnings(entries, listening, published) -> list[dict]:
+def listening_ports(proc_dir: str = "/proc/net") -> set[tuple[str, int]]:
+    """A hoston figyelő TCP (LISTEN) és kötött UDP portok."""
+    return {(proto, port) for proto, _, port in _proc_sockets(proc_dir)}
+
+
+def loopback_target(proto: str, port: int, proc_dir: str = "/proc/net") -> str | None:
+    """A csak loopbacken figyelő célport címe, egyébként None.
+
+    Ha a porton csak 127.0.0.0/8 címre kötött socket van, a ``redirect``
+    (a bejövő interfész elsődleges címe) üres portra érkezne: ilyenkor a
+    DNAT célja ez a loopback cím. Wildcard (0.0.0.0 / ::) vagy más
+    címre kötött socket mellett marad a redirect: a wildcard UDP-szerver
+    a válasz forráscímét az útvonalból választja (az interfész címe), ezért
+    127.0.0.1-re DNAT-olva a válasz nem illeszkedne a conntrackre.
+    """
+    addresses = set()
+    for sock_proto, address, sock_port in _proc_sockets(proc_dir):
+        if sock_proto != proto or sock_port != port:
+            continue
+        if address.version == 6:
+            if address.is_unspecified:
+                return None  # a dual-stack [::] az IPv4-et is fogadja
+            continue  # a ::1 / más IPv6 cím az IPv4 proxyt nem érinti
+        addresses.add(address)
+    if not addresses or not all(address.is_loopback for address in addresses):
+        return None
+    preferred = ipaddress.IPv4Address("127.0.0.1")
+    return str(preferred if preferred in addresses else min(addresses))
+
+
+def route_localnet(ifaces, conf_dir: str = "/proc/sys/net/ipv4/conf") -> bool:
+    """Engedi-e a kernel a 127/8 célt a megadott interfészeken.
+
+    A kernel az ``all`` és az interfész értékét VAGY-kapcsolattal veszi.
+    A portál konténerében a /proc/sys csak olvasható; a hoston a
+    docker/setup-host.sh állítja be.
+    """
+    def enabled(name: str) -> bool:
+        try:
+            with open(os.path.join(conf_dir, name, "route_localnet"),
+                      encoding="ascii") as fh:
+                return fh.read().strip() == "1"
+        except OSError:
+            return False
+
+    return enabled("all") or all(enabled(name) for name in ifaces)
+
+
+def port_proxy_warnings(entries, listening, published, localnet=()) -> list[dict]:
     """Figyelmeztetés a bekapcsolt bejegyzések már foglalt hallgató portjaira.
 
     Nem tiltás: a proxy DNAT-je (-101) a Docker DNAT-je (-100) előtt fut,
     ezért a beállított interfészeken a proxy nyer, és a helyi socket / a
-    Docker-publikálás onnan nem érhető el.
+    Docker-publikálás onnan nem érhető el. A ``localnet`` (protokoll,
+    hallgató port) párjainál a cél csak loopbacken figyel, de a hoston ki
+    van kapcsolva a route_localnet, ezért a proxy nem érheti el.
     """
     warnings: list[dict] = []
     for proto, port in sorted(_port_proxy_keys(entries)):
         docker = (proto, port) in published
         listen = (proto, port) in listening
-        if docker or listen:
+        blocked = (proto, port) in localnet
+        if docker or listen or blocked:
             warnings.append(
                 {"proto": proto, "port": port, "docker": docker,
-                 "listen": listen}
+                 "listen": listen, "localnet": blocked}
             )
     return warnings
 
@@ -4740,6 +6216,9 @@ def group_firewall_snapshot(
                 "direction": direction,
                 **entry_time(entry),
             }
+            if isinstance(entry.get("port_end"), int) \
+                    and not isinstance(entry["port_end"], bool):
+                item["port_end"] = entry["port_end"]
             bucket(normalize_ip(address))[field].append(item)
 
     for row in sessions:
@@ -4778,7 +6257,11 @@ def group_firewall_snapshot(
                 direction = entry.get("direction")
                 if direction not in ("forward", "input"):
                     direction = "forward"
-                actual[direction].add(entry["port"])
+                low = entry["port"]
+                high = entry.get("port_end", low)
+                if not isinstance(high, int) or isinstance(high, bool):
+                    high = low
+                actual[direction].update(range(low, high + 1))
         expected_tcp = {"forward": set(), "input": set()}
         expected_udp = {"forward": set(), "input": set()}
         expected_icmp = False
@@ -4876,24 +6359,21 @@ def group_firewall_snapshot(
             # megkülönböztethető legyen.
             parts: list[str] = []
             for direction, prefix in (("forward", ""), ("input", "Host ")):
-                tcp_values = sorted(
-                    entry["port"] for entry in item["tcp"]
-                    if (entry.get("direction") or "forward") == direction
-                )
-                if tcp_values:
-                    parts.append(
-                        f"{prefix}TCP "
-                        + ", ".join(str(port) for port in tcp_values)
-                    )
-                udp_values = sorted(
-                    entry["port"] for entry in item["udp"]
-                    if (entry.get("direction") or "forward") == direction
-                )
-                if udp_values:
-                    parts.append(
-                        f"{prefix}UDP "
-                        + ", ".join(str(port) for port in udp_values)
-                    )
+                for field, proto in (("tcp", "TCP"), ("udp", "UDP")):
+                    values: set[int] = set()
+                    for entry in item[field]:
+                        if (entry.get("direction") or "forward") != direction:
+                            continue
+                        low = entry["port"]
+                        high = entry.get("port_end", low)
+                        if not isinstance(high, int) or isinstance(high, bool):
+                            high = low
+                        values.update(range(low, high + 1))
+                    if values:
+                        parts.append(
+                            f"{prefix}{proto} "
+                            + format_ports(values, dash="–")
+                        )
             if actual_icmp:
                 parts.append("ICMP")
             ports_label = " · ".join(parts) or "Nincs port"
@@ -5730,6 +7210,59 @@ class UserStore:
                 self._write_raw(data)
             return changed
 
+    def set_rule_membership(
+        self, rule_id: str, user_ids
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """A szabály közvetlen felhasználói kiosztásainak beállítása.
+
+        Minden users.json-beli felhasználónál pontosan akkor szerepel a
+        szabály, ha a kért halmazban van. A többi szabály, a csoporttagság
+        és a többi mező változatlan. Egyetlen atomikus fájlírással dolgozik
+        (0600), és (hozzáadott, eltávolított) felhasználóneveket ad vissza.
+        """
+        if not isinstance(rule_id, str) or not rule_id.strip():
+            raise UserStoreError("hiányzó szabály-azonosító")
+        rule_id = rule_id.strip()
+        if rule_id == LEGACY_ADMIN_RULE_ID:
+            raise UserStoreError(
+                "a fenntartott szabály-azonosító nem rendelhető hozzá"
+            )
+        wanted = set(_clean_str_list(user_ids, "users", maximum=512))
+        with self._locked():
+            data = self._read_raw()
+            missing = wanted - {
+                name for name, item in data.items()
+                if isinstance(item, dict)
+            }
+            if missing:
+                raise UserStoreError(
+                    f"ismeretlen felhasználó: {', '.join(sorted(missing))}"
+                )
+            added: list[str] = []
+            removed: list[str] = []
+            changed = False
+            for name, item in list(data.items()):
+                if not isinstance(item, dict):
+                    continue
+                values = item.get("rules")
+                if not isinstance(values, list):
+                    values = []
+                if name in wanted and rule_id not in values:
+                    item["rules"] = [*values, rule_id]
+                    data[name] = item
+                    added.append(name)
+                    changed = True
+                elif name not in wanted and rule_id in values:
+                    item["rules"] = [
+                        rid for rid in values if rid != rule_id
+                    ]
+                    data[name] = item
+                    removed.append(name)
+                    changed = True
+            if changed:
+                self._write_raw(data)
+            return tuple(sorted(added)), tuple(sorted(removed))
+
     def remove(self, name: str) -> bool:
         with self._locked():
             data = self._read_raw()
@@ -5738,6 +7271,145 @@ class UserStore:
             del data[name]
             self._write_raw(data)
             return True
+
+    # -- konfigurációs csomag --------------------------------------------------
+
+    @staticmethod
+    def _clean_import_records(raw) -> dict:
+        """A users szakasz szigorú, írás nélküli ellenőrzése."""
+        if not isinstance(raw, dict):
+            raise UserStoreError("a users szakasz JSON-objektum kell")
+        clean: dict[str, dict] = {}
+        for name, item in raw.items():
+            if not isinstance(name, str) or not USERNAME_RE.match(name):
+                raise UserStoreError(f"érvénytelen felhasználónév: {name!r}")
+            if not isinstance(item, dict):
+                raise UserStoreError(f"{name}: hibás felhasználói bejegyzés")
+            try:
+                salt = bytes.fromhex(str(item["salt"]))
+                digest = bytes.fromhex(str(item["hash"]))
+                iterations = int(item.get("iterations", PBKDF2_ITERATIONS))
+                created = int(item.get("created", 0) or 0)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise UserStoreError(f"{name}: hibás jelszó-adat") from exc
+            # 5 millió feletti iteráció már szolgáltatásmegtagadás lenne.
+            if len(salt) != 16 or len(digest) != 32 or not 1 <= iterations <= 5_000_000:
+                raise UserStoreError(f"{name}: hibás jelszó-adat")
+            if created < 0:
+                raise UserStoreError(f"{name}: hibás létrehozási idő")
+            role = item.get("role", ROLE_USER)
+            if role not in (ROLE_USER, ROLE_ADMIN):
+                raise UserStoreError(f"{name}: érvénytelen szerepkör")
+            flags = {}
+            for key in ("enabled", "must_change_password", "pending"):
+                value = item.get(key, False)
+                if not isinstance(value, bool):
+                    raise UserStoreError(f"{name}: a(z) {key} mező igaz/hamis kell")
+                flags[key] = value
+            if "totp_required" in item:
+                if not isinstance(item["totp_required"], bool):
+                    raise UserStoreError(
+                        f"{name}: a totp_required mező igaz/hamis kell"
+                    )
+            secret = item.get("totp_secret", "")
+            if not isinstance(secret, str):
+                raise UserStoreError(f"{name}: hibás TOTP-titok")
+            if secret:
+                try:
+                    _totp_key(secret)
+                except ValueError as exc:
+                    raise UserStoreError(f"{name}: hibás TOTP-titok") from exc
+            try:
+                last_step = int(item.get("totp_last_step", -1))
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise UserStoreError(f"{name}: hibás TOTP-lépés") from exc
+            if last_step < -1:
+                raise UserStoreError(f"{name}: hibás TOTP-lépés")
+            recovery_raw = item.get("totp_recovery", [])
+            if not isinstance(recovery_raw, list) or any(
+                not isinstance(value, str) or not _TOTP_RECOVERY_RE.match(value)
+                for value in recovery_raw
+            ):
+                raise UserStoreError(f"{name}: hibás helyreállítási kód")
+            email_raw = item.get("email", "")
+            email = normalize_email(email_raw, strict=False)
+            if email_raw and not email:
+                raise UserStoreError(f"{name}: érvénytelen e-mail-cím")
+            if flags["pending"] and (
+                role != ROLE_USER or flags["enabled"] or flags["must_change_password"]
+            ):
+                raise UserStoreError(
+                    f"{name}: a függő fiók nem lehet aktív admin"
+                )
+            rules = item.get("rules")
+            if rules is not None:
+                if not isinstance(rules, list):
+                    raise UserStoreError(f"{name}: a rules mező lista kell")
+                try:
+                    rules = list(_clean_str_list(
+                        rules, f"{name}.rules", _SERVICE_ID_RE, maximum=64
+                    ))
+                except ValueError as exc:
+                    raise UserStoreError(f"{name}: {exc}") from exc
+                if LEGACY_ADMIN_RULE_ID in rules:
+                    raise UserStoreError(
+                        f"{name}: a fenntartott szabály-azonosító nem importálható"
+                    )
+            record = {
+                "salt": salt.hex(),
+                "hash": digest.hex(),
+                "iterations": iterations,
+                "algo": "pbkdf2-sha256",
+                "created": created,
+                "role": role,
+                "enabled": flags["enabled"],
+                "must_change_password": flags["must_change_password"],
+                "pending": flags["pending"],
+                "email": email,
+            }
+            if rules is not None:
+                record["rules"] = rules
+            if "totp_secret" in item:
+                record["totp_secret"] = secret
+            if "totp_required" in item:
+                record["totp_required"] = item["totp_required"]
+            if "totp_last_step" in item:
+                record["totp_last_step"] = last_step
+            if "totp_recovery" in item:
+                record["totp_recovery"] = list(recovery_raw)
+            provisioned = item.get("provisioned_from", "")
+            if provisioned:
+                if not isinstance(provisioned, str) or len(provisioned) > 128:
+                    raise UserStoreError(f"{name}: hibás provisioning-jelölő")
+                record["provisioned_from"] = provisioned
+            clean[name] = record
+        return clean
+
+    def export_records(self) -> dict:
+        """Az aktuális felhasználói rekordok a konfigurációs csomaghoz."""
+        return self._clean_import_records(self._read_raw())
+
+    def validate_import_records(self, raw) -> dict:
+        return self._clean_import_records(raw)
+
+    def replace_all(self, raw) -> None:
+        """A teljes felhasználói nyilvántartás cseréje."""
+        clean = self._clean_import_records(raw)
+        with self._locked():
+            self._write_raw(clean)
+        with self._lock:
+            self._cache = None
+            self._cache_key = None
+
+    def reset(self) -> None:
+        """A fájl törlése és a memóriabeli állapot ürítése (factory reset)."""
+        with self._lock, self._locked():
+            try:
+                os.unlink(self.path)
+            except FileNotFoundError:
+                pass
+            self._cache = None
+            self._cache_key = None
 
 
 _PROVISION_SALT = b"hatarvedelem-provision-v1"
@@ -6891,7 +8563,7 @@ class SessionManager:
         # elutasítjuk a csonkítás helyett.
         for rule in rules:
             grants = rule.grants
-            if not rule.domains and (not grants or all(
+            if not rule.session_domains and (not grants or all(
                 not (part.tcp or part.udp or part.icmp or part.full)
                 for part in grants
             )):
@@ -6914,7 +8586,10 @@ class SessionManager:
                 )
 
         rule_parts = tuple(
-            RuleSelection(rule.id, rule.label, rule.grants, rule.domains)
+            RuleSelection(
+                rule.id, rule.label, rule.grants, rule.session_domains,
+                rule.service_refs, rule.service_domains,
+            )
             for rule in rules
         )
         new_union = union_grants(
@@ -7496,6 +9171,11 @@ def verify_turnstile(token: str, remote_ip: str) -> tuple[bool, str]:
 class Gateway:
     """A HTTP-réteg által használt komponensek egy csomagban."""
 
+    # A beállítás-telepítés és a port proxy frissítő sorosítása: a frissítő
+    # ne írhassa vissza egy régi snapshot szabályait egy admin mentés után.
+    _custom_lock = threading.RLock()
+    PORTPROXY_REFRESH_SECONDS = 10
+
     def __init__(
         self,
         users: UserStore | None = None,
@@ -7535,15 +9215,27 @@ class Gateway:
                 "certs",
             )
         )
-        # A domain szabály csak létező proxy-bejegyzésre hivatkozhat.
+        # A WireGuard-alagút (dropjak0) a host hálózati névterében; a
+        # beállításváltozás után a signature egyezése esetén nem nyúl hozzá.
+        self.tunnels = tunnel_mod.TunnelManager(logger=log)
+        # Az ügynök-szinkron (GET /api/tunnel/config) ügynökönkénti
+        # minimális időköze; a token soha nem kerül ide vagy a naplóba.
+        self.tunnel_sync_times: dict[str, float] = {}
+        self.tunnel_sync_lock = threading.Lock()
+        # A domain szabály csak létező proxy-bejegyzésre vagy domaines
+        # alagút-szolgáltatásra hivatkozhat.
         if getattr(self.rules, "domain_names", False) is None:
-            self.rules.domain_names = lambda: {
-                f"{route['name']}.{route['root']}"
-                for route in self.settings.snapshot().get("proxy_routes", [])
-            }
+            self.rules.domain_names = self._domain_names
             self.rules.legacy_proxy_domain = getattr(
                 self.settings, "legacy_proxy_domain", ""
             )
+        # A szolgáltatás-szabály hivatkozásait a beállításokból oldjuk fel
+        # minden híváskor, hogy a leképzés módosítása azonnal érvényesüljön.
+        # A visszahívás kötése az első lusta _load() előtt történik.
+        self.rules.service_ports = self._service_ports_for
+        # A domain-módú szolgáltatások hostnevét ugyanebből az indexből
+        # oldjuk fel; a szolgáltatás-szabály így domain-hozzáférést is adhat.
+        self.rules.service_domains = self._service_domains_for
         self.drops = (
             drops if drops is not None else droplog.DropLogService()
         )
@@ -7615,6 +9307,56 @@ class Gateway:
         except Exception as exc:  # a naplózás soha ne blokkoljon
             log(f"[napló] {event} írása nem sikerült: {exc}")
 
+    def _domain_names(self) -> set[str]:
+        """A domain szabály által hivatkozható teljes hostnevek.
+
+        A proxy-bejegyzések mellett az engedélyezett alagút-ügynökök domaines
+        szolgáltatásai is ide tartoznak, hogy hozzájuk privát domain szabály
+        készülhessen. A letiltott szolgáltatás domainje is látszik: a
+        törlés/letiltás életciklus-korlátja így tud rá hivatkozni.
+        """
+        settings = self.settings.snapshot()
+        names = {
+            settings_store.route_host(route)
+            for route in settings.get("proxy_routes", [])
+        }
+        tunnels = settings.get("tunnels")
+        if isinstance(tunnels, dict):
+            for agent in tunnels.get("agents", []):
+                if not isinstance(agent, dict):
+                    continue
+                for service in agent.get("services", []):
+                    if not isinstance(service, dict):
+                        continue
+                    domain = service.get("domain", "")
+                    if domain:
+                        names.add(domain)
+        return names
+
+    def _service_entry_for(self, ref: str):
+        """Egy szolgáltatás-hivatkozás index-bejegyzése a beállításokból.
+
+        ``None``, ha a hivatkozás ismeretlen vagy a szolgáltatás/ügynök le
+        van tiltva. Így a szabály mentése és a döntéskori ellenőrzés is
+        fail-closed módon viselkedik.
+        """
+        tunnels = self.settings.snapshot().get("tunnels")
+        if not isinstance(tunnels, dict):
+            return None
+        return settings_store.tunnel_service_index(tunnels).get(ref)
+
+    def _service_ports_for(self, ref: str):
+        """Egy szolgáltatás-hivatkozás feloldott portjai a beállításokból."""
+        return self._service_entry_for(ref)
+
+    def _service_domains_for(self, ref: str):
+        """Egy szolgáltatás-hivatkozás feloldott domainje.
+
+        Ugyanaz az index-bejegyzés, mint a portoknál; a ``domain`` mező
+        csak domain-módú szolgáltatásnál nem üres.
+        """
+        return self._service_entry_for(ref)
+
     def effective_rules(self, user_name: str):
         record = self.users.record(user_name)
         if record is None:
@@ -7634,8 +9376,34 @@ class Gateway:
             )
         except (AccessError, KeyError, ValueError):
             return False
+        if rule.service_refs:
+            # A szolgáltatás-szabály (vagy az ilyet tartalmazó gyűjtő)
+            # engedélye a döntés pillanatában is a jelenlegi alagút-
+            # leképzésből számoljon. Hiányzó/letiltott hivatkozás vagy
+            # eltérő portok esetén a munkamenet nem maradhat érvényben.
+            resolver = getattr(self.rules, "service_ports", None)
+            tcp: set[int] = set()
+            udp: set[int] = set()
+            for ref in rule.service_refs:
+                resolved = resolver(ref) if resolver is not None else None
+                if resolved is None:
+                    return False
+                tcp.update(resolved.get("tcp") or ())
+                udp.update(resolved.get("udp") or ())
+            if (tuple(sorted(tcp)), tuple(sorted(udp))) != (
+                rule.service_tcp, rule.service_udp
+            ):
+                return False
+            # A hallgató portok változatlanok lehetnek, miközben a célhost
+            # vagy a célport átirányítása más engedélyt jelentene: a teljes
+            # leképezés-aláírást is össze kell vetni (fail-closed).
+            if self.rules.service_signature(rule.service_refs) != (
+                rule.service_signature
+            ):
+                return False
         return (
-            current.grants == rule.grants and current.domains == rule.domains
+            current.grants == rule.grants
+            and current.session_domains == rule.session_domains
         )
 
     def _host_ports_healthy(self) -> bool:
@@ -8032,56 +9800,58 @@ class Gateway:
         Előbb ürítünk, aztán alkalmazunk. Ha az alkalmazás nem sikerül, a
         pre-auth engedélyek nem maradnak életben (fail-closed).
         """
-        snapshot = snapshot if snapshot is not None else self.settings.snapshot()
-        invalid = bool(snapshot.get("error"))
-        if invalid:
-            log(
-                "[beállítások] FIGYELEM: a beállításfájl hibás; a pre-auth "
-                "lista ürül, a blokk láncok utolsó ismert jó tartalma "
-                f"változatlan marad: {snapshot['error']}"
-            )
-            self._write_audit(
-                "settings_invalid", reason=str(snapshot["error"])
-            )
-        try:
+        with Gateway._custom_lock:
+            snapshot = snapshot if snapshot is not None else self.settings.snapshot()
+            invalid = bool(snapshot.get("error"))
             if invalid:
-                # Fail-closed: a pre-auth engedélyek nem maradhatnak életben
-                # egy hibás fájlból, de a blokkolás nem tűnhet el.
-                self.firewall.replace_custom((), (), keep_block=True)
-            else:
-                self.firewall.replace_custom(
-                    snapshot.get("preauth", []), snapshot.get("block", []),
-                    port_proxies=snapshot.get("port_proxies", []),
+                log(
+                    "[beállítások] FIGYELEM: a beállításfájl hibás; a pre-auth "
+                    "lista ürül, a blokk láncok utolsó ismert jó tartalma "
+                    f"változatlan marad: {snapshot['error']}"
                 )
-        except FirewallError as exc:
+                self._write_audit(
+                    "settings_invalid", reason=str(snapshot["error"])
+                )
+            try:
+                if invalid:
+                    # Fail-closed: a pre-auth engedélyek nem maradhatnak életben
+                    # egy hibás fájlból, de a blokkolás nem tűnhet el.
+                    self.firewall.replace_custom((), (), keep_block=True)
+                else:
+                    self.firewall.replace_custom(
+                        snapshot.get("preauth", []), snapshot.get("block", []),
+                        port_proxies=snapshot.get("port_proxies", []),
+                        tunnels=snapshot.get("tunnels", {}),
+                    )
+            except FirewallError as exc:
+                log(
+                    "[beállítások] HIBA: a testreszabott szabályok telepítése "
+                    f"nem sikerült: {exc}"
+                )
+                self._write_audit(
+                    "firewall_error", operation="apply_custom", reason=str(exc)
+                )
+                raise
+            active_preauth = (
+                [] if invalid else _enabled_custom_entries(
+                    snapshot.get("preauth", [])
+                )
+            )
+            active_block = (
+                [] if invalid else _enabled_custom_entries(
+                    snapshot.get("block", [])
+                )
+            )
+            active_proxies = (
+                [] if invalid else _enabled_custom_entries(
+                    snapshot.get("port_proxies", [])
+                )
+            )
             log(
-                "[beállítások] HIBA: a testreszabott szabályok telepítése "
-                f"nem sikerült: {exc}"
+                f"[beállítások] {len(active_preauth)} pre-auth, "
+                f"{len(active_block)} blokk, {len(active_proxies)} port proxy "
+                "bejegyzés"
             )
-            self._write_audit(
-                "firewall_error", operation="apply_custom", reason=str(exc)
-            )
-            raise
-        active_preauth = (
-            [] if invalid else _enabled_custom_entries(
-                snapshot.get("preauth", [])
-            )
-        )
-        active_block = (
-            [] if invalid else _enabled_custom_entries(
-                snapshot.get("block", [])
-            )
-        )
-        active_proxies = (
-            [] if invalid else _enabled_custom_entries(
-                snapshot.get("port_proxies", [])
-            )
-        )
-        log(
-            f"[beállítások] {len(active_preauth)} pre-auth, "
-            f"{len(active_block)} blokk, {len(active_proxies)} port proxy "
-            "bejegyzés"
-        )
 
     def _restore_custom_settings(self, old: dict) -> None:
         """A korábbi pre-auth/blokk állapot visszaállítása egy tranzakcióban."""
@@ -8093,6 +9863,7 @@ class Gateway:
             self.firewall.replace_custom(
                 old.get("preauth", []), old.get("block", []),
                 port_proxies=old.get("port_proxies", []),
+                tunnels=old.get("tunnels", {}),
             )
 
     def apply_settings(self, new_data: dict) -> None:
@@ -8101,45 +9872,110 @@ class Gateway:
         Sorrend: nft alkalmazás -> atomi fájlírás. Ha a mentés nem sikerül,
         a korábbi nft-szabályokat visszaállítjuk.
         """
-        old = self.settings.snapshot()
-        try:
-            self.firewall.replace_custom(
-                new_data.get("preauth", []), new_data.get("block", []),
-                port_proxies=new_data.get("port_proxies", []),
-            )
-        except FirewallError:
+        with Gateway._custom_lock:
+            old = self.settings.snapshot()
+            tunnels = new_data.get("tunnels", {})
             try:
-                self._restore_custom_settings(old)
-            except FirewallError as rollback_exc:
-                log(
-                    "[beállítások] a korábbi szabályok visszaállítása sem "
-                    f"sikerült: {rollback_exc}"
+                self.firewall.replace_custom(
+                    new_data.get("preauth", []), new_data.get("block", []),
+                    port_proxies=new_data.get("port_proxies", []),
+                    tunnels=tunnels,
                 )
-                self._write_audit(
-                    "firewall_error",
-                    operation="rollback_apply",
-                    reason=str(rollback_exc),
-                )
-            raise
-        try:
-            self.settings.commit(new_data)
-        except Exception:
+            except FirewallError:
+                try:
+                    self._restore_custom_settings(old)
+                except FirewallError as rollback_exc:
+                    log(
+                        "[beállítások] a korábbi szabályok visszaállítása sem "
+                        f"sikerült: {rollback_exc}"
+                    )
+                    self._write_audit(
+                        "firewall_error",
+                        operation="rollback_apply",
+                        reason=str(rollback_exc),
+                    )
+                raise
             try:
-                self._restore_custom_settings(old)
-            except FirewallError as rollback_exc:
-                log(
-                    "[beállítások] mentési hiba után a korábbi szabályok "
-                    f"visszaállítása nem sikerült: {rollback_exc}"
+                self.settings.commit(new_data)
+            except Exception:
+                try:
+                    self._restore_custom_settings(old)
+                except FirewallError as rollback_exc:
+                    log(
+                        "[beállítások] mentési hiba után a korábbi szabályok "
+                        f"visszaállítása nem sikerült: {rollback_exc}"
+                    )
+                    self._write_audit(
+                        "firewall_error",
+                        operation="rollback_commit",
+                        reason=str(rollback_exc),
+                    )
+                raise
+            # A WireGuard-szinkron a mentés után fut; hibája csak az
+            # állapotban látszik, a beállításmentést nem rontja el.
+            try:
+                self.tunnels.reconcile(tunnels)
+            except Exception as exc:
+                log(f"[alagút] a WireGuard szinkron nem sikerült: {exc}")
+
+    def refresh_port_proxies(self) -> list[tuple[str, int]]:
+        """Újrarenderelés, ha egy input cél kötése vagy a route_localnet változott.
+
+        A loopback / redirect döntés a cél socketjétől függ, amely a portál
+        után is elindulhat (bootkor a Docker később publikál). Változásnál a
+        láncok atomikusan cserélődnek, és az érintett hallgató portok
+        conntrack-bejegyzései törlődnek (a régi NAT-kötésű UDP-folyam
+        különben a kliens forgalmával életben maradna).
+        """
+        with Gateway._custom_lock:
+            old = self.firewall.portproxy_applied
+            snapshot = self.settings.snapshot()
+            if old is None or snapshot.get("error"):
+                return []
+            try:
+                new = self.firewall._portproxy_rules(
+                    list(snapshot.get("port_proxies", []))
+                    + tunnel_proxy_entries(snapshot.get("tunnels", {}))
                 )
-                self._write_audit(
-                    "firewall_error",
-                    operation="rollback_commit",
-                    reason=str(rollback_exc),
-                )
-            raise
+            except FirewallError:
+                return []
+            if new == old:
+                return []
+            self._apply_custom_settings(snapshot)
+        changed = sorted({
+            (match.group(1), int(match.group(2)))
+            for line in set(old) ^ set(new) if " portproxy_nat " in line
+            for match in [re.search(r" (tcp|udp) dport (\d+) ", line)] if match
+        })
+        log(
+            "[port proxy] a cél kötése változott, szabályok frissítve: "
+            + ", ".join(f"{p}/{n}" for p, n in changed)
+        )
+        for proto, port in changed:
+            conntrack_flush_port(proto, port, audit=self.audit)
+        return changed
+
+    def _portproxy_loop(self) -> None:
+        while not self._portproxy_stop.wait(self.PORTPROXY_REFRESH_SECONDS):
+            try:
+                self.refresh_port_proxies()
+            except Exception as exc:  # a szál soha ne haljon meg
+                log(f"[port proxy] frissítési hiba: {exc}")
 
     def start(self) -> None:
         self.sessions.start_reaper()
+        # A WireGuard-interfész és a peerek szinkronja induláskor. A hiba
+        # csak a státuszban látszik; a portál elindul.
+        try:
+            self.tunnels.reconcile(
+                self.settings.snapshot().get("tunnels", {})
+            )
+        except Exception as exc:
+            log(f"[alagút] az induló WireGuard szinkron nem sikerült: {exc}")
+        self._portproxy_stop = threading.Event()
+        threading.Thread(
+            target=self._portproxy_loop, name="hv-portproxy", daemon=True
+        ).start()
         try:
             fail2ban_enabled = bool(self.fail2ban.snapshot().get("enabled"))
         except Exception:
@@ -8159,6 +9995,9 @@ class Gateway:
             log(f"[drop log] nem aktív: {status.get('error') or 'ismeretlen ok'}")
 
     def stop(self) -> None:
+        stop_event = getattr(self, "_portproxy_stop", None)
+        if stop_event is not None:
+            stop_event.set()
         try:
             self.drops.stop()
         except Exception as exc:  # a leállás ne akadjon el a naplózón

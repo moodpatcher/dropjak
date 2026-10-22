@@ -1331,6 +1331,22 @@ class Fail2ban:
                 self._save_locked(raise_errors=False)
         return removed
 
+    def reset(self) -> None:
+        """A tiltásállapot és a fájl törlése (factory reset)."""
+        with self._lock:
+            self._bans.clear()
+            self._proxy_bans.clear()
+            self._attempts.clear()
+            self._drop_events.clear()
+            self._proxy_hits.clear()
+            self._orphan_unbans.clear()
+            try:
+                os.unlink(self.path)
+            except FileNotFoundError:
+                pass
+            self._disk_stamp = None
+            self._error = ""
+
     def configure(self, data: dict) -> dict:
         """Beállítások módosítása.
 

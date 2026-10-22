@@ -1,0 +1,82 @@
+# Dropjak home tunnel agent - working example.
+#
+# The playit.gg model: the agent and the service are on EXACTLY THE SAME single
+# normal Docker bridge network (here: playitgg-net), and the agent resolves the
+# container name over the built-in DNS. There is no `internal: true`, no
+# separate egress network, no host-gateway entry, and the service does not need
+# to be moved. The agent can reach only containers on this network.
+#
+#   cp compose.example.yml compose.yml
+#   docker compose -f compose.yml up -d --build
+#
+# The downloaded installer generates a different compose file: it offers the
+# host's bridge networks in a numbered list and connects the agent to EXACTLY
+# the one selected. In a non-interactive install, DROPJAK_NETWORK=<network>
+# decides, otherwise the default (playitgg-net if present) is used;
+# DROPJAK_NO_PROMPT=1 forces non-interactive mode. The installer also derives
+# the agent's container_name from the bundled agent.json as
+#   dropjak-tunnel-agent-<label-slug>-<id>
+# (e.g. dropjak-tunnel-agent-home-home-1): the label makes the container
+# recognisable, the id keeps it unique when two agents share a label. Use a
+# separate install directory per agent (the agent-state volume and the
+# container-name file are per-directory) and replace the example name below
+# with your own. In the cloud, the target is the container name and port:
+#   {"id": "p8080", "label": "Web", "proto": "tcp", "tunnel_port": 8080,
+#    "target": "web:80", "enabled": true}
+#
+# Only the agent gets NET_ADMIN, in its own namespace. The host Docker socket
+# is not in either container.
+
+services:
+  web:
+    image: nginx:alpine
+    restart: unless-stopped
+    networks:
+      - playitgg-net
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx
+      - /var/run
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  tunnel-agent:
+    build: .
+    image: dropjak-tunnel-agent:1
+    # Example only: the installer derives and writes the real name.
+    container_name: dropjak-tunnel-agent-home-home-1
+    restart: unless-stopped
+    networks:
+      - playitgg-net
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /run
+      - /tmp
+    sysctls:
+      net.ipv4.ip_forward: 1
+    volumes:
+      # agent.json is placed next to the compose file (the installer sets it to
+      # 0600).
+      - ./agent.json:/etc/dropjak/agent.json:ro,Z
+      - agent-state:/var/lib/dropjak-agent
+
+networks:
+  # The single network: the existing playitgg-net shared with the playit.gg
+  # agent. The compose file does not create a new one, it joins this one.
+  # The installer asks for the network interactively (and uses only that one);
+  # if your network has a different name, edit the `name:` value (or pass the
+  # DROPJAK_NETWORK=<network> installer override).
+  playitgg-net:
+    external: true
+    name: "playitgg-net"
+
+volumes:
+  agent-state:

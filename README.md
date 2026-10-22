@@ -18,24 +18,54 @@ bottom-right corner.
 
 ## How it works
 
-- The `forward` chain is fail-closed; the portal is the only publicly
-  reachable service.
+- The `forward` chain is fail-closed. By default the portal is the only
+  publicly reachable service; with `HV_PROXY=1`, Caddy also listens on TCP
+  80/443 for the configured root domains (see
+  [Subdomain proxy](#subdomain-proxy-caddy)).
 - A correct password alone does not grant network access. Sign-in is
   two-phase: authenticate, then explicitly select one or more access rules
   and a TTL.
+- Several assigned rules can be selected at once, up to 16
+  (`limits.max_rules` in `GET /api/status`). **Select all** on the "Choose
+  an access rule" screen selects every assigned rule up to that limit, and
+  **Max** sets the duration to the largest whole number of hours the current
+  selection allows (the minimum of the global `max_ttl` and the selected
+  rules' `max_ttl`).
 - Account requests are optional and off by default. When an admin enables
   **Fiókkérelmek** in **Admin → Settings**, the login page shows **Fiók
   kérése** and a visitor can submit a username, password and email after the
   usual captcha. This creates a pending, disabled account with no rules or
   access; an admin approves or rejects it in **Admin → Users**. The email is
   stored as contact data only and is never sent or logged.
-  See [docs/account-requests.md](docs/account-requests.md).
-- Admins can duplicate any stored rule and combine existing individual
-  rules into a **collection rule** whose TCP/UDP/ICMP permissions are the
-  union of its members. The full-access identifier reserved by pre-3.0.0
-  releases is not a rule and cannot be created, assigned, duplicated or
-  used as a member. Collections can be assigned to users and groups like
-  any other rule. See [docs/rule-collections.md](docs/rule-collections.md).
+  See [Account requests](DOKUMENTACIO.md#fiokigenyles).
+- Admins can duplicate any stored rule and combine existing individual rules
+  into a **collection rule** whose grants are the union of its members':
+  forward TCP/UDP/ICMP ports, input (host) ports, and proxy hostnames from
+  domain rules or domain-mode service rules. Service rules can be members
+  too. The full-access identifier reserved by pre-3.0.0 releases is not a
+  rule and cannot be created, assigned, duplicated or used as a member.
+  Collections can be assigned to users and groups like any other rule. See
+  [Collection rules and rule duplication](DOKUMENTACIO.md#gyujtoszabalyok).
+- A **service rule** grants access through one or more tunnel services
+  instead of listing ports. Referenced port-mode services contribute their
+  WAN listen ports as forward access. Referenced domain-mode services
+  contribute only their hostname through the portal/Caddy proxy and open no
+  nftables or WAN port. A mixed service rule still opens the port services
+  and admits the domains. Disabling the agent or service fails closed: the
+  referencing rule's resolved grants are recalculated and its sessions are
+  revoked.
+- **Tunnel agents** reach a private Docker network behind NAT through a
+  WireGuard tunnel, without opening a port at home. The portal creates the
+  `dropjak0` interface in the host namespace (server `10.77.0.1`, agents
+  `10.77.0.2`–`10.77.0.254`) and opens UDP 51820 (default) on the WAN only
+  while an enabled agent exists. Port-mode services are DNATed like port
+  proxies, so a client still needs an authorized session and a matching rule
+  unless the service is marked public. A **domain-mode service** is served
+  by Caddy under a configured root domain: the portal assigns its internal
+  tunnel port automatically (41000–60999), and no WAN port or DNAT is
+  created. It is selectable both in a **Domain (proxy)** rule and in a
+  **Service** rule. See [Tunnels](DOKUMENTACIO.md#alagut) and the
+  [Tunnel agents](#tunnel-agents-wireguard) section below.
 - Grants are implemented with nftables dynamic sets (`allowed_v4`,
   `allowed_tcp`, `allowed_udp`, `allowed_input_tcp`, `allowed_input_udp`,
   `allowed_icmp`, `client_mac`). Entries expire in the kernel
@@ -53,7 +83,7 @@ bottom-right corner.
   same source IP. UDP 22 is an ordinary host-rule port and does not open
   SSH. Custom full-access rules never open SSH, and a collection opens TCP
   22 only through an input member that explicitly lists it. Keep a provider
-  console available: there is no separate host SSH switch. The `admin`
+  console available: there is no separate host SSH switch. The legacy `ssh`
   service in `services.json` is outbound client SSH (forward direction), not
   host SSH. A restart flushes the dynamic sets, so clients must sign in and
   authorize again.
@@ -122,8 +152,14 @@ explicitly lists it. Only administrators can create rules. The service must
 listen on `0.0.0.0` (or the external interface), not only on `127.0.0.1`.
 Collection rules have no direction of their own and may contain 1–64 members
 with mixed directions; each member grants access in its own direction. See
-[docs/host-rules.md](docs/host-rules.md) for the 25566 example and a quick
-`nc` test.
+[Host (input) rules](DOKUMENTACIO.md#host-szabalyok) for the 25566 example and
+a quick `nc` test.
+
+**Service rules** and **domain rules** are separate rule types, not
+directions. A service rule resolves its grants from the tunnel services it
+references: forward listen ports for port-mode services and/or proxy
+hostnames for domain-mode services. A domain rule admits proxy hostnames
+only. Neither can be an input (host) rule, and neither opens a host port.
 
 ## Requirements
 
@@ -135,6 +171,8 @@ with mixed directions; each member grants access in its own direction. See
   root is required for `docker/setup-host.sh`.
 - `net.ipv4.ip_forward=1` on the host. The setup script persists this.
 - Optional: `dnsmasq` on the host for DHCP/DNS.
+- Optional: WireGuard support in the host kernel (module or built in, Linux
+  5.6+) for tunnel agents.
 
 The image is built on Debian slim. The host distribution is independent; the
 container programs the host kernel's nftables.
@@ -458,8 +496,8 @@ The log rotates by size (`HV_AUDIT_MAX_BYTES`, default 10 MiB;
 secrets, recovery codes, cookies, full tokens or email addresses. Pending
 2FA tickets appear only as a 12-character hash. Audit write failures are
 reported in the process log and never block sign-in or admin actions. See
-[docs/audit-log.md](docs/audit-log.md) for the event families, severity
-rules, redaction guarantees and retention details.
+[the audit log section](DOKUMENTACIO.md#audit-naplo) for the event families,
+severity rules, redaction guarantees and retention details.
 
 ### Firewall customization
 
@@ -554,10 +592,11 @@ two DNS A records, both to the server's public IPv4:
    domain that still has entries cannot be deleted; delete or move them
    first.
 4. Admin → Rules: create a rule of type **Domain (proxy)** listing the
-   entries, and assign it to users/groups. It opens no firewall port; it can
-   be combined with port rules in the portal or used in collections. The
-   rule stores full hostnames; an entry referenced by a domain rule cannot be
-   deleted, renamed or moved to another root.
+   entries (and any domain-mode tunnel services), and assign it to
+   users/groups. It opens no firewall port; it can be combined with port
+   rules in the portal or used in collections. The rule stores full
+   hostnames; an entry or tunnel service referenced by a domain rule cannot
+   be deleted, renamed or moved to another root.
 
 [`deploy/Caddyfile`](deploy/Caddyfile) is static (never reloaded). Its admin API
 listens only on a Unix socket (`/run/caddy-admin/admin.sock`, no TCP port) in
@@ -767,12 +806,28 @@ target port, interfaces (`wan`, `lan` or `both`) and an on/off switch:
   needs a session whose **host (input)** rule lists the **listen port** (not
   the target port). The target port cannot be 22, 2019 or the portal port, and
   it cannot equal the listen port (a plain host rule does that).
+  If the target port is bound **only to 127.0.0.0/8** (for example a Docker
+  port published as `127.0.0.1:8081`), the rule is `dnat ip to
+  127.0.0.1:<port>` instead, because `redirect` rewrites to the incoming
+  interface address where nothing listens. This needs
+  `net.ipv4.conf.all.route_localnet = 1` on the host (`docker/setup-host.sh`
+  sets it; the portal container cannot, its `/proc/sys` is read-only). The
+  `loopback_guard` chain (prerouting, priority raw, also in the boot table)
+  drops every 127/8 destination or source arriving on a non-loopback
+  interface. The portal re-checks the target sockets every 10 s and
+  re-renders when the choice changes (e.g. Docker publishes after a reboot).
+  A wildcard listener keeps `redirect`; a naive wildcard UDP server replies
+  from the interface address, which a 127.0.0.1 DNAT would not match. A Docker
+  container behind its 127.0.0.1 publication sees the docker-proxy address;
+  use a Forward entry to the container IP when it needs the client IP.
 
 Only traffic addressed to the host (`fib daddr type local`) on the chosen
 interfaces is translated; a LAN client's traffic to an outside server on the
 same port is not touched. Listen ports 22, 53, 67, 80, 443, 2019 and the
 portal port are reserved, and a `(protocol, listen port)` pair can be used by
-one entry only (`both` takes TCP and UDP).
+one entry only (`both` takes TCP and UDP). Tunnel services share this
+listen-port namespace, and while an enabled tunnel agent exists its WireGuard
+UDP port is reserved as well.
 
 Order and precedence:
 
@@ -810,12 +865,70 @@ allows TCP 25565 and UDP 24454. On the Minecraft server set `port=24454` in
 `voicechat-server.properties`; if the public (listen) port differs, set
 `voice_host=<public name>:<listen port>`.
 
+### Tunnel agents (WireGuard)
+
+The **Tunnels** block of Admin → Proxies and tunnels connects a private
+Docker network behind NAT to the firewall without opening any port at home.
+The host kernel must support WireGuard (module or built in, Linux 5.6+), and
+the agent must be able to reach the firewall on the configured UDP port
+(default 51820). If `tunnels.endpoint` is empty, the downloaded config uses
+the hostname of the admin request (or `HV_PORTAL_URL`).
+
+Creating an agent generates a server key pair (once), an agent key pair, a
+preshared key, a `10.77.0.x` address and a random sync token. **Download
+installer** produces a single self-extracting shell script; copy it to the
+home host and run:
+
+```bash
+sudo sh dropjak-agent-<id>.sh
+```
+
+The installer is idempotent. On a TTY it lists the host's bridge networks and
+joins the agent to exactly one of them (default `playitgg-net` when present);
+non-interactively it uses `DROPJAK_NETWORK=<network>` or the same default. The
+container is named `dropjak-tunnel-agent-<label-slug>-<id>` (also written to
+`container-name`), so several agents can coexist on one host; each install
+needs its own directory. `sudo sh dropjak-agent-<id>.sh delete` removes the
+container and keeps the state volume.
+
+Containment: the agent runs on exactly one normal bridge network with a
+read-only root filesystem, `cap_drop: ALL` plus `NET_ADMIN`,
+`no-new-privileges` and no host Docker/Podman socket. It resolves targets by
+container name over that network's built-in DNS and can reach only containers
+on it — no host gateway and no other network. Targets outside the attached
+subnet are rejected fail-closed, and an agent failure keeps the last good
+ruleset. `deploy/tunnel-agent/check-containment.sh` verifies the running
+container and these settings from the home host.
+
+A service maps one or more `proto`/`listen` ports to `target` ports (`tcp`,
+`udp` or `both`; single ports, lists and ranges such as `8000-8100` are
+accepted and paired by position), with a common target host (a container name
+or IPv4 address). In port mode the internal tunnel port equals the listen
+port. A **Test** button probes the full path (portal → WireGuard → agent
+DNAT) mapping by mapping; the result is shown inline and disappears by
+itself after 60 seconds, while editing, toggling or deleting the service
+clears it immediately.
+
+A **domain-mode service** replaces the mapping rows with a target host, a
+`domain` and one target port. The domain must be a subdomain of a configured
+root domain; the portal assigns the internal tunnel port automatically
+(41000–60999) and Caddy serves the service over HTTPS. It has no WAN listen
+port and no DNAT. Set its challenge triggers under Admin → Domains →
+**Tunnel domains**, per service. A private domain service is admitted by a
+**Domain (proxy)** rule listing its hostname or by a **Service** rule
+referencing it; `public` makes it reachable without either. See
+[Tunnels](DOKUMENTACIO.md#alagut) and
+[Domain proxy](DOKUMENTACIO.md#domain-proxy).
+
 ### Backup
 
 State is stored in the `hatarvedelem-state` volume
 (`/var/lib/hatarvedelem`): `users.json`, `groups.json`, `rules.json`,
 `audit.jsonl`, `drops.jsonl`, `fail2ban.json`, `firewall-settings.json` and the
 uploaded proxy certificates under `certs/` (private keys included).
+`firewall-settings.json` also holds the tunnel settings, including the
+WireGuard server and agent private keys and the agent sync tokens, so treat
+the backup as a secret.
 
 ```bash
 docker volume ls | grep hatarvedelem-state
@@ -832,9 +945,12 @@ deletes the volume; without `-v` it is kept.
 `install.sh` (run as root) installs the portal and the firewall as systemd
 units. The runtime layout is `/opt/hatarvedelem`; the rendered ruleset is
 written to `/etc/nftables/hatarvedelem.nft`. Besides the Python modules, the
-installer copies `index.html`, `icon.png`, `blocked.png`, `services.json` and
-`VERSION`, so the portal serves its assets and `/api/status` reports the
-packaged version instead of `0.0.0`.
+installer copies the portal assets (`index.html`, `icon.png`, `blocked.png`,
+`unauthorized.png`, `sus.png`, `ok.png`), `services.json` and `VERSION`, so
+the portal serves its assets and `/api/status` reports the packaged version
+instead of `0.0.0`. It also installs the `tunnel-agent/` bundle (compose
+template, Dockerfile, agent and installer), so the agent installer can be
+downloaded from a native installation as well.
 
 The ruleset template contains `__FWD_MARK__` and `__DROP_LOG_GROUP__` in
 addition to the network placeholders. `install.sh` fills every placeholder
@@ -853,9 +969,10 @@ is optional and requires adapting those paths.
 
 ## Versioning
 
-The running version is stored in [`VERSION`](VERSION), and release history is
-recorded in [`CHANGELOG.md`](CHANGELOG.md). The portal footer shows the version,
-and `GET /api/status` exposes the same value as `version`.
+The running version is stored in [`VERSION`](VERSION), and the release
+history is recorded in the
+[changelog](DOKUMENTACIO.md#valtozasnaplo). The portal footer shows the
+version, and `GET /api/status` exposes the same value as `version`.
 
 ## Security notes
 
@@ -868,20 +985,33 @@ and `GET /api/status` exposes the same value as `version`.
   TCP 22 only through an input member that explicitly lists it. Always keep
   an out-of-band console (provider console) available so you can recover if
   the portal does not start.
-- The portal speaks plain HTTP. If it is reachable from an untrusted network,
-  terminate TLS in front of it (reverse proxy) and set
-  `HV_COOKIE_SECURE=1`; otherwise restrict `HV_PORTAL_NET` to a trusted
-  management network. HTTP-only exposure allows credentials and session
-  cookies to be sniffed.
+- The plain portal listens on HTTP. The optional Caddy domain proxy
+  (`HV_PROXY=1`, see [Subdomain proxy](#subdomain-proxy-caddy)) serves the
+  portal and proxy entries over HTTPS on the configured root domains, and
+  sets the `Secure` session cookie there automatically. Without it, if the
+  portal is reachable from an untrusted network, terminate TLS in front of it
+  and set `HV_COOKIE_SECURE=1`; otherwise restrict `HV_PORTAL_NET` to a
+  trusted management network. The plain-HTTP port and the LAN captive path
+  remain cleartext, so credentials and session cookies can be sniffed there.
 - TOTP 2FA does not make the plain-HTTP portal confidential. The base32
   secret and `otpauth://` URI are displayed and transmitted in cleartext, and
   6-digit and recovery codes are sent in request bodies; anyone who can sniff
   the LAN can capture them. `HV_COOKIE_SECURE=1` protects only the cookie.
   Restrict `HV_PORTAL_NET` to a trusted network. Integrated HTTPS termination
-  is still a follow-up, not part of the current implementation; the plan is in
-  [docs/caddy-proxy-terv.md](docs/caddy-proxy-terv.md).
+  now exists through the optional Caddy domain proxy (`HV_PROXY=1`, see
+  [Subdomain proxy](#subdomain-proxy-caddy); the original plan is archived
+  under [Caddy proxy plan](DOKUMENTACIO.md#caddy-proxy-terv)), but it covers
+  only the root-domain HTTPS portal and proxy entries, not the plain-HTTP
+  portal on port 8100 or the LAN captive path.
 - TOTP secrets are stored unencrypted in `users.json` (mode `0600`) in the
   state volume. Protect the volume and its backups accordingly.
+- A downloaded tunnel installer and its `agent.json` contain the agent's
+  WireGuard private key, preshared key and sync token; treat the file as a
+  secret and remove it after installation if it is no longer needed. The sync
+  endpoint accepts only the agent's tunnel source address together with that
+  token. The agent can reach every container on its single attached bridge
+  network, so attach it only to the network whose services you intend to
+  expose; `check-containment.sh` verifies the isolation settings.
 - MAC binding blocks source-IP spoofing and DHCP lease takeover, but MAC
   addresses are not authenticated. An attacker on the same layer-2 segment
   can clone an authorized client's IP and MAC, or ARP-spoof the gateway.

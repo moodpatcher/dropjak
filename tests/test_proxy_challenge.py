@@ -15,6 +15,8 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -218,12 +220,36 @@ class ChallengeHttpTests(unittest.TestCase):
         page = body.decode()
         self.assertIn('src="/__dropjak/sus.png"', page)
         self.assertIn('id="powbox"', page)
-        self.assertIn("Nem vagyok robot", page)
+        self.assertIn("I'm not a robot", page)
+        self.assertIn("Checking…", page)
+        self.assertIn("Verified", page)
         self.assertIn("const sha256 = (() => {", page)
         self.assertIn(".captcha-inner", page)
-        self.assertNotIn("Bejelentkezés", page)
+        # Szöveg nélküli állapotoldal: csak a kép és az angol captcha.
+        self.assertNotIn('class="state-icon"', page)
+        self.assertIn("<svg", page)
+        self.assertIn("<title>Dropjak</title>", page)
+        self.assertNotIn("<h1", page)
+        for removed in (
+            "Ellenőrzés", "Erősítsd meg, hogy nem vagy robot.",
+            "Nincs hozzáférés", "Bejelentkezés",
+            "Ez a szolgáltatás csak a Dropjak tűzfalon",
+        ):
+            with self.subTest(removed=removed):
+                self.assertNotIn(removed, page)
         self.assertNotIn("<a ", page)
         self.assertNotIn("<button", page)
+        # A captcha-szkript érvényes JS kell legyen: a Python escape miatt
+        # egyszer szintaxishiba lett, és a captcha el sem indult.
+        node = shutil.which("node")
+        if node:
+            script = page[page.index("<script>") + len("<script>"):
+                          page.index("</script>")]
+            result = subprocess.run(
+                [node, "--check"], input=script, text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
         shown = self.events("proxy_challenge_shown")
         self.assertEqual(len(shown), 1)
         self.assertEqual(shown[0]["triggers"], "always")
@@ -344,7 +370,9 @@ class ChallengeHttpTests(unittest.TestCase):
         resp, body = self.auth(tp.host("always"), STRANGER)
         self.assertEqual(resp.status, 401)
         self.assertIn(b"/__dropjak/unauthorized.png", body)
-        self.assertIn(b"Bejelentkez", body)
+        self.assertIn(b'class="login"', body)
+        self.assertIn(b'aria-label="Log in"', body)
+        self.assertNotIn(b"Bejelentkez", body)
         self.assertEqual(len(self.drops), 1)
         self.assertEqual(self.f2b.last_hit(STRANGER, proxy_only=True) > 0, True)
         for _ in range(5):

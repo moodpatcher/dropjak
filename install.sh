@@ -126,10 +126,14 @@ done
 
 [[ $EUID -eq 0 ]] || die "rootként futtasd: sudo $0"
 command -v systemctl >/dev/null 2>&1 || die "hiányzik a systemd"
-for f in server.py gateway.py settings_store.py fail2ban.py droplog.py \
-         index.html icon.png blocked.png unauthorized.png sus.png services.json VERSION \
+for f in server.py gateway.py settings_store.py fail2ban.py droplog.py tunnel.py \
+         index.html icon.png blocked.png unauthorized.png sus.png ok.png services.json VERSION \
          deploy/hatarvedelem.nft deploy/hatarvedelem.service \
-         deploy/hatarvedelem-firewall.service; do
+         deploy/hatarvedelem-firewall.service \
+         deploy/tunnel-agent/compose.agent.yml \
+         deploy/tunnel-agent/Dockerfile deploy/tunnel-agent/agent.py \
+         deploy/tunnel-agent/selfinstall.sh \
+         deploy/tunnel-agent/check-containment.sh; do
   [[ -f "$SRC_DIR/$f" ]] || die "hiányzó fájl: $SRC_DIR/$f"
 done
 
@@ -526,8 +530,9 @@ note "Program telepítése"
 install -d -m 0755 "$APP_DIR"
 install -m 0644 "$SRC_DIR/server.py" "$SRC_DIR/gateway.py" \
   "$SRC_DIR/settings_store.py" "$SRC_DIR/fail2ban.py" "$SRC_DIR/droplog.py" \
+  "$SRC_DIR/tunnel.py" \
   "$SRC_DIR/index.html" "$SRC_DIR/icon.png" "$SRC_DIR/blocked.png" \
-  "$SRC_DIR/unauthorized.png" "$SRC_DIR/sus.png" \
+  "$SRC_DIR/unauthorized.png" "$SRC_DIR/sus.png" "$SRC_DIR/ok.png" \
   "$SRC_DIR/services.json" "$SRC_DIR/VERSION" "$APP_DIR/"
 if [[ -f "$SRC_DIR/README.md" ]]; then
   install -m 0644 "$SRC_DIR/README.md" "$APP_DIR/"
@@ -536,6 +541,13 @@ fi
 # tűzfal a /etc/nftables/hatarvedelem.nft renderelt példányát használja.
 install -d -m 0755 "$APP_DIR/deploy"
 install -m 0644 "$SRC_DIR/deploy/hatarvedelem.nft" "$APP_DIR/deploy/"
+# A letölthető ügynök-csomag forrása (a natív telepítés is ugyanazt adja).
+install -d -m 0755 "$APP_DIR/tunnel-agent"
+install -m 0644 "$SRC_DIR/deploy/tunnel-agent/Dockerfile" \
+  "$SRC_DIR/deploy/tunnel-agent/compose.agent.yml" \
+  "$SRC_DIR/deploy/tunnel-agent/selfinstall.sh" "$APP_DIR/tunnel-agent/"
+install -m 0755 "$SRC_DIR/deploy/tunnel-agent/agent.py" \
+  "$SRC_DIR/deploy/tunnel-agent/check-containment.sh" "$APP_DIR/tunnel-agent/"
 
 if ! getent group "$SERVICE_USER" >/dev/null; then
   groupadd --system "$SERVICE_USER"
@@ -571,7 +583,19 @@ sed \
 if grep -qE '__[A-Z0-9_]+__' "$TMP_NFT"; then
   die "kitöltetlen helyőrző maradt a generált nftables-szabályokban"
 fi
-"$NFT_BIN" -c -f "$TMP_NFT" || die "a generált szabályok nem érvényesek"
+# A 3.14.0 interval flagjei helyben nem vehetők fel egy meglévő setre, a
+# hivatkozott set pedig nem törölhető. Régi tábla esetén ezért a táblát a
+# korai boot-védelem alatt újraépítjük; ezt az ellenőrzés ELŐTT kell
+# eldönteni, mert a régi set-ek mellett az `nft -c` elbukna. A törlés a
+# megerősítés után történik, és utána még egyszer ellenőrzünk.
+recreate_table=0
+if "$NFT_BIN" list set inet hatarvedelem allowed_tcp >/dev/null 2>&1 \
+        && ! "$NFT_BIN" list set inet hatarvedelem allowed_tcp \
+            2>/dev/null | grep -q 'flags interval'; then
+  recreate_table=1
+else
+  "$NFT_BIN" -c -f "$TMP_NFT" || die "a generált szabályok nem érvényesek"
+fi
 
 install -d -m 0755 /etc/nftables
 install -m 0600 "$TMP_NFT" "$NFT_FILE"
@@ -597,9 +621,33 @@ warn "önmagában nem tartja életben. Őrizd meg a szolgáltatói konzol"
 warn "hozzáférését, vagy előbb HV_SKIP_FIREWALL=1 értékkel indíts, állítsd"
 warn "be a szabályt, és utána töltsd be a tűzfalat."
 confirm "Betöltöm a tűzfalszabályokat?" || die "megszakítva"
+if (( recreate_table )); then
+  warn "A régi nft set-flagek miatt a hatarvedelem tábla újraépül."
+  # A törlés és az új betöltés között a host csak a korai boot-védelem
+  # alatt maradhat (fail-closed).
+  if ! "$NFT_BIN" list table inet hatarvedelem_boot >/dev/null 2>&1; then
+    "$NFT_BIN" -f "$SRC_DIR/deploy/hatarvedelem-boot.nft" \
+      || die "a korai boot-védelem betöltése nem sikerült"
+  fi
+  "$NFT_BIN" delete table inet hatarvedelem \
+    || die "a régi nft tábla törlése nem sikerült; a korai boot-védelem érvényben maradt"
+  if ! "$NFT_BIN" -c -f "$TMP_NFT"; then
+    die "a generált szabályok nem érvényesek; a régi tábla már törölve, a korai boot-védelem érvényben maradt (fail-closed)"
+  fi
+fi
 # A fájl idempotens: többszöri futtatás nem duplázza a szabályokat, és a
-# belépett kliensek halmazelemei megmaradnak.
-"$NFT_BIN" -f "$NFT_FILE"
+# belépett kliensek halmazelemei megmaradnak (az interval-flagre váltás
+# egyszeri tábla-újraépítése után).
+if ! "$NFT_BIN" -f "$NFT_FILE"; then
+  if (( recreate_table )); then
+    die "a szabályok betöltése sikertelen; a korai boot-védelem érvényben maradt (fail-closed)"
+  fi
+  die "a szabályok betöltése sikertelen"
+fi
+if "$NFT_BIN" list table inet hatarvedelem_boot >/dev/null 2>&1; then
+  "$NFT_BIN" delete table inet hatarvedelem_boot \
+    || die "a korai boot-védelem eltávolítása nem sikerült"
+fi
 for hv_set in allowed_v4 allowed_tcp allowed_udp allowed_icmp; do
   "$NFT_BIN" list set inet hatarvedelem "$hv_set" >/dev/null \
     || die "a tűzfal betöltődött, de a(z) $hv_set halmaz nem található"

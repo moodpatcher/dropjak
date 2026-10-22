@@ -191,6 +191,37 @@ class ProxyRedirectTests(unittest.TestCase):
             with self.subTest(host=name):
                 self.assertEqual(self.redirect(name)[:2], want)
 
+    def test_portal_domain_frees_the_root(self) -> None:
+        portal = "dropjak." + tp.ROOT_DOMAIN
+        self.settings.set_portal_domain(portal)
+        addCleanup = self.addCleanup
+        addCleanup(self.settings.set_portal_domain, "")
+        # Bejegyzés nélkül a gyökér nem irányít a portálra (nincs tanúsítványa).
+        for name in (tp.ROOT_DOMAIN, tp.SECOND_DOMAIN):
+            with self.subTest(host=name):
+                self.assertEqual(self.redirect(name)[:2], (404, None))
+        # Az ismeretlen aldomain viszont a portálra megy.
+        self.assertEqual(
+            self.redirect(tp.host("x", tp.SECOND_DOMAIN))[:2],
+            (302, f"https://{portal}/"),
+        )
+        # Gyökérre szóló bejegyzéssel a gyökér saját szolgáltatást kap.
+        snap = self.settings.snapshot()
+        self.settings.set_proxy(
+            snap["proxy_domains"],
+            [dict(route) for route in snap["proxy_routes"]] + [
+                {"name": "", "root": tp.ROOT_DOMAIN, "port": 3000}],
+        )
+        addCleanup(
+            self.settings.set_proxy,
+            snap["proxy_domains"],
+            [route for route in snap["proxy_routes"] if route["name"]],
+        )
+        self.assertEqual(
+            self.redirect(tp.ROOT_DOMAIN)[:2],
+            (308, f"https://{tp.ROOT_DOMAIN}/a/b?c=1"),
+        )
+
     def test_loopback_only(self) -> None:
         status, location, body = self.redirect(tp.ROOT_DOMAIN, source="127.0.0.2")
         self.assertEqual((status, location, body), (404, None, b""))

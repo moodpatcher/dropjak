@@ -158,6 +158,10 @@ class RuleGenerationTests(unittest.TestCase):
         )
         self.scripts: list[str] = []
         self.fw._run_script = self.scripts.append  # type: ignore[method-assign]
+        # Determinisztikus: nincs figyelő socket, ezért az input redirect.
+        empty = tempfile.TemporaryDirectory()
+        self.addCleanup(empty.cleanup)
+        self.fw.proc_net = self.fw.sysctl_conf = empty.name
 
     def test_forward_wan_tcp(self) -> None:
         self.assertEqual(self.fw._portproxy_rules([forward()]), [
@@ -264,6 +268,158 @@ class RuleGenerationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
 
+HEAD = "  sl  local_address rem_address   st\n"
+V6_ZERO = "00000000000000000000000000000000"
+
+
+def write_proc(root: str, files: dict[str, list[tuple[str, int, str]]],
+               localnet: dict[str, str] | None = None) -> None:
+    """Hamis /proc/net (cím-hex, port, állapot) és route_localnet fájlok."""
+    for name, rows in files.items():
+        with open(os.path.join(root, name), "w", encoding="ascii") as fh:
+            fh.write(HEAD + "".join(
+                f"   {i}: {addr}:{port:04X} {V6_ZERO if len(addr) > 8 else '00000000'}:0000 {st}\n"
+                for i, (addr, port, st) in enumerate(rows)
+            ))
+    for iface, value in (localnet or {}).items():
+        os.makedirs(os.path.join(root, "conf", iface), exist_ok=True)
+        with open(os.path.join(root, "conf", iface, "route_localnet"), "w") as fh:
+            fh.write(value + "\n")
+
+
+# 127.0.0.1 / 0.0.0.0 / 127.0.0.53 a kernel natív (little-endian) kiírásában.
+LO, ANY, STUB = "0100007F", "00000000", "3500007F"
+MAPPED_LO = "0000000000000000FFFF00000100007F"
+V6_LOOP = "00000000000000000000000001000000"
+
+
+class LoopbackTargetTests(unittest.TestCase):
+    """3.11.1: a csak 127.0.0.1-en figyelő input célhoz DNAT kell, nem redirect.
+
+    Élő hiba: a redirect a WAN címre írt át, a Docker 127.0.0.1:8081-es
+    publikálása ott nem válaszolt, a kernel RST-t küldött.
+    """
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = tmp.name
+        self.fw = gateway.Firewall(
+            dry_run=True, logger=lambda *_: None, lan_if="eth1", wan_if="eth0",
+            lan_network=gateway._parse_lan_network("192.168.10.0/24"),
+        )
+        self.fw.proc_net = self.root
+        self.fw.sysctl_conf = os.path.join(self.root, "conf")
+
+    def test_loopback_target_detection(self) -> None:
+        cases = [
+            ({"tcp": [(LO, 8081, "0A")]}, "tcp", "127.0.0.1"),
+            ({"tcp": [(LO, 8081, "01")]}, "tcp", None),  # nem LISTEN
+            ({"tcp": [(LO, 8081, "0A"), (ANY, 8081, "0A")]}, "tcp", None),
+            ({"tcp": [(ANY, 8081, "0A")]}, "tcp", None),
+            ({"tcp6": [(MAPPED_LO, 8081, "0A")]}, "tcp", "127.0.0.1"),
+            ({"tcp": [(LO, 8081, "0A")], "tcp6": [(V6_ZERO, 8081, "0A")]}, "tcp", None),
+            ({"tcp": [(LO, 8081, "0A")], "tcp6": [(V6_LOOP, 8081, "0A")]}, "tcp", "127.0.0.1"),
+            ({"udp": [(STUB, 8081, "07")]}, "udp", "127.0.0.53"),
+            ({"udp": [(LO, 8081, "07")]}, "tcp", None),  # más protokoll
+            ({"udp": [(LO, 8082, "07")]}, "udp", None),  # más port
+            ({}, "udp", None),
+        ]
+        for files, proto, expected in cases:
+            with self.subTest(files=files, proto=proto):
+                for name in ("tcp", "tcp6", "udp", "udp6"):
+                    path = os.path.join(self.root, name)
+                    if os.path.exists(path):
+                        os.remove(path)
+                write_proc(self.root, files)
+                self.assertEqual(gateway.loopback_target(proto, 8081, self.root), expected)
+
+    def test_route_localnet_all_or_every_iface(self) -> None:
+        conf = os.path.join(self.root, "conf")
+        self.assertFalse(gateway.route_localnet(["eth0"], conf))
+        write_proc(self.root, {}, {"all": "0", "eth0": "1", "eth1": "0"})
+        self.assertTrue(gateway.route_localnet(["eth0"], conf))
+        self.assertFalse(gateway.route_localnet(["eth1", "eth0"], conf))
+        write_proc(self.root, {}, {"all": "1"})
+        self.assertTrue(gateway.route_localnet(["eth1", "eth0"], conf))
+
+    def test_input_to_loopback_only_target_uses_dnat(self) -> None:
+        write_proc(self.root, {"tcp": [(LO, 8081, "0A")], "udp": [(LO, 9001, "07")]},
+                   {"all": "1"})
+        rules = self.fw._portproxy_rules([
+            input_entry(id="w", proto="tcp", ifaces="wan", listen_port=8084,
+                        target_port=8081),
+            input_entry(id="v", proto="udp", ifaces="both", listen_port=18086,
+                        target_port=9001),
+        ])
+        nat = [r for r in rules if " portproxy_nat " in r]
+        self.assertEqual(nat, [
+            f'add rule {T} portproxy_nat iifname "eth0" fib daddr type local '
+            "tcp dport 8084 dnat ip to 127.0.0.1:8081",
+            f'add rule {T} portproxy_nat iifname {{ "eth1", "eth0" }} '
+            "fib daddr type local udp dport 18086 dnat ip to 127.0.0.1:9001",
+        ])
+        # Az engedélyezés változatlanul az eredeti hallgató portra szól.
+        self.assertIn(
+            f"add rule {T} portproxy_input meta l4proto tcp ct status dnat "
+            "ct original proto-dst 8084 "
+            "ip saddr . ct original proto-dst @allowed_input_tcp accept", rules,
+        )
+        self.assertEqual(self.fw.portproxy_localnet_blocked([input_entry(
+            proto="tcp", ifaces="wan", listen_port=8084, target_port=8081)]), [])
+
+    def test_wildcard_or_localnet_off_keeps_redirect(self) -> None:
+        entry = input_entry(proto="both", ifaces="wan", listen_port=8084, target_port=8081)
+        # Wildcard UDP: a válasz forrása az interfész címe, ezért redirect.
+        write_proc(self.root, {"tcp": [(LO, 8081, "0A")], "udp": [(ANY, 8081, "07")]},
+                   {"all": "1"})
+        nat = [r for r in self.fw._portproxy_rules([entry]) if " portproxy_nat " in r]
+        self.assertEqual([r.rsplit(" dport ", 1)[1] for r in nat], [
+            "8084 dnat ip to 127.0.0.1:8081", "8084 redirect to :8081",
+        ])
+        # route_localnet nélkül a kernel eldobná a 127.0.0.1 célt: redirect
+        # és figyelmeztetés.
+        write_proc(self.root, {}, {"all": "0", "eth0": "0"})
+        nat = [r for r in self.fw._portproxy_rules([entry]) if " portproxy_nat " in r]
+        self.assertTrue(all(r.endswith("redirect to :8081") for r in nat))
+        self.assertEqual(self.fw.portproxy_localnet_blocked([entry]), [("tcp", 8084)])
+        warnings = gateway.port_proxy_warnings([entry], set(), set(), {("tcp", 8084)})
+        self.assertEqual([(w["proto"], w["localnet"]) for w in warnings], [("tcp", True)])
+        # A forward bejegyzés nem érintett.
+        self.assertEqual(self.fw.portproxy_localnet_blocked([forward()]), [])
+
+    def test_refresh_reapplies_when_target_binding_changes(self) -> None:
+        store = settings_store.SettingsStore(
+            os.path.join(self.root, "s.json"), logger=lambda *_: None
+        )
+        store.commit(store.prepare_port_proxies([input_entry(
+            proto="tcp", ifaces="wan", listen_port=8084, target_port=8081)]))
+        scripts: list[str] = []
+        self.fw._run_script = scripts.append  # type: ignore[method-assign]
+        gw = types.SimpleNamespace(settings=store, firewall=self.fw, audit=None)
+        gw._write_audit = lambda *_a, **_k: None
+        gw._apply_custom_settings = (
+            lambda snap=None: gateway.Gateway._apply_custom_settings(gw, snap)
+        )
+        flushed: list[tuple[str, int]] = []
+        old_flush = gateway.conntrack_flush_port
+        gateway.conntrack_flush_port = lambda p, n, audit=None: flushed.append((p, n)) or True
+        self.addCleanup(setattr, gateway, "conntrack_flush_port", old_flush)
+        # Még semmi nincs telepítve: a frissítő nem nyúl a kernelhez.
+        self.assertEqual(gateway.Gateway.refresh_port_proxies(gw), [])
+        gw._apply_custom_settings()
+        self.assertIn("redirect to :8081", scripts[-1])
+        self.assertEqual(gateway.Gateway.refresh_port_proxies(gw), [])
+        self.assertEqual(len(scripts), 1)
+        # A cél később, csak loopbackre kötve indul (bootkori sorrend).
+        write_proc(self.root, {"tcp": [(LO, 8081, "0A")]}, {"all": "1"})
+        self.assertEqual(gateway.Gateway.refresh_port_proxies(gw), [("tcp", 8084)])
+        self.assertIn("dnat ip to 127.0.0.1:8081", scripts[-1])
+        self.assertEqual(flushed, [("tcp", 8084)])
+        self.assertEqual(gateway.Gateway.refresh_port_proxies(gw), [])
+        self.assertEqual(len(scripts), 2)
+
+
 class TemplateOrderTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -334,6 +490,27 @@ class TemplateOrderTests(unittest.TestCase):
             self.assertNotIn(f"flush chain inet hatarvedelem {chain}", flushed)
         for chain in ("portproxy_prerouting",) + gateway.PORTPROXY_CHAINS:
             self.assertIn(chain, gateway.RULESET_CHAINS)
+
+    def test_loopback_guard_before_nat(self) -> None:
+        """A route_localnet mellett kívülről érkező 127/8 csomag eldobódik."""
+        guard = [
+            'iifname != "lo" ip daddr 127.0.0.0/8 drop',
+            'iifname != "lo" ip saddr 127.0.0.0/8 drop',
+        ]
+        self.assertIn(
+            "add chain inet hatarvedelem loopback_guard {\n"
+            "    type filter hook prerouting priority raw; policy accept;",
+            self.text,
+        )
+        self.assertIn("flush chain inet hatarvedelem loopback_guard", self.text)
+        self.assertEqual(self.chain("loopback_guard"), guard)
+        self.assertIn("loopback_guard", gateway.RULESET_CHAINS)
+        boot = (ROOT / "deploy" / "hatarvedelem-boot.nft").read_text()
+        self.assertIn("type filter hook prerouting priority raw; policy accept;", boot)
+        for rule in guard:
+            self.assertIn(rule, boot)
+        setup = (ROOT / "docker" / "setup-host.sh").read_text()
+        self.assertIn("net.ipv4.conf.all.route_localnet = 1", setup)
 
 
 class ApplyRollbackTests(unittest.TestCase):
@@ -446,8 +623,10 @@ class HelperTests(unittest.TestCase):
             ports, {("udp", 25565)},
         )
         self.assertEqual(warnings, [
-            {"proto": "tcp", "port": 25565, "docker": False, "listen": True},
-            {"proto": "udp", "port": 25565, "docker": True, "listen": False},
+            {"proto": "tcp", "port": 25565, "docker": False, "listen": True,
+             "localnet": False},
+            {"proto": "udp", "port": 25565, "docker": True, "listen": False,
+             "localnet": False},
         ])
 
     def test_docker_published_ports_parse(self) -> None:

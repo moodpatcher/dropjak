@@ -14,6 +14,7 @@ import glob
 import http.client
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -263,6 +264,76 @@ class ProxySettingsTests(unittest.TestCase):
              **R}
         ], {host("owui")})
         self.assertEqual(stored["proxy_routes"][0]["ip"], "10.1.2.3")
+
+    def test_portal_domain_is_under_a_root_and_not_a_route(self) -> None:
+        portal = "dropjak." + ROOT_DOMAIN
+        self.store.set_proxy([ROOT_DOMAIN], [])
+        self.assertEqual(self.store.snapshot()["portal_domain"], "")
+        stored = self.store.set_portal_domain(portal)
+        self.assertEqual(stored["portal_domain"], portal)
+        # A böngészőből bemásolt URL és a nagybetű/záró pont is elfogadott.
+        for pasted in (
+            f"https://{portal}/", portal.upper() + ".",
+            f"https://{portal}:443/utvonal",
+        ):
+            with self.subTest(pasted=pasted):
+                stored = self.store.set_portal_domain(pasted)
+                self.assertEqual(stored["portal_domain"], portal)
+        # A portál challenge-e a címhez tartozik; kikapcsoláskor törlődik.
+        stored = self.store.set_proxy(
+            [ROOT_DOMAIN], [],
+            portal_challenge={"triggers": ["always"], "interval_hours": 24},
+        )
+        self.assertEqual(stored["portal_challenge"]["triggers"], ["always"])
+        for value in (
+            ROOT_DOMAIN, "dropjak.example.net", "x." + SECOND_DOMAIN,
+            "dropjak", "*.z1.example.com", 42,
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(settings_store.SettingsError):
+                    self.store.set_portal_domain(value)
+        # Ütközés egy meglévő proxy-bejegyzéssel.
+        with self.assertRaisesRegex(
+            settings_store.SettingsError, "proxy-bejegyzés"
+        ):
+            self.store.set_proxy([ROOT_DOMAIN], [
+                {"name": "dropjak", "port": 3000, **R}
+            ])
+        # A gyökér nem törölhető a portál címe alól.
+        with self.assertRaisesRegex(
+            settings_store.SettingsError, "gyökérdomain alatt"
+        ):
+            self.store.set_proxy([SECOND_DOMAIN], [])
+        stored = self.store.set_portal_domain("")
+        self.assertEqual(stored["portal_domain"], "")
+        self.assertIsNone(stored["portal_challenge"])
+
+    def test_root_entry_requires_a_dedicated_portal_address(self) -> None:
+        entry = {"name": "", "port": 3000, **R}
+        # A portál saját címe nélkül a gyökér a portálé.
+        with self.assertRaisesRegex(
+            settings_store.SettingsError, "saját portálcím"
+        ):
+            self.store.set_proxy([ROOT_DOMAIN], [entry])
+        self.store.set_proxy([ROOT_DOMAIN], [])
+        self.store.set_portal_domain("dropjak." + ROOT_DOMAIN)
+        stored = self.store.set_proxy([ROOT_DOMAIN], [entry])
+        self.assertEqual(
+            settings_store.route_host(stored["proxy_routes"][0]), ROOT_DOMAIN
+        )
+        with self.assertRaisesRegex(
+            settings_store.SettingsError, "duplikált"
+        ):
+            self.store.set_proxy([ROOT_DOMAIN], [entry, dict(entry)])
+        # Szabály hivatkozhat a gyökérre szóló bejegyzésre, ezért nem tűnhet el.
+        with self.assertRaisesRegex(
+            settings_store.SettingsError, "hivatkozik"
+        ):
+            self.store.set_proxy(
+                [ROOT_DOMAIN], [], referenced={ROOT_DOMAIN}
+            )
+        self.store.set_proxy([ROOT_DOMAIN], [])
+        self.store.set_portal_domain("")
 
     def test_corrupt_file_turns_proxy_off(self) -> None:
         self.store.set_proxy([ROOT_DOMAIN], [{"name": "a", "port": 3000, **R}])
@@ -673,7 +744,23 @@ class ProxyEndpointTests(unittest.TestCase):
                 page = body.decode("utf-8")
                 self.assertIn("/__dropjak/unauthorized.png", page)
                 self.assertIn(f'href="https://{ROOT_DOMAIN}/"', page)
-                self.assertIn("Bejelentkezés", page)
+                # Ikonos belépés-gomb: kék téglalap, SVG-ikon, akadálymentes név.
+                self.assertIn('class="login"', page)
+                self.assertIn('aria-label="Log in"', page)
+                self.assertIn('title="Log in"', page)
+                self.assertNotIn('class="state-icon"', page)
+                self.assertIn("<svg", page)
+                # A gomb a kép alatt, középen: blokk-szintű, automatikus
+                # vízszintes margóval (különben a kép mellé csúszna).
+                self.assertIn("margin:20px auto 0", page)
+                # A tiltó oldalon nincs látható szöveg a régi magyar feliratokból.
+                visible = re.sub(r"<[^>]+>", " ", page)
+                for removed in (
+                    "Nincs hozzáférés", "Bejelentkezés",
+                    "Ez a szolgáltatás csak a Dropjak tűzfalon",
+                ):
+                    with self.subTest(removed=removed):
+                        self.assertNotIn(removed, visible)
 
     def test_login_url_ignores_portal_url(self) -> None:
         # A captive PORTAL_URL a LAN-címe; a tiltóoldal a HTTPS-gyökérre mutat.
@@ -685,6 +772,68 @@ class ProxyEndpointTests(unittest.TestCase):
             gateway.PORTAL_URL = old
         self.assertNotIn(b"portal", body)
         self.assertIn(f'href="https://{ROOT_DOMAIN}/"'.encode(), body)
+
+    def test_portal_domain_host_serves_portal_and_roots_redirect(self) -> None:
+        portal = "dropjak." + ROOT_DOMAIN
+        self.settings.set_portal_domain(portal)
+        try:
+            for ip in ("198.51.100.99", self.AUTHORIZED):
+                with self.subTest(ip=ip):
+                    resp, _ = self.auth(portal, ip)
+                    self.assertEqual(resp.status, 200)
+                    self.assertEqual(
+                        resp.getheader("X-Dropjak-Upstream"),
+                        f"127.0.0.1:{gateway.PORT}",
+                    )
+            # Ismeretlen IP: mint bármely publikus bejegyzésnél, 401.
+            resp, _ = self.auth(portal, "")
+            self.assertEqual(resp.status, 401)
+            # A gyökér bejegyzés nélkül már nem a portálé: nincs tanúsítványa.
+            resp, _ = self.auth(ROOT_DOMAIN, "198.51.100.99")
+            self.assertEqual(resp.status, 404)
+            self.assertIsNone(resp.getheader("X-Dropjak-Upstream"))
+            resp, _ = self.get(f"/api/proxy/ask?domain={ROOT_DOMAIN}")
+            self.assertEqual(resp.status, 404)
+            resp, _ = self.get(f"/api/proxy/ask?domain={portal}")
+            self.assertEqual(resp.status, 200)
+            # A portál címe is tiltja a loopback-végpontokat a Caddyn át.
+            resp, _ = self.get("/api/proxy/auth", {
+                "X-Forwarded-Host": portal,
+                "X-Forwarded-For": "198.51.100.99",
+                "X-Forwarded-Uri": "/api/proxy/auth",
+            })
+            self.assertEqual(resp.status, 404)
+            # A portál címére is kérhető challenge; a captcha-oldal jön.
+            self.settings.set_proxy(
+                [ROOT_DOMAIN, SECOND_DOMAIN],
+                self.settings.snapshot()["proxy_routes"],
+                portal_challenge={"triggers": ["always"]},
+            )
+            resp, body = self.auth(portal, "198.51.100.99")
+            self.assertEqual(resp.status, 403)
+            self.assertIn(b"proxy_challenge", body)
+            # Üres nevű bejegyzés: a gyökér saját szolgáltatást ad.
+            snap = self.settings.snapshot()
+            self.settings.set_proxy(
+                snap["proxy_domains"],
+                [dict(route) for route in snap["proxy_routes"]] + [
+                    {"name": "", "root": ROOT_DOMAIN, "port": 3003,
+                     "visibility": "public"}],
+            )
+            resp, _ = self.auth(ROOT_DOMAIN, "198.51.100.99")
+            self.assertEqual(resp.status, 200)
+            self.assertEqual(
+                resp.getheader("X-Dropjak-Upstream"), "127.0.0.1:3003"
+            )
+            resp, _ = self.get(f"/api/proxy/ask?domain={ROOT_DOMAIN}")
+            self.assertEqual(resp.status, 200)
+        finally:
+            snap = self.settings.snapshot()
+            self.settings.set_proxy(
+                snap["proxy_domains"],
+                [route for route in snap["proxy_routes"] if route["name"]],
+            )
+            self.settings.set_portal_domain("")
 
     def test_public_entry(self) -> None:
         name = host("pub")
@@ -989,6 +1138,24 @@ class ProxyFirewallTemplateTests(unittest.TestCase):
             chain.index("ether saddr != @client_mac drop"), wan
         )
         self.assertLess(wan, chain.index("chain prerouting"))
+
+
+class ProductNameTests(unittest.TestCase):
+    """A látható terméknév Dropjak; a technikai azonosítók változatlanok."""
+
+    def test_server_header_and_cli_description(self) -> None:
+        self.assertEqual(server.Handler.server_version, "Dropjak/2")
+        source = (ROOT / "server.py").read_text(encoding="utf-8")
+        self.assertIn(
+            'description="Felhasználók kezelése a Dropjak users.json fájljában."',
+            source,
+        )
+        for line in source.splitlines():
+            if "Hatarvedelem" in line or (
+                "hatarvedelem" in line
+                and ("server_version" in line or "description=" in line)
+            ):
+                self.fail(f"látható terméknév maradt: {line.strip()}")
 
 
 if __name__ == "__main__":

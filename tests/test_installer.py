@@ -27,11 +27,13 @@ REQUIRED_RUNTIME_FILES = {
     "settings_store.py",
     "fail2ban.py",
     "droplog.py",
+    "tunnel.py",
     "index.html",
     "icon.png",
     "blocked.png",
     "unauthorized.png",
     "sus.png",
+    "ok.png",
     "services.json",
     "VERSION",
 }
@@ -48,25 +50,34 @@ EXPECTED_NFT_PLACEHOLDERS = {
 }
 
 # Pre-3.0.0 SSH plumbing that must not be described as current behaviour.
-# ``CHANGELOG.md`` is deliberately not scanned: it records that these were
-# removed and is expected to name them.
+# The changelog section of ``DOKUMENTACIO.md`` is deliberately not scanned: it
+# records that these were removed and is expected to name them.
 STALE_SSH_TOKENS = ("host_ssh_v4", "admin-full")
 DESIGN_BACKUP_DIR = "design-backup-2026-10-20"
+# Each merged section of DOKUMENTACIO.md starts with its original file name.
+SOURCE_MARK = re.compile(r"^_Source: `([^`]+)`", re.M)
 
 
 def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def documentation_files() -> list[Path]:
-    """README plus docs Markdown, skipping the frozen design backup."""
-    files = [REPO_ROOT / "README.md"]
-    docs = REPO_ROOT / "docs"
-    for path in sorted(docs.rglob("*.md")):
-        if DESIGN_BACKUP_DIR in path.parts:
+def documentation_texts() -> list[tuple[str, str]]:
+    """README plus the former ``docs/`` sections of DOKUMENTACIO.md.
+
+    The frozen design backup is skipped, as are the sections that never lived
+    under ``docs/`` (project status, local guide, changelog).
+    """
+    texts = [("README.md", read_text(REPO_ROOT / "README.md"))]
+    merged = read_text(REPO_ROOT / "DOKUMENTACIO.md")
+    marks = list(SOURCE_MARK.finditer(merged))
+    for mark, nxt in zip(marks, marks[1:] + [None]):
+        source = mark.group(1)
+        if not source.startswith("docs/") or DESIGN_BACKUP_DIR in source:
             continue
-        files.append(path)
-    return files
+        end = nxt.start() if nxt else len(merged)
+        texts.append((f"DOKUMENTACIO.md ({source})", merged[mark.start():end]))
+    return texts
 
 
 def installed_sources(install_sh: str) -> set[str]:
@@ -162,16 +173,15 @@ class InstallerStaticTests(unittest.TestCase):
         )
 
     def test_docs_have_no_stale_ssh_wording(self) -> None:
-        for path in documentation_files():
-            text = read_text(path)
+        texts = documentation_texts()
+        self.assertGreater(len(texts), 1, "no docs/ sections found")
+        for name, text in texts:
             for token in STALE_SSH_TOKENS:
-                with self.subTest(
-                    file=str(path.relative_to(REPO_ROOT)), token=token
-                ):
+                with self.subTest(file=name, token=token):
                     self.assertNotRegex(
                         text,
                         r"\b" + re.escape(token) + r"\b",
-                        f"{path.relative_to(REPO_ROOT)} still contains "
+                        f"{name} still contains "
                         f"pre-3.0.0 SSH wording: {token}",
                     )
 

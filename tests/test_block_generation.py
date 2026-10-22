@@ -27,7 +27,9 @@ if str(ROOT) not in sys.path:
 import gateway  # noqa: E402
 
 # A tisztításnak pontosan ezeket a láncokat kell ürítenie, és semmi mást.
-CUSTOM_CHAINS = ("preauth", "block", "preauth_nat", "block_nat")
+CUSTOM_CHAINS = (
+    "preauth", "preauth_input", "block", "preauth_nat", "block_nat"
+)
 
 
 def valid_preauth_entry() -> dict:
@@ -403,10 +405,10 @@ class InvalidBlockEntryTests(BlockGenerationTestCase):
 
 
 class ClearCustomTests(BlockGenerationTestCase):
-    """A ``clear_custom()`` csak a négy egyedi láncot üríti."""
+    """A ``clear_custom()`` csak az öt egyedi láncot üríti."""
 
     def test_clear_custom_flushes_exactly_the_custom_chains(self) -> None:
-        """Négy ``add chain`` és négy ``flush chain``, más mellékhatás nélkül."""
+        """Öt ``add chain`` és öt ``flush chain``, más mellékhatás nélkül."""
         self.scripts.clear()
         self.run_calls.clear()
         self.firewall.clear_custom()
@@ -526,7 +528,7 @@ class ReplaceCustomTests(BlockGenerationTestCase):
         self.assertEqual(self.run_calls, [])
         lines = self.scripts[0].splitlines()
 
-        for chain in ("preauth", "preauth_nat"):
+        for chain in ("preauth", "preauth_input", "preauth_nat"):
             with self.subTest(chain=chain):
                 self.assertIn(
                     f"add chain inet {self.table} {chain}", lines
@@ -595,7 +597,7 @@ class ApplyCustomSettingsTests(BlockGenerationTestCase):
 
         # Csak a pre-auth láncokat cseréli; a block/block_nat láncok
         # utolsó ismert jó tartalma a kernelben marad.
-        for chain in ("preauth", "preauth_nat"):
+        for chain in ("preauth", "preauth_input", "preauth_nat"):
             with self.subTest(chain=chain):
                 self.assertIn(
                     f"add chain inet {self.table} {chain}", lines

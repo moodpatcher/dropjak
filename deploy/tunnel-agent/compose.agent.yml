@@ -1,0 +1,65 @@
+# Dropjak home tunnel agent.
+#
+# Like the playit.gg agent, the agent is on EXACTLY ONE normal Docker bridge
+# network: the one the playit.gg agent is on (playitgg-net by default), and it
+# reaches containers there by container name over the built-in DNS. Only
+# containers on this network are reachable; other networks, the host gateway
+# and the host Docker socket are not.
+#
+# The downloaded installer (selfinstall.sh) regenerates this file with the
+# single network selected on the host (interactive numbered list,
+# DROPJAK_NETWORK override, or the default), so manual editing is not needed.
+# It also derives container_name from the bundled agent.json as
+#   dropjak-tunnel-agent-<label-slug>-<id>
+# (e.g. dropjak-tunnel-agent-home-home-1): the label makes the container
+# recognisable, the id keeps it unique when two agents share a label. Each
+# install must use its own directory, because the compose project and the
+# agent-state volume are per-directory. container-name next to compose.yml
+# records the resolved name. This static example uses the playitgg-net
+# network and a fixed example name. To start it manually:
+#
+#   1. put agent.json next to this file (the installer packages it; mode 0600)
+#   2. adjust container_name to your agent's name (or copy the generated
+#      compose.yml instead of this template)
+#   3. docker compose up -d --build
+#   4. in the cloud, the target is the container name and port (e.g.
+#      purpur:25565)
+#
+# Only the agent gets NET_ADMIN, in its own network namespace; the host Docker
+# socket is not in the container.
+
+services:
+  tunnel-agent:
+    build: .
+    image: dropjak-tunnel-agent:1
+    container_name: dropjak-tunnel-agent-home-home-1
+    restart: unless-stopped
+    networks:
+      - n1
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /run
+      - /tmp
+    sysctls:
+      # Under rootless Podman /proc/sys is read-only; the runtime sets it.
+      net.ipv4.ip_forward: 1
+    volumes:
+      # The ,Z is required for volume labelling on SELinux hosts (RHEL/Fedora).
+      - ./agent.json:/etc/dropjak/agent.json:ro,Z
+      - agent-state:/var/lib/dropjak-agent
+    # The host kernel needs WireGuard support (module or built in, Linux
+    # >= 5.6). The host sysctls remain unchanged.
+
+networks:
+  n1:
+    external: true
+    name: "playitgg-net"
+
+volumes:
+  agent-state:

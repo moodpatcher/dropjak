@@ -38,15 +38,17 @@ add set inet hatarvedelem allowed_v4 {
 
 # Portra korlátozott hozzáférés: kliens IP + célport párok.
 # A portok a kliens által választott szabályból jönnek (rules.json).
+# Az interval flag a "8000-8100" tartományelemekhez kell; timeout mellett
+# nincs auto-merge, ezért az átfedéseket a gateway.py kezeli.
 add set inet hatarvedelem allowed_tcp {
     type ipv4_addr . inet_service
-    flags timeout
+    flags interval,timeout
     size 16384
 }
 
 add set inet hatarvedelem allowed_udp {
     type ipv4_addr . inet_service
-    flags timeout
+    flags interval,timeout
     size 16384
 }
 
@@ -59,13 +61,13 @@ add set inet hatarvedelem allowed_udp {
 # deklarálhatja; a host elfogadás a 8100-at ettől függetlenül kizárja.
 add set inet hatarvedelem allowed_input_tcp {
     type ipv4_addr . inet_service
-    flags timeout
+    flags interval,timeout
     size 16384
 }
 
 add set inet hatarvedelem allowed_input_udp {
     type ipv4_addr . inet_service
-    flags timeout
+    flags interval,timeout
     size 16384
 }
 
@@ -79,17 +81,20 @@ add set inet hatarvedelem allowed_input_udp {
 #
 # A méret 65536: az érvényes host portok száma legfeljebb 65535, ezért a
 # halmaz soha nem telhet meg, és nem veszhet el csendben egy őrelem. A
-# takarítás (prune) csak olyan portot töröl, amelyre egyetlen perzisztált
-# szabály sem hivatkozik, és amelyhez nem tartozik élő conntrack-bejegyzés.
-# Induláskor a halmaz szándékosan nem ürül: a törölt portok régi folyamai
-# így továbbra is el vannak vágva.
+# takarítás (prune) csak olyan egyportos elemet töröl, amelyre egyetlen
+# perzisztált szabály sem hivatkozik, és amelyhez nem tartozik élő
+# conntrack-bejegyzés. A tartományelemek érintetlenül maradnak, mert a
+# részleges törlés a teljes elemet vinné. Induláskor a halmaz szándékosan
+# nem ürül: a törölt portok régi folyamai így továbbra is el vannak vágva.
 add set inet hatarvedelem host_service_tcp {
     type inet_service
+    flags interval
     size 65536
 }
 
 add set inet hatarvedelem host_service_udp {
     type inet_service
+    flags interval
     size 65536
 }
 
@@ -147,11 +152,13 @@ add chain inet hatarvedelem breakglass
 # Admin által testreszabott láncok. A portál tölti fel őket induláskor és
 # beállításmódosításkor; a sablon betöltése nem üríti őket, hogy egy
 # újratöltés ne nyissa meg vagy ne zárja el a beállított célokat.
-#   preauth:    bejelentkezés előtt is elérhető célok/portok (LAN és válasz)
+#   preauth:    bejelentkezés előtt is elérhető forward célok/portok
+#   preauth_input: bejelentkezés előtt elérhető host (input) portok
 #   block:      mindig eldobott LAN-forgalom (a pre-auth előtt)
 #   preauth_nat: a pre-auth TCP 80 kikerüli a portál-átirányítást
 #   block_nat:  a blokkolt TCP 80-at már a redirect előtt eldobja
 add chain inet hatarvedelem preauth
+add chain inet hatarvedelem preauth_input
 add chain inet hatarvedelem block
 add chain inet hatarvedelem preauth_nat
 add chain inet hatarvedelem block_nat
@@ -164,6 +171,11 @@ add chain inet hatarvedelem block_nat
 add chain inet hatarvedelem portproxy_nat
 add chain inet hatarvedelem portproxy_input
 add chain inet hatarvedelem portproxy_snat
+
+# WireGuard-alagút fogadó lánca (3.20). A portál tölti fel; bekapcsolt
+# ügynök nélkül üres marad, ezért a WireGuard UDP-port zárva van. A
+# sablon nem üríti, hogy egy újratöltés ne zárja el a meglévő alagutat.
+add chain inet hatarvedelem tunnel_input
 
 add chain inet hatarvedelem input {
     type filter hook input priority filter; policy drop;
@@ -188,6 +200,18 @@ add chain inet hatarvedelem postrouting {
     type nat hook postrouting priority srcnat; policy accept;
 }
 
+# Loopback-őr a NAT és a conntrack előtt (raw prioritás), amikor a cím még
+# a vezetéken érkezett eredeti cím. Az input port proxy a csak 127.0.0.1-en
+# figyelő célhoz 127.0.0.1-re DNAT-ol, amihez a hoston
+# net.ipv4.conf.all.route_localnet=1 kell; ekkor a kernel a kívülről
+# érkező 127/8 célú (és forrású) csomagot sem dobná el martianként. Ez a
+# lánc minden nem-loopback interfészen eldobja őket, így a loopback
+# szolgáltatások csak a proxy (engedélyezett DNAT) útján érhetők el. A
+# route_localnet nélkül is ártalmatlan: ezek a csomagok úgyis martianok.
+add chain inet hatarvedelem loopback_guard {
+    type filter hook prerouting priority raw; policy accept;
+}
+
 # A láncok szabályainak cseréje. A flush és az új szabályok ugyanabban az
 # nft-tranzakcióban futnak, ezért nincs nyitott időablak. A halmazhoz nem
 # nyúlunk: az újratöltés nem jelentkezteti ki a klienseket.
@@ -204,6 +228,7 @@ flush chain inet hatarvedelem input
 flush chain inet hatarvedelem prerouting
 flush chain inet hatarvedelem portproxy_prerouting
 flush chain inet hatarvedelem postrouting
+flush chain inet hatarvedelem loopback_guard
 
 table inet hatarvedelem {
     chain forward {
@@ -370,6 +395,11 @@ table inet hatarvedelem {
         # szükség.
         jump block
 
+        # Bejelentkezés előtti host (input) engedélyek. A blokk már lefutott,
+        # ezért a blokk ezt is felülbírálja; a portál- és SSH-szabályok előtt
+        # áll, hogy a megadott host-port a belépés előtt elérhető legyen.
+        jump preauth_input
+
         # A host felé irányuló engedélyezett forgalom (SSH, DNS, ICMP) is
         # csak a munkamenet alatt rögzített MAC-csel jöhet a LAN-on. A portál
         # forgalmát ez nem érinti, mert a portál IP-je nincs a dinamikus
@@ -413,6 +443,10 @@ table inet hatarvedelem {
         # engedélyezett kliensnek semmit. A forward proxyhoz nem kell külön
         # szabály: a forward lánc ct original szabálya engedélyezi.
         jump portproxy_input
+        # WireGuard-alagút: a felhő UDP-portja csak bekapcsolt ügynök
+        # esetén nyílik (a portál tölti fel a láncot). A fail2ban-drop, a
+        # blokk és a MAC-ellenőrzés már lefutott, ezért azok ide is hatnak.
+        jump tunnel_input
         __PROXY__iifname "__WAN_IF__" tcp dport { 80, 443 } accept
         __PROXY__iifname "__LAN_IF__" tcp dport { 80, 443 } ip saddr . ether saddr @client_mac accept
 
@@ -553,5 +587,10 @@ table inet hatarvedelem {
 
     chain portproxy_prerouting {
         jump portproxy_nat
+    }
+
+    chain loopback_guard {
+        iifname != "lo" ip daddr 127.0.0.0/8 drop
+        iifname != "lo" ip saddr 127.0.0.0/8 drop
     }
 }

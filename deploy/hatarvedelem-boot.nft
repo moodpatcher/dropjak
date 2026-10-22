@@ -26,8 +26,13 @@ add chain inet hatarvedelem_boot input {
     type filter hook input priority filter; policy accept;
 }
 
+add chain inet hatarvedelem_boot loopback_guard {
+    type filter hook prerouting priority raw; policy accept;
+}
+
 flush chain inet hatarvedelem_boot forward
 flush chain inet hatarvedelem_boot input
+flush chain inet hatarvedelem_boot loopback_guard
 
 # A portál még nem fut, ezért a host SSH-t a végleges szabályok
 # betöltéséig mindenhonnan eldobjuk. A loopback kivétel, hogy a helyi
@@ -36,5 +41,14 @@ table inet hatarvedelem_boot {
     chain input {
         iifname "lo" accept
         tcp dport 22 drop
+    }
+
+    # A hoston net.ipv4.conf.all.route_localnet=1 (az input port proxy
+    # loopback-céljához): a kívülről érkező 127/8 célú vagy forrású csomag
+    # a végleges szabályok betöltése előtt sem érheti el a loopback
+    # szolgáltatásokat.
+    chain loopback_guard {
+        iifname != "lo" ip daddr 127.0.0.0/8 drop
+        iifname != "lo" ip saddr 127.0.0.0/8 drop
     }
 }

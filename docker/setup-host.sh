@@ -8,7 +8,10 @@
 #
 #   - /etc/nftables/hatarvedelem-boot.nft  (policy drop a forward-láncon)
 #   - /etc/systemd/system/hatarvedelem-boot.service
-#   - /etc/sysctl.d/90-hatarvedelem.conf   (net.ipv4.ip_forward = 1)
+#   - /etc/sysctl.d/90-hatarvedelem.conf   (net.ipv4.ip_forward = 1,
+#     net.ipv4.conf.all.route_localnet = 1 az input port proxy
+#     127.0.0.1-es céljához; a 127/8 csomagokat a loopback_guard lánc
+#     minden nem-loopback interfészen eldobja)
 #
 # A konténer a saját szabályainak betöltése után törli a boot-táblát, így
 # a végleges szabályok veszik át a helyét.
@@ -84,13 +87,19 @@ cat >"$SYSCTL_FILE" <<'EOF'
 # Dropjak: a VM átjáróként továbbítja a kliensek forgalmát.
 # A tényleges engedélyezést az nftables allowed_v4 halmaza végzi.
 net.ipv4.ip_forward = 1
+# Az input port proxy a csak 127.0.0.1-en figyelő célhoz (például a Docker
+# 127.0.0.1-re publikált portjához) 127.0.0.1-re DNAT-ol. A kívülről érkező
+# 127/8 célú/forrású csomagokat az nft loopback_guard lánca eldobja.
+net.ipv4.conf.all.route_localnet = 1
 EOF
 chmod 0644 "$SYSCTL_FILE"
 
 if command -v sysctl >/dev/null 2>&1; then
     sysctl -q -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
+    sysctl -q -w net.ipv4.conf.all.route_localnet=1 >/dev/null 2>&1 || true
 else
     echo 1 >/proc/sys/net/ipv4/ip_forward 2>/dev/null || true
+    echo 1 >/proc/sys/net/ipv4/conf/all/route_localnet 2>/dev/null || true
 fi
 if [ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo 0)" != "1" ]; then
     info "FIGYELEM: a net.ipv4.ip_forward most nem kapcsolható be; újraindítás után igen."

@@ -11,6 +11,7 @@ használnak, és a HTTP-kiszolgálót is csak 127.0.0.1-re indítják.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import http.client
 import ipaddress
@@ -3705,11 +3706,18 @@ class HttpTests(unittest.TestCase):
         self.assertIn(b"/api/access", body)
         self.assertIn(b'id="rules"', body)
         self.assertIn(b'id="admin-panel"', body)
+        self.assertIn(b'class="ok-art" src="ok.png"', body)
+        self.assertIn(b"portal-domain", body)
+        self.assertIn(b"portal_domain", body)
         status, headers, body = self.get("/icon.png")
         self.assertEqual(status, 200)
         self.assertEqual(headers["Content-Type"], "image/png")
         self.assertTrue(body.startswith(b"\x89PNG"))
         status, headers, body = self.get("/blocked.png")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "image/png")
+        self.assertTrue(body.startswith(b"\x89PNG"))
+        status, headers, body = self.get("/ok.png")
         self.assertEqual(status, 200)
         self.assertEqual(headers["Content-Type"], "image/png")
         self.assertTrue(body.startswith(b"\x89PNG"))
@@ -6864,6 +6872,451 @@ class RuleGroupStoreTests(unittest.TestCase):
         self.assertTrue(self.users.verify("alice", "masik-jelszo-1"))
 
 
+class ServiceRuleStoreTests(unittest.TestCase):
+    """Szolgáltatás-szabályok: feloldás, perzisztencia, gyűjtő, reflect."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.ports = {
+            "home/mc": {
+                "tcp": (25565,), "udp": (), "target_host": "mc",
+            },
+            "home/mc-both": {
+                "tcp": (25565,), "udp": (25565,), "target_host": "mc",
+            },
+            "home/dns": {
+                "tcp": (53,), "udp": (53,), "target_host": "dns",
+            },
+            # Domain-módú szolgáltatás: nincs WAN-port, proxy-domain van.
+            "home/web": {
+                "tcp": (), "udp": (), "target_host": "web",
+                "domain": "web.example.com",
+            },
+        }
+        self.logs: list[str] = []
+        self.rules = self.store()
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def store(self, path: str | None = None) -> gateway.RuleStore:
+        return gateway.RuleStore(
+            path or os.path.join(self.tmp.name, "rules.json"),
+            catalog=CATALOG,
+            logger=self.logs.append,
+            service_ports=lambda ref: self.ports.get(ref),
+            service_domains=lambda ref: self.ports.get(ref),
+        )
+
+    def test_create_resolves_forward_ports_and_persists_refs_only(self) -> None:
+        rule = self.rules.create("mc-rule", {
+            "label": "Minecraft", "description": "játék",
+            "service_refs": ["home/mc"], "default_ttl": 60, "max_ttl": 600,
+        })
+        self.assertEqual(rule.service_refs, ("home/mc",))
+        self.assertEqual(rule.service_tcp, (25565,))
+        self.assertEqual(rule.service_udp, ())
+        self.assertEqual(rule.ports.direction, "forward")
+        self.assertEqual(
+            rule.grants,
+            (gateway.Ports((25565,), (), False, False, "forward"),),
+        )
+        public = rule.public()
+        self.assertEqual(public["service_refs"], ["home/mc"])
+        self.assertNotIn("domains", public)
+        self.assertNotIn("members", public)
+        self.assertEqual(public["tcp"], [25565])
+        self.assertEqual(public["direction"], "forward")
+
+        with open(self.rules.path, encoding="utf-8") as fh:
+            stored = json.load(fh)["rules"]["mc-rule"]
+        self.assertEqual(
+            set(stored),
+            {"label", "description", "service_refs", "default_ttl",
+             "max_ttl", "created"},
+        )
+        self.assertEqual(stored["service_refs"], ["home/mc"])
+        for forbidden in ("tcp", "udp", "icmp", "full", "direction",
+                          "service_tcp", "service_udp", "members"):
+            self.assertNotIn(forbidden, stored)
+
+        reloaded = self.store()
+        loaded = reloaded.get("mc-rule")
+        self.assertIsNotNone(loaded)
+        self.assertEqual(loaded.service_refs, ("home/mc",))
+        self.assertEqual(loaded.service_tcp, (25565,))
+
+    def test_udp_and_both_protocol_union(self) -> None:
+        rule = self.rules.create("both-rule", {
+            "label": "Mindkettő",
+            "service_refs": ["home/mc-both", "home/dns"],
+        })
+        self.assertEqual(rule.service_tcp, (53, 25565))
+        self.assertEqual(rule.service_udp, (53, 25565))
+        self.assertEqual(
+            rule.grants,
+            (gateway.Ports((53, 25565), (53, 25565), False, False,
+                           "forward"),),
+        )
+
+    def test_domain_service_rule_grants_domain_without_ports(self) -> None:
+        """Csak domain-módú szolgáltatás: nincs port, a domain a grant."""
+        rule = self.rules.create("web-rule", {
+            "label": "Web", "service_refs": ["home/web"],
+            "default_ttl": 60, "max_ttl": 600,
+        })
+        self.assertEqual(rule.service_refs, ("home/web",))
+        self.assertEqual(rule.service_tcp, ())
+        self.assertEqual(rule.service_udp, ())
+        self.assertEqual(rule.service_domains, ("web.example.com",))
+        self.assertEqual(rule.grants, ())
+        self.assertEqual(rule.ports.label(), "Nincs port")
+        self.assertEqual(rule.session_domains, ("web.example.com",))
+
+        # A számított mezők nem perzisztálódnak; betöltéskor újra feloldódnak.
+        with open(self.rules.path, encoding="utf-8") as fh:
+            stored = json.load(fh)["rules"]["web-rule"]
+        self.assertEqual(
+            set(stored),
+            {"label", "description", "service_refs", "default_ttl",
+             "max_ttl", "created"},
+        )
+        loaded = self.store().get("web-rule")
+        self.assertEqual(loaded.service_domains, ("web.example.com",))
+
+    def test_mixed_domain_and_port_service_keeps_ports_and_domain(self) -> None:
+        rule = self.rules.create("mixed-rule", {
+            "label": "Web + MC",
+            "service_refs": ["home/mc", "home/web"],
+        })
+        self.assertEqual(rule.service_tcp, (25565,))
+        self.assertEqual(rule.service_udp, ())
+        self.assertEqual(rule.service_domains, ("web.example.com",))
+        self.assertEqual(
+            rule.grants,
+            (gateway.Ports((25565,), (), False, False, "forward"),),
+        )
+        self.assertEqual(rule.session_domains, ("web.example.com",))
+
+    def test_disabled_domain_service_is_rejected_on_save(self) -> None:
+        self.ports["home/web-off"] = None
+        with self.assertRaises(gateway.RuleStoreError) as caught:
+            self.rules.create("web-off-rule", {
+                "label": "Web", "service_refs": ["home/web-off"],
+            })
+        self.assertIn("home/web-off", str(caught.exception))
+        self.assertIsNone(self.rules.get("web-off-rule"))
+
+    def test_domain_service_rename_changes_signature(self) -> None:
+        """A domain átnevezése a signature-ben is megjelenik."""
+        rule = self.rules.create("web-rule", {
+            "label": "Web", "service_refs": ["home/web"],
+        })
+        self.assertIn(
+            ("home/web", "domain", 0, "web.example.com", 0),
+            rule.service_signature,
+        )
+        old_signature = rule.service_signature
+        self.ports["home/web"] = {
+            "tcp": (), "udp": (), "target_host": "web",
+            "domain": "web2.example.com",
+        }
+        self.assertEqual(self.rules.reflect_services(), ("web-rule",))
+        current = self.rules.get("web-rule")
+        self.assertNotEqual(current.service_signature, old_signature)
+        self.assertEqual(current.service_domains, ("web2.example.com",))
+        self.assertEqual(
+            self.rules.service_signature(current.service_refs),
+            current.service_signature,
+        )
+        self.assertNotEqual(
+            self.rules.service_signature(current.service_refs), old_signature
+        )
+
+    def test_authorize_domain_service_rule_grants_only_its_domain(self) -> None:
+        rule = self.rules.create("web-rule", {
+            "label": "Web", "service_refs": ["home/web"],
+        })
+
+        class _RecordingFirewall:
+            def __init__(self) -> None:
+                self.granted: list[tuple] = []
+
+            def revoke_all(self, ip: str, grants=()) -> None:
+                pass
+
+            def grant_all(self, ip, grants, ttl) -> None:
+                self.granted.append((ip, tuple(grants), ttl))
+
+        firewall = _RecordingFirewall()
+        manager = gateway.SessionManager(
+            firewall, ttl=600, pending_ttl=60
+        )
+        session = manager.login("alice", "192.168.50.20")
+        authorized = manager.authorize(
+            session.token, "192.168.50.20", rule, 120
+        )
+        self.assertTrue(authorized.authorized)
+        self.assertEqual(
+            authorized.rule_parts[0].domains, ("web.example.com",)
+        )
+        self.assertEqual(
+            manager.domain_user("192.168.50.20", "web.example.com"), "alice"
+        )
+        self.assertIsNone(
+            manager.domain_user("192.168.50.20", "other.example.com")
+        )
+        # A domain-szolgáltatás nem nyit nft-portot.
+        self.assertEqual(authorized.grant_parts, ())
+        self.assertEqual(firewall.granted, [("192.168.50.20", (), 120)])
+
+    def test_unknown_and_disabled_refs_are_rejected_on_save(self) -> None:
+        with self.assertRaises(gateway.RuleStoreError) as caught:
+            self.rules.create("missing", {
+                "label": "Hiányzó", "service_refs": ["home/nincs"],
+            })
+        self.assertIn("home/nincs", str(caught.exception))
+        # Letiltott szolgáltatás: a visszahívás None-t ad.
+        self.ports["home/off"] = None
+        with self.assertRaises(gateway.RuleStoreError) as caught:
+            self.rules.create("disabled", {
+                "label": "Letiltott", "service_refs": ["home/off"],
+            })
+        self.assertIn("home/off", str(caught.exception))
+
+    def test_missing_ref_on_load_keeps_rule_but_grants_nothing(self) -> None:
+        path = os.path.join(self.tmp.name, "stale.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"rules": {"stale": {
+                "label": "Elavult", "service_refs": ["home/mc"],
+                "default_ttl": 60, "max_ttl": 600,
+            }}}, fh)
+        self.ports.pop("home/mc")
+        store = self.store(path)
+        rule = store.get("stale")
+        self.assertIsNotNone(rule)
+        self.assertEqual(rule.service_refs, ("home/mc",))
+        self.assertEqual(rule.service_tcp, ())
+        self.assertEqual(rule.service_udp, ())
+        self.assertEqual(rule.grants, ())
+        self.assertEqual(rule.ports.label(), "Nincs port")
+
+    def test_mixed_kinds_and_bad_shapes_are_rejected(self) -> None:
+        for payload in (
+            {"label": "Vegyes", "service_refs": ["home/mc"], "tcp": [80]},
+            {"label": "Vegyes", "service_refs": ["home/mc"],
+             "members": ["web-only"]},
+            {"label": "Vegyes", "service_refs": ["home/mc"],
+             "domains": ["a.example.com"]},
+            {"label": "Vegyes", "service_refs": ["home/mc"],
+             "collection": True, "members": []},
+            {"label": "Üres", "service_refs": []},
+            {"label": "Hibás", "service_refs": ["home"]},
+            {"label": "Hibás", "service_refs": ["home/mc", "home/mc"]},
+            {"label": "Hibás", "service_refs": ["Home/MC"]},
+        ):
+            with self.subTest(payload=payload):
+                with self.assertRaises(gateway.RuleStoreError):
+                    self.rules.create("mixed", payload)
+        self.assertIsNone(self.rules.get("mixed"))
+
+    def test_legacy_fallback_excludes_service_rules(self) -> None:
+        self.rules.create("forward-web", {"label": "Web", "tcp": [80]})
+        self.rules.create("service-rule", {
+            "label": "Szolgáltatás", "service_refs": ["home/mc"],
+        })
+        self.rules.create("service-col", {
+            "label": "Gyűjtő", "collection": True,
+            "members": ["forward-web", "service-rule"],
+        })
+        self.users = gateway.UserStore(
+            os.path.join(self.tmp.name, "users.json"), iterations=10_000
+        )
+        self.users.add("legacy", "hosszu-jelszo-1")
+        legacy = self.users.record("legacy")
+        ids = [rule.id for rule in self.rules.effective_for(legacy, [])]
+        self.assertIn("forward-web", ids)
+        self.assertNotIn("service-rule", ids)
+        self.assertNotIn("service-col", ids)
+        for rule_id in ("service-rule", "service-col"):
+            with self.assertRaises(gateway.AccessError):
+                self.rules.resolve_for(legacy, [], rule_id)
+
+        self.users.set_metadata("legacy", rules=("service-rule",))
+        assigned = self.users.record("legacy")
+        self.assertEqual(
+            [rule.id for rule in self.rules.effective_for(assigned, [])],
+            ["service-rule"],
+        )
+
+    def test_collection_containing_service_rule(self) -> None:
+        web = self.rules.create("col-web", {"label": "Web", "tcp": [80]})
+        service = self.rules.create("col-service", {
+            "label": "MC", "service_refs": ["home/mc"],
+        })
+        combo = self.rules.create("col-combo", {
+            "label": "Web + MC", "collection": True,
+            "members": ["col-web", "col-service"],
+        })
+        self.assertTrue(combo.collection)
+        self.assertEqual(combo.tcp, (80, 25565))
+        self.assertEqual(combo.service_refs, ("home/mc",))
+        self.assertEqual(combo.service_tcp, (25565,))
+        self.assertEqual(
+            [part.direction for part in combo.grants], ["forward"]
+        )
+        self.assertEqual(combo.grants[0].tcp, (80, 25565))
+        with open(self.rules.path, encoding="utf-8") as fh:
+            stored = json.load(fh)["rules"]["col-combo"]
+        self.assertEqual(
+            set(stored),
+            {"label", "description", "members", "default_ttl",
+             "max_ttl", "created"},
+        )
+        references = self.rules.service_references()
+        self.assertEqual(references["home/mc"], ("col-combo", "col-service"))
+
+        # Beágyazott gyűjtő és teljes hozzáférésű tag továbbra is tiltott.
+        with self.assertRaises(gateway.RuleStoreError):
+            self.rules.create("nested", {
+                "label": "Beágyazott", "collection": True,
+                "members": ["col-combo"],
+            })
+        self.rules.create("full-rule", {"label": "Full", "full": True})
+        with self.assertRaises(gateway.RuleStoreError):
+            self.rules.create("full-col", {
+                "label": "Full gyűjtő", "collection": True,
+                "members": ["full-rule"],
+            })
+
+    def test_reflect_services_updates_rule_and_collection(self) -> None:
+        service = self.rules.create("svc", {
+            "label": "MC", "service_refs": ["home/mc"],
+        })
+        self.rules.create("svc-col", {
+            "label": "Gyűjtő", "collection": True, "members": ["svc"],
+        })
+        with open(self.rules.path, encoding="utf-8") as fh:
+            before = fh.read()
+        self.ports["home/mc"] = {"tcp": (25566,), "udp": ()}
+        changed = self.rules.reflect_services()
+        self.assertEqual(changed, ("svc", "svc-col"))
+        self.assertEqual(self.rules.get("svc").service_tcp, (25566,))
+        self.assertEqual(self.rules.get("svc-col").tcp, (25566,))
+        with open(self.rules.path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), before)
+        # Ismételt hívás: nincs több változás.
+        self.assertEqual(self.rules.reflect_services(), ())
+
+    def test_service_signature_tracks_target_host_and_port(self) -> None:
+        """A hallgató portok változatlanok, a cél mégis más: változás."""
+        rule = self.rules.create("svc", {
+            "label": "MC", "service_refs": ["home/mc"],
+        })
+        self.assertEqual(
+            rule.service_signature,
+            (("home/mc", "tcp", 25565, "mc", 25565),),
+        )
+        self.rules.create("svc-col", {
+            "label": "Gyűjtő", "collection": True, "members": ["svc"],
+        })
+        # Csak a célhost változik; a feloldott hallgató port marad.
+        self.ports["home/mc"] = {
+            "tcp": (25565,), "udp": (), "target_host": "nas",
+        }
+        self.assertEqual(self.rules.reflect_services(), ("svc", "svc-col"))
+        self.assertEqual(self.rules.get("svc").service_tcp, (25565,))
+        self.assertEqual(
+            self.rules.get("svc").service_signature,
+            (("home/mc", "tcp", 25565, "nas", 25565),),
+        )
+        self.assertEqual(
+            self.rules.get("svc-col").service_signature,
+            (("home/mc", "tcp", 25565, "nas", 25565),),
+        )
+        # Csak a célport változik (a hallgató port ugyanaz).
+        self.ports["home/mc"] = {
+            "tcp": (25565,), "udp": (), "target_host": "nas",
+            "signature": (("tcp", 25565, "nas", 40000),),
+        }
+        self.assertEqual(self.rules.reflect_services(), ("svc", "svc-col"))
+        self.assertEqual(self.rules.get("svc").service_tcp, (25565,))
+        self.assertEqual(
+            self.rules.get("svc").service_signature,
+            (("home/mc", "tcp", 25565, "nas", 40000),),
+        )
+        # A perzisztált alak továbbra sem tartalmaz számított mezőt.
+        records = self.rules.export_records()
+        self.assertEqual(set(records["svc"]), {
+            "label", "description", "service_refs", "default_ttl",
+            "max_ttl", "created",
+        })
+        self.rules.delete("svc-col")
+        self.rules.delete("svc")
+
+    def test_duplicate_and_import_export(self) -> None:
+        self.rules.create("svc", {
+            "label": "MC", "service_refs": ["home/mc"],
+        })
+        copied = self.rules.duplicate("svc")
+        self.assertEqual(copied.service_refs, ("home/mc",))
+        self.assertEqual(copied.service_tcp, (25565,))
+        records = self.rules.export_records()
+        self.assertEqual(records["svc"]["service_refs"], ["home/mc"])
+        self.assertNotIn("tcp", records["svc"])
+        # Az import csak az alakot ellenőrzi: az ismeretlen hivatkozás
+        # megengedett (az alagutak ugyanabban a csomagban jöhetnek).
+        imported = self.rules.validate_import_records({
+            "svc-import": {
+                "label": "Import", "service_refs": ["future/svc"],
+            },
+        })
+        self.assertEqual(imported["svc-import"].service_tcp, ())
+        with self.assertRaises(gateway.RuleStoreError):
+            self.rules.validate_import_records({
+                "bad": {
+                    "label": "Bad", "service_refs": ["future/svc"],
+                    "tcp": [80],
+                },
+            })
+
+    def test_authorize_grants_service_ports(self) -> None:
+        rule = self.rules.create("svc", {
+            "label": "MC", "service_refs": ["home/mc"],
+        })
+
+        class _RecordingFirewall:
+            def __init__(self) -> None:
+                self.granted: list[tuple] = []
+
+            def revoke_all(self, ip: str, grants=()) -> None:
+                pass
+
+            def grant_all(self, ip, grants, ttl) -> None:
+                self.granted.append((ip, tuple(grants), ttl))
+
+        firewall = _RecordingFirewall()
+        manager = gateway.SessionManager(
+            firewall, ttl=600, pending_ttl=60
+        )
+        session = manager.login("alice", "192.168.50.20")
+        authorized = manager.authorize(
+            session.token, "192.168.50.20", rule, 120
+        )
+        self.assertEqual(
+            authorized.grant_parts,
+            (gateway.Ports((25565,), (), False, False, "forward"),),
+        )
+        self.assertEqual(
+            firewall.granted,
+            [(
+                "192.168.50.20",
+                (gateway.Ports((25565,), (), False, False, "forward"),),
+                120,
+            )],
+        )
+
+
 class RuleStoreConcurrencyTests(unittest.TestCase):
     """A szabálytár zárolási versenyhelyzetei."""
 
@@ -7261,6 +7714,10 @@ class AdminHttpTests(unittest.TestCase):
         self.assertEqual(status, 403, body)
         status, _, body = self.get("/api/admin/firewall-rules", cookie=cookie)
         self.assertEqual(status, 403, body)
+        status, _, body = self.get(
+            "/api/admin/preview?user=alice", cookie=cookie
+        )
+        self.assertEqual(status, 403, body)
         status, _, body = self.post(
             "/api/admin/sessions", {"action": "terminate", "id": "x"},
             cookie=cookie,
@@ -7270,6 +7727,136 @@ class AdminHttpTests(unittest.TestCase):
             "/api/admin/users", {"action": "delete", "name": "root"}, cookie=cookie
         )
         self.assertEqual(status, 403)
+
+    def test_admin_preview_origin_check(self) -> None:
+        cookie = self.admin_cookie()
+        conn = self.conn("127.0.0.5")
+        conn.request(
+            "GET", "/api/admin/preview?user=alice",
+            headers={"Cookie": cookie, "Origin": "http://evil.example"},
+        )
+        resp = conn.getresponse()
+        body = resp.read()
+        conn.close()
+        self.assertEqual(resp.status, 403, body)
+
+    def test_admin_preview_is_read_only_and_matches_portal(self) -> None:
+        cookie = self.admin_cookie()
+        source = "127.0.0.5"
+
+        def admin_post(path: str, payload: dict):
+            return self.post(path, payload, cookie=cookie, source=source)
+
+        # Gyűjtő + csoport + közvetlen kiosztás: az előnézetnek mindhármat
+        # ugyanúgy mutatnia kell, mint a valódi portál /api/status.
+        status, _, body = admin_post("/api/admin/rules", {
+            "action": "create", "id": "preview-col", "label": "Előnézet gyűjtő",
+            "collection": True, "members": ["web-only", "host-ssh"],
+            "default_ttl": 120, "max_ttl": 600,
+        })
+        self.assertEqual(status, 200, body)
+        status, _, body = admin_post("/api/admin/users", {
+            "action": "create", "name": "previewer",
+            "password": "previewer-jelszo-1", "role": "user",
+            "enabled": True, "rules": ["web-only"], "groups": [],
+        })
+        self.assertEqual(status, 200, body)
+        status, _, body = admin_post("/api/admin/groups", {
+            "action": "create", "id": "preview-group", "label": "Előnézet",
+            "rules": ["preview-col"], "members": ["previewer"],
+        })
+        self.assertEqual(status, 200, body)
+
+        def cleanup() -> None:
+            self.gw.sessions.revoke_user("previewer")
+            admin_post(
+                "/api/admin/groups",
+                {"action": "delete", "id": "preview-group"},
+            )
+            admin_post(
+                "/api/admin/users",
+                {"action": "delete", "name": "previewer"},
+            )
+            admin_post(
+                "/api/admin/rules",
+                {"action": "delete", "id": "preview-col"},
+            )
+        self.addCleanup(cleanup)
+
+        self.users.add(
+            "preview-pending", "pending-jelszo-1", pending=True,
+            email="pending@example.invalid",
+        )
+        self.users.set_totp_required("preview-pending", True)
+        self.addCleanup(self.users.remove, "preview-pending")
+
+        # Tiszta nft- és munkamenet-állapotból nyitjuk az előnézetet.
+        self.tools.clear()
+        sessions_before = self.gw.sessions.count()
+        status, headers, body = self.get(
+            "/api/admin/preview?user=previewer", cookie=cookie, source=source
+        )
+        self.assertEqual(status, 200, body)
+        self.assertNotIn("Set-Cookie", headers)
+        preview = json.loads(body)
+        self.assertTrue(preview["preview"])
+        self.assertEqual(preview["user"], "previewer")
+        self.assertFalse(preview["totp_required"])
+        self.assertFalse(preview["totp_enrolled"])
+        self.assertFalse(preview["pending"])
+        self.assertNotIn("totp_secret", preview)
+        ids = [rule["id"] for rule in preview["rules"]]
+        self.assertEqual(ids, ["web-only", "preview-col"])
+        self.assertTrue(next(
+            rule for rule in preview["rules"]
+            if rule["id"] == "preview-col"
+        )["collection"])
+        # A domainek és a TTL-korlátok is a portál-payloadban vannak.
+        self.assertIn("limits", preview)
+        for rule in preview["rules"]:
+            self.assertIn("max_ttl", rule)
+            self.assertIn("domains", rule)
+
+        # Nem nyílt munkamenet és nem indult nft-művelet.
+        self.assertEqual(self.gw.sessions.count(), sessions_before)
+        self.assertFalse([
+            row for row in self.gw.sessions.active_sessions()
+            if row["user"] == "previewer"
+        ])
+        self.assertEqual(self.tools.script(), [])
+
+        # Az előnézet megnyitása audit-bejegyzést ír.
+        entries = self.audit.read(limit=2000)
+        self.assertTrue(any(
+            item.get("event") == "admin_user_preview"
+            and item.get("user") == "root"
+            and item.get("target") == "previewer"
+            for item in entries
+        ))
+
+        # A tartalom pontosan a valódi portál-adat: ugyanaz, mint /api/status.
+        user_cookie, _ = self.login(
+            "previewer", "previewer-jelszo-1", source="127.0.0.9"
+        )
+        status, _, body = self.get(
+            "/api/status", cookie=user_cookie, source="127.0.0.9"
+        )
+        self.assertEqual(status, 200, body)
+        real = json.loads(body)
+        self.assertTrue(real["authenticated"])
+        self.assertEqual(preview["rules"], real["rules"])
+        self.assertEqual(preview["limits"], real["limits"])
+
+        # Jóváhagyásra váró fiók: üres szabálylista, pending jelző.
+        status, _, body = self.get(
+            "/api/admin/preview?user=preview-pending",
+            cookie=cookie, source=source,
+        )
+        self.assertEqual(status, 200, body)
+        pending = json.loads(body)
+        self.assertTrue(pending["pending"])
+        self.assertTrue(pending["totp_required"])
+        self.assertEqual(pending["rules"], [])
 
     def test_admin_firewall_view_groups_active_grants(self) -> None:
         cookie = self.admin_cookie()
@@ -9473,6 +10060,70 @@ class AdminHttpTests(unittest.TestCase):
             self.assertEqual(row.get("user"), "root")
             self.assertEqual(row.get("target"), "registration_enabled")
 
+    def test_admin_portal_domain_setting(self) -> None:
+        admin = self.admin_cookie()
+        before = list(self.tools.lines())
+        self.settings.set_proxy(["z1.example.com"], [])
+        started = time.time()
+        try:
+            status, _, body = self.post(
+                "/api/admin/settings",
+                {"action": "portal_domain",
+                 "domain": "Dropjak.Z1.example.com"},
+                cookie=admin, source="127.0.0.5",
+            )
+            self.assertEqual(status, 200, body)
+            data = json.loads(body)
+            self.assertEqual(
+                data["settings"]["portal_domain"], "dropjak.z1.example.com"
+            )
+            self.assertEqual(data["message"], "A Dropjak címe mentve.")
+            # A cím beállítása nem megy át az nftables-en.
+            self.assertEqual(self.tools.lines(), before)
+            reloaded = gateway.settings_store.SettingsStore(
+                self.settings.path, logger=lambda *_: None
+            )
+            self.assertEqual(
+                reloaded.snapshot()["portal_domain"], "dropjak.z1.example.com"
+            )
+            for value in ("z1.example.com", "dropjak.example.net", 42):
+                with self.subTest(value=value):
+                    status, _, body = self.post(
+                        "/api/admin/settings",
+                        {"action": "portal_domain", "domain": value},
+                        cookie=admin, source="127.0.0.5",
+                    )
+                    self.assertEqual(status, 400, body)
+                    self.assertEqual(
+                        self.settings.snapshot()["portal_domain"],
+                        "dropjak.z1.example.com",
+                    )
+            status, _, body = self.post(
+                "/api/admin/settings",
+                {"action": "portal_domain", "domain": ""},
+                cookie=admin, source="127.0.0.5",
+            )
+            self.assertEqual(status, 200, body)
+            self.assertEqual(
+                json.loads(body)["settings"]["portal_domain"], ""
+            )
+        finally:
+            self.settings.set_portal_domain("")
+            self.settings.set_proxy([], [])
+        rows = [
+            row for row in audit_since(self.audit, started)
+            if row.get("event") == "admin_settings_changed"
+            and row.get("action") == "portal_domain"
+        ]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(
+            {row.get("portal_domain") for row in rows},
+            {"dropjak.z1.example.com", ""},
+        )
+        for row in rows:
+            self.assertEqual(row.get("user"), "root")
+            self.assertEqual(row.get("target"), "portal_domain")
+
     def test_public_status_only_exposes_registration_flag(self) -> None:
         status, _, body = self.get("/api/status")
         self.assertEqual(status, 200, body)
@@ -9577,6 +10228,117 @@ class AdminHttpTests(unittest.TestCase):
         ]
         self.assertEqual(len(rows), 2)
         self.assertIn("", [row.get("site_name") for row in rows])
+
+    def test_admin_motd_and_status_visibility(self) -> None:
+        admin = self.admin_cookie()
+        before = list(self.tools.lines())
+        started = time.time()
+
+        # Bejelentkezés előtt a közlemény soha nem hagyja el a szervert.
+        status, _, body = self.get("/api/status")
+        self.assertEqual(status, 200, body)
+        self.assertNotIn("motd", json.loads(body))
+
+        status, _, body = self.post(
+            "/api/admin/settings",
+            {"action": "motd", "text": "  Karbantartás 22:00  ",
+             "expires_at": "2999-01-01T00:00:00Z"},
+            cookie=admin, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+        data = json.loads(body)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["settings"]["motd_text"], "Karbantartás 22:00")
+        self.assertEqual(
+            data["settings"]["motd_expires_at"], "2999-01-01T00:00:00Z"
+        )
+        self.assertEqual(data["message"], "A közlemény mentve.")
+        # A közlemény mentése nem megy át az nftables-en.
+        self.assertEqual(self.tools.lines(), before)
+
+        # Bejelentkezés nélkül az aktív közlemény sem hagyja el a szervert.
+        status, _, body = self.get("/api/status")
+        self.assertEqual(status, 200, body)
+        self.assertNotIn("motd", json.loads(body))
+
+        # Belépés után a portál megkapja; a belépés válasza is tartalmazza.
+        cookie, login_data = self.login("alice", "alice-jelszo-1")
+        self.assertEqual(login_data["motd"], "Karbantartás 22:00")
+        status, _, body = self.get("/api/status", cookie=cookie)
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body)["motd"], "Karbantartás 22:00")
+
+        # Lejárt közlemény: a mentés elfogadja, de a válaszból kimarad.
+        status, _, body = self.post(
+            "/api/admin/settings",
+            {"action": "motd", "text": "Régi hír",
+             "expires_at": "2000-01-01T00:00:00Z"},
+            cookie=admin, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+        status, _, body = self.get("/api/status", cookie=cookie)
+        self.assertEqual(status, 200, body)
+        self.assertNotIn("motd", json.loads(body))
+        self.assertNotIn("Régi hír", json.loads(body).values())
+
+        # Állandó közlemény: üres lejárat.
+        status, _, body = self.post(
+            "/api/admin/settings",
+            {"action": "motd", "text": "Állandó hír", "expires_at": ""},
+            cookie=admin, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+        self.assertEqual(
+            json.loads(body)["settings"]["motd_expires_at"], ""
+        )
+        status, _, body = self.get("/api/status", cookie=cookie)
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body)["motd"], "Állandó hír")
+
+        # Üres szöveg kikapcsolja (törli) a közleményt.
+        status, _, body = self.post(
+            "/api/admin/settings",
+            {"action": "motd", "text": "", "expires_at": ""},
+            cookie=admin, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+        status, _, body = self.get("/api/status", cookie=cookie)
+        self.assertEqual(status, 200, body)
+        self.assertNotIn("motd", json.loads(body))
+
+        rows = [
+            row for row in audit_since(self.audit, started)
+            if row.get("event") == "admin_settings_changed"
+            and row.get("action") == "motd"
+        ]
+        self.assertEqual(len(rows), 4)
+        for row in rows:
+            self.assertEqual(row.get("user"), "root")
+            self.assertEqual(row.get("target"), "motd")
+            # A közlemény szövege soha nem kerül a naplóba.
+            self.assertNotIn("text", row)
+        self.assertEqual(
+            rows[-1].get("motd_length"), len("Karbantartás 22:00")
+        )
+        self.assertEqual(
+            rows[-1].get("motd_expires_at"), "2999-01-01T00:00:00Z"
+        )
+        self.assertEqual(self.tools.lines(), before)
+
+    def test_admin_motd_rejects_invalid_expiry(self) -> None:
+        admin = self.admin_cookie()
+        for value in ("tegnap", "2026-10-22", "2026-10-22T10:00:00", 5):
+            with self.subTest(value=value):
+                status, _, body = self.post(
+                    "/api/admin/settings",
+                    {"action": "motd", "text": "Hír", "expires_at": value},
+                    cookie=admin, source="127.0.0.5",
+                )
+                self.assertEqual(status, 400, body)
+                self.assertFalse(json.loads(body)["ok"])
+                snapshot = self.settings.snapshot()
+                self.assertEqual(snapshot["motd_text"], "")
+                self.assertEqual(snapshot["motd_expires_at"], "")
 
     def test_admin_proxy_setting_saves_without_nft(self) -> None:
         self.addCleanup(self.settings.set_proxy, [], [])
@@ -10161,6 +10923,663 @@ class AdminHttpTests(unittest.TestCase):
         )
 
 
+class ConfigFlashHttpTests(unittest.TestCase):
+    """Konfigurációs csomag export/import és gyári visszaállítás HTTP-n."""
+
+    # Statikus EC P-256 pár (2126-ig érvényes), SAN: z1.example.com és
+    # *.z1.example.com. Nem függünk a test_proxy_certs modultól, mert az
+    # ezt a modult importálja.
+    KEY = """-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgN6i2etytxkXgL7a+
+Lu78ak5XqhofNa7yWA1/jvIPLS+hRANCAAS65bQqmYQQYIo6rXqiPhJe9TUd7Inu
+xMjjUQNwMAB0xvE9m7ytSuOA2l5qZCAA5ByLdFGnvxbXbAtAIfULSOHI
+-----END PRIVATE KEY-----
+"""
+    CERT = """-----BEGIN CERTIFICATE-----
+MIIB5jCCAYugAwIBAgIUYC19A2baCIZQj408P1c5AArgp98wCgYIKoZIzj0EAwIw
+MDEXMBUGA1UEAwwOejEuZXhhbXBsZS5jb20xFTATBgNVBAoMDERyb3BqYWsgVGVz
+dDAgFw0yNjEwMjEyMDQyMDdaGA8yMTI2MDkyNzIwNDIwN1owMDEXMBUGA1UEAwwO
+ejEuZXhhbXBsZS5jb20xFTATBgNVBAoMDERyb3BqYWsgVGVzdDBZMBMGByqGSM49
+AgEGCCqGSM49AwEHA0IABLrltCqZhBBgijqteqI+El71NR3sie7EyONRA3AwAHTG
+8T2bvK1K44DaXmpkIADkHIt0Uae/FtdsC0Ah9QtI4cijgYAwfjAdBgNVHQ4EFgQU
+5IsGnuTHqrJjfzO37ztMka2Ap8wwHwYDVR0jBBgwFoAU5IsGnuTHqrJjfzO37ztM
+ka2Ap8wwDwYDVR0TAQH/BAUwAwEB/zArBgNVHREEJDAigg56MS5leGFtcGxlLmNv
+bYIQKi56MS5leGFtcGxlLmNvbTAKBggqhkjOPQQDAgNJADBGAiEAvn1Pc3eayyMy
+sbSYFW5vQl3RLmNT+d6AUOfLWpo9aGcCIQDaB6KtgZ/TfqaZCCmSx1v/ePDt3wju
+dz674+jH6I8AVw==
+-----END CERTIFICATE-----
+"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.tools = FakeTools(cls.tmp.name)
+        cls._old_conntrack = gateway.CONNTRACK_BIN
+        cls._old_difficulty = gateway.POW_DIFFICULTY
+        gateway.CONNTRACK_BIN = str(cls.tools.conntrack)
+        gateway.POW_DIFFICULTY = 2
+        cls.users = gateway.UserStore(
+            os.path.join(cls.tmp.name, "users.json"), iterations=10_000
+        )
+        cls.rules = gateway.RuleStore(
+            os.path.join(cls.tmp.name, "rules.json"), catalog=CATALOG,
+            logger=lambda *_: None,
+        )
+        cls.groups = gateway.GroupStore(
+            os.path.join(cls.tmp.name, "groups.json"), logger=lambda *_: None
+        )
+        cls.audit = gateway.AuditLog(
+            os.path.join(cls.tmp.name, "audit.jsonl"), logger=lambda *_: None
+        )
+        cls.fw = gateway.Firewall(
+            binary=str(cls.tools.nft), logger=lambda *_: None, lan_if="eth1"
+        )
+        cls.settings = gateway.settings_store.SettingsStore(
+            os.path.join(cls.tmp.name, "firewall-settings.json"),
+            logger=lambda *_: None,
+        )
+        cls.drops = gateway.droplog.DropLogService(
+            os.path.join(cls.tmp.name, "drops.jsonl"),
+            enabled=False, logger=lambda *_: None,
+        )
+        cls.fail2ban = fail2ban_mod.Fail2ban(
+            cls.fw,
+            path=os.path.join(cls.tmp.name, "fail2ban.json"),
+            audit=cls.audit, logger=lambda *_: None,
+            on_ban=lambda record: cls.gw._on_fail2ban_ban(record),
+        )
+        cls.gw = gateway.Gateway(
+            users=cls.users, firewall=cls.fw, catalog=CATALOG,
+            rules=cls.rules, groups=cls.groups, audit=cls.audit,
+            rate_limiter=gateway.RateLimiter(window=60, maximum=1000),
+            settings=cls.settings, drops=cls.drops, fail2ban=cls.fail2ban,
+        )
+        cls.certs = cls.gw.certs
+        server.LOGIN_TICKETS.set_audit(cls.audit)
+        cls.server = server.AppServer(("127.0.0.1", 0), cls.gw)
+        cls.thread = threading.Thread(
+            target=cls.server.serve_forever, daemon=True
+        )
+        cls.thread.start()
+        cls.port = cls.server.server_address[1]
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=5)
+        server.LOGIN_TICKETS.revoke_all()
+        server.LOGIN_TICKETS.set_audit(None)
+        gateway.CONNTRACK_BIN = cls._old_conntrack
+        gateway.POW_DIFFICULTY = cls._old_difficulty
+        cls.tmp.cleanup()
+
+    def setUp(self) -> None:
+        self.tools.clear()
+        self.tools.clear_fail()
+        self.tools.clear_json()
+        self.tools.clear_chains()
+        self.gw.sessions.shutdown(reason="test")
+        server.LOGIN_TICKETS.revoke_all()
+        # Üres, ismert állapot; a .env-ből létrehozott admin szerepét a
+        # provisioning-jelölő utánozza (a felület ilyenkor üresnek látja).
+        self.users.reset()
+        self.users.add("root", "root-jelszo-1", role=gateway.ROLE_ADMIN)
+        self.users.set_metadata(
+            "root",
+            provisioned_from=gateway.provision_marker(
+                "root-jelszo-1", self.users.iterations
+            ),
+        )
+        self.rules.replace_all({})
+        self.groups.replace_all({})
+        self.settings.reset()
+        self.certs.reset()
+        self.fail2ban.reset()
+        # A fájl létezzen a pillanatkép előtt: a puszta snapshot is menthet.
+        self.fail2ban.configure({})
+        for name in os.listdir(self.tmp.name):
+            if name.startswith("config-backup-"):
+                os.unlink(os.path.join(self.tmp.name, name))
+        self.restart_calls: list[float] = []
+        self._old_restart = server._request_service_restart
+        server._request_service_restart = (
+            lambda delay=0.5: self.restart_calls.append(delay)
+        )
+        self.addCleanup(self._restore_restart)
+
+    def _restore_restart(self) -> None:
+        server._request_service_restart = self._old_restart
+
+    def conn(self, source: str = "127.0.0.1") -> http.client.HTTPConnection:
+        return http.client.HTTPConnection(
+            "127.0.0.1", self.port, timeout=10, source_address=(source, 0)
+        )
+
+    def get(self, path: str, cookie: str = "", source: str = "127.0.0.1",
+            origin: str = ""):
+        conn = self.conn(source)
+        headers = {}
+        if cookie:
+            headers["Cookie"] = cookie
+        if origin:
+            headers["Origin"] = origin
+        conn.request("GET", path, headers=headers)
+        resp = conn.getresponse()
+        body = resp.read()
+        out = (resp.status, dict(resp.getheaders()), body)
+        conn.close()
+        return out
+
+    def post(self, path: str, obj: dict, cookie: str = "",
+             source: str = "127.0.0.1", origin: str = ""):
+        conn = self.conn(source)
+        headers = {"Content-Type": "application/json"}
+        if cookie:
+            headers["Cookie"] = cookie
+        if origin:
+            headers["Origin"] = origin
+        conn.request("POST", path, body=json.dumps(obj), headers=headers)
+        resp = conn.getresponse()
+        body = resp.read()
+        out = (resp.status, dict(resp.getheaders()), body)
+        conn.close()
+        return out
+
+    def login(self, user: str = "root", password: str = "root-jelszo-1",
+              source: str = "127.0.0.5") -> str:
+        _, _, body = self.get("/api/challenge", source=source)
+        challenge = json.loads(body)
+        status, headers, body = self.post(
+            "/api/login",
+            {"user": user, "pass": password, "captcha": solve(challenge)},
+            source=source,
+        )
+        self.assertEqual(status, 200, body)
+        return headers["Set-Cookie"].split(";", 1)[0]
+
+    def bundle(self) -> dict:
+        return server._config_bundle(self.gw)
+
+    def import_bundle(self, bundle: dict, confirm=None,
+                      cookie: str = "") -> tuple:
+        payload = {"bundle": bundle}
+        if confirm is not None:
+            payload["confirm"] = confirm
+        return self.post(
+            "/api/admin/config/import", payload,
+            cookie=cookie or self.login(), source="127.0.0.5",
+        )
+
+    def reset_config(self, confirm: str, cookie: str = "") -> tuple:
+        return self.post(
+            "/api/admin/config/reset", {"confirm": confirm},
+            cookie=cookie or self.login(), source="127.0.0.5",
+        )
+
+    def state_snapshot(self) -> dict:
+        snapshot = {}
+        for path in (
+            self.users.path, self.rules.path, self.groups.path,
+            self.settings.path, self.fail2ban.path,
+        ):
+            try:
+                with open(path, "rb") as fh:
+                    snapshot[path] = fh.read()
+            except FileNotFoundError:
+                snapshot[path] = None
+        try:
+            snapshot["certs"] = sorted(os.listdir(self.certs.directory))
+        except FileNotFoundError:
+            snapshot["certs"] = []
+        return snapshot
+
+    def backup_files(self) -> list[str]:
+        return sorted(
+            name for name in os.listdir(self.tmp.name)
+            if name.startswith("config-backup-") and name.endswith(".json")
+        )
+
+    def audit_rows(self, started: float, event: str) -> list[dict]:
+        return [
+            row for row in audit_since(self.audit, started)
+            if row.get("event") == event
+        ]
+
+    def seed_site(self) -> None:
+        """Nem üres állapot: felhasználó, szabály, csoport, beállítás, tanúsítvány."""
+        self.rules.create("web", {
+            "label": "Web", "tcp": [80], "default_ttl": 120, "max_ttl": 600,
+        })
+        self.users.add("alice", "alice-jelszo-1", rules=("web",))
+        self.users.enroll_totp(
+            "alice", gateway.generate_totp_secret(),
+            [gateway.hash_recovery_code("ABCD-EFGH")],
+        )
+        self.groups.create("team", {
+            "label": "Csapat", "rules": ["web"], "members": ["alice"],
+        })
+        self.settings.commit({
+            "site_name": "Tesztoldal",
+            "proxy_domains": ["z1.example.com"],
+            "proxy_routes": [{
+                "name": "owui", "root": "z1.example.com", "port": 3000,
+                "type": "input", "visibility": "private",
+            }],
+        })
+        self.certs.install("z1.example.com", self.CERT, self.KEY)
+
+    def test_export_bundle_sections_headers_and_audit_counts(self) -> None:
+        self.seed_site()
+        cookie = self.login()
+        started = time.time()
+        status, headers, body = self.get(
+            "/api/admin/config/export", cookie=cookie, source="127.0.0.5"
+        )
+        self.assertEqual(status, 200, body[:300])
+        self.assertTrue(
+            headers.get("Content-Disposition", "").startswith(
+                'attachment; filename="dropjak-config-'
+            )
+        )
+        self.assertIn(".json", headers["Content-Disposition"])
+        self.assertEqual(headers.get("Cache-Control"), "no-store")
+
+        bundle = json.loads(body)
+        self.assertEqual(bundle["format"], server.CONFIG_FORMAT)
+        self.assertEqual(bundle["format_version"], server.CONFIG_FORMAT_VERSION)
+        self.assertTrue(bundle["created_at"])
+        sections = bundle["sections"]
+        self.assertEqual(set(sections), set(server.CONFIG_SECTIONS))
+        self.assertEqual(sections["settings"]["site_name"], "Tesztoldal")
+        self.assertIn("web", sections["rules"])
+        self.assertIn("team", sections["groups"])
+        self.assertIn("root", sections["users"])
+        self.assertIn("salt", sections["users"]["root"])
+        self.assertIn("hash", sections["users"]["root"])
+        self.assertTrue(sections["users"]["alice"]["totp_secret"])
+        self.assertEqual(len(sections["users"]["alice"]["totp_recovery"]), 1)
+        self.assertIn("z1.example.com", sections["certs"])
+        self.assertIn("PRIVATE KEY", sections["certs"]["z1.example.com"]["key"])
+        self.assertEqual(
+            set(sections["fail2ban"]), set(server._FAIL2BAN_CONFIG_KEYS)
+        )
+        # Naplók, munkamenetek, tiltások és futásidejű állapot nem kerülhet bele.
+        for forbidden in (
+            "audit", "sessions", "bans", "attempts", "drops", "logs",
+            "orphan_unbans",
+        ):
+            self.assertNotIn(forbidden, sections)
+
+        rows = self.audit_rows(started, "config_exported")
+        self.assertEqual(len(rows), 1, rows)
+        row = rows[0]
+        self.assertEqual(row["users"], 2)
+        self.assertEqual(row["rules"], 1)
+        self.assertEqual(row["groups"], 1)
+        self.assertEqual(row["certs"], 1)
+        self.assertEqual(row["proxy_domains"], 1)
+        self.assertEqual(row["proxy_routes"], 1)
+        serialized = json.dumps(row)
+        for marker in ("salt", "hash", "totp", "PRIVATE KEY", "BEGIN"):
+            self.assertNotIn(marker, serialized)
+
+    def test_export_requires_admin_and_same_origin(self) -> None:
+        self.users.add("alice", "alice-jelszo-1")
+        started = time.time()
+        status, _, _ = self.get(
+            "/api/admin/config/export", source="127.0.0.5"
+        )
+        self.assertEqual(status, 403)
+        alice = self.login("alice", "alice-jelszo-1")
+        status, _, _ = self.get(
+            "/api/admin/config/export", cookie=alice, source="127.0.0.5"
+        )
+        self.assertEqual(status, 403)
+        cookie = self.login()
+        status, _, body = self.get(
+            "/api/admin/config/export", cookie=cookie, source="127.0.0.5",
+            origin="http://evil.example",
+        )
+        self.assertEqual(status, 403, body)
+        rows = self.audit_rows(started, "config_export_failed")
+        self.assertTrue(any(row.get("reason") == "invalid_origin" for row in rows))
+        self.assertEqual(self.restart_calls, [])
+
+    def test_import_and_reset_require_same_origin(self) -> None:
+        cookie = self.login()
+        before = self.state_snapshot()
+        bundle = self.bundle()
+        started = time.time()
+        for path, payload in (
+            ("/api/admin/config/import", {"bundle": bundle}),
+            ("/api/admin/config/reset", {"confirm": "Dropjak"}),
+        ):
+            with self.subTest(path):
+                status, _, body = self.post(
+                    path, payload, cookie=cookie, source="127.0.0.5",
+                    origin="http://evil.example",
+                )
+                self.assertEqual(status, 403, body)
+                self.assertEqual(self.state_snapshot(), before)
+                self.assertEqual(self.restart_calls, [])
+        rows = self.audit_rows(started, "config_import_failed") + self.audit_rows(
+            started, "config_reset_failed"
+        )
+        self.assertTrue(any(row.get("reason") == "invalid_origin" for row in rows))
+
+    def test_import_blank_install_needs_no_confirmation(self) -> None:
+        bundle = self.bundle()
+        bundle["sections"]["settings"]["site_name"] = "Első oldal"
+        start_backups = set(self.backup_files())
+        started = time.time()
+        status, _, body = self.import_bundle(bundle)
+        self.assertEqual(status, 200, body)
+        data = json.loads(body)
+        self.assertTrue(data["ok"])
+        self.assertTrue(data["restarting"])
+        self.assertEqual(data["counts"]["users"], 1)
+        self.assertEqual(self.restart_calls, [0.5])
+        self.assertEqual(self.settings.snapshot()["site_name"], "Első oldal")
+        self.assertEqual(self.gw.sessions.count(), 0)
+
+        rows = self.audit_rows(started, "config_imported")
+        self.assertEqual(len(rows), 1, rows)
+        self.assertEqual(rows[0]["users"], 1)
+        self.assertEqual(rows[0]["rules"], 0)
+        self.assertIn("backup", rows[0])
+        serialized = json.dumps(rows[0])
+        for marker in ("salt", "hash", "PRIVATE KEY", "BEGIN"):
+            self.assertNotIn(marker, serialized)
+
+        backups = set(self.backup_files()) - start_backups
+        self.assertEqual(len(backups), 1, backups)
+        backup_path = os.path.join(self.tmp.name, backups.pop())
+        self.assertEqual(stat.S_IMODE(os.stat(backup_path).st_mode), 0o600)
+        with open(backup_path, encoding="utf-8") as fh:
+            backup = json.load(fh)
+        self.assertEqual(backup["format"], server.CONFIG_FORMAT)
+        self.assertNotIn("Első oldal", backup["sections"]["settings"]["site_name"])
+
+    def test_import_resolves_service_rule_after_settings(self) -> None:
+        """A csomagban érkező új alagút + szolgáltatás-szabály azonnal oldódik."""
+        old_wan = self.fw.wan_if
+        self.fw.wan_if = "eth0"
+        self.addCleanup(setattr, self.fw, "wan_if", old_wan)
+        key = base64.b64encode(b"k" * 32).decode("ascii")
+        bundle = self.bundle()
+        bundle["sections"]["settings"]["tunnels"] = {
+            **gateway.settings_store.default_tunnels(),
+            "server_private_key": key, "server_public_key": key,
+            "agents": [{
+                "id": "home", "label": "Otthon", "address": "10.77.0.2",
+                "private_key": key, "public_key": key,
+                "preshared_key": key, "token": "t" * 32, "enabled": True,
+                "services": [{
+                    "id": "mc", "label": "Minecraft", "target_host": "mc",
+                    "enabled": True,
+                    "mappings": [{
+                        "proto": "tcp", "listen": "25565",
+                        "target": "25565",
+                    }],
+                }],
+            }],
+        }
+        bundle["sections"]["rules"]["import-svc"] = {
+            "label": "Import MC", "service_refs": ["home/mc"],
+            "default_ttl": 60, "max_ttl": 600,
+        }
+        status, _, body = self.import_bundle(bundle)
+        self.assertEqual(status, 200, body)
+        rule = self.rules.get("import-svc")
+        self.assertIsNotNone(rule)
+        # A beállítások előtti szabályírás után a reflect_services() a
+        # mentés részeként azonnal feloldja a hivatkozást.
+        self.assertEqual(rule.service_tcp, (25565,))
+        self.assertEqual(
+            rule.service_signature,
+            (("home/mc", "tcp", 25565, "mc", 25565),),
+        )
+        self.assertEqual(
+            self.rules.export_records()["import-svc"].get("service_refs"),
+            ["home/mc"],
+        )
+        self.assertNotIn(
+            "service_tcp", self.rules.export_records()["import-svc"]
+        )
+
+    def test_import_nonempty_requires_typed_site_name(self) -> None:
+        self.settings.commit({"site_name": "Tesztoldal"})
+        bundle = self.bundle()
+        bundle["sections"]["settings"]["site_name"] = "Új oldal"
+        cookie = self.login()
+        before = self.state_snapshot()
+        status, _, body = self.import_bundle(bundle, cookie=cookie)
+        self.assertEqual(status, 400, body)
+        data = json.loads(body)
+        self.assertTrue(data["confirm_required"])
+        self.assertEqual(data["site_name"], "Tesztoldal")
+        self.assertEqual(self.state_snapshot(), before)
+        status, _, body = self.import_bundle(
+            bundle, confirm="rossz név", cookie=cookie
+        )
+        self.assertEqual(status, 400, body)
+        self.assertEqual(self.state_snapshot(), before)
+        self.assertEqual(self.restart_calls, [])
+        status, _, body = self.import_bundle(
+            bundle, confirm="Tesztoldal", cookie=cookie
+        )
+        self.assertEqual(status, 200, body)
+        self.assertEqual(self.settings.snapshot()["site_name"], "Új oldal")
+        self.assertEqual(self.restart_calls, [0.5])
+
+    def test_import_rejects_invalid_bundles_without_writes(self) -> None:
+        valid = self.bundle()
+        before = self.state_snapshot()
+        cookie = self.login()
+        cases: list[tuple[str, dict]] = []
+
+        def add(label: str, mutate) -> None:
+            candidate = json.loads(json.dumps(valid))
+            mutate(candidate)
+            cases.append((label, candidate))
+
+        add("formátum", lambda b: b.update(format="más"))
+        add("verzió", lambda b: b.update(format_version=3))
+        add("hiányzó szakasz", lambda b: b["sections"].pop("groups"))
+        add("ismeretlen szakasz", lambda b: b["sections"].update(audit=[]))
+        add("beállítás típus", lambda b: b["sections"].update(settings=[]))
+        add("admin kikapcsolva",
+            lambda b: b["sections"]["users"]["root"].update(enabled=False))
+        add("rossz szerepkör",
+            lambda b: b["sections"]["users"]["root"].update(role="owner"))
+        add("ismeretlen felhasználói szabály",
+            lambda b: b["sections"]["users"]["root"].update(rules=["nincs"]))
+        add("csoport ismeretlen tagja",
+            lambda b: b["sections"].update(groups={
+                "team": {"label": "Csapat", "rules": [], "members": ["nincs"]}
+            }))
+        add("csoport ismeretlen szabálya",
+            lambda b: b["sections"].update(groups={
+                "team": {"label": "Csapat", "rules": ["nincs"], "members": []}
+            }))
+        add("domain szabály proxy nélkül",
+            lambda b: b["sections"]["rules"].update(dom={
+                "label": "Domain", "domains": ["x.example.com"],
+                "default_ttl": 120, "max_ttl": 600,
+            }))
+        add("tanúsítvány gyökér nélkül",
+            lambda b: b["sections"].update(certs={
+                "z1.example.com": {"cert": self.CERT, "key": self.KEY}
+            }))
+        add("hibás tanúsítványkulcs",
+            lambda b: b["sections"].update(certs={
+                "z1.example.com": {"cert": self.CERT, "key": "nem kulcs"}
+            }))
+
+        def san_mismatch(b) -> None:
+            b["sections"]["settings"]["proxy_domains"] = ["other.example.com"]
+            b["sections"]["certs"] = {
+                "other.example.com": {"cert": self.CERT, "key": self.KEY}
+            }
+
+        add("tanúsítvány nem fedi a gyökeret", san_mismatch)
+        add("fail2ban hiányos",
+            lambda b: b["sections"]["fail2ban"].pop("enabled"))
+
+        for label, candidate in cases:
+            with self.subTest(label):
+                status, _, body = self.import_bundle(candidate, cookie=cookie)
+                self.assertEqual(status, 400, body)
+                self.assertIn("érvénytelen", json.loads(body)["error"])
+                self.assertEqual(self.state_snapshot(), before)
+                self.assertEqual(self.restart_calls, [])
+        self.assertEqual(self.users.names(), ["root"])
+        self.assertEqual(self.rules.persisted_rules(), [])
+
+    def test_import_rolls_back_mid_write_failure(self) -> None:
+        self.settings.commit({"site_name": "Régi"})
+        before = self.state_snapshot()
+        bundle = self.bundle()
+        bundle["sections"]["settings"]["site_name"] = "Új"
+        bob = json.loads(json.dumps(bundle["sections"]["users"]["root"]))
+        bob.pop("provisioned_from", None)
+        bob.update(role="user", rules=[], email="bob@example.com")
+        bundle["sections"]["users"]["bob"] = bob
+        bundle["sections"]["rules"]["web"] = {
+            "label": "Web", "tcp": [80], "default_ttl": 120, "max_ttl": 600,
+        }
+        original = self.fail2ban.configure
+        calls: list[int] = []
+
+        def flaky(data):
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("szimulált írási hiba")
+            return original(data)
+
+        started = time.time()
+        with mock.patch.object(self.fail2ban, "configure", side_effect=flaky):
+            status, _, body = self.import_bundle(
+                bundle, confirm="Régi", cookie=self.login()
+            )
+        self.assertEqual(status, 500, body)
+        self.assertIn("visszaállítva", json.loads(body)["error"])
+        self.assertEqual(self.state_snapshot(), before)
+        self.assertEqual(self.restart_calls, [])
+        self.assertNotIn("bob", self.users.names())
+        self.assertEqual(self.rules.persisted_rules(), [])
+        # A munkamenet a hibás import után is használható marad.
+        self.assertEqual(self.gw.sessions.count(), 1)
+        rows = self.audit_rows(started, "config_import_failed")
+        self.assertTrue(
+            any(row.get("reason") == "apply_failed" for row in rows), rows
+        )
+        self.assertEqual(len(self.backup_files()), 1)
+
+    def test_reset_clears_state_keeps_env_and_reprovisions_admin(self) -> None:
+        self.seed_site()
+        env_path = os.path.join(self.tmp.name, ".env")
+        with open(env_path, "w", encoding="utf-8") as fh:
+            fh.write("HV_ADMIN_ENABLED=1\nHV_ADMIN_USER=envadmin\n")
+        backup = os.path.join(self.tmp.name, "config-backup-20200101-000000.json")
+        with open(backup, "w", encoding="utf-8") as fh:
+            fh.write("{}\n")
+        before = self.state_snapshot()
+        cookie = self.login()
+        started = time.time()
+
+        status, _, body = self.reset_config("rossz", cookie=cookie)
+        self.assertEqual(status, 400, body)
+        self.assertEqual(self.state_snapshot(), before)
+        self.assertEqual(self.restart_calls, [])
+
+        with mock.patch.object(
+            self.fw, "flush", wraps=self.fw.flush
+        ) as flush_spy, mock.patch.object(
+            self.fail2ban, "unban_all", wraps=self.fail2ban.unban_all
+        ) as unban_spy:
+            status, _, body = self.reset_config("Tesztoldal", cookie=cookie)
+        self.assertEqual(status, 200, body)
+        flush_spy.assert_called_once()
+        unban_spy.assert_called_once()
+        data = json.loads(body)
+        self.assertTrue(data["restarting"])
+        self.assertEqual(self.restart_calls, [0.5])
+        self.assertEqual(self.users.names(), [])
+        self.assertEqual(self.rules.persisted_rules(), [])
+        self.assertEqual(self.groups.all_groups(), [])
+        self.assertEqual(self.certs.export_all(), {})
+        snapshot = self.settings.snapshot()
+        self.assertEqual(snapshot["site_name"], "")
+        self.assertEqual(snapshot["error"], "")
+        self.assertEqual(self.fail2ban.snapshot()["bans"], [])
+        self.assertEqual(self.gw.sessions.count(), 0)
+        self.assertEqual(self.backup_files(), [])
+        with open(env_path, encoding="utf-8") as fh:
+            self.assertIn("HV_ADMIN_USER=envadmin", fh.read())
+        rows = self.audit_rows(started, "config_reset")
+        self.assertEqual(len(rows), 1, rows)
+        self.assertIn("errors", rows[0])
+
+        # Az újraindulás utáni .env-admin létrehozását utánozzuk.
+        with mock.patch.multiple(
+            gateway, ADMIN_ENABLED=True, ADMIN_USER="envadmin",
+            ADMIN_PASSWORD="env-jelszo-1", ADMIN_PASSWORD_FILE="",
+        ):
+            outcome = gateway.provision_admin(self.users)
+        self.assertEqual(outcome, "created")
+        self.assertTrue(self.users.verify("envadmin", "env-jelszo-1"))
+        record = self.users.record("envadmin")
+        self.assertTrue(record.is_admin and record.enabled and not record.pending)
+
+    def test_reset_aborts_before_deleting_when_firewall_flush_fails(self) -> None:
+        self.settings.commit({"site_name": "Tesztoldal"})
+        before = self.state_snapshot()
+        started = time.time()
+        with mock.patch.object(
+            self.fw, "flush", side_effect=gateway.FirewallError("nft hiba")
+        ):
+            status, _, body = self.reset_config("Tesztoldal")
+        self.assertEqual(status, 503, body)
+        self.assertEqual(self.state_snapshot(), before)
+        self.assertEqual(self.restart_calls, [])
+        self.assertEqual(self.gw.sessions.count(), 0)
+        rows = self.audit_rows(started, "config_reset_failed")
+        self.assertTrue(
+            any(row.get("reason") == "runtime_flush_failed" for row in rows),
+            rows,
+        )
+
+    def test_round_trip_export_reset_import(self) -> None:
+        self.seed_site()
+        bundle = self.bundle()
+        cookie = self.login()
+        status, _, body = self.reset_config("Tesztoldal", cookie=cookie)
+        self.assertEqual(status, 200, body)
+
+        # A reset utáni indulás újra létrehozza a provisioning admint.
+        self.users.add("root", "root-jelszo-1", role=gateway.ROLE_ADMIN)
+        self.users.set_metadata(
+            "root",
+            provisioned_from=gateway.provision_marker(
+                "root-jelszo-1", self.users.iterations
+            ),
+        )
+        status, _, body = self.import_bundle(bundle)
+        self.assertEqual(status, 200, body)
+
+        self.assertEqual(self.settings.snapshot()["site_name"], "Tesztoldal")
+        self.assertEqual(
+            [rule.id for rule in self.rules.persisted_rules()], ["web"]
+        )
+        self.assertIsNotNone(self.groups.get("team"))
+        self.assertTrue(self.users.verify("alice", "alice-jelszo-1"))
+        restored = self.certs.export_all()
+        self.assertEqual(restored["z1.example.com"]["cert"], self.CERT)
+        self.assertEqual(restored["z1.example.com"]["key"], self.KEY)
+
+
 class RateLimitHttpTests(unittest.TestCase):
     def test_second_attempt_is_429(self) -> None:
         tmp = tempfile.TemporaryDirectory()
@@ -10596,6 +12015,148 @@ class StaticUiTests(unittest.TestCase):
                     f"'{text}':", de, f"hiányzó német fordítás: {text}"
                 )
 
+    def test_motd_modal_admin_ui_and_translations(self) -> None:
+        for token in (
+            'id="motd-overlay"',
+            'id="motd-title"',
+            'id="motd-text"',
+            'id="motd-close"',
+            'role="dialog"',
+            'aria-modal="true"',
+            'data-i18n="MOTD:"',
+            'data-i18n="Bezárás"',
+            "function showMotd(data)",
+            "function hideMotd()",
+            "motdTextEl.textContent = data.motd",
+            "motdOverlay.hidden = false",
+            "motdShown = true",
+            "motdClose.addEventListener('click', hideMotd)",
+            "showMotd(data);",
+            "function renderMotdSection(settings)",
+            "el('textarea'",
+            "id: 'motd-text-input'",
+            "id: 'motd-permanent'",
+            "id: 'motd-expires'",
+            "expires.disabled = permanent.checked",
+            "action: 'motd'",
+            "expires_at: permanent.checked",
+            "motd_text",
+            "motd_expires_at",
+            "A közlemény mentve.",
+        ):
+            self.assertIn(token, self.source, token)
+        # A közlemény szövege textContenttel kerül a DOM-ba, nem innerHTML-lel.
+        start = self.source.index("function showMotd(data)")
+        end = self.source.index("\n}", start)
+        self.assertNotIn("innerHTML", self.source[start:end])
+        # Az admin mező felső korlátja a szerveroldali limittel egyezik.
+        self.assertIn("maxlength: 2000", self.source)
+        en, de, _, _ = self._i18n_sections()
+        for text, english, german in (
+            ("MOTD:", "MOTD:", "MOTD:"),
+            ("Bezárás", "Close", "Schließen"),
+            ("Napi közlemény (MOTD)", "Message of the day (MOTD)",
+             "Mitteilung des Tages (MOTD)"),
+            ("Közlemény szövege", "Notice text", "Mitteilungstext"),
+            ("Állandó (nincs lejárat)", "Permanent (no expiry)",
+             "Dauerhaft (kein Ablauf)"),
+            ("Érvényes eddig", "Valid until", "Gültig bis"),
+            ("A közlemény mentve.", "Notice saved.",
+             "Mitteilung gespeichert."),
+        ):
+            with self.subTest(text=text):
+                self.assertIn(f"'{text}': '{english}'", en)
+                self.assertIn(f"'{text}': '{german}'", de)
+        # A szerveroldali motd-hibák is fordulnak.
+        for text in (
+            "motd: szöveg kell",
+            "motd: legfeljebb 2000 karakter",
+            "motd: a lejárat szöveg kell",
+            "motd: érvénytelen lejárat (ISO-8601 időpont kell)",
+            "motd: a lejáratnak időzónát is tartalmaznia kell",
+        ):
+            with self.subTest(error=text):
+                self.assertIn(f"'{text}':", en)
+                self.assertIn(f"'{text}':", de)
+
+    def test_motd_is_shown_once_per_login(self) -> None:
+        # A 30 másodperces poll a refreshAccessFromStatus()-ot hívja, az nem
+        # nyitja újra a közleményt; a kilépés nullázza a jelzőt.
+        show = self._js_function("showMotd", self.source)
+        self.assertIn("if (motdShown ||", show)
+        access = self._js_function("showAccess", self.source)
+        self.assertIn("showMotd(data);", access)
+        poll_start = self.source.index(
+            "function refreshAccessFromStatus(data)"
+        )
+        poll_end = self.source.index(
+            "async function refreshStatus()", poll_start
+        )
+        self.assertNotIn("showMotd(", self.source[poll_start:poll_end])
+        end = self.source[
+            self.source.index("function endSession("):
+            self.source.index("function updateTimer()")
+        ]
+        self.assertIn("motdShown = false;", end)
+        self.assertIn("hideMotd();", end)
+
+    def test_motd_modal_behaviour_in_node(self) -> None:
+        """A modális megjeleníti a szöveget, zárható, és poll után sem nyílik újra."""
+        show = self._js_function("showMotd", self.source)
+        hide = self._js_function("hideMotd", self.source)
+        script = (
+            "let motdShown = false;\n"
+            "const motdTextEl = { textContent: '' };\n"
+            "const motdOverlay = { hidden: true };\n"
+            "const motdClose = { focus() {} };\n"
+            "const setTimeout = () => 0;\n"
+            + show + "\n" + hide + "\n"
+            + """
+const payload = { motd: 'Karbantartás 22:00' };
+showMotd(payload);
+const opened = { hidden: motdOverlay.hidden, text: motdTextEl.textContent };
+hideMotd();
+const closed = motdOverlay.hidden;
+// Ismételt status-poll (ugyanaz a belépés) nem nyitja újra.
+showMotd(payload);
+showMotd(payload);
+const afterPoll = motdOverlay.hidden;
+// Új belépés: a jelző nullázódik, az új közlemény megjelenik.
+motdShown = false;
+showMotd({ motd: 'Új hír' });
+const nextLogin = { hidden: motdOverlay.hidden, text: motdTextEl.textContent };
+// Üres vagy hiányzó közlemény nem nyit ablakot.
+motdShown = false;
+hideMotd();
+showMotd({ motd: '' });
+const empty = motdOverlay.hidden;
+showMotd({});
+const missing = motdOverlay.hidden;
+process.stdout.write(JSON.stringify(
+  { opened, closed, afterPoll, nextLogin, empty, missing }
+));
+"""
+        )
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node nem érhető el a JS-helper teszthez")
+        result = subprocess.run(
+            [node, "-e", script], capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(
+            data["opened"],
+            {"hidden": False, "text": "Karbantartás 22:00"},
+        )
+        self.assertIs(data["closed"], True)
+        self.assertIs(data["afterPoll"], True)
+        self.assertEqual(
+            data["nextLogin"], {"hidden": False, "text": "Új hír"}
+        )
+        self.assertIs(data["empty"], True)
+        self.assertIs(data["missing"], True)
+
     def test_qr_markup_and_inline_library_present(self) -> None:
         for token in (
             "qrcodegen",
@@ -10810,26 +12371,37 @@ class StaticUiTests(unittest.TestCase):
             "el('option', { value: 'input', text: tr('Input (host)') })",
             "directionSelect.value = draftValue(",
             "directionSelect.addEventListener('change', syncMode)",
+            "el('label', { for: fieldId('direction'), text: tr('Irány') })",
+            "name: 'domain'",
+            "if (boolValue(box, 'domain'))",
+            "domainBox.addEventListener('change', syncMode)",
+            "directionSelect.disabled = collection || domain",
+            "directionField.hidden = collection || domain",
             "direction,",
-            "directionField.hidden = collection",
-            "accessField.hidden = collection || host",
+            "accessField.hidden = collection || host || domain",
             "hostNote.hidden = !host",
             "!rule.collection && rule.direction === 'input'",
             "rule.direction || 'forward'",
-            "class: 'dir-badge'",
+            "class: `kind-badge kind-${kind}`",
+            "if ((rule.members || []).length || rule.collection) "
+            "return 'collection';",
             "A gyűjtőszabály tagjai különböző irányúak is lehetnek; "
             "minden tag a saját irányában kap engedélyt.",
             "A host szabály a portálgép saját szolgáltatásait nyitja meg "
             "a belépett kliens IP-jének. Csak a szükséges portokat add "
             "meg; a 8100 (portál) fenntartott.",
+            "A domain szabály a kiválasztott proxy-bejegyzéseket nyitja "
+            "meg; ilyenkor az irány nem értelmezett.",
         ):
             with self.subTest(token=token):
                 self.assertIn(token, self.source)
-        # Az admin táblában és a hozzáférési kártyán is csak egyedi
-        # szabálynál jelenik meg a Host jelzés.
+        # A domain szabály nem irány: nincs 'domain' opció az irányválasztóban.
+        self.assertNotIn("value: 'domain'", self.source)
+        # A hozzáférési kártyán csak egyedi szabálynál jelenik meg a Host
+        # jelzés; az admin listában a ruleKind() a gyűjtőt veszi előre.
         self.assertEqual(
             self.source.count("!rule.collection && rule.direction === 'input'"),
-            2,
+            1,
         )
 
         en, de, pen, pde = self._i18n_sections()
@@ -10849,6 +12421,8 @@ class StaticUiTests(unittest.TestCase):
             "host szabályhoz legalább egy TCP vagy UDP port kell",
             "a 8100-as port (portál) nem nyitható meg host szabállyal",
             "direction: forward vagy input érték kell",
+            "A domain szabály a kiválasztott proxy-bejegyzéseket nyitja "
+            "meg; ilyenkor az irány nem értelmezett.",
         )
         for text in sources:
             with self.subTest(text=text):
@@ -10876,15 +12450,292 @@ class StaticUiTests(unittest.TestCase):
                 "host szabály nem használhat szolgáltatáslistát", section
             )
 
+    def test_preauth_direction_markup_and_translations(self) -> None:
+        for token in (
+            "el('label', { text: tr('Irány') })",
+            "direction: formValue(box, 'direction') === 'input'",
+            "entry.direction === 'input' ? 'Input (host)' : 'Forward'",
+            "Az Input (host) irány a portálgép saját portjait nyitja meg "
+            "bejelentkezés előtt; ez megkerüli a portál kapuját, ezért csak "
+            "indokolt esetben használd.",
+            "Forward irányban WAN felől csak DNAT-olt (publikált) portokra "
+            "érvényes.",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, self.source)
+        en, de, _, _ = self._i18n_sections()
+        for text in (
+            "Az Input (host) irány a portálgép saját portjait nyitja meg "
+            "bejelentkezés előtt; ez megkerüli a portál kapuját, ezért csak "
+            "indokolt esetben használd.",
+            "Forward irányban WAN felől csak DNAT-olt (publikált) portokra "
+            "érvényes. A cél a DNAT előtti cím (publikált Docker-portnál a "
+            "VM IP-je), nem a konténer belső címe.",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(
+                    f"'{text}':", en, f"hiányzó angol fordítás: {text}"
+                )
+                self.assertIn(
+                    f"'{text}':", de, f"hiányzó német fordítás: {text}"
+                )
+
+    def test_admin_cross_reference_links(self) -> None:
+        """Az admin oldalak entitásnevei belső hivatkozásként nyílnak meg."""
+        for token in (
+            "const ENTITY_TABS = { rule: 'rules', group: 'groups', "
+            "user: 'users', domain: 'domains' };",
+            "function openAdminEntity(type, id)",
+            "function entityLink(label, type, id, cls = '')",
+            "function entityList(type, ids, sep = ', ')",
+            "href: '#', role: 'link'",
+            "'aria-label': title",
+            "return loadAdminState();",
+            "adminPanel.querySelectorAll('[data-route]')",
+            "route.scrollIntoView({ block: 'center' })",
+            "row.dataset.route = full;",
+        ):
+            self.assertIn(token, self.source, token)
+        # Csoportok, felhasználók és munkamenetek közvetlenül hivatkoznak; a
+        # szabályoldal a ruleSummary-n keresztül (gyűjtőtagok, domainek).
+        for name in ("renderGroups", "renderUsers"):
+            self.assertIn(
+                "entityList(", self._js_function(name, self.source), name
+            )
+        self.assertIn(
+            "entityLink(",
+            self._js_function("renderSessions", self.source),
+            "renderSessions",
+        )
+        summary = self._js_function("ruleSummary", self.source)
+        self.assertIn("entityLink(name, 'rule', ids[index])", summary)
+        self.assertIn("entityLink(host, 'domain', host)", summary)
+        en, de, _, _ = self._i18n_sections()
+        for text in (
+            "Ugrás: szabály szerkesztése",
+            "Ugrás: csoport szerkesztése",
+            "Ugrás: felhasználó szerkesztése",
+            "Ugrás: domain beállításai",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(f"'{text}':", en, f"hiányzó angol fordítás: {text}")
+                self.assertIn(f"'{text}':", de, f"hiányzó német fordítás: {text}")
+
+    def test_open_admin_entity_in_node(self) -> None:
+        """A szerkesztő csak a betöltés után nyílik; domainnél kiemelés van."""
+        open_entity = self._js_function("openAdminEntity", self.source)
+        tabs_match = re.search(
+            r"const ENTITY_TABS = \{[^}]*\};", self.source
+        )
+        self.assertIsNotNone(tabs_match)
+        script = (
+            tabs_match.group(0) + "\n"
+            "let activeView = 'login';\n"
+            "let adminTabName = 'users';\n"
+            "let adminEdit = null;\n"
+            "let adminDraft = { old: true };\n"
+            "let adminFlash = { old: true };\n"
+            "let adminState = null;   // hideg gyorsítótár\n"
+            "let ruleEditorOpened = false;\n"
+            "const log = [];\n"
+            "let editAtLoad = 'unset';\n"
+            "const routeClasses = [];\n"
+            "let routeScroll = null;\n"
+            "const route = {\n"
+            "  dataset: { route: 'app.example.com' },\n"
+            "  classList: {\n"
+            "    add(name) { routeClasses.push(name); },\n"
+            "    remove(name) {\n"
+            "      const index = routeClasses.indexOf(name);\n"
+            "      if (index >= 0) routeClasses.splice(index, 1);\n"
+            "    }\n"
+            "  },\n"
+            "  scrollIntoView(options) { routeScroll = options; }\n"
+            "};\n"
+            "const adminPanel = { querySelectorAll() { return [route]; } };\n"
+            "const setTimeout = () => 0;\n"
+            "function setView(name) { activeView = name; log.push('view:' + name); }\n"
+            "function loadAdminState() {\n"
+            "  log.push('load:start');\n"
+            "  return Promise.resolve().then(() => {\n"
+            "    editAtLoad = adminEdit;\n"
+            "    adminState = {\n"
+            "      rules: [{ id: 'r1', label: 'Web' }], groups: [], users: []\n"
+            "    };\n"
+            "    log.push('load:done');\n"
+            "  });\n"
+            "}\n"
+            "function adminSetTab(name) {\n"
+            "  adminEdit = null; adminDraft = null; adminFlash = null;\n"
+            "  adminTabName = name; log.push('tab:' + name);\n"
+            "  return loadAdminState();\n"
+            "}\n"
+            "function renderAdminPanel() { log.push('render:' + adminTabName); }\n"
+            + open_entity + "\n"
+            + """
+(async () => {
+  await openAdminEntity('rule', 'r1');
+  const afterRule = {
+    view: activeView, tab: adminTabName, edit: adminEdit, editAtLoad,
+    draft: adminDraft, flash: adminFlash, ruleEditorOpened,
+    log: log.slice()
+  };
+  log.length = 0;
+  adminEdit = null;
+  await openAdminEntity('domain', 'APP.Example.com');
+  const afterDomain = {
+    edit: adminEdit, classes: routeClasses.slice(),
+    scroll: routeScroll, log: log.slice()
+  };
+  process.stdout.write(JSON.stringify({ afterRule, afterDomain }));
+})();
+"""
+        )
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node nem érhető el a JS-helper teszthez")
+        result = subprocess.run(
+            [node, "-e", script], capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        rule = data["afterRule"]
+        self.assertEqual(rule["view"], "admin")
+        self.assertEqual(rule["tab"], "rules")
+        self.assertEqual(rule["edit"], {"kind": "rule", "id": "r1"})
+        self.assertIsNone(rule["editAtLoad"])
+        self.assertIsNone(rule["draft"])
+        self.assertIsNone(rule["flash"])
+        self.assertIs(rule["ruleEditorOpened"], True)
+        self.assertEqual(
+            rule["log"],
+            ["view:admin", "tab:rules", "load:start", "load:done",
+             "render:rules"],
+        )
+        domain = data["afterDomain"]
+        self.assertIsNone(domain["edit"])
+        self.assertEqual(domain["classes"], ["entity-target"])
+        self.assertEqual(domain["scroll"], {"block": "center"})
+        self.assertNotIn("render:domains", domain["log"])
+
     @staticmethod
     def _js_function(name: str, source: str) -> str:
         match = re.search(
-            rf"function {re.escape(name)}\([^)]*\) \{{.*?\n\}}",
+            rf"(?:async\s+)?function {re.escape(name)}\([^)]*\) \{{.*?\n\}}",
             source, re.S,
         )
         if match is None:
             raise AssertionError(f"hiányzó JS függvény: {name}")
         return match.group(0)
+
+    def test_config_flash_section_and_translations(self) -> None:
+        for token in (
+            "function renderConfigFlashSection()",
+            "adminPanel.append(renderConfigFlashSection());",
+            "/api/admin/config/export",
+            "/api/admin/config/import",
+            "/api/admin/config/reset",
+            "id: 'config-import-file'",
+            "link.download = 'dropjak-config.json'",
+            "cache: 'no-store'",
+            "function configStateNonEmpty()",
+            "function configSiteName()",
+            "async function importConfigBundle(input)",
+            "async function resetConfig()",
+            "if (!confirm(tr('Biztosan törlöd a teljes konfigurációt? Ez nem vonható vissza.'))) return;",
+        ):
+            self.assertIn(token, self.source, token)
+
+        en, de, _, _ = self._i18n_sections()
+        pairs = (
+            ("Konfiguráció mentése és visszaállítása",
+             "Configuration backup and restore",
+             "Konfiguration sichern und wiederherstellen"),
+            ("Konfiguráció exportálása",
+             "Export configuration", "Konfiguration exportieren"),
+            ("Konfiguráció importálása",
+             "Import configuration", "Konfiguration importieren"),
+            ("Gyári visszaállítás",
+             "Factory reset", "Werkseinstellungen"),
+            ("Csomag kiválasztása (JSON)",
+             "Bundle file (JSON)", "Paketdatei (JSON)"),
+            ("Az export nem sikerült.",
+             "Export failed.", "Export fehlgeschlagen."),
+            ("Az importálás nem sikerült.",
+             "Import failed.", "Import fehlgeschlagen."),
+            ("A visszaállítás nem sikerült.",
+             "Reset failed.", "Zurücksetzen fehlgeschlagen."),
+        )
+        for source, english, german in pairs:
+            self.assertIn(f"'{source}': '{english}'", en, source)
+            self.assertIn(f"'{source}': '{german}'", de, source)
+        # A titkokra figyelmeztető szöveg mindhárom nyelven megvan.
+        self.assertIn("password hashes", en)
+        self.assertIn("private keys", en)
+        self.assertIn("Passwort-Hashes", de)
+        self.assertIn("privaten Schlüsseln", de)
+
+    def test_config_state_nonempty_in_node(self) -> None:
+        nonempty = self._js_function("configStateNonEmpty", self.source)
+        site_name = self._js_function("configSiteName", self.source)
+        script = (
+            "let adminState = { users: [], groups: [], proxy_certs: [],"
+            " settings: { preauth: [], block: [], error: '' } };\n"
+            "function settingsData() {\n"
+            "  return (adminState && adminState.settings) ||"
+            " { preauth: [], block: [], error: '' };\n"
+            "}\n"
+            + nonempty + "\n" + site_name + "\n"
+            + """
+const out = {};
+const set = settings => { adminState.settings = settings; };
+set({ preauth: [], block: [], error: '' });
+out.blank = configStateNonEmpty();
+out.defaultName = configSiteName();
+adminState.users = [{ name: 'root' }];
+out.user = configStateNonEmpty();
+adminState.users = [];
+set({ preauth: [], block: [], error: '', site_name: 'Teszt' });
+out.site = configStateNonEmpty();
+out.siteName = configSiteName();
+set({ preauth: [], block: [], error: '', preauth: [{}] });
+out.preauth = configStateNonEmpty();
+adminState.users = [];
+set({ preauth: [], block: [], error: '', registration_enabled: true });
+out.registration = configStateNonEmpty();
+set({ preauth: [], block: [], error: '', proxy_acme: false });
+out.acme = configStateNonEmpty();
+set({ error: 'sérült' });
+out.error = configStateNonEmpty();
+adminState.users = [];
+adminState.groups = [{ id: 'team' }];
+set({ preauth: [], block: [], error: '' });
+out.group = configStateNonEmpty();
+adminState.groups = [];
+adminState.proxy_certs = [{ installed: false }];
+out.certMissing = configStateNonEmpty();
+adminState.proxy_certs = [{ installed: true }];
+out.cert = configStateNonEmpty();
+process.stdout.write(JSON.stringify(out));
+"""
+        )
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node nem érhető el a JS-helper teszthez")
+        result = subprocess.run(
+            [node, "-e", script], capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertIs(data["blank"], False)
+        self.assertEqual(data["defaultName"], "Dropjak")
+        for key in (
+            "user", "site", "preauth", "registration", "acme", "error",
+            "group", "cert",
+        ):
+            self.assertIs(data[key], True, key)
+        self.assertIs(data["certMissing"], False)
+        self.assertEqual(data["siteName"], "Teszt")
 
     def test_duplicate_label_localization_and_suffix(self) -> None:
         """A másolat utótagja nyelvfüggetlenül tárolva, megjelenítéskor fordul."""
@@ -10952,6 +12803,63 @@ class StaticUiTests(unittest.TestCase):
             data["long"].count("x"),
             80 - len(suffix),
         )
+
+    def test_rule_list_search_and_kind_helpers(self) -> None:
+        """A szabálylista keresője ékezet- és kisbetűfüggetlen, minden szóra illeszt."""
+        kinds = re.search(r"const RULE_KINDS = \[.*?\];", self.source, re.S)
+        self.assertIsNotNone(kinds)
+        functions = "\n".join(
+            self._js_function(name, self.source)
+            for name in (
+                "ruleKind", "foldSearch", "formatPortRanges",
+                "ruleSearchText", "ruleMatches",
+            )
+        )
+        script = (
+            "const tr = text => text;\n"
+            "const ruleDisplayLabel = label => String(label ?? '');\n"
+            + kinds.group(0) + "\n" + functions + "\n"
+            + """
+const ssh = { id: 'ssh', label: 'SSH a szerverekre', description: 'Belső gépek',
+  tcp: [22], udp: [], direction: 'forward', ports_label: 'TCP 22' };
+const host = { id: 'host_web', label: 'Host admin', tcp: [8443], direction: 'input' };
+const dom = { id: 'dom', label: 'Webappok', domains: ['teszt1.z2.example.com'],
+  hosts: ['teszt1.z2.example.com'], tcp: [], udp: [] };
+const coll = { id: 'dev', label: 'Fejlesztői csomag', collection: true,
+  members: ['ssh', 'host_web'], tcp: [22, 8443], udp: [] };
+const full = { id: 'all', label: 'Teljes', full: true, direction: 'forward' };
+const range = { id: 'range', label: 'Tartomány', direction: 'forward',
+  tcp: Array.from({ length: 101 }, (_, i) => 8000 + i), udp: [],
+  ports_label: 'TCP 8000–8100' };
+const byId = new Map([ssh, host, dom, coll, full, range].map(rule => [rule.id, rule]));
+const m = (rule, q) => ruleMatches(rule, q, byId);
+process.stdout.write(JSON.stringify({
+  kinds: [ssh, host, dom, coll, full, range].map(ruleKind).join(','),
+  accents: m(ssh, 'BELSO gepek') && m(coll, 'fejlesztoi'),
+  terms: m(ssh, 'tcp 22') && !m(ssh, 'udp 22'),
+  host: m(dom, 'teszt1.z2') && !m(ssh, 'teszt1'),
+  members: m(coll, 'szerverekre') && m(coll, 'host_web'),
+  direction: m(host, 'input') && !m(ssh, 'input'),
+  range: m(range, '8050') && !m(range, '8101') && m(range, '8000–8100'),
+  empty: m(full, '   '),
+}));
+"""
+        )
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node nem érhető el a JS-helper teszthez")
+        result = subprocess.run(
+            [node, "-e", script], capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(
+            data.pop("kinds"),
+            "forward,input,domain,collection,full,forward",
+        )
+        for name, value in data.items():
+            with self.subTest(name=name):
+                self.assertIs(value, True)
 
     def test_password_copy_is_guarded_when_empty(self) -> None:
         for token in (
@@ -11071,13 +12979,15 @@ class StaticUiTests(unittest.TestCase):
     def test_audit_event_select_manual_render_and_raw_code(self) -> None:
         """Az eseményszűrő legördülő, a kézi betöltés pedig mindig rajzol."""
         for token in (
-            "const eventSelect = el('select'",
+            "const eventSelect = multiSelect({",
+            "options: auditEventOptions(logFilter.events)",
+            "events: (logFilter.events || []).join(',')",
+            "adminPanel.append(eventSelect.chips);",
             "Object.keys(AUDIT_EVENT_LABELS)",
-            ".sort((a, b) => auditEventLabel(a).localeCompare(",
-            "if (logFilter.event && !eventCodes.includes(logFilter.event))",
-            "value: '', text: tr('összes esemény')",
-            "text: `${auditEventLabel(code)} (${code})`",
-            "event: eventSelect.value",
+            "|| a.label.localeCompare(b.label, LOCALES[lang]))",
+            "for (const code of extra || []) if (!codes.includes(code)) codes.push(code);",
+            "placeholder: 'összes esemény'",
+            "onChange: events => { logFilter.events = events; apply(); }",
             "['Esemény', eventSelect]",
             "for (const node of [userInput, qInput, ipInput])",
             "class: 'log-event-code muted'",
@@ -11428,6 +13338,133 @@ class StaticUiTests(unittest.TestCase):
         ):
             self.assertIn(token, helper, token)
 
+    def test_access_tab_round_trip_keeps_domain_chips(self) -> None:
+        """Admin fül után visszatérve a domain-chipek és a visszaszámlálás
+        megmaradnak: a kliens auth-állapota a hosts mezőt is őrzi."""
+        functions = "\n".join(
+            self._js_function(name, self.source)
+            for name in ("showSession", "renderAuth", "portChips", "chip")
+        )
+        script = """\
+const tr = text => text;
+const DEFAULT_LIMITS = { min_ttl: 60, max_ttl: 7200 };
+let auth = null;
+let activeView = 'session';
+const sessionRule = { textContent: '' };
+const sessionSvcs = el('div', {});
+function el(tag, attrs, ...children) {
+  return {
+    tag,
+    attrs: attrs || {},
+    children,
+    hidden: false,
+    append(...nodes) { this.children.push(...nodes); },
+    replaceChildren(...nodes) { this.children = nodes; }
+  };
+}
+function textOf(node) {
+  if (node === null || node === undefined) return '';
+  if (typeof node === 'object') {
+    if (node.attrs && node.attrs.text !== undefined) {
+      return String(node.attrs.text);
+    }
+    return (node.children || []).map(textOf).join('');
+  }
+  return String(node);
+}
+function rulesSignature() { return ''; }
+function renderIdentity() {}
+function ruleDisplayLabel(label) { return String(label ?? ''); }
+function hostLink(host) { return host; }
+function clearPreview() {}
+function setView(name) { activeView = name; }
+function show() {}
+function showAccessMsg() {}
+function showSessionMsg() {}
+function updateTimer() {}
+function startSessionTimers() {}
+""" + functions + """
+
+const portGrant = { tcp: [8080], udp: [], icmp: false, full: false,
+  direction: 'forward', label: 'TCP 8080' };
+const domainGrant = { tcp: [], udp: [], icmp: false, full: false,
+  direction: 'forward', label: 'Nincs port' };
+const base = {
+  authenticated: true, authorized: true, user: 'alice', role: 'user',
+  admin: false, expires_in: 3600, rule: 'web', rule_label: 'Web',
+  selected_rules: ['web'], selected_rule_labels: ['Web'],
+  limits: { min_ttl: 60, max_ttl: 7200 },
+  rules: [{ id: 'web', label: 'Web', tcp: [8080], max_ttl: 7200 }],
+};
+function runScenario(payload) {
+  auth = null;
+  activeView = 'session';
+  sessionSvcs.replaceChildren();
+  showSession(payload);
+  const before = sessionSvcs.children.map(textOf);
+  const expiresAt = auth.expiresAt;
+  // Admin fül, majd a Hozzáférés fül kezelőjének kódja (index.html).
+  setView('admin');
+  clearPreview(false);
+  showSession({
+    ...auth,
+    expires_in: Math.max(0, (auth.expiresAt - Date.now()) / 1000),
+    rule_label: auth.ruleLabel,
+    selected_rules: auth.selectedRules,
+    selected_rule_labels: auth.selectedRuleLabels,
+    grants: auth.grants
+  }, true);
+  return {
+    before,
+    after: sessionSvcs.children.map(textOf),
+    hiddenBefore: !before.length,
+    hiddenAfter: sessionSvcs.hidden,
+    expiresAtSame: auth.expiresAt === expiresAt,
+    remaining: Math.round((auth.expiresAt - Date.now()) / 1000)
+  };
+}
+const out = {
+  both: runScenario({
+    ...base, hosts: ['app.example.com'],
+    grants: [portGrant], grant: portGrant
+  }),
+  domainsOnly: runScenario({
+    ...base, hosts: ['app.example.com'],
+    grants: [domainGrant], grant: domainGrant
+  }),
+  empty: runScenario({ ...base, hosts: [], grants: [], grant: null })
+};
+process.stdout.write(JSON.stringify(out));
+"""
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node nem érhető el a JS-helper teszthez")
+        result = subprocess.run(
+            [node, "-e", script], capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+
+        both = data["both"]
+        self.assertEqual(
+            both["before"],
+            ["Forward: TCP 8080", "Domain: app.example.com"],
+        )
+        self.assertEqual(both["after"], both["before"])
+        self.assertTrue(both["expiresAtSame"])
+        self.assertGreater(both["remaining"], 0)
+
+        domains = data["domainsOnly"]
+        self.assertEqual(domains["before"], ["Domain: app.example.com"])
+        self.assertEqual(domains["after"], domains["before"])
+        self.assertTrue(domains["expiresAtSame"])
+
+        empty = data["empty"]
+        self.assertEqual(empty["before"], [])
+        self.assertEqual(empty["after"], [])
+        self.assertTrue(empty["hiddenBefore"])
+        self.assertTrue(empty["hiddenAfter"])
+
     def test_rule_signature_helpers_are_order_insensitive(self) -> None:
         functions = "\n".join(
             self._js_function(name, self.source)
@@ -11526,13 +13563,16 @@ class VersionMetadataTests(unittest.TestCase):
         self.assertTrue(text.endswith("\n"))
 
     def test_changelog_top_matches_version(self) -> None:
-        changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+        docs = (ROOT / "DOKUMENTACIO.md").read_text(encoding="utf-8")
+        marker = '<a id="valtozasnaplo"></a>'
+        self.assertIn(marker, docs, "hiányzó változásnapló-szakasz")
+        changelog = docs.split(marker, 1)[1]
         match = re.search(
-            r"^## \[(\d+\.\d+\.\d+)\] - \d{4}-\d{2}-\d{2}$",
+            r"^### \[(\d+\.\d+\.\d+)\] - \d{4}-\d{2}-\d{2}$",
             changelog,
             re.M,
         )
-        self.assertIsNotNone(match, "hiányzó CHANGELOG-verziócím")
+        self.assertIsNotNone(match, "hiányzó változásnapló-verziócím")
         self.assertEqual(match.group(1), gateway.APP_VERSION)
 
     def test_dockerfile_copies_version(self) -> None:
@@ -12085,6 +14125,58 @@ class SettingsStoreTests(unittest.TestCase):
         )
         self.assertEqual(any_dst["preauth"][0]["dst"], "")
 
+    def test_preauth_direction_default_roundtrip_and_validation(self) -> None:
+        # A direction hiányában forward; az input érték körbejár a fájlon.
+        created = self.store.prepare(
+            "create", "preauth",
+            entry={"label": "Forward", "proto": "tcp", "ports": [25565]},
+        )
+        self.assertEqual(created["preauth"][0]["direction"], "forward")
+        self.store.commit(created)
+        input_rule = self.store.prepare(
+            "create", "preauth",
+            entry={"label": "Host", "proto": "tcp", "ports": [8443],
+                   "direction": "input"},
+        )
+        self.assertEqual(input_rule["preauth"][1]["direction"], "input")
+        self.store.commit(input_rule)
+        reloaded = gateway.settings_store.SettingsStore(
+            self.path, logger=lambda *_: None
+        )
+        self.assertEqual(
+            [entry["direction"] for entry in reloaded.snapshot()["preauth"]],
+            ["forward", "input"],
+        )
+        for value in ("bogus", "both", 1, True, [], {}):
+            with self.subTest(value=value):
+                with self.assertRaises(gateway.settings_store.SettingsError):
+                    self.store.prepare(
+                        "create", "preauth",
+                        entry={"label": "Rossz", "proto": "tcp",
+                               "ports": [80], "direction": value},
+                    )
+        # A blokk bejegyzés nem kap direction mezőt.
+        blocked = self.store.prepare(
+            "create", "block",
+            entry={"label": "DNS", "proto": "udp", "ports": [53]},
+        )
+        self.assertNotIn("direction", blocked["block"][0])
+
+    def test_legacy_preauth_entry_without_direction_loads_forward(self) -> None:
+        # Régi firewall-settings.json: a direction mező még nem létezett.
+        Path(self.path).write_text(json.dumps({
+            "preauth": [{
+                "id": "legacy01", "label": "Régi", "dst": "",
+                "proto": "tcp", "ports": [25565], "enabled": True,
+            }],
+        }), encoding="utf-8")
+        store = gateway.settings_store.SettingsStore(
+            self.path, logger=lambda *_: None
+        )
+        snapshot = store.snapshot()
+        self.assertEqual(snapshot["error"], "")
+        self.assertEqual(snapshot["preauth"][0]["direction"], "forward")
+
     def test_corrupt_file_fails_closed(self) -> None:
         with open(self.path, "w", encoding="utf-8") as fh:
             fh.write("{nem json")
@@ -12261,6 +14353,82 @@ class SettingsStoreTests(unittest.TestCase):
             legacy.set_site_name(maximum)["site_name"], maximum
         )
 
+    def test_motd_text_expiry_and_persistence(self) -> None:
+        self.assertEqual(self.store.snapshot()["motd_text"], "")
+        self.assertEqual(self.store.snapshot()["motd_expires_at"], "")
+        self.assertEqual(
+            gateway.settings_store.validate_state({})["motd_text"], ""
+        )
+        now = time.time()
+
+        # Állandó közlemény: üres lejárat.
+        saved = self.store.set_motd("  Karbantartás 22:00  ", "")
+        self.assertEqual(saved["motd_text"], "Karbantartás 22:00")
+        self.assertEqual(saved["motd_expires_at"], "")
+        self.assertEqual(
+            gateway.settings_store.active_motd(saved, now),
+            "Karbantartás 22:00",
+        )
+
+        # Lejárt közlemény: a mentés nem hibázik, de a portál nem kapja meg.
+        expired = self.store.set_motd("Régi hír", "2000-01-01T00:00:00Z")
+        self.assertEqual(
+            expired["motd_expires_at"], "2000-01-01T00:00:00Z"
+        )
+        self.assertEqual(
+            gateway.settings_store.active_motd(expired, now), ""
+        )
+
+        # Időzónás jövőbeli lejárat kanonikus UTC alakban tárolódik.
+        future = self.store.set_motd(
+            "Holnap", "2999-01-01T12:00:00+02:00"
+        )
+        self.assertEqual(
+            future["motd_expires_at"], "2999-01-01T10:00:00Z"
+        )
+        self.assertEqual(
+            gateway.settings_store.active_motd(future, now), "Holnap"
+        )
+
+        # A fájlból újratöltve is megmarad.
+        reloaded = gateway.settings_store.SettingsStore(
+            self.path, logger=lambda *_: None
+        )
+        self.assertEqual(reloaded.snapshot()["motd_text"], "Holnap")
+        self.assertEqual(
+            reloaded.snapshot()["motd_expires_at"], "2999-01-01T10:00:00Z"
+        )
+
+        # Üres szöveg kikapcsolja.
+        cleared = self.store.set_motd("", "")
+        self.assertEqual(cleared["motd_text"], "")
+        self.assertEqual(
+            gateway.settings_store.active_motd(cleared, now), ""
+        )
+
+    def test_motd_validation(self) -> None:
+        for value in ("tegnap", "2026-10-22", "2026-10-22T10:00:00"):
+            with self.subTest(value=value):
+                with self.assertRaises(gateway.settings_store.SettingsError):
+                    self.store.set_motd("Hír", value)
+        for value in (None, 1, True, 1.5, [], {}):
+            with self.subTest(value=value):
+                with self.assertRaises(gateway.settings_store.SettingsError):
+                    self.store.set_motd(value, "")
+        with self.assertRaises(gateway.settings_store.SettingsError):
+            self.store.set_motd(
+                "x" * (gateway.settings_store.MAX_MOTD + 1), ""
+            )
+        # A pontosan maximális hossz érvényes.
+        maximum = "x" * gateway.settings_store.MAX_MOTD
+        self.assertEqual(
+            self.store.set_motd(maximum, "")["motd_text"], maximum
+        )
+        # Hibás mentés után az állapot változatlan.
+        with self.assertRaises(gateway.settings_store.SettingsError):
+            self.store.set_motd("másik", "rossz")
+        self.assertEqual(self.store.snapshot()["motd_text"], maximum)
+
 
 class HostSshPolicyRemovedTests(unittest.TestCase):
     """A régi, állítható host SSH politika és a külön SSH-plumbing eltűnt."""
@@ -12339,14 +14507,16 @@ class FirewallCustomTests(unittest.TestCase):
     def test_clear_custom_creates_and_flushes_chains(self) -> None:
         self.fw.clear_custom()
         lines = self.tools.script()
-        for chain in ("preauth", "block", "preauth_nat", "block_nat"):
+        for chain in (
+            "preauth", "preauth_input", "block", "preauth_nat", "block_nat"
+        ):
             self.assertIn(
                 f"add chain inet hatarvedelem {chain}", lines
             )
             self.assertIn(
                 f"flush chain inet hatarvedelem {chain}", lines
             )
-        self.assertEqual(len(lines), 8)
+        self.assertEqual(len(lines), 10)
 
     def test_apply_custom_rules(self) -> None:
         self.fw.apply_custom(
@@ -12514,6 +14684,110 @@ class FirewallCustomTests(unittest.TestCase):
                 block=[{"dst": "10.0.0.0/24", "proto": "icmp",
                         "ports": [1]}]
             )
+
+    def test_preauth_input_rules_and_forward_compat(self) -> None:
+        """Input pre-auth a host felé acceptál; a direction nélküli régi
+        bejegyzés változatlanul a forward láncban marad."""
+        self.tools.clear()
+        self.fw.apply_custom(preauth=[
+            {"dst": "", "proto": "tcp", "ports": [25565]},
+            {"dst": "192.168.50.10", "proto": "tcp", "ports": [8443],
+             "direction": "input"},
+            {"dst": "", "proto": "udp", "ports": [51820],
+             "direction": "input"},
+            {"dst": "10.0.0.1", "proto": "tcp", "ports": [9000],
+             "direction": "input", "enabled": False},
+        ])
+        lines = self.tools.script()
+        input_lines = [
+            line for line in lines
+            if line.startswith("add rule inet hatarvedelem preauth_input ")
+        ]
+        self.assertEqual(
+            input_lines[0],
+            "add rule inet hatarvedelem preauth_input "
+            "ip saddr @banned_v4 drop",
+        )
+        for iface in ("eth1", "eth0"):
+            with self.subTest(iface=iface, proto="tcp"):
+                self.assertIn(
+                    f'add rule inet hatarvedelem preauth_input '
+                    f'iifname "{iface}" meta l4proto tcp '
+                    "ct original ip daddr 192.168.50.10/32 "
+                    "ct original proto-dst 8443 accept",
+                    input_lines,
+                )
+            with self.subTest(iface=iface, proto="udp"):
+                self.assertIn(
+                    f'add rule inet hatarvedelem preauth_input '
+                    f'iifname "{iface}" meta l4proto udp '
+                    "ct original proto-dst 51820 accept",
+                    input_lines,
+                )
+        self.assertIn(
+            "add rule inet hatarvedelem preauth_input "
+            "ct state established meta l4proto tcp "
+            "ct original ip daddr 192.168.50.10/32 "
+            "ct original proto-dst 8443 accept",
+            input_lines,
+        )
+        self.assertIn(
+            "add rule inet hatarvedelem preauth_input "
+            "ct state established meta l4proto udp "
+            "ct original proto-dst 51820 accept",
+            input_lines,
+        )
+        # A host felé menő csomag nem DNAT-olt, és nincs NAT-kivétel sem.
+        self.assertFalse(
+            any("ct status dnat" in line for line in input_lines)
+        )
+        self.assertFalse(
+            any("preauth_nat" in line and "8443" in line for line in lines)
+        )
+        self.assertFalse(any("9000" in line for line in lines))
+        # A direction nélküli bejegyzés a forward láncban renderelődik.
+        self.assertTrue(any(
+            line.startswith("add rule inet hatarvedelem preauth ")
+            and 'iifname "eth1" meta l4proto tcp '
+                "ct original proto-dst 25565" in line
+            for line in lines
+        ))
+
+    def test_preauth_input_uses_the_known_interfaces(self) -> None:
+        """Input pre-auth LAN nélkül is működik, ha a WAN ismert; ha
+        egyik interfész sem ismert, magyar hibát ad."""
+        self.tools.clear()
+        wan_only = gateway.Firewall(
+            binary=str(self.tools.nft), logger=lambda *_: None,
+            lan_if="", wan_if="eth0", lan_network=None,
+        )
+        wan_only.apply_custom(preauth=[{
+            "dst": "", "proto": "tcp", "ports": [8443],
+            "direction": "input",
+        }])
+        input_lines = [
+            line for line in self.tools.script()
+            if line.startswith("add rule inet hatarvedelem preauth_input ")
+        ]
+        self.assertTrue(input_lines)
+        scoped = [line for line in input_lines if "iifname" in line]
+        self.assertTrue(scoped)
+        self.assertTrue(all('iifname "eth0"' in line for line in scoped))
+        self.assertFalse(any('iifname "eth1"' in line for line in input_lines))
+
+        self.tools.clear()
+        no_iface = gateway.Firewall(
+            binary=str(self.tools.nft), logger=lambda *_: None,
+            lan_if="", wan_if="", lan_network=None,
+        )
+        with self.assertRaisesRegex(
+            gateway.FirewallError, "ismert LAN vagy WAN interfésszel"
+        ):
+            no_iface.apply_custom(preauth=[{
+                "dst": "", "proto": "tcp", "ports": [8443],
+                "direction": "input",
+            }])
+        self.assertEqual(self.tools.script(), [])
 
 
 class RulesetTemplateTests(unittest.TestCase):
@@ -12753,7 +15027,10 @@ class RulesetTemplateTests(unittest.TestCase):
         )
         with open(path, encoding="utf-8") as fh:
             text = fh.read()
-        flush_loop = text.split("for hv_set in ", 1)[1].split("; do", 1)[0]
+        flush_at = text.index('"$NFT_BIN" flush set inet hatarvedelem')
+        flush_loop = text[
+            text.rindex("for hv_set in ", 0, flush_at):
+        ].split("; do", 1)[0]
         for set_name in ("allowed_input_tcp", "allowed_input_udp"):
             self.assertIn(set_name, flush_loop)
         # A host_service_* halmazok add-only védőhalmazok: újraindításkor

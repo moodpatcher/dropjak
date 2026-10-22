@@ -41,6 +41,11 @@ RestartSec=2
 
 StateDirectory=hatarvedelem
 StateDirectoryMode=0750
+# A WireGuard-kulcsok 0600-os ideiglenes fájljai ide kerülnek; a portál
+# nem rootként fut, ezért a systemd hozza létre a jogával (ProtectSystem
+# mellett a /run egyébként nem írható).
+RuntimeDirectory=dropjak
+RuntimeDirectoryMode=0700
 UMask=0077
 
 # A szerver nem root: csak az nftables-hez és a 80-as porthoz kell képesség.
