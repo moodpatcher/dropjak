@@ -4,6 +4,8 @@
 
 **Státusz: implementálva (3.4.0), a tervtől eltérően:** statikus `deploy/Caddyfile` admin API és újratöltés nélkül; az útvonalak portálkapuzottak (`/api/proxy/ask`, `/api/proxy/auth` forward_auth). Lásd a README „Subdomain proxy (Caddy)” részét. Az alábbi szöveg az eredeti terv.
 
+**3.10.0:** a 2. fázisra halasztott Unix socketes admin API elkészült, szűkebben a tervezettnél: `admin unix//run/caddy-admin/admin.sock|0666` a csak a portál és a Caddy konténerébe csatolt `caddy-admin` köteten (könyvtár `root:hatarvedelem 0750`), TCP-port nélkül. A konfiguráció továbbra is statikus; a portál egyetlen hívása a `POST /stop` (gyorsítótár-ürítés az ACME kikapcsolásakor, lásd `docs/domain-proxy-naplo.md`).
+
 Ez a dokumentum kizárólag tervet tartalmaz. A javaslat nem került implementálásra, a repóban a `docs/caddy-proxy-terv.md` létrehozásán kívül nem történt változtatás, nem történt commit, telepítés vagy host firewall módosítás.
 
 ---

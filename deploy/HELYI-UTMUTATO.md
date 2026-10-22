@@ -65,6 +65,34 @@ tűzfalnak. A név a portál fejlécében, a böngésző címében és az új
 név érvényes. A módosítás csak az új beiratkozásokat érinti, a már meglévő
 hitelesítő-bejegyzéseket nem nevezi át.
 
+## Előfeltétel domain használatához
+
+A domain-proxyhoz (`HV_PROXY=1`, `COMPOSE_PROFILES=proxy`, **Admin →
+Domainek**) minden gyökérdomainhez két DNS A rekord kell, mindkettő a szerver
+nyilvános IPv4-címére:
+
+| Rekord | Érték |
+|---|---|
+| `A <gyökér>` (pl. `z1.example.com`) | a szerver nyilvános IP-je |
+| `A *.<gyökér>` (pl. `*.z1.example.com`) | ugyanez az IP |
+
+- Cloudflare-en mindkettő **DNS only** (szürke felhő), különben a Caddy nem
+  látja a valódi kliens IP-t.
+- AAAA rekord ne legyen: a bejövő IPv6-ot a tűzfal eldobja.
+- Az ismeretlen aldomain challenge-éhez (pl. `x.z1.example.com`, amely nem
+  bejegyzés) feltöltött, a `*.<gyökér>` nevet fedő wildcard tanúsítvány kell
+  (**Admin → Beállítások → Domain beállítások**); ismeretlen névre ACME
+  sosem kér tanúsítványt.
+- Az **Automatikus tanúsítvány** kikapcsolásakor a portál a Caddy admin
+  socketjén (`caddy-admin` kötet, csak Unix socket, TCP-port nincs)
+  újraindítja a Caddyt, hogy a memóriában lévő Let's Encrypt-tanúsítványokat
+  se adja ki. Ez legfeljebb néhány másodperc kiesés; a nyitott kapcsolatok
+  megszakadnak. Bekapcsolt ACME mellett a tanúsítványfeltöltés is
+  újraindítja. A `/data` kötetben a kiadott tanúsítványok megmaradnak,
+  visszakapcsoláskor újrakérés nélkül visszajönnek. A Caddy állapota (elérhető,
+  utolsó újraindítás, hiba) ugyanebben a részben látszik. A compose
+  `restart: unless-stopped` beállítása kell hozzá, ne vedd ki.
+
 ## SSH a hostra
 
 A host SSH (TCP 22) **csak akkor** nyílik meg, ha a portálon ugyanarról az

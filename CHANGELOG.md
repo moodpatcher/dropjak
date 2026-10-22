@@ -10,6 +10,228 @@ The running version is stored in [`VERSION`](VERSION).
 > the documentation in this repository. Version tracking itself was introduced
 > in 2.9.0.
 
+## [3.11.0] - 2026-10-22
+
+### Added
+
+- **Proxy** admin tab (EN "Port proxy", DE "Port-Proxy"): kernel-level TCP/UDP
+  port proxy with nftables DNAT, no userland process. The client IP is kept,
+  and UDP works, so Minecraft (TCP 25565) and Simple Voice Chat (UDP 24454)
+  can be forwarded.
+  - **Forward** entries DNAT to a private IPv4 target (optional SNAT);
+    **Input** entries redirect to another port on the host.
+  - Access needs an active session whose rule (forward or host/input) lists
+    the **listen port**. The forward chain uses its existing `ct original`
+    check and Docker guard mark; input proxies are checked in the new
+    `portproxy_input` chain, after the fail2ban, block, MAC and proxy-ban
+    drops. Unauthorized input-proxy packets are dropped as
+    `reason=portproxy`, which counts toward the drop-based fail2ban.
+  - Only traffic addressed to the host (`fib daddr type local`) is
+    translated, on the chosen interfaces (WAN, LAN or both).
+  - The DNAT chain runs at prerouting priority -101, before Docker's DNAT
+    (-100), so an entry wins over a Docker-published port on the same
+    interfaces. Saving warns about such ports and about ports a local socket
+    already listens on.
+  - Stored as `port_proxies` in `firewall-settings.json` (at most 64
+    entries). Saving uses the same apply, commit and rollback path as the
+    other firewall settings, flushes conntrack for changed listen ports, and
+    writes the `admin_portproxy_changed` audit event.
+  - New chains `portproxy_prerouting`, `portproxy_nat`, `portproxy_input` and
+    `portproxy_snat`; they are shown in the raw firewall view.
+
+### Changed
+
+- The forward chain's LAN MAC checks for port grants match the original
+  direction only (`ct direction original`). Replies from a LAN DNAT target
+  were dropped as a MAC mismatch.
+
+## [3.10.0] - 2026-10-22
+
+### Fixed
+
+- Turning off **Automatikus tanúsítvány (Let's Encrypt)** (`proxy_acme`) now
+  really stops Caddy from serving ACME certificates, on the entries and on
+  the root (the HTTPS portal). Before, only new requests were refused
+  (`/api/proxy/ask` 404): certmagic (Caddy 2.10.2) hands out a certificate it
+  already holds in memory before asking `get_certificate` or `ask`, and a
+  config reload does not evict on-demand certificates. Now the switch going
+  from on to off makes the portal call `POST /stop` on Caddy's admin socket.
+  `restart: unless-stopped` starts Caddy again with an empty cache.
+  - Loading from `/data` still needs `ask`'s approval, so after the restart
+    only uploaded certificates are served, and names without one fail the
+    TLS handshake.
+  - Nothing in `/data` is deleted: switching back on reloads the stored
+    certificates without a new issuance.
+- With ACME on, uploading a certificate restarts Caddy the same way, so the
+  upload takes precedence over an ACME certificate already in memory.
+
+### Added
+
+- Caddy admin API on a Unix socket only: `admin
+  unix//run/caddy-admin/admin.sock|0666`, no TCP port.
+  - The socket lives in the new `caddy-admin` volume, mounted only into the
+    portal and Caddy containers.
+  - The portal entrypoint sets the directory to `root:hatarvedelem 0750`,
+    so only Caddy (uid 0) and the portal's group can reach it. The portal
+    still gets no Docker socket.
+  - `HV_CADDY_ADMIN` sets the socket path; empty disables the feature.
+  - Caddy gets `grace_period 5s`.
+- A background thread (`hv-caddy`, only with `HV_PROXY=1`) handles the
+  restart requests.
+  - A request survives portal restarts (flag file `caddy-restart-pending` in
+    the state volume).
+  - It is retried with backoff (2–60 s) while Caddy is unreachable.
+  - Each request restarts Caddy exactly once, never in a loop.
+  - Otherwise the thread checks every 60 s that Caddy is reachable
+    (`GET /config/admin`).
+- The Domain settings section shows the Caddy status: reachable or not, the
+  last restart, a pending restart and the last error (`caddy` in
+  `/api/admin/state`).
+
+## [3.9.1] - 2026-10-22
+
+### Changed
+
+- Proxy challenge page: the `sus.png` image is shifted 8px to the left so it
+  lines up with the captcha box.
+
+## [3.9.0] - 2026-10-22
+
+### Added
+
+- Challenge trigger `burst` (**Sok frissítés / spam**): when the same IP
+  opens a page of the entry host 10 times within 30 seconds, a new
+  challenge is required (a pass issued before the detection no longer
+  counts). Only page opens are counted, in portal memory per IP and host.
+
+## [3.8.1] - 2026-10-22
+
+### Changed
+
+- Port 80 (`http://` site in `deploy/Caddyfile`) no longer blindly redirects
+  to `https://{host}{uri}`: forward_auth asks the new loopback-only
+  `/api/proxy/redirect`, which always answers 3xx without audit. Root
+  domains, enabled entries and unknown subdomains covered by an unexpired
+  uploaded certificate get `308` to `https://<host><uri>`; other
+  `<x>.<root>` names get `302` to `https://<root>/`, any other name or raw IP
+  `302` to `https://<first root>/` (avoids the TLS error on names without a
+  certificate). Without roots the old `308` stays. The Host
+  (`X-Forwarded-Host`, else `Host`) is lowercased, port-stripped and strictly
+  validated; invalid values count as foreign names (`400` without roots), and
+  a bad `X-Forwarded-Uri` becomes `/`. `/.well-known/acme-challenge/*` (not
+  an active challenge, which Caddy answers before routes) and an unreachable
+  portal (`handle_errors`) keep the old redirect.
+
+## [3.8.0] - 2026-10-21
+
+### Added
+
+- Per-entry **Challenge (ellenőrzés)** for the domain proxy: a collapsible
+  part of each entry card on the Domainek tab with triggers `always`,
+  `interval` (`interval_hours` 1–720), `daily`, `after_401`, `fail2ban`,
+  `suspicious`, `new_ip` (stored as `challenge` in the entry; entries without
+  it are unchanged). Evaluated only for requests `/api/proxy/auth` would let
+  through: a page open gets a 403 page with `sus.png` and the login page's
+  captcha (PoW or Turnstile), other requests a short 403 JSON
+  (`code: proxy_challenge`). Challenge 403s are not counted by fail2ban and
+  write no drop-log row; root domains are never challenged.
+- Pass cookie `__Host-dropjak_pass` (Secure, HttpOnly, SameSite=Lax),
+  HMAC-SHA256 signed with a per-process key; bound to the host, and to the
+  client IP with `new_ip`. Caddy strips it from the `Cookie` header before
+  the upstream.
+- `GET`/`POST /api/gate/challenge` (Caddy: `/__dropjak/challenge` on the
+  entry host): issues the PoW task and verifies the solution with the login
+  code, then sets the pass. Loopback peer and challenge-enabled entry host
+  only (else 404); failures count as a proxy fail2ban hit.
+- `/__dropjak/sus.png` (portal: loopback-only `/api/proxy/sus.png`); `sus.png`
+  is shipped by the Dockerfile and `install.sh`.
+- `Fail2ban.last_hit(ip, proxy_only=False)`: read-only latest pending hit.
+- Audit events `proxy_challenge_shown`, `proxy_challenge_passed`,
+  `proxy_challenge_failed` (warning), labelled in the Naplók event filter.
+- Unknown-subdomain challenge: a host `<x>.<root>` under a configured root
+  that is not an enabled entry (unknown or disabled) and is covered by an
+  unexpired uploaded certificate of that root (typically `*.<root>`) always
+  gets the challenge page from `/api/proxy/auth` (403; short 403 JSON for
+  non-navigation; bare 403 for banned IPs). `/api/proxy/cert` now serves by
+  coverage, so such names get the uploaded certificate; `/api/proxy/ask`
+  stays 404 for them (no ACME). A solved captcha sets no pass and returns
+  `{"ok": true, "redirect": "https://<root>/"}`, which the page follows;
+  failures count as a proxy fail2ban hit. Audit events carry
+  `unknown_host: true`. Uncovered unknown names are unchanged (404).
+- Naplók: **IP-cím / CIDR** filter (`ip=` on `/api/admin/logs`, single
+  IPv4/IPv6 address or CIDR, invalid → 400), matching `ip`, `target`,
+  `target_ip`, `session_ip` and `request_ip`. Proxy events show `host` +
+  `path` (domain/certificate settings changes: domains or root) as the first,
+  bold detail line; `visibility`, `triggers` and `unknown_host` are listed
+  in the details.
+- README and `deploy/HELYI-UTMUTATO.md`: DNS prerequisites for domains (A
+  `<root>` and `*.<root>`, DNS only, no AAAA, wildcard certificate for the
+  unknown-subdomain challenge).
+
+### Changed
+
+- `docker-compose.yml` mounts the host's `/etc/localtime` read-only into the
+  portal container, so the `daily` challenge trigger uses the host's local
+  midnight instead of UTC.
+
+## [3.7.0] - 2026-10-21
+
+### Added
+
+- New fail2ban signal **Proxy: jogosulatlan kérések**: every 401 that
+  `/api/proxy/auth` returns for a private entry counts against the real
+  client IP (from Caddy's `X-Forwarded-For`). Config keys `proxy_enabled`,
+  `proxy_max`, `proxy_window_seconds` (defaults: on, 20, 600 s; env
+  `HV_FAIL2BAN_PROXY`, `HV_FAIL2BAN_PROXY_MAX`, `HV_FAIL2BAN_PROXY_WINDOW`);
+  the ban duration is the shared `ban_seconds`. Legacy `fail2ban.json` files
+  load with these defaults.
+- `proxy_banned_v4` nft set and an input-chain drop (`reason=proxy-ban`) for
+  TCP 80/443, placed before the proxy accepts and active regardless of
+  `HV_PROXY`. A proxy ban closes only HTTP/HTTPS to the host; the portal port
+  and other access stay open and sessions are kept.
+- Proxy bans are stored separately (`proxy_bans` in `fail2ban.json`),
+  restored on start, listed in the Fail2ban tab as `proxy` ("csak
+  HTTP/HTTPS"), and can be lifted on their own (`unban` with
+  `"proxy": true`); `unban_all` lifts both kinds. They coexist with a full
+  ban on the same IP. A proxy-banned IP also gets 401 from
+  `/api/proxy/auth`, and further 401s are not counted.
+- Admin → Settings → **Domain beállítások**: toggle **Automatikus tanúsítvány
+  (Let's Encrypt)** (`proxy_acme`, default on; legacy settings load as on).
+  Off makes `/api/proxy/ask` always 404, so no ACME issuance happens.
+- Uploaded certificates per root domain (`POST /api/admin/certs`, upload /
+  replace / delete): chain + unencrypted key PEM, at most 64 KiB each,
+  validated with stdlib `ssl` (key matches, not expired, SANs include the
+  root or `*.<root>`). Stored as `certs/<root>.pem` + `.key` in the state
+  volume (dir `0700`, files `0600`). The UI and `/api/admin/state`
+  (`proxy_certs`) show only metadata (CN, SANs, issuer, validity with a
+  14-day expiry warning, fingerprint, covered / not covered hostnames). Key
+  and PEM never leave the server through the API or the audit log. Deleting
+  a root domain deletes its certificate.
+- Caddy `get_certificate http` → new loopback-only `GET /api/proxy/cert`
+  (200 chain + key when an uploaded certificate covers `server_name`, else
+  204 → on-demand ACME). Requests that came through Caddy (`X-Forwarded-*`
+  headers or a root-domain Host) get 404.
+- Audit event `proxy_page_opened` (ip, user, host, path without query,
+  visibility) for page navigations that `/api/proxy/auth` lets through to an
+  entry (`Sec-Fetch-Dest: document`, `Sec-Fetch-Mode: navigate`, or GET +
+  `Accept: text/html` without those headers).
+- Plain HTTP portal → HTTPS: with `HV_PROXY=1` (now also read by the
+  portal), a GET/HEAD outside `/api/` that a WAN client sends directly to
+  the portal port gets a `308` to `https://<first proxy root><path+query>`
+  (audit `portal_https_redirect`, ahead of the foreign-Host captive
+  redirect). Skipped for LAN (`HV_LAN_NET`) and loopback peers, requests via
+  Caddy, fail2ban- and proxy-banned IPs, and when no certificate can serve
+  the root (`proxy_acme` off and no unexpired uploaded certificate covers
+  it). No HSTS.
+- Drop log row `reason=proxy-unauthorized` (category **Proxy: jogosulatlan**)
+  for every proxy 401, rate-limited to 30/min. It does not feed the
+  drop-count / distinct-port fail2ban signals.
+
+### Changed
+
+- `proxy_banned_v4` is listed in the firewall snapshot and flushed on start
+  with the other dynamic sets (the ban list is then restored).
+
 ## [3.6.0] - 2026-10-21
 
 ### Added

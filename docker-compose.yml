@@ -119,6 +119,11 @@ services:
       HV_FAIL2BAN_DROP_MAX: ${HV_FAIL2BAN_DROP_MAX:-120}
       HV_FAIL2BAN_DROP_PORTS: ${HV_FAIL2BAN_DROP_PORTS:-12}
       HV_FAIL2BAN_DROP_WINDOW: ${HV_FAIL2BAN_DROP_WINDOW:-180}
+      # Proxy-alapú tiltás: a domain proxy 401-es válaszai; csak a 80/443-at
+      # zárja. Futásidőben a felületen állítható.
+      HV_FAIL2BAN_PROXY: ${HV_FAIL2BAN_PROXY:-1}
+      HV_FAIL2BAN_PROXY_MAX: ${HV_FAIL2BAN_PROXY_MAX:-20}
+      HV_FAIL2BAN_PROXY_WINDOW: ${HV_FAIL2BAN_PROXY_WINDOW:-600}
       # A forward-jelölés; a Docker DOCKER-USER guard ehhez igazodik.
       HV_FWD_MARK: ${HV_FWD_MARK:-0x44524a4b}
       HV_COOKIE_SECURE: ${HV_COOKIE_SECURE:-0}
@@ -128,6 +133,9 @@ services:
       # 1: a tűzfal megnyitja a TCP 80/443-at a caddy proxy-szolgáltatásnak
       # (COMPOSE_PROFILES=proxy mellett). Lásd a .env.example fájlt.
       HV_PROXY: ${HV_PROXY:-0}
+      # A Caddy admin API Unix socketje a caddy-admin köteten; a portál ezen
+      # indítja újra a Caddyt az ACME kikapcsolásakor (gyorsítótár-ürítés).
+      HV_CADDY_ADMIN: ${HV_CADDY_ADMIN:-/run/caddy-admin/admin.sock}
       HV_SKIP_FIREWALL: ${HV_SKIP_FIREWALL:-0}
       HV_RUN_AS_ROOT: ${HV_RUN_AS_ROOT:-0}
       TURNSTILE_SITEKEY: ${TURNSTILE_SITEKEY:-}
@@ -138,6 +146,12 @@ services:
 
     volumes:
       - hatarvedelem-state:/var/lib/hatarvedelem
+      # A Caddy admin socketje; csak ez a két konténer csatolja.
+      - caddy-admin:/run/caddy-admin
+      # A host időzónája (a challenge "daily" feltétele helyi éjfélt
+      # használ; nélküle a konténer UTC-ben fut). A kép tzdata nélkül is
+      # olvassa, csak olvasható gyökér mellett is működik.
+      - /etc/localtime:/etc/localtime:ro
 
     # A gyökérfájlrendszer csak olvasható; a sablon ideiglenes fájlja a
     # /run tmpfs-en jön létre.
@@ -162,8 +176,10 @@ services:
 
   # Portállal védett aldomain-proxy automatikus HTTPS-sel. Csak a
   # COMPOSE_PROFILES=proxy beállítással indul; a 80/443 megnyitásához a
-  # HV_PROXY=1 is kell. A Caddyfile statikus (nincs admin API): az útvonalakat
-  # és a jogosultságot kérésenként a portál loopback-végpontjai adják.
+  # HV_PROXY=1 is kell. A Caddyfile statikus: az útvonalakat és a
+  # jogosultságot kérésenként a portál loopback-végpontjai adják. Az admin API
+  # csak a caddy-admin kötet Unix socketjén érhető el (TCP-port nincs); a
+  # portál ezen kéri a leállást, amit a restart: unless-stopped újraindít.
   caddy:
     image: caddy:2.10.2-alpine
     profiles: ["proxy"]
@@ -182,6 +198,7 @@ services:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
       - caddy-config:/config
+      - caddy-admin:/run/caddy-admin
     depends_on:
       hatarvedelem:
         condition: service_healthy
@@ -194,3 +211,4 @@ volumes:
   hatarvedelem-state:
   caddy-data:
   caddy-config:
+  caddy-admin:

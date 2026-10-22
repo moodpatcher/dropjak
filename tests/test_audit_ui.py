@@ -214,7 +214,13 @@ class AuditUiStaticTests(unittest.TestCase):
             "text: `${auditEventLabel(code)} (${code})`",
             "event: eventSelect.value",
             "['Esemény', eventSelect]",
-            "for (const node of [userInput, qInput])",
+            "for (const node of [userInput, qInput, ipInput])",
+            # IP/CIDR szűrő és a proxy-események kiemelt hostja.
+            "ip: ipInput.value.trim()",
+            "ip: logFilter.ip || ''",
+            "['IP-cím / CIDR', ipInput]",
+            "function logSubject(entry)",
+            "class: 'log-subject mono'",
         ):
             self.assertIn(token, self.source, token)
         self.assertNotIn("placeholder: tr('esemény')", self.source)

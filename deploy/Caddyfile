@@ -1,15 +1,32 @@
 # Dropjak — portállal védett aldomain-proxy (Caddy)
 #
-# Statikus konfiguráció: nincs admin API és nincs újratöltés. Az útvonalakat
-# a portál tárolja (Admin → Domainek), és a Caddy kérésenként a portál
-# loopback-végpontjait kérdezi:
-#   - /api/proxy/ask: kérhető-e tanúsítvány az adott névre (on-demand TLS);
+# Statikus konfiguráció, újratöltés nélkül. Az útvonalakat a portál tárolja
+# (Admin → Domainek), és a Caddy kérésenként a portál loopback-végpontjait
+# kérdezi:
+#   - /api/proxy/cert: feltöltött tanúsítvány (lánc + kulcs) a névre, ha
+#     lefedi (ismeretlen aldomainre is), vagy 204, ha nincs; ekkor jön az on-demand ACME (get_certificate http, minden
+#     olyan kézfogásnál, amelyhez nincs tanúsítvány a Caddy memóriájában);
+#   - /api/proxy/ask: kérhető-e ACME-tanúsítvány az adott névre (on-demand
+#     TLS; az Admin → Beállítások kapcsolójával kikapcsolva mindig nem);
 #   - /api/proxy/auth: a kliens IP-jének munkamenete választott-e a
 #     bejegyzést tartalmazó domain szabályt, és hova kell továbbítani
-#     (X-Dropjak-Upstream: 127.0.0.1:<port> vagy <ip>:<port>).
+#     (X-Dropjak-Upstream: 127.0.0.1:<port> vagy <ip>:<port>); ha a
+#     bejegyzés challenge-et kér, 403-as captcha-oldalt ad helyette;
+#   - /api/gate/challenge: a challenge-oldal captchája (/__dropjak/challenge).
 # A {$PORT} a portál portja; a compose adja át.
+#
+# Admin API csak Unix socketen, TCP-port nélkül, a csak a portál és a Caddy
+# konténerébe csatolt caddy-admin köteten (a könyvtár root:hatarvedelem 0750,
+# a portál belépési pontja állítja be). A portál egyetlen hívása a POST /stop:
+# az ACME kikapcsolásakor és tanúsítványfeltöltéskor leállítja a Caddyt, a
+# compose (restart: unless-stopped) üres tanúsítvány-gyorsítótárral indítja
+# újra. A certmagic ugyanis a memóriában tartott tanúsítványt az ask és a
+# get_certificate előtt adja ki; a /data alól betölteni viszont csak az ask
+# engedélyével tölt be, így kikapcsolt ACME mellett újraindulás után sem.
 {
-	admin off
+	admin unix//run/caddy-admin/admin.sock|0666
+	# A /stop (és a docker stop) legfeljebb ennyit vár a nyitott kapcsolatokra.
+	grace_period 5s
 	on_demand_tls {
 		ask http://127.0.0.1:{$PORT:8100}/api/proxy/ask
 	}
@@ -21,10 +38,22 @@
 https:// {
 	tls {
 		on_demand
+		get_certificate http http://127.0.0.1:{$PORT:8100}/api/proxy/cert
 	}
-	# A tiltóoldal képe a portálról jön, hitelesítés nélkül.
+	# A tiltó- és a challenge-oldal képe a portálról jön, hitelesítés nélkül.
 	handle /__dropjak/unauthorized.png {
 		rewrite * /api/proxy/unauthorized.png
+		reverse_proxy 127.0.0.1:{$PORT:8100}
+	}
+	handle /__dropjak/sus.png {
+		rewrite * /api/proxy/sus.png
+		reverse_proxy 127.0.0.1:{$PORT:8100}
+	}
+	# A challenge-oldal captchája (GET: feladvány, POST: megoldás + belépő
+	# süti); a portál csak challenge-es bejegyzés vagy a feltöltött
+	# tanúsítvánnyal fedett ismeretlen aldomain hostján válaszol.
+	handle /__dropjak/challenge {
+		rewrite * /api/gate/challenge
 		reverse_proxy 127.0.0.1:{$PORT:8100}
 	}
 	handle {
@@ -36,10 +65,28 @@ https:// {
 		}
 		reverse_proxy {http.request.header.X-Dropjak-Upstream} {
 			header_up -X-Dropjak-Upstream
+			# A challenge-belépő sütije nem jut el a célalkalmazáshoz.
+			header_up Cookie "__Host-dropjak_pass=[^;]*;?\s*" ""
+			header_up Cookie ";\s*$" ""
 		}
 	}
 }
 
+# A 80-as port célját a portál adja (/api/proxy/redirect, mindig 3xx): saját
+# névre https://<host><uri>, minden másra (nincs rá tanúsítvány) a gyökér
+# portálja. Az aktív ACME HTTP-01 kihívást a Caddy minden útvonal előtt
+# kezeli; a többi kihívás-útvonal nem jut a portálhoz.
 http:// {
-	redir https://{host}{uri} 308
+	handle /.well-known/acme-challenge/* {
+		redir https://{host}{uri} 308
+	}
+	handle {
+		forward_auth 127.0.0.1:{$PORT:8100} {
+			uri /api/proxy/redirect
+		}
+	}
+	# Elérhetetlen portál: a régi átirányítás.
+	handle_errors {
+		redir https://{host}{uri} 308
+	}
 }

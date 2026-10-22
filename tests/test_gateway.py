@@ -8777,6 +8777,28 @@ class AdminHttpTests(unittest.TestCase):
         self.assertTrue(data["ok"])
         return data["fail2ban"]
 
+    def test_admin_fail2ban_proxy_unban_is_separate(self) -> None:
+        cookie = self.admin_cookie()
+        ip = "203.0.113.45"
+        for _ in range(20):
+            self.gw.fail2ban.record_proxy_unauthorized(ip)
+        self.gw.fail2ban.ban(ip, 600)
+        sources = sorted(
+            row["source"] for row in self.fail2ban_state(cookie)["bans"]
+        )
+        self.assertEqual(sources, ["manual", "proxy"])
+        request = {"action": "unban", "ip": ip, "proxy": True}
+        status, _, body = self.post(
+            "/api/admin/fail2ban", request, cookie=cookie, source="127.0.0.5"
+        )
+        self.assertEqual(status, 200, body)
+        self.assertIsNone(self.gw.fail2ban.proxy_banned(ip))
+        self.assertIsNotNone(self.gw.fail2ban.banned(ip))
+        status, _, _ = self.post(
+            "/api/admin/fail2ban", request, cookie=cookie, source="127.0.0.5"
+        )
+        self.assertEqual(status, 404)
+
     def test_admin_fail2ban_config_and_rejections(self) -> None:
         alice, _ = self.login("alice", "alice-jelszo-1", source="127.0.0.6")
         status, _, _ = self.get(
@@ -10021,6 +10043,123 @@ class AdminHttpTests(unittest.TestCase):
         self.assertEqual(row["severity"], "warn")
         self.assertNotIn(password, json.dumps(rows, ensure_ascii=False))
 
+    # -- port proxy (3.11.0) -------------------------------------------------
+
+    PORT_PROXY = {
+        "label": "Minecraft", "proto": "tcp", "type": "forward",
+        "listen_port": 25565, "target_ip": "192.168.10.20",
+        "target_port": 25565, "ifaces": "lan", "snat": False,
+        "enabled": True,
+    }
+
+    def test_port_proxy_requires_admin_and_same_origin(self) -> None:
+        payload = {"action": "port_proxies", "port_proxies": [self.PORT_PROXY]}
+        alice, _ = self.login("alice", "alice-jelszo-1", source="127.0.0.7")
+        status, _, body = self.post(
+            "/api/admin/settings", payload, cookie=alice, source="127.0.0.7"
+        )
+        self.assertEqual(status, 403, body)
+        self.assertEqual(json.loads(body).get("code"), "admin_session")
+        admin = self.admin_cookie()
+        started = time.time()
+        conn = self.conn("127.0.0.5")
+        conn.request(
+            "POST", "/api/admin/settings", body=json.dumps(payload),
+            headers={"Content-Type": "application/json", "Cookie": admin,
+                     "Origin": "http://evil.example"},
+        )
+        resp = conn.getresponse()
+        body = resp.read()
+        conn.close()
+        self.assertEqual(resp.status, 403, body)
+        self.assertEqual(self.settings.snapshot()["port_proxies"], [])
+        self.assertFalse(any("portproxy" in line for line in self.tools.lines()))
+        rejected = [
+            row for row in audit_since(self.audit, started)
+            if row.get("event") == "admin_request_rejected"
+        ]
+        self.assertEqual(rejected[0]["reason"], "invalid_origin")
+
+    def test_port_proxy_apply_audit_and_conntrack(self) -> None:
+        admin = self.admin_cookie()
+        started = time.time()
+        status, _, body = self.post(
+            "/api/admin/settings",
+            {"action": "port_proxies", "port_proxies": [self.PORT_PROXY]},
+            cookie=admin, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+        data = json.loads(body)
+        self.assertIsInstance(data["port_proxy_warnings"], list)
+        stored = self.settings.snapshot()["port_proxies"]
+        self.assertEqual(len(stored), 1)
+        self.assertEqual(data["settings"]["port_proxies"], stored)
+        script = self.tools.script()
+        self.assertIn("flush chain inet hatarvedelem portproxy_nat", script)
+        self.assertIn(
+            'add rule inet hatarvedelem portproxy_nat iifname "eth1" '
+            "fib daddr type local tcp dport 25565 "
+            "dnat ip to 192.168.10.20:25565",
+            script,
+        )
+        self.assertIn(
+            "conntrack -D -p tcp --orig-port-dst 25565", self.tools.lines()
+        )
+        rows = [
+            row for row in audit_since(self.audit, started)
+            if row.get("event") == "admin_portproxy_changed"
+        ]
+        self.assertEqual(len(rows), 1, rows)
+        self.assertEqual(rows[0]["user"], "root")
+        self.assertEqual(rows[0]["port_proxy_count"], 1)
+        self.assertEqual(
+            rows[0]["port_proxies"],
+            "Minecraft: tcp/25565 -> forward 192.168.10.20:25565 (lan)",
+        )
+        self.assertEqual(rows[0]["flushed_ports"], "tcp/25565")
+
+        # Változatlan újramentésnél nincs conntrack-törlés.
+        self.tools.clear()
+        status, _, body = self.post(
+            "/api/admin/settings",
+            {"action": "port_proxies", "port_proxies": stored},
+            cookie=admin, source="127.0.0.5",
+        )
+        self.assertEqual(status, 200, body)
+        self.assertFalse(
+            any(line.startswith("conntrack") for line in self.tools.lines())
+        )
+
+    def test_port_proxy_invalid_and_nft_failure_keep_state(self) -> None:
+        admin = self.admin_cookie()
+        started = time.time()
+        bad = dict(self.PORT_PROXY, listen_port=22)
+        status, _, body = self.post(
+            "/api/admin/settings",
+            {"action": "port_proxies", "port_proxies": [bad]},
+            cookie=admin, source="127.0.0.5",
+        )
+        self.assertEqual(status, 400, body)
+        self.assertIn("fenntartott", json.loads(body)["error"])
+        rejected = [
+            row for row in audit_since(self.audit, started)
+            if row.get("event") == "admin_request_rejected"
+        ]
+        self.assertEqual(rejected[0]["reason"], "invalid_port_proxy")
+
+        self.tools.make_fail("nft hiba")
+        status, _, body = self.post(
+            "/api/admin/settings",
+            {"action": "port_proxies", "port_proxies": [self.PORT_PROXY]},
+            cookie=admin, source="127.0.0.5",
+        )
+        self.tools.clear_fail()
+        self.assertEqual(status, 503, body)
+        self.assertEqual(self.settings.snapshot()["port_proxies"], [])
+        self.assertFalse(
+            any(line.startswith("conntrack") for line in self.tools.lines())
+        )
+
 
 class RateLimitHttpTests(unittest.TestCase):
     def test_second_attempt_is_429(self) -> None:
@@ -10940,7 +11079,7 @@ class StaticUiTests(unittest.TestCase):
             "text: `${auditEventLabel(code)} (${code})`",
             "event: eventSelect.value",
             "['Esemény', eventSelect]",
-            "for (const node of [userInput, qInput])",
+            "for (const node of [userInput, qInput, ipInput])",
             "class: 'log-event-code muted'",
             "text: entry.event",
             "const searchPhrase = 'keresés a látható értékekben "
@@ -11047,7 +11186,8 @@ class StaticUiTests(unittest.TestCase):
             self.source,
         )
         self.assertIn(
-            "const running = loginActive || dropRunning;", self.source
+            "const running = loginActive || dropRunning || fb.proxy_enabled === true;",
+            self.source
         )
         self.assertIn("fb.drop_count_active", self.source)
         self.assertIn("fb.drop_ports_active", self.source)
@@ -12717,6 +12857,9 @@ class FakeBanFirewall:
 
     def sync_bans(self, elements) -> None:
         self.calls.append(("sync", list(elements)))
+
+    def sync_proxy_bans(self, elements) -> None:
+        self.proxy_elements = list(elements)
 
 
 class Fail2banTests(unittest.TestCase):

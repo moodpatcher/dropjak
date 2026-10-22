@@ -182,13 +182,20 @@ if not re.match(r"^0x[0-9a-f]{1,8}$", FWD_MARK):
 # hogy a portál-átirányítás ne térítse el. Ez nem hozzáférési jelölés.
 PREAUTH_CT_MARK = "0x50524541"
 CUSTOM_CHAINS = ("preauth", "block", "preauth_nat", "block_nat")
+# A port proxy (nftables DNAT) futásidejű láncai. A sablon csak a rájuk
+# ugró szabályokat tartalmazza, a tartalmukat a portál tölti fel:
+#   portproxy_nat:   DNAT/redirect (a -101-es prerouting láncból, a Docker
+#                    DNAT-je előtt)
+#   portproxy_input: a redirectelt (input) proxy engedélyezése
+#   portproxy_snat:  a kért forward bejegyzések masquerade-je
+PORTPROXY_CHAINS = ("portproxy_nat", "portproxy_input", "portproxy_snat")
 
 # Drop-alapú fail2ban: csak a valódi, engedély nélküli TCP-forgalom számít.
 # A MAC/spoof/ipv6/fail2ban/dns/ssh okok kimaradnak (hamis forrás-IP vagy
 # szabályos, lejárt munkamenet), és a szabályos kliens UDP-háttérzaja
 # (mDNS, LLMNR, NetBIOS, DNS) sem tiltás.
 DROP_BAN_REASONS = frozenset(
-    {"no-grant", "wan-drop", "input-wan", "input-lan"}
+    {"no-grant", "wan-drop", "input-wan", "input-lan", "portproxy"}
 )
 DROP_BAN_SKIP_TCP_PORTS = frozenset({53})
 # Az admin Tűzfal nézet nyers (iptables -L -n jellegű) kiírásában megjelenő
@@ -203,6 +210,10 @@ RULESET_CHAINS = (
     "block",
     "preauth_nat",
     "block_nat",
+    "portproxy_prerouting",
+    "portproxy_nat",
+    "portproxy_input",
+    "portproxy_snat",
     "breakglass",
 )
 
@@ -261,6 +272,14 @@ MAC_BINDING = bool(HV_LAN_IF and LAN_NETWORK is not None)
 ARP_PATH = os.environ.get("HV_ARP_PATH", "").strip() or "/proc/net/arp"
 
 PORTAL_URL = os.environ.get("HV_PORTAL_URL", "").strip()
+# A Caddy domain proxy be van-e kapcsolva (HV_PROXY=1): ekkor a portál a
+# gyökérdomaineken HTTPS-en is elérhető.
+PROXY_ENABLED = _env_bool("HV_PROXY", False)
+# A Caddy admin API-ja (Unix socket a közös caddy-admin köteten); a portál
+# ezen keresztül üríti a Caddy tanúsítvány-gyorsítótárát. Üresen kikapcsolva.
+CADDY_ADMIN = os.environ.get(
+    "HV_CADDY_ADMIN", "/run/caddy-admin/admin.sock"
+).strip()
 COOKIE_NAME = "hv_session"
 COOKIE_SECURE = (
     os.environ.get("HV_COOKIE_SECURE", "0") == "1"
@@ -719,7 +738,8 @@ AUDIT_SEVERITY = {
     "fail2ban_ban_restore_failed": "warn",
     "admin_request_rejected": "warn",
     "admin_session_terminate_failed": "warn",
-    "portal_host_redirect": "warn", "cli_password_changed": "warn",
+    "portal_host_redirect": "warn", "proxy_challenge_failed": "warn",
+    "cli_password_changed": "warn",
     "cli_user_deleted": "warn", "cli_totp_reset": "warn",
     "cli_action_failed": "warn", "cli_fail2ban_unban": "warn",
     "firewall_error": "alert", "fail2ban_error": "alert",
@@ -770,6 +790,21 @@ def _search_values(value):
             yield from _search_values(nested)
     elif value is not None:
         yield value
+
+
+# Az IP-szűrő ezekben a mezőkben keres: a kliens (ip), illetve a művelet
+# tárgya (pl. az admin által tiltott/feloldott cím a target mezőben).
+AUDIT_IP_FIELDS = ("ip", "target", "target_ip", "session_ip", "request_ip")
+
+
+def _audit_ip_match(item: dict, network) -> bool:
+    for field in AUDIT_IP_FIELDS:
+        try:
+            if ipaddress.ip_address(str(item.get(field, ""))) in network:
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 class AuditLog:
@@ -889,7 +924,9 @@ class AuditLog:
         q: str = "",
         before: float | None = None,
         severity: str = "",
+        ip=None,
     ) -> list[dict]:
+        """Az ``ip`` egy ipaddress-hálózat (egy cím: /32 vagy /128) vagy None."""
         limit = max(1, min(2000, int(limit)))
         event_raw = (event or "").strip().lower()
         event_key = _search_key(event_raw)
@@ -929,6 +966,8 @@ class AuditLog:
                             ):
                                 continue
                         if user and user not in str(item.get("user", "")).lower():
+                            continue
+                        if ip is not None and not _audit_ip_match(item, ip):
                             continue
                         # A régi bejegyzésekben nincs severity mező: ezek
                         # alapértelmezésként "info" szintűek.
@@ -2833,6 +2872,8 @@ class Firewall:
         self.icmp_set = "allowed_icmp"
         self.mac_set = "client_mac"
         self.ban_set = "banned_v4"
+        # fail2ban proxy-tiltás: csak a host TCP 80/443-át zárja.
+        self.proxy_ban_set = "proxy_banned_v4"
         self.lan_if = (lan_if or "").strip()
         self.wan_if = (wan_if or "").strip()
         self.lan_network = lan_network
@@ -3079,6 +3120,128 @@ class Firewall:
                 )
         return lines
 
+    def _portproxy_ifaces(self, value) -> list[str]:
+        """A bejegyzés interfészei; ismeretlen interfész FirewallError."""
+        wanted = {"wan": ("wan",), "lan": ("lan",), "both": ("lan", "wan")}
+        if value not in wanted:
+            raise FirewallError("érvénytelen port proxy interfész")
+        names: list[str] = []
+        for side in wanted[value]:
+            name = self.lan_if if side == "lan" else self.wan_if
+            if not name:
+                raise FirewallError(
+                    f"port proxy csak ismert {side.upper()} interfésszel "
+                    "alkalmazható"
+                )
+            if name not in names:
+                names.append(name)
+        return names
+
+    def _portproxy_rules(self, entries=()) -> list[str]:
+        """A port proxy láncok szabályai (végrehajtás nélkül).
+
+        Csak a hostnak címzett (``fib daddr type local``) forgalom kerül
+        DNAT-ra: egy LAN-kliens külső szerverre menő, azonos portú
+        forgalmát a proxy nem téríti el. A forward engedélyt a forward
+        lánc meglévő ``ct original`` szabálya adja (kliens IP . hallgató
+        port az allowed_tcp/udp halmazban, FWD_MARK-kal); az input proxyt a
+        portproxy_input lánc engedélyezi (kliens IP . hallgató port az
+        allowed_input_* halmazban), és ott a nem engedélyezett folyam
+        csomagonként eldobódik, így a visszavonás a meglévő kapcsolatot is
+        elvágja. Bármely hibás bejegyzés FirewallError a végrehajtás előtt.
+        """
+        table = self.table
+        lines: list[str] = []
+        for entry in _enabled_custom_entries(entries):
+            proto = entry.get("proto")
+            kind = entry.get("type")
+            listen = entry.get("listen_port")
+            target = entry.get("target_port")
+            if proto not in ("tcp", "udp", "both") \
+                    or kind not in ("input", "forward") or any(
+                        isinstance(port, bool) or not isinstance(port, int)
+                        or not 1 <= port <= 65535
+                        for port in (listen, target)
+                    ):
+                raise FirewallError("érvénytelen port proxy bejegyzés")
+            ifaces = self._portproxy_ifaces(entry.get("ifaces"))
+            iif = (
+                f'iifname "{ifaces[0]}"' if len(ifaces) == 1
+                else "iifname { " + ", ".join(f'"{n}"' for n in ifaces) + " }"
+            )
+            if kind == "forward":
+                try:
+                    address = ipaddress.IPv4Address(str(entry.get("target_ip")))
+                except ValueError:
+                    address = None
+                if address is None or not any(
+                    address in net for net in settings_store.PROXY_PRIVATE_NETS
+                ):
+                    raise FirewallError("érvénytelen port proxy cél")
+                nat = f"dnat ip to {address}:{target}"
+            else:
+                nat = f"redirect to :{target}"
+            for p in (("tcp", "udp") if proto == "both" else (proto,)):
+                lines.append(
+                    f"add rule inet {table} portproxy_nat {iif} "
+                    f"fib daddr type local {p} dport {listen} {nat}"
+                )
+                if kind == "forward":
+                    if entry.get("snat"):
+                        lines.append(
+                            f"add rule inet {table} portproxy_snat "
+                            f"meta l4proto {p} ct status dnat "
+                            f"ct original proto-dst {listen} "
+                            f"ip daddr {address} {p} dport {target} masquerade"
+                        )
+                    continue
+                match = (
+                    f"meta l4proto {p} ct status dnat "
+                    f"ct original proto-dst {listen}"
+                )
+                grant = f"ip saddr . ct original proto-dst @allowed_input_{p}"
+                if self.mac_binding and self.lan_if in ifaces:
+                    mac = (
+                        f'iifname "{self.lan_if}" {match} {grant} '
+                        f"ip saddr . ether saddr != @{self.mac_set}"
+                    )
+                    lines.append(
+                        f"add rule inet {table} portproxy_input {mac} "
+                        f"{self._log_statement('mac')}"
+                    )
+                    lines.append(
+                        f"add rule inet {table} portproxy_input {mac} drop"
+                    )
+                lines.append(
+                    f"add rule inet {table} portproxy_input {match} {grant} "
+                    "accept"
+                )
+                lines.append(
+                    f"add rule inet {table} portproxy_input {match} "
+                    f"{self._log_statement('portproxy')}"
+                )
+                lines.append(
+                    f"add rule inet {table} portproxy_input {match} drop"
+                )
+        return lines
+
+    def docker_published_ports(self) -> set[tuple[str, int]]:
+        """A Docker által DNAT-olt (publikált) host portok; hiba: üres."""
+        try:
+            with self._lock:
+                result = self._run(
+                    ["list", "chain", "ip", "nat", "DOCKER"], check=False
+                )
+        except FirewallError:
+            return set()
+        if result.returncode != 0:
+            return set()
+        text = result.stdout.decode("utf-8", "replace")
+        return {
+            (proto, int(port))
+            for proto, port in re.findall(r"\b(tcp|udp) dport (\d+)\b", text)
+        }
+
     def apply_custom(self, preauth=(), block=()) -> None:
         """A pre-auth és blokk szabályok telepítése ürítés nélkül.
 
@@ -3089,7 +3252,8 @@ class Firewall:
         self._run_script("\n".join(lines) + ("\n" if lines else ""))
 
     def replace_custom(
-        self, preauth=(), block=(), *, keep_block: bool = False
+        self, preauth=(), block=(), *, keep_block: bool = False,
+        port_proxies=(),
     ) -> None:
         """A pre-auth/blokk láncok cseréje egyetlen nft-tranzakcióban.
 
@@ -3102,11 +3266,15 @@ class Firewall:
         ``keep_block=True`` esetén csak a pre-auth láncokat cseréli: a
         block/block_nat láncok érintetlenek maradnak (hibás beállításfájl
         esetén az utolsó ismert jó blokkolás nem tűnhet el).
+
+        A port proxy láncok ugyanebben a tranzakcióban cserélődnek.
         """
         rules = self._custom_rules(
             preauth, block, include_block=not keep_block
-        )
-        chains = ("preauth", "preauth_nat") if keep_block else CUSTOM_CHAINS
+        ) + self._portproxy_rules(port_proxies)
+        chains = (
+            ("preauth", "preauth_nat") if keep_block else CUSTOM_CHAINS
+        ) + PORTPROXY_CHAINS
         lines = [
             f"add chain inet {self.table} {chain}" for chain in chains
         ]
@@ -3428,44 +3596,59 @@ class Firewall:
             )
             self._run_script(script)
 
-    def ban(self, ip: str, ttl: int) -> None:
-        """Forrás-IP felvétele a ``banned_v4`` halmazba.
+    def ban(self, ip: str, ttl: int, set_name: str = "") -> None:
+        """Forrás-IP felvétele a ``banned_v4`` (vagy a megadott) halmazba.
 
         A tiltás kerneloldali timeouttal rendelkezik. Újra hozzáadás előtt
         töröljük, így a tiltás meghosszabbításakor a timeout újraindul.
         """
         if not is_ipv4(ip):
             raise FirewallError("csak IPv4-cím tiltható le")
+        set_name = set_name or self.ban_set
         address = normalize_ip(ip)
         ttl = max(1, int(ttl))
         with self._lock:
-            self._delete_quiet(self.ban_set, address)
+            self._delete_quiet(set_name, address)
             self._run_script(
-                f"add element inet {self.table} {self.ban_set} "
+                f"add element inet {self.table} {set_name} "
                 f"{{ {address} timeout {ttl}s }}\n"
             )
 
-    def unban(self, ip: str) -> None:
-        """Forrás-IP törlése a ``banned_v4`` halmazból (hiányzó elem nem hiba)."""
+    def unban(self, ip: str, set_name: str = "") -> None:
+        """Forrás-IP törlése a ``banned_v4`` (vagy a megadott) halmazból.
+
+        A hiányzó elem nem hiba.
+        """
         if not is_ipv4(ip):
             return
-        self._delete_elements([(self.ban_set, normalize_ip(ip))])
+        self._delete_elements([(set_name or self.ban_set, normalize_ip(ip))])
 
-    def sync_bans(self, elements) -> None:
+    def sync_bans(self, elements, set_name: str = "") -> None:
         """A tiltott IP-k és hátralévő idejük betöltése a halmazba.
 
         Induláskor hívjuk a dinamikus halmazok ürítése után. A halmazt előbb
         kiürítjük, hogy a kernel és a mentett nyilvántartás biztosan egyezzen.
         """
-        lines = [f"flush set inet {self.table} {self.ban_set}"]
+        set_name = set_name or self.ban_set
+        lines = [f"flush set inet {self.table} {set_name}"]
         for ip, ttl in elements:
             if not is_ipv4(ip):
                 continue
             lines.append(
-                f"add element inet {self.table} {self.ban_set} "
+                f"add element inet {self.table} {set_name} "
                 f"{{ {normalize_ip(ip)} timeout {max(1, int(ttl))}s }}"
             )
         self._run_script("\n".join(lines) + "\n")
+
+    # A proxy-tiltás (TCP 80/443) ugyanígy, a proxy_banned_v4 halmazzal.
+    def proxy_ban(self, ip: str, ttl: int) -> None:
+        self.ban(ip, ttl, self.proxy_ban_set)
+
+    def proxy_unban(self, ip: str) -> None:
+        self.unban(ip, self.proxy_ban_set)
+
+    def sync_proxy_bans(self, elements) -> None:
+        self.sync_bans(elements, self.proxy_ban_set)
 
     def _delete_elements(self, elements: list[tuple[str, str]]) -> None:
         """Elemek törlése; a nem létező elem nem hiba."""
@@ -3901,7 +4084,7 @@ class Firewall:
             for set_name in (
                 self.set_name, self.tcp_set, self.udp_set,
                 self.input_tcp_set, self.input_udp_set, self.icmp_set,
-                self.mac_set, self.ban_set,
+                self.mac_set, self.ban_set, self.proxy_ban_set,
             ):
                 result = self._run(
                     ["flush", "set", "inet", self.table, set_name],
@@ -4042,7 +4225,7 @@ class Firewall:
         names = (
             self.set_name, self.tcp_set, self.udp_set,
             self.input_tcp_set, self.input_udp_set,
-            self.icmp_set, self.mac_set, self.ban_set,
+            self.icmp_set, self.mac_set, self.ban_set, self.proxy_ban_set,
         )
         sets: dict[str, list[dict]] = {name: [] for name in names}
         errors: list[str] = []
@@ -4364,6 +4547,114 @@ def conntrack_flush_removed(
                 )
             ok = False
     return ok
+
+
+def _port_proxy_keys(entries) -> dict[tuple[str, int], tuple]:
+    """Bekapcsolt bejegyzések: (protokoll, hallgató port) -> a hatásuk."""
+    keys: dict[tuple[str, int], tuple] = {}
+    for entry in _enabled_custom_entries(entries):
+        proto = entry.get("proto")
+        for p in (("tcp", "udp") if proto == "both" else (proto,)):
+            keys[(p, entry.get("listen_port"))] = (
+                entry.get("type"), entry.get("target_ip"),
+                entry.get("target_port"), entry.get("ifaces"),
+                entry.get("snat"),
+            )
+    return keys
+
+
+def port_proxy_changes(old_entries, new_entries) -> list[tuple[str, int]]:
+    """Azok a (protokoll, port) párok, amelyek NAT-célja megváltozott.
+
+    A conntrack a régi NAT-kötést a folyam végéig megtartja, ezért ezek
+    meglévő kapcsolatait törölni kell (új, eltávolított vagy módosított
+    bejegyzés egyaránt).
+    """
+    old = _port_proxy_keys(old_entries)
+    new = _port_proxy_keys(new_entries)
+    return sorted(
+        key for key in set(old) | set(new) if old.get(key) != new.get(key)
+    )
+
+
+def conntrack_flush_port(proto: str, port: int, audit=None) -> bool:
+    """A megadott eredeti célportú (DNAT előtti) kapcsolatok törlése."""
+    if DRY_RUN or not CONNTRACK_BIN:
+        return False
+    target = f"{proto}/{port}"
+    try:
+        result = subprocess.run(
+            [CONNTRACK_BIN, "-D", "-p", proto, "--orig-port-dst", str(port)],
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log(f"[tűzfal] conntrack törlés nem sikerült ({target}): {exc}")
+        _audit_conntrack_failure(
+            audit, target, -1, str(exc), operation="flush_port"
+        )
+        return False
+    if result.returncode != 0:
+        detail = result.stderr.decode("utf-8", "replace").strip()
+        # Az 1-es kód üres hibaszöveggel: nincs ilyen bejegyzés.
+        if result.returncode != 1 or detail:
+            log(
+                f"[tűzfal] conntrack törlés hibakóddal tért vissza "
+                f"({target}): {result.returncode} {detail}".strip()
+            )
+            _audit_conntrack_failure(
+                audit, target, result.returncode, detail,
+                operation="flush_port",
+            )
+        return False
+    return True
+
+
+def listening_ports(proc_dir: str = "/proc/net") -> set[tuple[str, int]]:
+    """A hoston figyelő TCP (LISTEN) és kötött UDP portok.
+
+    A portál host-hálózaton fut, ezért a /proc/net a host socketjeit
+    mutatja (például a docker-proxy publikált portjait is).
+    """
+    ports: set[tuple[str, int]] = set()
+    for proto in ("tcp", "udp"):
+        for name in (proto, proto + "6"):
+            try:
+                with open(os.path.join(proc_dir, name), encoding="ascii") as fh:
+                    next(fh, None)
+                    for line in fh:
+                        fields = line.split()
+                        if len(fields) < 4:
+                            continue
+                        # TCP-nél csak a LISTEN (0A), UDP-nél a kötött (07).
+                        if fields[3] != ("0A" if proto == "tcp" else "07"):
+                            continue
+                        try:
+                            ports.add((proto, int(fields[1].rsplit(":", 1)[1], 16)))
+                        except (IndexError, ValueError):
+                            continue
+            except OSError:
+                continue
+    return ports
+
+
+def port_proxy_warnings(entries, listening, published) -> list[dict]:
+    """Figyelmeztetés a bekapcsolt bejegyzések már foglalt hallgató portjaira.
+
+    Nem tiltás: a proxy DNAT-je (-101) a Docker DNAT-je (-100) előtt fut,
+    ezért a beállított interfészeken a proxy nyer, és a helyi socket / a
+    Docker-publikálás onnan nem érhető el.
+    """
+    warnings: list[dict] = []
+    for proto, port in sorted(_port_proxy_keys(entries)):
+        docker = (proto, port) in published
+        listen = (proto, port) in listening
+        if docker or listen:
+            warnings.append(
+                {"proto": proto, "port": port, "docker": docker,
+                 "listen": listen}
+            )
+    return warnings
 
 
 def _ip_sort_key(ip: str):
@@ -5805,13 +6096,22 @@ class SessionManager:
         Csak kifejezetten választott domain szabály számít: a teljes
         hozzáférés és az admin szerepkör sem nyit domaint.
         """
+        return self.domain_user(ip, name) is not None
+
+    def domain_user(self, ip: str, name: str) -> str | None:
+        """Az allows_domain() munkamenetének felhasználója (vagy None)."""
         now = time.time()
         with self._lock:
-            return any(
-                session.ip == ip and session.authorized
-                and session.expires > now
-                and any(name in part.domains for part in session.selections())
-                for session in self._sessions.values()
+            return next(
+                (
+                    session.user for session in self._sessions.values()
+                    if session.ip == ip and session.authorized
+                    and session.expires > now
+                    and any(
+                        name in part.domains for part in session.selections()
+                    )
+                ),
+                None,
             )
 
     def _active_authorized_ips_locked(self) -> set[str]:
@@ -7209,6 +7509,7 @@ class Gateway:
         settings: "settings_store.SettingsStore | None" = None,
         drops: "droplog.DropLogService | None" = None,
         fail2ban: "fail2ban_mod.Fail2ban | None" = None,
+        certs: "settings_store.CertStore | None" = None,
     ) -> None:
         self.catalog = (
             catalog if catalog is not None else ServiceCatalog.load()
@@ -7224,6 +7525,15 @@ class Gateway:
             settings
             if settings is not None
             else settings_store.SettingsStore()
+        )
+        # A feltöltött tanúsítványok a beállításfájl mellett, a certs/ alatt.
+        self.certs = certs if certs is not None else settings_store.CertStore(
+            os.path.join(
+                os.path.dirname(
+                    getattr(self.settings, "path", settings_store.SETTINGS_PATH)
+                ),
+                "certs",
+            )
         )
         # A domain szabály csak létező proxy-bejegyzésre hivatkozhat.
         if getattr(self.rules, "domain_names", False) is None:
@@ -7286,6 +7596,9 @@ class Gateway:
         )
         # A fiók-kérések saját korlátja: a belépési keretet ne fogyassza.
         self.register_rate = RateLimiter(window=600, maximum=3)
+        # A proxy 401-ek drop log sorai az nft log-szabályok mintájára
+        # (30/perc) korlátozva, globálisan.
+        self.proxy_drop_rate = RateLimiter(window=60, maximum=30)
         # Külön korlát a jelszóváltásnak, hogy a belépési próbákat ne
         # fogyassza, és fordítva.
         self.password_rate = RateLimiter(window=300, maximum=10)
@@ -7472,6 +7785,29 @@ class Gateway:
         except Exception as exc:
             log(f"[fail2ban] a(z) {src} drop-alapú tiltása nem sikerült: {exc}")
 
+    def record_proxy_drop(self, ip: str, host: str, path: str) -> None:
+        """Egy proxy 401 (tiltóoldal) sora a drop logban.
+
+        Közvetlenül a tárba ír, nem az NFLOG-visszahíváson át: a drop- és
+        portszám-jelzést nem táplálja (a 401-eket a proxy-jelzés számolja).
+        """
+        if not self.proxy_drop_rate.allow("proxy"):
+            return
+        try:
+            self.drops.store.write(
+                {
+                    "reason": droplog.PROXY_DROP_REASON,
+                    "src": ip,
+                    "dst": host,
+                    "proto": "tcp",
+                    "dport": 443,
+                    "source": "proxy",
+                    "path": path,
+                }
+            )
+        except Exception as exc:
+            log(f"[proxy] a drop log bejegyzés nem sikerült: {exc}")
+
     def _on_fail2ban_ban(self, record: dict) -> None:
         """Egy friss tiltás utókezelése.
 
@@ -7487,9 +7823,32 @@ class Gateway:
         user = str(record.get("user") or "")
         until = int(record.get("until") or 0)
         source = str(record.get("source") or "")
-        if source not in ("manual", "login", "drop"):
+        if source not in ("manual", "login", "drop", "proxy"):
             source = "manual" if manual else "login"
         detail = str(record.get("detail") or "")[:64]
+        if source == "proxy":
+            # A proxy-tiltás csak a TCP 80/443-at zárja: a munkamenet és a
+            # többi kapcsolat marad, a sima portál elérhető. A meglévő
+            # 80/443 kapcsolatokat az input lánc állapotfüggetlen dropja
+            # vágja el, ezért conntrack-ürítés sem kell (az irányvak lenne,
+            # és a kliens továbbított webforgalmát is bontaná). A drop log
+            # tiltás-eseménye a teljes tiltásé, ide nem írjuk.
+            self.audit.write(
+                "fail2ban_ban",
+                ip=ip,
+                manual=False,
+                attempts=attempts,
+                user="",
+                until=until,
+                source=source,
+                detail="",
+                sessions_revoked=0,
+            )
+            log(
+                f"[fail2ban] proxy-tiltás (csak HTTP/HTTPS): {ip} "
+                f"({attempts} jogosulatlan proxykérés)"
+            )
+            return
         revoked = 0
         try:
             revoked = self.sessions.revoke_ip(ip, reason="fail2ban")
@@ -7647,7 +8006,8 @@ class Gateway:
                 f"{'aktív' if status['enabled'] else 'kikapcsolva'}; "
                 f"drop-mérőszámok: "
                 f"csomagszám={'be' if status['drop_count_enabled'] else 'ki'}, "
-                f"portok={'be' if status['drop_ports_enabled'] else 'ki'}; "
+                f"portok={'be' if status['drop_ports_enabled'] else 'ki'}, "
+                f"proxy={'be' if status['proxy_enabled'] else 'ki'}; "
                 f"{status['banned']} tiltott IP, küszöb: "
                 f"{status['max_attempts']} próbálkozás / "
                 f"{status['window_seconds']} mp, tiltás: "
@@ -7690,7 +8050,8 @@ class Gateway:
                 self.firewall.replace_custom((), (), keep_block=True)
             else:
                 self.firewall.replace_custom(
-                    snapshot.get("preauth", []), snapshot.get("block", [])
+                    snapshot.get("preauth", []), snapshot.get("block", []),
+                    port_proxies=snapshot.get("port_proxies", []),
                 )
         except FirewallError as exc:
             log(
@@ -7711,9 +8072,15 @@ class Gateway:
                 snapshot.get("block", [])
             )
         )
+        active_proxies = (
+            [] if invalid else _enabled_custom_entries(
+                snapshot.get("port_proxies", [])
+            )
+        )
         log(
             f"[beállítások] {len(active_preauth)} pre-auth, "
-            f"{len(active_block)} blokk bejegyzés"
+            f"{len(active_block)} blokk, {len(active_proxies)} port proxy "
+            "bejegyzés"
         )
 
     def _restore_custom_settings(self, old: dict) -> None:
@@ -7724,7 +8091,8 @@ class Gateway:
             self.firewall.replace_custom((), (), keep_block=True)
         else:
             self.firewall.replace_custom(
-                old.get("preauth", []), old.get("block", [])
+                old.get("preauth", []), old.get("block", []),
+                port_proxies=old.get("port_proxies", []),
             )
 
     def apply_settings(self, new_data: dict) -> None:
@@ -7736,7 +8104,8 @@ class Gateway:
         old = self.settings.snapshot()
         try:
             self.firewall.replace_custom(
-                new_data.get("preauth", []), new_data.get("block", [])
+                new_data.get("preauth", []), new_data.get("block", []),
+                port_proxies=new_data.get("port_proxies", []),
             )
         except FirewallError:
             try:

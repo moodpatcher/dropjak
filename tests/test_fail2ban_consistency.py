@@ -73,6 +73,9 @@ class FakeFail2banFirewall:
             raise RuntimeError("nft sync hiba")
         self.kernel = dict(elements)
 
+    def sync_proxy_bans(self, elements) -> None:
+        self.proxy_kernel = dict(elements)
+
 
 class RecordingAudit:
     """Az audit-eseményeket memóriában gyűjtő helyettesítő."""

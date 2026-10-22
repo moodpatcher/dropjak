@@ -37,7 +37,7 @@ RUN useradd --system --user-group \
 
 WORKDIR /opt/hatarvedelem
 
-COPY gateway.py server.py droplog.py settings_store.py fail2ban.py index.html icon.png blocked.png unauthorized.png services.json VERSION ./
+COPY gateway.py server.py droplog.py settings_store.py fail2ban.py index.html icon.png blocked.png unauthorized.png sus.png services.json VERSION ./
 COPY deploy/hatarvedelem.nft ./deploy/hatarvedelem.nft
 COPY docker/entrypoint.sh /usr/local/bin/hatarvedelem-entrypoint
 

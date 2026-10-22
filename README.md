@@ -337,6 +337,14 @@ captured through NFLOG (`nfnetlink_log`) on group 5; the kernel must support
 NFLOG, and the group must not be used by another process. Only packet
 headers are stored, never payloads.
 
+Every 401 ("Nincs hozzáférés" page) from the subdomain proxy also adds a
+**Proxy: jogosulatlan** row (`reason=proxy-unauthorized`, `source=proxy`):
+the client IP as source, the requested hostname as destination, `tcp 443`,
+and the path without query string (at most 200 characters). The portal
+writes these rows directly, rate-limited like the nft log rules (30 per
+minute, global). They do not feed the drop-count or distinct-port fail2ban
+signals; repeated 401s are counted only by the separate proxy signal.
+
 The **Fail2ban** admin tab protects the portal login and the network edge.
 Failed passwords are counted per source IP; after the configured number of
 attempts within the window, the IP is banned for the configured duration.
@@ -383,6 +391,24 @@ does not otherwise lift bans that already exist; they expire normally. The
 pending drop events are listed separately, and a drop-based ban is marked
 `drop` in the ban list and on the ban screen.
 
+A fourth, independent signal covers the subdomain proxy (`proxy_enabled`,
+`proxy_max`, `proxy_window_seconds`; defaults on, 20 hits in 600 s; first-
+start defaults from `HV_FAIL2BAN_PROXY`, `HV_FAIL2BAN_PROXY_MAX`,
+`HV_FAIL2BAN_PROXY_WINDOW`). Every 401 that `/api/proxy/auth` returns for a
+private entry counts against the real client IP (the `X-Forwarded-For` value
+from Caddy); 200, the root-domain portal, 404 for unknown hosts and public
+entries do not count, and a successful request does not reset the counter.
+This ban is narrower: the IP goes into a separate `proxy_banned_v4` set that
+drops only TCP 80 and 443 to the host (everything Caddy serves, including
+the HTTPS portal), logged as `reason=proxy-ban`. The plain portal port and
+all other access stay open, so the user can still sign in at
+`http://<host>:<PORT>`. Sessions are not revoked. The ban uses the shared ban
+duration, is stored under `proxy_bans` in `fail2ban.json`, restored on start,
+and listed in the ban list as `proxy` ("csak HTTP/HTTPS"). It is separate
+from a full ban on the same IP: unbanning one leaves the other. A full or
+proxy ban stops further counting, and a proxy-banned IP also gets 401 from
+`/api/proxy/auth`. Turning the signal off releases only proxy bans.
+
 If the admin UI is unreachable, the ban list can be managed from the CLI:
 
 ```bash
@@ -409,6 +435,24 @@ names) and tolerates underscores, hyphens and spaces interchangeably. Opening
 the tab, **Frissítés** and **Szűrők törlése** count as manual reads and are
 themselves audited; the 5-second auto-refresh is not.
 
+Page opens through the subdomain proxy are logged as `proxy_page_opened`
+(ip, user, host, path, visibility) when `/api/proxy/auth` lets a request
+through to an entry (not the root-domain portal) and the request is a page
+navigation: `Sec-Fetch-Dest: document`, or `Sec-Fetch-Mode: navigate` when
+there is no `Sec-Fetch-Dest`, or, without either header, a GET whose `Accept`
+contains `text/html`. Assets, XHR/fetch and iframes are not logged. `user` is
+the session user for private entries and empty for public ones; `path` has
+no query string (it may carry tokens) and is cut to 200 characters.
+
+The **IP-cím / CIDR** filter (`ip=` on `GET /api/admin/logs`) takes one IPv4
+or IPv6 address or a CIDR range (e.g. `192.168.10.0/24`; invalid input is a
+400) and matches the `ip`, `target`, `target_ip`, `session_ip` and
+`request_ip` fields, so an admin ban/unban of that address (`target`) shows up
+as well. It combines with the other filters and the `before` paging like they
+do. Proxy events (`proxy_page_opened`, `proxy_challenge_*`) show `host` and
+`path` as the first, bold line of the details; domain and certificate
+settings changes show the domains/entries or the root there.
+
 The log rotates by size (`HV_AUDIT_MAX_BYTES`, default 10 MiB;
 `HV_AUDIT_KEEP`, default 5 files) and never contains passwords, TOTP codes or
 secrets, recovery codes, cookies, full tokens or email addresses. Pending
@@ -419,7 +463,8 @@ rules, redaction guarantees and retention details.
 
 ### Firewall customization
 
-The **Settings** admin tab manages three things:
+The **Settings** admin tab manages these things (plus account requests and
+the domain settings, see [Subdomain proxy](#subdomain-proxy-caddy)):
 
 - **Firewall name** — a display name for this Dropjak instance (at most 64
   characters; empty means `Dropjak`). It appears in the portal header and
@@ -473,13 +518,32 @@ fail2ban-banned, without a session. Everyone else sees a "Nincs hozzáférés"
 page with a **Bejelentkezés** button that links to `https://<root>/` (the
 entry's own root). Each root domain serves the portal itself over HTTPS
 (e.g. `https://z1.example.com/`), with a `Secure` session cookie.
+With `HV_PROXY=1`, a WAN client that opens the plain HTTP portal directly
+(`http://<ip>:8100/...`) gets a `308` to `https://<first root><same path and
+query>` (audit `portal_https_redirect`), only for GET/HEAD outside `/api/`
+and only when a certificate can serve the root (`proxy_acme` on, or an
+unexpired uploaded certificate covers it). LAN clients, loopback peers,
+requests already through Caddy, and fail2ban- or proxy-banned IPs (which
+cannot reach 443) keep the plain HTTP portal. No HSTS is sent.
 Several root domains can be configured (up to 16);
 an entry belongs to one of them and is identified by its full hostname, so
 `owui.z1.example.com` and `owui.z2.example.org` are separate entries.
 
-1. DNS ("DNS only", no CDN proxy, so Caddy sees the real client IP), for
-   every root: `A z1.example.com` and `A *.z1.example.com` → the host's
-   public IPv4. No AAAA records: inbound IPv6 is dropped.
+**Előfeltétel domain használatához (prerequisite):** for every root domain
+two DNS A records, both to the server's public IPv4:
+
+| Record | Value |
+|---|---|
+| `A <root>` (e.g. `z1.example.com`) | server public IP |
+| `A *.<root>` (e.g. `*.z1.example.com`) | same IP |
+
+- At Cloudflare both **DNS only** (grey cloud), no CDN proxy, so Caddy sees
+  the real client IP.
+- No AAAA records: inbound IPv6 is dropped.
+- The [unknown-subdomain challenge](#unknown-subdomains) needs an uploaded
+  certificate covering `*.<root>`; ACME is never used for unknown names.
+
+1. DNS: the two A records above, for every root.
 2. `.env`: `HV_PROXY=1` (opens TCP 80/443 in the input chain, after the
    fail2ban, block and MAC-binding drops; from the LAN only with a bound
    IP+MAC) and `COMPOSE_PROFILES=proxy` (starts `caddy`), then
@@ -495,7 +559,13 @@ an entry belongs to one of them and is identified by its full hostname, so
    rule stores full hostnames; an entry referenced by a domain rule cannot be
    deleted, renamed or moved to another root.
 
-[`deploy/Caddyfile`](deploy/Caddyfile) is static (`admin off`). Caddy asks the
+[`deploy/Caddyfile`](deploy/Caddyfile) is static (never reloaded). Its admin API
+listens only on a Unix socket (`/run/caddy-admin/admin.sock`, no TCP port) in
+the `caddy-admin` volume, which only the portal and Caddy containers mount
+(directory `root:hatarvedelem 0750`, set by the portal entrypoint; Caddy runs
+as root without `DAC_OVERRIDE`, so only uid 0 and the portal's group reach
+it). The portal uses it for one call, `POST /stop` (see Domain settings
+below); `HV_CADDY_ADMIN` sets the socket path, empty disables it. Caddy asks the
 portal's loopback-only endpoints on every request: `/api/proxy/ask` allows
 on-demand certificates only for the configured names, and `/api/proxy/auth`
 (forward_auth) checks the client IP's selected domain rules and returns the
@@ -504,6 +574,19 @@ upstream (`127.0.0.1:<port>` or `<ip>:<port>`). The portal, SSH, DNS, DHCP,
 from the host itself (output path, no forward chain). For a root domain
 `/api/proxy/auth` returns the portal itself (`127.0.0.1:<PORT>`); the
 `/api/proxy/*` paths are not reachable through Caddy.
+
+Plain HTTP (port 80) asks the portal for the redirect target (forward_auth to
+the loopback-only `/api/proxy/redirect`, which always answers 3xx, no audit):
+a root domain, an enabled entry, or an unknown `<x>.<root>` covered by an
+unexpired uploaded certificate gets `308` to `https://<host><uri>`; any other
+`<x>.<root>` gets `302` to `https://<root>/`, and any other name or raw IP
+`302` to `https://<first root>/` (no certificate exists for those names).
+Without roots it stays `308` to `https://<host><uri>`. The Host is lowercased,
+the port stripped, and anything that is not a valid hostname or IP is treated
+as a foreign name (`400` without roots), so the `Location` only ever names the
+request's own (configured) host or a root. Active ACME HTTP-01 challenges are
+answered by Caddy before any route; other `/.well-known/acme-challenge/` paths
+and an unreachable portal keep the old `308` to `https://<host><uri>`.
 
 Client IP behind Caddy: the portal trusts `X-Forwarded-For` only when the raw
 socket peer is exactly `127.0.0.1` or `::1` (the host's Caddy, which replaces
@@ -514,13 +597,225 @@ raw peer. `HV_PORTAL_URL` stays the LAN/IP captive URL: LAN clients that are
 not yet authorized keep using the plain-HTTP captive portal (LAN 443 is open
 only for MAC-bound authorized clients), and fail2ban-banned WAN IPs are
 dropped by nftables before reaching Caddy, so they see the ban screen only on
-the plain-HTTP portal port.
+the plain-HTTP portal port. Repeated 401s on private entries lead to a
+fail2ban proxy ban that closes only 80/443 (see the Fail2ban section above).
+
+#### Domain settings and certificates
+
+Admin → Settings → **Domain beállítások** controls the HTTPS certificates:
+
+- **Automatikus tanúsítvány (Let's Encrypt)** (`proxy_acme`, default on;
+  settings files without the key load as on). When off, `/api/proxy/ask`
+  always answers 404, so Caddy requests no ACME certificate at all; only
+  names covered by an uploaded certificate work over HTTPS. Caddy (certmagic)
+  serves a certificate already in its memory before it asks `get_certificate`
+  or `ask`, and a config reload does not evict on-demand certificates, so
+  turning the switch off also restarts Caddy: the portal calls `POST /stop`
+  on the admin socket and `restart: unless-stopped` starts it again with an
+  empty cache (sub-second locally, a few seconds of proxy downtime at most;
+  `grace_period 5s`). Loading from the `/data` volume needs `ask`'s approval,
+  so after the restart no stored ACME certificate is served either. Nothing
+  in `/data` is deleted: turning the switch back on loads the stored
+  certificates again without a new issuance. Uploading a certificate while
+  the switch is on restarts Caddy the same way, so the upload wins over an
+  ACME certificate already in memory. The request survives portal restarts
+  (flag file `caddy-restart-pending` in the state volume) and is retried with
+  backoff (2 s … 60 s) while Caddy is unreachable; each request restarts
+  Caddy exactly once. The section shows the Caddy status: reachable or not
+  (checked every 60 s), last restart, pending restart, last error.
+- Per root domain, a certificate chain PEM (leaf first) and an unencrypted
+  private key PEM can be uploaded, replaced or deleted (`POST
+  /api/admin/certs`, `{"action": "upload"|"delete", "root", "cert", "key"}`,
+  admin only). The upload is checked before it is stored: at most 64 KiB per
+  PEM, the key must match the certificate, the certificate must not be
+  expired, and its SANs must include the root or `*.<root>`. The tab shows
+  only metadata: subject CN, SANs, issuer, validity (with a warning when it
+  expires within 14 days or has expired), the SHA-256 fingerprint, and which
+  configured hostnames (the root and its entries) it covers and which it does
+  not (a wildcard covers exactly one label). The key and the PEM are never
+  returned by any API and never written to the audit log; the audit records
+  only root, SANs, `notAfter` and fingerprint.
+- Files: `certs/<root>.pem` and `certs/<root>.key` in the state volume
+  (directory `0700`, files `0600`, written atomically). Deleting a root
+  domain on the Domainek tab also deletes its certificate.
+
+Caddy fetches certificates from the portal with `get_certificate http
+http://127.0.0.1:<PORT>/api/proxy/cert` (in the `tls` block, next to
+`on_demand`). On a TLS handshake for a name it has no certificate in memory
+for, Caddy calls the endpoint with `server_name`; the portal answers 200
+with the chain followed by the key when an uploaded, unexpired certificate of
+that name's root covers it (also for a name that is not an entry, see
+[Unknown subdomains](#unknown-subdomains)), otherwise 204, and Caddy falls back to on-demand
+ACME (which still goes through `/api/proxy/ask`). The endpoint answers only
+the raw loopback peer, and refuses (404) any request that carries
+`X-Forwarded-*` headers or a root-domain Host, i.e. anything that came
+through Caddy; `/api/proxy/*` is not reachable through the root-domain
+portal either. Certificates from this endpoint are not cached by Caddy, so
+an upload, replacement or deletion applies to the next new TLS connection.
+Caddy's in-memory cache is consulted first, though: if Caddy has already
+loaded an ACME certificate for a name, it keeps serving that one until it is
+restarted (`docker compose restart caddy`). The HTTPS portal on
+`https://<root>/` is served by the same Caddy site, so it uses the uploaded
+certificate as well.
+
+#### Challenge (captcha gate)
+
+Each entry has a collapsible **Challenge (ellenőrzés)** part on the Domainek
+tab (`"challenge": {"triggers": [...], "interval_hours": n}` in the entry;
+missing or empty = no challenge, the previous behaviour). The challenge is
+evaluated only **after** authorization, i.e. only for a request that would be
+let through (200); unauthorized requests still get the 401 page, and root
+domains (the portal, which has its own captcha) are never challenged. When a
+trigger fires, a page open gets a **403** page in the style of the denial
+page, with `sus.png` and the same captcha as the login page ("Nem vagyok
+robot" proof-of-work, or Turnstile when configured), and nothing else. After
+a solved captcha the client gets a pass cookie and the page reloads. Other
+requests (XHR, assets, API) get a short 403 JSON
+(`"code": "proxy_challenge"`). Challenge 403s are not counted by fail2ban and
+write no drop-log row.
+
+Triggers:
+
+- `always` (**Első megnyitáskor**): a valid pass is needed for the host; a
+  pass lives 24 hours.
+- `interval` (**X óránként**, `interval_hours` 1–720): a pass lives
+  `interval_hours` instead of 24 hours.
+- `daily` (**Naponta első megnyitáskor**): a pass issued before the last
+  local midnight is no longer valid. The compose file mounts the host's
+  `/etc/localtime` read-only, so the container uses the host's time zone
+  (without it, UTC).
+- `new_ip` (**Új IP-ről**): the pass is bound to the client IP it was issued
+  to; without it the pass is bound only to the host, so it keeps working
+  after an IP change.
+- `after_401` (**Ha az IP kapott már 401-et**): only while the IP has a
+  pending fail2ban proxy counter (401s or failed challenges within
+  `proxy_window_seconds`; needs the proxy signal on); then the pass must have
+  been issued after the IP's latest counted hit.
+- `fail2ban` (**Ha bármely fail2ban-számláló fut rá**): the same with any
+  pending counter (failed logins, dropped packets/ports, proxy 401s). A LAN
+  client that keeps producing drops is challenged again after each new drop.
+- `suspicious` (**Gyanús kliens**): the request has no `Accept-Language`, a
+  page open has no `Sec-Fetch-Mode`, or the User-Agent is empty or a
+  command-line client (curl, wget, python-requests, Go-http-client, ...);
+  then any valid pass is enough.
+- `burst` (**Sok frissítés / spam**): the same IP opened (refreshed) a page
+  of the host 10 times within 30 seconds (counted only for page opens, in
+  portal memory); then the pass must have been issued after that detection,
+  and the counter starts again.
+
+The first four impose a pass whenever they are set; the last four only
+while their condition holds. The pass is the cookie `__Host-dropjak_pass`
+(`Secure; HttpOnly; SameSite=Lax; Path=/`, no `Domain`, on the entry host),
+value `base64url(host|ip or *|issued ms|expires).HMAC-SHA256`. The HMAC key
+is random per portal process, so a portal restart invalidates every pass.
+Caddy removes the cookie from the `Cookie` header before the request reaches
+the upstream app (`header_up Cookie` regex replace).
+
+The captcha is served through Caddy at `/__dropjak/challenge` on the entry
+host (rewritten to the portal's `/api/gate/challenge`: `GET` issues a PoW
+task or reports Turnstile mode, `POST {"captcha": ...}` verifies it with the
+login code (signed, expiring, single-use PoW; Turnstile siteverify with the
+client IP), checks the origin, applies the login rate limit, and sets the
+cookie). It answers only the loopback peer and only for an enabled entry
+with a challenge or a covered unknown subdomain; anything else is 404, and banned or proxy-banned IPs get
+403. A failed verification counts as a proxy fail2ban hit. With Turnstile,
+the site key must allow the entry hostnames. Audit: `proxy_challenge_shown`
+(page opens only), `proxy_challenge_passed`, `proxy_challenge_failed`, with
+`host` and the fired `triggers`.
+
+Non-browser clients (API calls, webhooks, CLI tools) cannot solve the
+challenge, so they get 403 whenever a trigger fires. Leave the triggers off
+for API and webhook entries.
+
+#### Unknown subdomains
+
+A host `<anything>.<root>` under a configured root that is not an enabled
+entry (unknown or disabled) is challenged when an unexpired **uploaded**
+certificate of that root covers it (typically `*.<root>`):
+`/api/proxy/cert` serves it by coverage, while `/api/proxy/ask` stays 404 for
+it, so no ACME certificate is ever requested for such names (Let's Encrypt
+rate limits). `/api/proxy/auth` then always answers with the challenge page
+(403; non-navigation requests get the short 403 JSON), regardless of
+triggers, session or pass; a banned IP gets a bare 403. After a solved
+captcha `/api/gate/challenge` sets no pass and answers
+`{"ok": true, "redirect": "https://<root>/"}`, and the page navigates to the
+root portal. A failed verification counts as a proxy fail2ban hit. The audit
+events are the same (`proxy_challenge_shown`/`_passed`/`_failed`) with
+`host` and `unknown_host: true` instead of `triggers`. A name not covered by
+an uploaded certificate is unchanged (404 / TLS handshake failure).
+
+### Port proxy (TCP/UDP)
+
+The **Proxy** admin tab forwards a TCP and/or UDP port of the firewall host
+in the kernel (nftables DNAT), with no userland proxy process. The client IP
+is preserved, and UDP works through conntrack, so it suits game servers such
+as Minecraft (TCP 25565) and the Simple Voice Chat mod (UDP 24454).
+
+Each entry has a label, protocol (`tcp`, `udp` or `both`), listen port, type,
+target port, interfaces (`wan`, `lan` or `both`) and an on/off switch:
+
+- **Forward** — `dnat` to a private IPv4 target (10/8, 172.16/12 including
+  Docker bridge networks, 192.168/16). Access needs an active session whose
+  **forward** rule lists the **listen port**: the forward chain matches
+  `ct original ip saddr . ct original proto-dst` against
+  `allowed_tcp`/`allowed_udp` (the same check as for published Docker ports)
+  and sets the Docker guard mark, so a container target works too. Optional
+  **SNAT** masquerades only that flow; use it when the target would not reply
+  through the firewall (e.g. a LAN client to a LAN target). The target then
+  sees the firewall's address instead of the client IP.
+- **Input** — `redirect` to another port on the firewall host itself. Access
+  needs a session whose **host (input)** rule lists the **listen port** (not
+  the target port). The target port cannot be 22, 2019 or the portal port, and
+  it cannot equal the listen port (a plain host rule does that).
+
+Only traffic addressed to the host (`fib daddr type local`) on the chosen
+interfaces is translated; a LAN client's traffic to an outside server on the
+same port is not touched. Listen ports 22, 53, 67, 80, 443, 2019 and the
+portal port are reserved, and a `(protocol, listen port)` pair can be used by
+one entry only (`both` takes TCP and UDP).
+
+Order and precedence:
+
+- The DNAT runs in its own `type nat hook prerouting priority -101` chain
+  (`portproxy_prerouting` → `portproxy_nat`). The kernel runs nat chains by
+  priority and stops at the first NAT binding, so on the chosen interfaces a
+  Proxy entry wins over Docker's own DNAT (`ip nat PREROUTING`, priority
+  -100) for the same published port. Saving such an entry is allowed but
+  returns a warning, as does a port a local socket already listens on.
+- Input-proxy packets go through `portproxy_input`, jumped from the input
+  chain after the fail2ban drop, the block chain, the MAC checks and the
+  proxy ban, but before the 80/443 proxy accept, the host-service guards and
+  the established accept. An unauthorized redirected packet is dropped and
+  logged as `reason=portproxy` (counts toward the drop-based fail2ban, like
+  `no-grant`). Since every packet is checked, revoking the grant cuts open
+  flows too. Unauthorized forward-proxy packets are dropped as `no-grant` /
+  `wan-drop`.
+- The forward chain's LAN MAC checks on port grants now apply to the
+  original direction only (`ct direction original`), so replies from a LAN
+  target are not checked against the client's MAC binding.
+
+Saving applies the chains, `portproxy_snat` (jumped from postrouting) and the
+other customized chains in one nft transaction, then writes
+`firewall-settings.json` (`port_proxies`); on failure the previous rules are
+restored. Changed, added or removed listen ports get their conntrack entries
+flushed (`conntrack -D -p <proto> --orig-port-dst <port>`), so old flows do
+not keep the old target. The runtime chains survive a template reload and are
+re-applied at startup; an invalid settings file leaves them empty
+(fail-closed). Changes are audited as `admin_portproxy_changed`. The new
+chains appear in the raw firewall view.
+
+**Minecraft + Simple Voice Chat example:** a `both` (or one TCP and one UDP)
+forward entry for 25565 and 24454 to the server, and a forward rule that
+allows TCP 25565 and UDP 24454. On the Minecraft server set `port=24454` in
+`voicechat-server.properties`; if the public (listen) port differs, set
+`voice_host=<public name>:<listen port>`.
 
 ### Backup
 
 State is stored in the `hatarvedelem-state` volume
 (`/var/lib/hatarvedelem`): `users.json`, `groups.json`, `rules.json`,
-`audit.jsonl`, `drops.jsonl`, `fail2ban.json` and `firewall-settings.json`.
+`audit.jsonl`, `drops.jsonl`, `fail2ban.json`, `firewall-settings.json` and the
+uploaded proxy certificates under `certs/` (private keys included).
 
 ```bash
 docker volume ls | grep hatarvedelem-state

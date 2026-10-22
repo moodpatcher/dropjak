@@ -17,12 +17,16 @@ A tényleges tűzfalkezelés a gateway.py-ban van.
 from __future__ import annotations
 
 import argparse
+import base64
 import getpass
 import hashlib
 import hmac
 import html
+import http.client
+import ipaddress
 import json
 import os
+import re
 import secrets
 import signal
 import socket
@@ -48,16 +52,26 @@ STATIC_FILES = {
     "icon.png": ("image/png", "public, max-age=3600"),
     "blocked.png": ("image/png", "public, max-age=3600"),
     "unauthorized.png": ("image/png", "public, max-age=3600"),
+    "sus.png": ("image/png", "public, max-age=3600"),
 }
 
 # A proxy-végpontokat csak a hoston futó Caddy hívhatja (a nyers socket
 # peer, nem az X-Forwarded-For alapján; lásd _peer_ip).
 PROXY_LOOPBACK = ("127.0.0.1", "::1")
 
-PROXY_UNAUTHORIZED_PAGE = """<!doctype html>
+# A 80-as port átirányításának Hostja: hostnév/IPv4 vagy [IPv6], opcionális
+# porttal; minden más (CRLF, szóköz, userinfo, %-scope) érvénytelen.
+_REDIRECT_HOST_RE = re.compile(
+    r"((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}"
+    r"[a-z0-9])?|\[[0-9a-f:.]+\])(?::[0-9]{1,5})?"
+)
+
+# A proxy tiltó- és challenge-oldala közös váz; a {mező} helyőrzőket a
+# _proxy_page tölti ki.
+PROXY_PAGE = """<!doctype html>
 <html lang="hu"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Nincs hozzáférés</title>
+<title>{title}</title>
 <style>
 body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
 font-family:system-ui,sans-serif;background:#111418;color:#e8eaed;text-align:center}
@@ -67,12 +81,156 @@ h1{font-size:1.5rem;margin:16px 0 8px}
 p{color:#b0b6bd;line-height:1.5}
 a{display:inline-block;margin-top:12px;padding:10px 22px;border-radius:8px;
 background:#2f6fde;color:#fff;text-decoration:none;font-weight:600}
-</style></head><body><main>
-<img src="/__dropjak/unauthorized.png" alt="">
-<h1>Nincs hozzáférés</h1>
-<p>Ez a szolgáltatás csak a Dropjak tűzfalon történő bejelentkezés után érhető el.</p>
-<a href="{login}">Bejelentkezés</a>
+{style}</style></head><body><main>
+<img src="/__dropjak/{image}" alt="">
+<h1>{title}</h1>
+<p>{text}</p>
+{body}
 </main></body></html>
+"""
+_PROXY_PAGE_FIELD = re.compile(r"\{(title|style|image|text|body)\}")
+
+
+def _proxy_page(**values: str) -> bytes:
+    # Egyetlen menet: a beillesztett CSS/JS kapcsos zárójelei érintetlenek.
+    return _PROXY_PAGE_FIELD.sub(
+        lambda match: values.get(match.group(1), ""), PROXY_PAGE
+    ).encode("utf-8")
+
+
+# A challenge-oldal a belépőoldal captcha-modulját használja: a stílusát és
+# az SHA-256 PoW-kódját az index.html-ből emeljük ki (egyszer, lustán).
+_CAPTCHA_CSS_LINE = re.compile(
+    r'^\s*(?::root\[data-theme="dark"\] )?'
+    r"(?:\.captcha|\.box|\.bar|\.spinner|#turnstile|@keyframes spin)\b.*$",
+    re.M,
+)
+_captcha_assets: tuple[str, str] | None = None
+
+
+def _captcha_assets_from_index() -> tuple[str, str]:
+    global _captcha_assets
+    if _captcha_assets is None:
+        with open(os.path.join(BASE, "index.html"), encoding="utf-8") as fh:
+            source = fh.read()
+        style = source[source.index("<style>"):source.index("</style>")]
+        # Az oldal mindig sötét: a sötét téma szabályai feltétel nélküliek.
+        css = "\n".join(
+            m.group(0).strip().replace(':root[data-theme="dark"] ', "")
+            for m in _CAPTCHA_CSS_LINE.finditer(style)
+        )
+        start = source.index("const sha256 = (() => {")
+        end = source.index("  return { matches };\n})();", start)
+        _captcha_assets = css, source[start:end] + "  return { matches };\n})();"
+    return _captcha_assets
+
+
+PROXY_CHALLENGE_STYLE = """:root{--line-strong:#3b414b;--green:#7ecf8e;--ink:#e9e9e4;--muted:#9b9d99}
+.captcha,#turnstile{max-width:300px;margin:16px auto 0;text-align:left}
+main>img{position:relative;left:-8px}
+#msg{min-height:1.5em;color:#ee8b8b}
+"""
+
+PROXY_CHALLENGE_SCRIPT = """
+const CFG = __CFG__;
+const slot = document.getElementById('slot');
+const msg = document.getElementById('msg');
+const show = text => { msg.textContent = text; };
+async function verify(captcha) {
+  const res = await fetch('/__dropjak/challenge', {
+    method: 'POST', cache: 'no-store',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ captcha })
+  });
+  if (res.ok) {
+    // Ismeretlen aldomainről a gyökérdomainre visz; a bejegyzés újratölt.
+    const data = await res.json().catch(() => ({}));
+    if (data.redirect) location.href = data.redirect; else location.reload();
+    return;
+  }
+  const data = await res.json().catch(() => ({}));
+  const error = new Error(data.error || 'Az ellenőrzés nem sikerült.');
+  error.shown = true;
+  throw error;
+}
+if (CFG.mode === 'turnstile') {
+  slot.innerHTML = '<div id="turnstile"></div>';
+  const s = document.createElement('script');
+  s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+  s.async = true;
+  s.onload = () => window.turnstile.render('#turnstile', {
+    sitekey: CFG.sitekey, theme: 'dark', language: 'hu',
+    callback: token => verify({ token }).catch(e => {
+      show(e.shown ? e.message : 'Az ellenőrzés nem sikerült.');
+      try { window.turnstile.reset('#turnstile'); } catch (_) { /* nincs widget */ }
+    }),
+    'error-callback': () => show('A captcha nem töltődött be. Frissítsd az oldalt.')
+  });
+  s.onerror = () => show('A captcha nem töltődött be (hálózat).');
+  document.head.appendChild(s);
+} else {
+  slot.innerHTML = `
+    <div class="captcha">
+      <div class="captcha-inner" id="powbox" role="checkbox" aria-checked="false" tabindex="0">
+        <span class="box">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3.4"
+               stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5 9.5 18 20 6.5"/></svg>
+        </span>
+        <span class="spinner"></span>
+        <span class="captcha-text" id="powtext">Nem vagyok robot</span>
+      </div>
+      <div class="bar"><i id="powbar"></i></div>
+    </div>`;
+  const box = document.getElementById('powbox');
+  const text = document.getElementById('powtext');
+  const bar = document.getElementById('powbar');
+  // A belépőoldal startPow() ciklusa, a megoldás után azonnali beküldéssel.
+  const start = async () => {
+    if (box.dataset.state === 'busy' || box.dataset.state === 'done') return;
+    box.dataset.state = 'busy';
+    text.textContent = 'Ellenőrzés…';
+    show('');
+    try {
+      const res = await fetch('/__dropjak/challenge', { cache: 'no-store' });
+      const ch = await res.json();
+      if (ch.mode !== 'pow') throw new Error('mód-váltás');
+      const difficulty = Number(ch.difficulty);
+      if (!Number.isInteger(difficulty) || difficulty < 1 || difficulty > 6) {
+        throw new Error('érvénytelen nehézség');
+      }
+      const saltBytes = new TextEncoder().encode(ch.salt);
+      const expected = Math.pow(16, difficulty) / 2;
+      const limit = Math.max(2_000_000, expected * 60);
+      let n = 0;
+      let found = -1;
+      for (;;) {
+        const end = n + 2000;
+        for (; n < end; n++) {
+          if (sha256.matches(saltBytes, String(n), difficulty)) { found = n; break; }
+        }
+        const done = found >= 0;
+        bar.style.width = (done ? 100 : Math.min(96, (n / expected) * 100)).toFixed(1) + '%';
+        if (done) break;
+        if (n > limit) throw new Error('túl hosszú számítás');
+        await new Promise(r => setTimeout(r, 0));
+      }
+      box.dataset.state = 'done';
+      box.setAttribute('aria-checked', 'true');
+      text.textContent = 'Ellenőrizve';
+      await verify({ ...ch, number: found });
+    } catch (e) {
+      box.dataset.state = '';
+      box.setAttribute('aria-checked', 'false');
+      text.textContent = 'Nem vagyok robot';
+      bar.style.width = '0%';
+      show(e.shown ? e.message : 'Az ellenőrzés nem indult el. Próbáld újra.');
+    }
+  };
+  box.addEventListener('click', start);
+  box.addEventListener('keydown', e => {
+    if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); start(); }
+  });
+}
 """
 
 CONTENT_SECURITY_POLICY = (
@@ -84,6 +242,115 @@ CONTENT_SECURITY_POLICY = (
     "connect-src 'self' https://challenges.cloudflare.com; "
     "base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 )
+
+
+
+def _proxy_challenge_page() -> bytes:
+    css, sha256_js = _captcha_assets_from_index()
+    config = (
+        {"mode": "turnstile", "sitekey": gateway.TURNSTILE_SITEKEY}
+        if gateway.TURNSTILE_ON else {"mode": "pow"}
+    )
+    script = PROXY_CHALLENGE_SCRIPT.replace(
+        "__CFG__", json.dumps(config).replace("<", "\\u003c")
+    )
+    return _proxy_page(
+        title="Ellenőrzés",
+        image="sus.png",
+        text="Erősítsd meg, hogy nem vagy robot.",
+        style=css + "\n" + PROXY_CHALLENGE_STYLE,
+        body=(
+            '<div id="slot"></div>\n<p id="msg" role="alert"></p>\n'
+            f"<script>\n{sha256_js}\n{script}</script>"
+        ),
+    )
+
+
+# A proxy challenge belépője: __Host- süti a bejegyzés hostján, értéke
+# base64url(host|ip vagy *|kiadva ms|lejár s).HMAC-SHA256. A kulcs folyamatonként
+# új (mint a PoW-kulcs): újraindítás után minden belépő érvénytelen.
+PROXY_PASS_COOKIE = "__Host-dropjak_pass"
+PROXY_PASS_TTL = 24 * 3600
+_PROXY_PASS_KEY = secrets.token_bytes(32)
+_CLI_AGENT_RE = re.compile(
+    r"^(?:curl|wget|python-|python/|go-http-client|libwww-perl|httpie|okhttp"
+    r"|java/|aiohttp|axios|node-fetch|undici|powershell|scrapy)",
+    re.I,
+)
+
+
+# A "burst" feltétel (sok frissítés / spam): ugyanarról az IP-ről ugyanarra a
+# hostra ennyi oldalmegnyitás ennyi másodpercen belül. Folyamatonként a
+# memóriában (mint a belépő kulcsa), újraindításkor törlődik.
+PROXY_BURST_LIMIT = 10
+PROXY_BURST_WINDOW = 30
+PROXY_BURST_MAX_KEYS = 10000
+_PROXY_BURST: dict[tuple[str, str], tuple[list[float], float]] = {}
+_PROXY_BURST_LOCK = threading.Lock()
+
+
+def _proxy_burst(ip: str, host: str, now: float, count: bool) -> float:
+    """A legutóbbi spam-észlelés ideje az IP+hostra (0: nem volt).
+
+    ``count``: ez a kérés oldalmegnyitás, beleszámít. A határ elérésekor az
+    észlelés ideje frissül és a számláló nullázódik.
+    """
+    key = (ip, host)
+    with _PROXY_BURST_LOCK:
+        hits, flagged = _PROXY_BURST.get(key, ([], 0.0))
+        if not count:
+            return flagged
+        hits = [t for t in hits if now - t < PROXY_BURST_WINDOW] + [now]
+        if len(hits) >= PROXY_BURST_LIMIT:
+            hits, flagged = [], now
+        if key not in _PROXY_BURST and len(_PROXY_BURST) >= PROXY_BURST_MAX_KEYS:
+            for old in [k for k, (h, f) in _PROXY_BURST.items()
+                        if not f and (not h or now - h[-1] >= PROXY_BURST_WINDOW)]:
+                del _PROXY_BURST[old]
+            if len(_PROXY_BURST) >= PROXY_BURST_MAX_KEYS:
+                # shortcut: tele táblánál minden észlelés elvész; LRU kell, ha
+                # a valós forgalom eléri a 10 000 IP+host párt.
+                _PROXY_BURST.clear()
+        _PROXY_BURST[key] = (hits, flagged)
+        return flagged
+
+
+def _proxy_pass_lifetime(challenge: dict) -> int:
+    if "interval" in challenge["triggers"]:
+        return challenge["interval_hours"] * 3600
+    return PROXY_PASS_TTL
+
+
+def _proxy_pass_sign(payload: bytes) -> bytes:
+    return hmac.new(_PROXY_PASS_KEY, payload, hashlib.sha256).hexdigest().encode()
+
+
+def _proxy_pass_value(host: str, ip: str, issued: float, expires: int) -> str:
+    # Ezredmásodperc, lefelé kerekítve: a belépő sosem tűnik későbbinek.
+    payload = f"{host}|{ip or '*'}|{int(issued * 1000)}|{expires}".encode()
+    encoded = base64.urlsafe_b64encode(payload).rstrip(b"=").decode()
+    return f"{encoded}.{_proxy_pass_sign(payload).decode()}"
+
+
+def _proxy_pass_issued(value: str, host: str, ip: str, now: float) -> float:
+    """Az érvényes belépő kiadási ideje; 0, ha hiányzik, hamis, lejárt vagy
+    más hosté. Üres ``ip``: a belépő IP-től függetlenül érvényes."""
+    encoded, _, signature = value.partition(".")
+    try:
+        payload = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+        if not hmac.compare_digest(
+            _proxy_pass_sign(payload), signature.encode()
+        ):
+            return 0.0
+        pass_host, pass_ip, issued, expires = payload.decode().split("|")
+        issued_at, expires_at = int(issued) / 1000, int(expires)
+    except ValueError:
+        return 0.0
+    if pass_host != host or (ip and pass_ip != ip) \
+            or not issued_at <= now < expires_at:
+        return 0.0
+    return issued_at
+
 
 # Egy munkamenet legfeljebb ennyi szabályt választhat egyszerre. A korlát
 # az audit- és a válaszméretet is kordában tartja.
@@ -498,6 +765,9 @@ class Handler(BaseHTTPRequestHandler):
         print(f"[{self._client_ip()}] {fmt % args}", flush=True)
 
     def _cookie_token(self) -> str:
+        return self._cookie(gateway.COOKIE_NAME)
+
+    def _cookie(self, name: str) -> str:
         raw = self.headers.get("Cookie")
         if not raw:
             return ""
@@ -506,7 +776,7 @@ class Handler(BaseHTTPRequestHandler):
             jar.load(raw)
         except CookieError:
             return ""
-        morsel = jar.get(gateway.COOKIE_NAME)
+        morsel = jar.get(name)
         return morsel.value if morsel else ""
 
     def _origin_ok(self) -> bool:
@@ -570,7 +840,7 @@ class Handler(BaseHTTPRequestHandler):
             )
         self._send(200, body, ctype, cache=cache)
 
-    def _read_json(self) -> dict | None:
+    def _read_json(self, limit: int = 64 * 1024) -> dict | None:
         # Az állapotmódosító végpontok csak JSON-t fogadnak. Ez a böngészők
         # űrlapos (simple request) CSRF-ját is kizárja, mert az űrlap nem tud
         # application/json tartalomtípust küldeni.
@@ -582,7 +852,7 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length") or "0")
         except ValueError:
             length = -1
-        if length <= 0 or length > 64 * 1024:
+        if length <= 0 or length > limit:
             self.close_connection = True
             return None
         try:
@@ -714,6 +984,8 @@ class Handler(BaseHTTPRequestHandler):
                 rule.id for rule in self.gw.rules.effective_for(record, groups)
             ]
             users.append(item)
+        settings = self.gw.settings.snapshot()
+        caddy = getattr(self.gw, "caddy", None)
         return {
             "ok": True,
             "users": users,
@@ -723,7 +995,11 @@ class Handler(BaseHTTPRequestHandler):
             ],
             "limits": self._limits(),
             "roles": [gateway.ROLE_USER, gateway.ROLE_ADMIN],
-            "settings": self.gw.settings.snapshot(),
+            "settings": settings,
+            # Csak metaadat: a kulcs és a PEM soha nem kerül a válaszba.
+            "proxy_certs": self.gw.certs.public(settings),
+            # A Caddy admin API állapota (None: nincs domain proxy).
+            "caddy": caddy.snapshot() if caddy is not None else None,
             "drop_log": self.gw.drops.status(),
             "fail2ban": self.gw.fail2ban.snapshot(),
         }
@@ -807,6 +1083,38 @@ class Handler(BaseHTTPRequestHandler):
         target = urllib.parse.urlsplit(gateway.PORTAL_URL).netloc.lower()
         return host == target
 
+    def _https_portal_url(self) -> str:
+        """A WAN-ról közvetlenül (http) nyitott portál HTTPS-célja, vagy "".
+
+        A LAN-kliens, a tiltott és a proxy-tiltott IP a 443-at nem éri el,
+        ezért nekik a http portál marad; a loopback (healthcheck, Caddy)
+        és a Caddyn át érkező kérés érintetlen.
+        """
+        if not gateway.PROXY_ENABLED or self._peer_ip() in PROXY_LOOPBACK:
+            return ""
+        settings = self.gw.settings.snapshot()
+        roots = settings.get("proxy_domains", [])
+        if not roots:
+            return ""
+        ip = self._client_ip()
+        try:
+            if gateway.LAN_NETWORK is not None and \
+                    ipaddress.ip_address(ip) in gateway.LAN_NETWORK:
+                return ""
+        except ValueError:
+            return ""
+        root = roots[0]
+        if not settings.get("proxy_acme", True) \
+                and self.gw.certs.bundle(root, root) is None:
+            return ""
+        if self.gw.fail2ban.banned(ip) is not None \
+                or self.gw.fail2ban.proxy_banned(ip) is not None:
+            return ""
+        parts = urllib.parse.urlsplit(self.path)
+        return urllib.parse.urlunsplit(
+            ("https", root, parts.path or "/", parts.query, "")
+        )
+
     # -- GET / HEAD ------------------------------------------------------------
 
     def do_GET(self) -> None:
@@ -835,8 +1143,20 @@ class Handler(BaseHTTPRequestHandler):
             return self._admin_fail2ban_api()
         if path.startswith("/api/proxy/"):
             return self._proxy_api(path)
+        if path.startswith("/api/gate/"):
+            return self._gate_api(path)
         if path.startswith("/api/"):
             return self._json(404, {"ok": False, "error": "ismeretlen végpont"})
+
+        # A WAN-ról közvetlenül nyitott http portál a gyökérdomain HTTPS
+        # portáljára vált (a captive átirányítás előtt, annak célja helyett).
+        https_url = self._https_portal_url()
+        if https_url:
+            self._audit("portal_https_redirect", target=https_url[:300])
+            return self._send(
+                308, b"", "text/plain; charset=utf-8",
+                headers={"Location": https_url},
+            )
 
         # Captive portal: idegen Hosttal érkező HTTP kérést a kapu saját
         # címére irányítjuk, hogy a süti és az állapot egy helyen legyen.
@@ -887,20 +1207,101 @@ class Handler(BaseHTTPRequestHandler):
                 return route, route["root"]
         return None, ""
 
+    def _proxy_unknown_root(self, host: str) -> str:
+        """A nem bejegyzett (vagy kikapcsolt) aldomain gyökere, ha a gyökér
+        feltöltött, érvényes tanúsítványa ACME nélkül fedi a nevet; vagy "".
+
+        Csak a _proxy_target None eredménye után értelmes.
+        """
+        for root in self.gw.settings.snapshot().get("proxy_domains", []):
+            if host.endswith("." + root) \
+                    and self.gw.certs.bundle(host, root) is not None:
+                return root
+        return ""
+
+    def _proxy_redirect(self) -> None:
+        """A 80-as port (Caddy http:// forward_auth) válasza: mindig 3xx.
+
+        Saját név (gyökér, bekapcsolt bejegyzés, feltöltött tanúsítvánnyal
+        fedett ismeretlen aldomain) az eredeti URI-val HTTPS-re vált (308);
+        más névre nincs tanúsítvány, ezért a (tartalmazó, különben az első)
+        gyökér portáljára visz (302: ideiglenes, egy később felvett
+        bejegyzést nem takar el). Gyökér nélkül a régi viselkedés marad.
+        Kérésenként fut: nincs audit.
+        """
+        raw = (
+            self.headers.get("X-Forwarded-Host")
+            or self.headers.get("Host") or ""
+        ).strip().lower()
+        match = len(raw) <= 300 and _REDIRECT_HOST_RE.fullmatch(raw)
+        host = match.group(1) if match and len(match.group(1)) <= 253 else ""
+        if host.startswith("["):
+            try:
+                ipaddress.IPv6Address(host[1:-1])
+            except ValueError:
+                host = ""
+        uri = self.headers.get("X-Forwarded-Uri") or "/"
+        if not (uri.startswith("/") and uri.isascii() and uri.isprintable()
+                and " " not in uri):
+            uri = "/"
+        roots = self.gw.settings.snapshot().get("proxy_domains", [])
+        if host and (
+            self._proxy_target(host)[0] is not None
+            or self._proxy_unknown_root(host) or not roots
+        ):
+            code, location = 308, f"https://{host}{uri}"
+        elif roots:
+            root = next((r for r in roots if host.endswith("." + r)), roots[0])
+            code, location = 302, f"https://{root}/"
+        else:
+            return self._send(400, b"", "text/plain; charset=utf-8")
+        return self._send(
+            code, b"", "text/plain; charset=utf-8",
+            headers={"Location": location},
+        )
+
     def _proxy_api(self, path: str) -> None:
-        # A Caddy minden proxyzott kérésnél hívja: szándékosan nincs audit és
-        # fail2ban-számlálás. Idegen peer semmit nem tudhat meg.
+        # A Caddy minden proxyzott kérésnél hívja: auditot csak a bejegyzés
+        # oldalmegnyitása kap, a 401 drop-sort; a fail2ban csak a privát
+        # bejegyzés 401-es válaszait számolja. Idegen peer semmit nem tudhat meg.
         if self._peer_ip() not in PROXY_LOOPBACK:
             return self._send(404, b"", "text/plain; charset=utf-8")
-        if path == "/api/proxy/unauthorized.png":
-            return self._static("unauthorized.png")
+        if path in ("/api/proxy/unauthorized.png", "/api/proxy/sus.png"):
+            return self._static(path.rpartition("/")[2])
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
         if path == "/api/proxy/ask":
-            # On-demand TLS: tanúsítvány csak a beállított nevekre kérhető.
-            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            # On-demand TLS: tanúsítvány csak a beállított nevekre kérhető,
+            # és csak bekapcsolt automatikus tanúsítványnál.
             domain = (query.get("domain") or [""])[0].strip().lower()
             target, _ = self._proxy_target(domain)
-            code = 200 if target is not None else 404
+            acme = self.gw.settings.snapshot().get("proxy_acme", True)
+            code = 200 if acme and target is not None else 404
             return self._send(code, b"", "text/plain; charset=utf-8")
+        if path == "/api/proxy/cert":
+            # A Caddy get_certificate http kérése (titkos kulcsot ad): a
+            # Caddyn át érkező (proxyzott) kérés semmit nem kaphat. A Caddy
+            # reverse_proxy/forward_auth mindig küld X-Forwarded-For-t, a
+            # tanúsítványlekérés soha.
+            if self._via_proxy() or any(
+                self.headers.get(name) is not None
+                for name in (
+                    "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Uri"
+                )
+            ):
+                return self._send(404, b"", "text/plain; charset=utf-8")
+            name = (query.get("server_name") or [""])[0].strip().lower()
+            # A lefedettség dönt, nem a bejegyzés: az ismeretlen, de a
+            # feltöltött wildcard által fedett név is megkapja (challenge-re).
+            target, root = self._proxy_target(name)
+            if target is None:
+                root = self._proxy_unknown_root(name)
+            bundle = self.gw.certs.bundle(name, root) if root else None
+            if bundle is None:
+                # 204: a Caddy a saját (on-demand ACME) útján folytatja.
+                return self._send(204, b"", "text/plain; charset=utf-8")
+            return self._send(200, bundle, "application/x-pem-file")
+        if path == "/api/proxy/redirect":
+            return self._proxy_redirect()
         if path != "/api/proxy/auth":
             return self._send(404, b"", "text/plain; charset=utf-8")
         host = (
@@ -908,9 +1309,45 @@ class Handler(BaseHTTPRequestHandler):
             or self.headers.get("Host") or ""
         )
         host = host.strip().lower().partition(":")[0]
+        # A Caddy az X-Forwarded-For-t a valódi kliens IP-re állítja (nem
+        # bízik a bejövő értékben); az utolsó elem a közvetlen kliens.
+        forwarded = (self.headers.get("X-Forwarded-For") or "").split(",")[-1]
+        try:
+            ip = gateway.normalize_ip(forwarded)
+        except ValueError:
+            ip = ""
+        # Lekérdezés nélkül, csonkolva (a query tokent is hordozhat).
+        page_path = urllib.parse.urlsplit(
+            self.headers.get("X-Forwarded-Uri") or "/"
+        ).path[:200]
         target, root = self._proxy_target(host)
         if target is None:
-            return self._send(404, b"", "text/plain; charset=utf-8")
+            if not self._proxy_unknown_root(host):
+                return self._send(404, b"", "text/plain; charset=utf-8")
+            # Ismeretlen, de feltöltött tanúsítvánnyal fedett aldomain:
+            # feltételektől és munkamenettől függetlenül mindig challenge
+            # (a sikeres megoldás a gyökérre visz, belépő nélkül).
+            if (
+                not ip
+                or self.gw.fail2ban.banned(ip) is not None
+                or self.gw.fail2ban.proxy_banned(ip) is not None
+            ):
+                return self._send(403, b"", "text/plain; charset=utf-8")
+            if not self._proxy_navigation():
+                return self._json(403, {
+                    "ok": False, "error": "ellenőrzés szükséges",
+                    "code": "proxy_challenge",
+                })
+            self._audit(
+                "proxy_challenge_shown",
+                ip=ip,
+                host=host,
+                path=page_path,
+                unknown_host=True,
+            )
+            return self._send(
+                403, _proxy_challenge_page(), "text/html; charset=utf-8"
+            )
         login = f"https://{root}/"
         if target == "root":
             # A gyökérdomain maga a portál. A Caddyn át a proxy-végpontok
@@ -922,37 +1359,235 @@ class Handler(BaseHTTPRequestHandler):
                 200, b"", "text/plain; charset=utf-8",
                 headers={"X-Dropjak-Upstream": f"127.0.0.1:{gateway.PORT}"},
             )
-        # A Caddy az X-Forwarded-For-t a valódi kliens IP-re állítja (nem
-        # bízik a bejövő értékben); az utolsó elem a közvetlen kliens.
-        forwarded = (self.headers.get("X-Forwarded-For") or "").split(",")[-1]
-        try:
-            ip = gateway.normalize_ip(forwarded)
-        except ValueError:
-            ip = ""
-        # Publikus bejegyzés: bárki, akit a fail2ban nem tilt.
+        # Publikus bejegyzés: bárki, akit a fail2ban nem tilt. A proxy-tiltott
+        # IP-t a tűzfal a 80/443-on eldobja; itt is jogosulatlan (mélységi
+        # védelem), és további kérése nem számít.
+        user = None
         if (
             ip
             and self.gw.fail2ban.banned(ip) is None
-            and (
-                target["visibility"] == "public"
-                or self.gw.sessions.allows_domain(ip, host)
-            )
+            and self.gw.fail2ban.proxy_banned(ip) is None
         ):
+            user = (
+                "" if target["visibility"] == "public"
+                else self.gw.sessions.domain_user(ip, host)
+            )
+        if user is not None:
             # A forward_auth csak 2xx esetén enged tovább, és ekkor mindig
             # mi adjuk a célt: a kliens által küldött fejléc nem irányíthat.
             upstream = (
                 target["ip"] if target["type"] == "forward" else "127.0.0.1"
             )
+            # A challenge 403-at ad (nem 401-et): sem a fail2ban, sem a drop
+            # log nem számolja.
+            fired = self._proxy_challenge_triggers(target, host, ip)
+            if fired:
+                if not self._proxy_navigation():
+                    return self._json(403, {
+                        "ok": False, "error": "ellenőrzés szükséges",
+                        "code": "proxy_challenge",
+                    })
+                self._audit(
+                    "proxy_challenge_shown",
+                    ip=ip,
+                    user=user,
+                    host=host,
+                    path=page_path,
+                    triggers=",".join(fired),
+                )
+                return self._send(
+                    403, _proxy_challenge_page(), "text/html; charset=utf-8"
+                )
+            if self._proxy_navigation():
+                self._audit(
+                    "proxy_page_opened",
+                    ip=ip,
+                    user=user,
+                    host=host,
+                    path=page_path,
+                    visibility=target["visibility"],
+                )
             return self._send(
                 200, b"", "text/plain; charset=utf-8",
                 headers={
                     "X-Dropjak-Upstream": f"{upstream}:{target['port']}"
                 },
             )
-        page = PROXY_UNAUTHORIZED_PAGE.replace(
-            "{login}", html.escape(login, quote=True)
+        # Csak privát bejegyzésnél lehet ide jutni számolható IP-vel: a
+        # publikus 401 mindig üres vagy már tiltott IP-é, az nem számít.
+        if ip:
+            try:
+                self.gw.fail2ban.record_proxy_unauthorized(ip)
+            except Exception as exc:
+                _log_fail2ban_error(
+                    ip, exc, self.gw.audit, operation="record_proxy"
+                )
+        self.gw.record_proxy_drop(ip, host, page_path)
+        page = _proxy_page(
+            title="Nincs hozzáférés",
+            image="unauthorized.png",
+            text=(
+                "Ez a szolgáltatás csak a Dropjak tűzfalon történő "
+                "bejelentkezés után érhető el."
+            ),
+            body=f'<a href="{html.escape(login, quote=True)}">Bejelentkezés</a>',
         )
-        return self._send(401, page.encode("utf-8"), "text/html; charset=utf-8")
+        return self._send(401, page, "text/html; charset=utf-8")
+
+    def _proxy_challenge_triggers(
+        self, target: dict, host: str, ip: str
+    ) -> list[str]:
+        """A bejegyzés most teljesülő challenge-feltételei (üres: nem kell).
+
+        Az always/interval/daily/new_ip érvényes belépőt kér (ezek az
+        érvényességet szűkítik). Az after_401/fail2ban csak futó számlálónál
+        kér, és a legutóbbi találat után kiadott belépőt; a burst ugyanígy
+        a legutóbbi spam-észlelés (sok oldalmegnyitás) után kiadottat; a
+        suspicious gyanús kérésnél bármely érvényes belépőt.
+        """
+        challenge = target.get("challenge")
+        if not challenge:
+            return []
+        triggers = challenge["triggers"]
+        now = time.time()
+        issued = _proxy_pass_issued(
+            self._cookie(PROXY_PASS_COOKIE), host,
+            ip if "new_ip" in triggers else "", now,
+        )
+        if now - issued >= _proxy_pass_lifetime(challenge):
+            issued = 0.0
+        if issued and "daily" in triggers:
+            today = time.localtime(now)
+            midnight = time.mktime(
+                (today.tm_year, today.tm_mon, today.tm_mday, 0, 0, 0, 0, 0, -1)
+            )
+            if issued < midnight:
+                issued = 0.0
+        fired = [
+            name for name in ("always", "interval", "daily", "new_ip")
+            if name in triggers and not issued
+        ]
+        for name, proxy_only in (("after_401", True), ("fail2ban", False)):
+            if name in triggers:
+                since = self.gw.fail2ban.last_hit(ip, proxy_only=proxy_only)
+                if since and issued <= since:
+                    fired.append(name)
+        if "burst" in triggers:
+            since = _proxy_burst(ip, host, now, self._proxy_navigation())
+            if since and issued <= since:
+                fired.append("burst")
+        if "suspicious" in triggers and not issued and self._proxy_suspicious():
+            fired.append("suspicious")
+        return fired
+
+    def _proxy_suspicious(self) -> bool:
+        """Nem böngészőszerű-e a forward_auth által továbbított kérés."""
+        agent = (self.headers.get("User-Agent") or "").strip()
+        return (
+            not agent
+            or bool(_CLI_AGENT_RE.match(agent))
+            or not self.headers.get("Accept-Language")
+            or (
+                self._proxy_navigation()
+                and self.headers.get("Sec-Fetch-Mode") is None
+            )
+        )
+
+    def _gate_api(self, path: str) -> None:
+        """A proxy challenge végpontja (a Caddy /__dropjak/challenge útja).
+
+        GET: PoW-feladvány vagy Turnstile-mód (mint a /api/challenge); POST:
+        a megoldás ellenőrzése és a belépő sütije. Csak a Caddyn át (loopback
+        peer), challenge-es bejegyzés vagy tanúsítvánnyal fedett ismeretlen
+        aldomain hostján (ez utóbbinál belépő helyett a gyökérre irányít);
+        minden más 404.
+        """
+        host = (self.headers.get("Host") or "").strip().lower().partition(":")[0]
+        target, unknown_root = None, ""
+        if self._peer_ip() in PROXY_LOOPBACK and path == "/api/gate/challenge":
+            target, _ = self._proxy_target(host)
+            if target is None:
+                unknown_root = self._proxy_unknown_root(host)
+        if not unknown_root and (
+            not isinstance(target, dict) or not target.get("challenge")
+        ):
+            self._discard_body()
+            return self._send(404, b"", "text/plain; charset=utf-8")
+        ip = self._client_ip()
+        if self.gw.fail2ban.banned(ip) is not None \
+                or self.gw.fail2ban.proxy_banned(ip) is not None:
+            self._discard_body()
+            return self._json(403, {"ok": False, "error": "tiltott IP-cím"})
+        if self.command != "POST":
+            return self._challenge()
+        data = self._read_json(limit=4096)
+        if data is None:
+            return self._json(400, {"ok": False, "error": "hibás kérés"})
+        if not self._origin_ok():
+            return self._json(403, {"ok": False, "error": "érvénytelen kérés-eredet"})
+        if not self.gw.login_rate.allow(ip):
+            return self._json(
+                429,
+                {"ok": False, "error": "Túl sok próbálkozás. Várj egy percet."},
+                headers={"Retry-After": str(gateway.RATE_WINDOW)},
+            )
+        extra = {"unknown_host": True} if unknown_root else {
+            "triggers": ",".join(self._proxy_challenge_triggers(target, host, ip))
+        }
+        captcha = data.get("captcha")
+        if not isinstance(captcha, dict):
+            ok, why = False, "hiányos adatok"
+        elif gateway.TURNSTILE_ON:
+            ok, why = gateway.verify_turnstile(str(captcha.get("token", "")), ip)
+        else:
+            ok, why = gateway.verify_pow(captcha)
+        if not ok:
+            self._audit(
+                "proxy_challenge_failed", ip=ip, host=host,
+                reason=f"captcha: {why}", **extra,
+            )
+            # A sikertelen challenge a proxy-jel számlálójába megy.
+            try:
+                self.gw.fail2ban.record_proxy_unauthorized(ip)
+            except Exception as exc:
+                _log_fail2ban_error(
+                    ip, exc, self.gw.audit, operation="record_proxy"
+                )
+            return self._json(403, {"ok": False, "error": f"Captcha: {why}"})
+        self._audit("proxy_challenge_passed", ip=ip, host=host, **extra)
+        if unknown_root:
+            return self._json(
+                200, {"ok": True, "redirect": f"https://{unknown_root}/"}
+            )
+        challenge = target["challenge"]
+        now = time.time()
+        lifetime = _proxy_pass_lifetime(challenge)
+        value = _proxy_pass_value(
+            host, ip if "new_ip" in challenge["triggers"] else "", now,
+            int(now) + lifetime,
+        )
+        return self._json(200, {"ok": True}, headers={
+            "Set-Cookie": (
+                f"{PROXY_PASS_COOKIE}={value}; Max-Age={lifetime}; Path=/; "
+                "Secure; HttpOnly; SameSite=Lax"
+            ),
+        })
+
+    def _proxy_navigation(self) -> bool:
+        """Oldalmegnyitás-e a forward_auth által továbbított eredeti kérés.
+
+        A Sec-Fetch-* fejléc dönt; nélküle a GET + text/html Accept.
+        """
+        dest = self.headers.get("Sec-Fetch-Dest")
+        if dest is not None:
+            return dest == "document"
+        mode = self.headers.get("Sec-Fetch-Mode")
+        if mode is not None:
+            return mode == "navigate"
+        return (
+            (self.headers.get("X-Forwarded-Method") or "GET").upper() == "GET"
+            and "text/html" in (self.headers.get("Accept") or "")
+        )
 
     def _challenge(self) -> None:
         if gateway.TURNSTILE_ON:
@@ -1286,6 +1921,16 @@ class Handler(BaseHTTPRequestHandler):
         user_filter = first("user")
         q_filter = first("q")
         severity_filter = first("severity").strip().lower()
+        ip_raw = first("ip").strip()
+        ip_filter = None
+        if ip_raw:
+            try:
+                ip_filter = ipaddress.ip_network(ip_raw, strict=False)
+            except ValueError:
+                return self._json(400, {
+                    "ok": False,
+                    "error": "érvénytelen IP-cím vagy CIDR (pl. 192.168.10.0/24)",
+                })
         rows = self.gw.audit.read(
             limit=limit,
             event=event_filter,
@@ -1293,6 +1938,7 @@ class Handler(BaseHTTPRequestHandler):
             q=q_filter,
             before=before,
             severity=severity_filter,
+            ip=ip_filter,
         )
         manual = first("manual").strip().lower() in ("1", "true", "yes")
         if manual:
@@ -1305,6 +1951,7 @@ class Handler(BaseHTTPRequestHandler):
                 event_filter=event_filter[:120],
                 user_filter=user_filter[:120],
                 severity_filter=severity_filter[:16],
+                ip_filter=str(ip_filter or ""),
                 q_present=bool(q_filter),
                 before_present=before is not None,
                 count=len(rows),
@@ -1386,6 +2033,82 @@ class Handler(BaseHTTPRequestHandler):
                 "drop_log": self.gw.drops.status(),
             },
         )
+
+    def _audit_cert(self, action: str, session, root: str, meta) -> None:
+        # A naplóba csak a gyökér, a SAN-ok, a lejárat és az ujjlenyomat kerül.
+        meta = meta or {}
+        self._audit(
+            "admin_settings_changed",
+            user=session.user,
+            action=action,
+            target=root,
+            sans=", ".join(meta.get("sans", []))[:500],
+            not_after=meta.get("not_after", 0),
+            fingerprint=meta.get("fingerprint", ""),
+        )
+
+    def _caddy_restart(self) -> None:
+        caddy = getattr(self.gw, "caddy", None)
+        if caddy is not None:
+            caddy.request_restart()
+
+    def _admin_certs_action(self) -> None:
+        """Gyökérdomain-tanúsítvány feltöltése/cseréje (upload) és törlése."""
+        session = self._admin_guard()
+        if session is None:
+            return
+        if not self._origin_ok():
+            self._admin_request_rejected("invalid_origin", user=session.user)
+            self._json(403, {"ok": False, "error": "érvénytelen kérés-eredet"})
+            return
+        # Két, egyenként legfeljebb 64 KiB-os PEM JSON-kódolva.
+        data = self._read_json(4 * settings_store.MAX_CERT_PEM)
+        if data is None:
+            self._admin_request_rejected("bad_request", user=session.user)
+            return self._json(400, {"ok": False, "error": "hibás kérés"})
+        action = str(data.get("action", "")).strip().lower()
+        root = data.get("root")
+        try:
+            with self.gw.admin_lock:
+                if root not in self.gw.settings.snapshot().get(
+                    "proxy_domains", []
+                ):
+                    raise settings_store.SettingsError(
+                        "ismeretlen gyökérdomain"
+                    )
+                if action == "upload":
+                    meta = self.gw.certs.install(
+                        root, data.get("cert"), data.get("key")
+                    )
+                    # A gyorsítótárban lévő ACME-tanúsítvány megelőzné a
+                    # feltöltöttet; ACME nélkül nincs ilyen.
+                    if self.gw.settings.snapshot().get("proxy_acme", True):
+                        self._caddy_restart()
+                    message = "A tanúsítvány mentve."
+                elif action == "delete":
+                    meta = self.gw.certs.delete(root)
+                    if meta is None:
+                        raise settings_store.SettingsError(
+                            "ehhez a gyökérdomainhez nincs feltöltött "
+                            "tanúsítvány"
+                        )
+                    message = "A tanúsítvány törölve."
+                else:
+                    raise settings_store.SettingsError(
+                        f"ismeretlen művelet: {action!r}"
+                    )
+                self._audit_cert(f"proxy_cert_{action}", session, root, meta)
+        except (settings_store.SettingsError, ValueError, OSError) as exc:
+            self._admin_request_rejected("invalid_proxy_cert", user=session.user)
+            # Az OSError szövege útvonalat tartalmazhat; nem adjuk ki.
+            if isinstance(exc, ValueError):
+                return self._json(400, {"ok": False, "error": str(exc)})
+            return self._json(
+                500, {"ok": False, "error": "a tanúsítvány mentése nem sikerült"}
+            )
+        payload = self._admin_state()
+        payload["message"] = message
+        self._json(200, payload)
 
     def _admin_settings_action(self) -> None:
         session = self._admin_guard()
@@ -1469,6 +2192,38 @@ class Handler(BaseHTTPRequestHandler):
             payload["message"] = "A tűzfal neve mentve."
             self._json(200, payload)
             return
+        if action == "proxy_acme":
+            # A /api/proxy/ask válaszát változtatja; kikapcsoláskor a Caddy
+            # újraindul, hogy a már kiadott tanúsítványokat se szolgálja ki.
+            value = data.get("enabled")
+            if not isinstance(value, bool):
+                self._admin_request_rejected(
+                    "invalid_proxy_acme", user=session.user
+                )
+                self._json(
+                    400,
+                    {
+                        "ok": False,
+                        "error": "a proxy_acme mező igaz/hamis érték kell",
+                    },
+                )
+                return
+            with self.gw.admin_lock:
+                was_on = self.gw.settings.snapshot().get("proxy_acme", True)
+                self.gw.settings.set_proxy_acme(value)
+                if was_on and not value:
+                    self._caddy_restart()
+                self._audit(
+                    "admin_settings_changed",
+                    user=session.user,
+                    action="proxy_acme",
+                    target="proxy_acme",
+                    proxy_acme=value,
+                )
+            payload = self._admin_state()
+            payload["message"] = "Az automatikus tanúsítvány beállítása mentve."
+            self._json(200, payload)
+            return
         if action == "proxy":
             # A Caddy kérésenként a portált kérdezi, ezért itt nincs
             # újratöltés és nftables-módosítás sem.
@@ -1494,9 +2249,17 @@ class Handler(BaseHTTPRequestHandler):
                             + ("" if route["enabled"] else " (off)")
                             + (" (public)" if route["visibility"] == "public"
                                else "")
+                            + (" (challenge: "
+                               + "/".join(route["challenge"]["triggers"]) + ")"
+                               if "challenge" in route else "")
                             for route in stored["proxy_routes"]
                         ),
                     )
+                    # A törölt gyökérdomain tanúsítványa is törlődik.
+                    for root, meta in self.gw.certs.prune(
+                        stored["proxy_domains"]
+                    ).items():
+                        self._audit_cert("proxy_cert_delete", session, root, meta)
             except (settings_store.SettingsError, ValueError) as exc:
                 self._admin_request_rejected(
                     "invalid_proxy", user=session.user
@@ -1507,6 +2270,8 @@ class Handler(BaseHTTPRequestHandler):
             payload["message"] = "A proxy beállításai mentve."
             self._json(200, payload)
             return
+        if action == "port_proxies":
+            return self._admin_port_proxies(session, data)
         kind = str(data.get("kind", "")).strip().lower()
         entry_id = data.get("id", "")
         if entry_id is None:
@@ -1566,6 +2331,71 @@ class Handler(BaseHTTPRequestHandler):
         payload["message"] = "A tűzfalbeállítások mentve."
         self._json(200, payload)
 
+    def _admin_port_proxies(self, session, data: dict) -> None:
+        """A port proxy lista cseréje: nft alkalmazás -> mentés -> conntrack.
+
+        Az apply_settings a többi testreszabott lánccal egy tranzakcióban
+        cseréli a port proxy láncokat, és mentési hibánál visszaállít.
+        """
+        with self.gw.admin_lock:
+            old = self.gw.settings.snapshot().get("port_proxies", [])
+            try:
+                new_data = self.gw.settings.prepare_port_proxies(
+                    data.get("port_proxies")
+                )
+            except (settings_store.SettingsError, ValueError) as exc:
+                self._admin_request_rejected(
+                    "invalid_port_proxy", user=session.user
+                )
+                self._json(400, {"ok": False, "error": str(exc)})
+                return
+            try:
+                self.gw.apply_settings(new_data)
+            except (gateway.FirewallError, settings_store.SettingsError,
+                    OSError) as exc:
+                self._admin_action_error(
+                    "settings_port_proxies", exc, target="port_proxies"
+                )
+                self._json(
+                    503,
+                    {
+                        "ok": False,
+                        "error": "a tűzfal-beállítások alkalmazása nem "
+                                 f"sikerült: {exc}",
+                    },
+                )
+                return
+            entries = new_data["port_proxies"]
+            # A régi NAT-kötésű folyamok a conntrackben a végükig a régi
+            # célra mennének: a megváltozott hallgató portokét töröljük.
+            changed = gateway.port_proxy_changes(old, entries)
+            for proto, port in changed:
+                gateway.conntrack_flush_port(proto, port, audit=self.gw.audit)
+            self._audit(
+                "admin_portproxy_changed",
+                user=session.user,
+                action="port_proxies",
+                target="port_proxies",
+                port_proxies=", ".join(
+                    f"{entry['label']}: {entry['proto']}/{entry['listen_port']}"
+                    f" -> {entry['type']} "
+                    + (f"{entry['target_ip']}:" if entry["target_ip"] else ":")
+                    + f"{entry['target_port']} ({entry['ifaces']}"
+                    + (", snat" if entry["snat"] else "")
+                    + ("" if entry["enabled"] else ", off") + ")"
+                    for entry in entries
+                ),
+                port_proxy_count=len(entries),
+                flushed_ports=", ".join(f"{p}/{n}" for p, n in changed),
+            )
+        payload = self._admin_state()
+        payload["port_proxy_warnings"] = gateway.port_proxy_warnings(
+            entries, gateway.listening_ports(),
+            self.gw.firewall.docker_published_ports(),
+        )
+        payload["message"] = "A port proxy beállításai mentve."
+        self._json(200, payload)
+
     def _admin_fail2ban_api(self) -> None:
         if self._admin_guard() is None:
             return
@@ -1607,6 +2437,8 @@ class Handler(BaseHTTPRequestHandler):
                             "drop_enabled", "drop_count_enabled",
                             "drop_ports_enabled", "drop_max",
                             "drop_ports", "drop_window_seconds",
+                            "proxy_enabled", "proxy_max",
+                            "proxy_window_seconds",
                         )
                         if key in data
                     }
@@ -1620,6 +2452,8 @@ class Handler(BaseHTTPRequestHandler):
                             "drop_count_enabled", "drop_ports_enabled",
                             "drop_count_active", "drop_ports_active",
                             "drop_max", "drop_ports", "drop_window_seconds",
+                            "proxy_enabled", "proxy_max",
+                            "proxy_window_seconds",
                         )
                     }
                     audit_extra["released"] = max(
@@ -1652,8 +2486,14 @@ class Handler(BaseHTTPRequestHandler):
                         }
                         message = f"{ip} letiltva."
                     else:
-                        existing = self.gw.fail2ban.banned(ip)
-                        if not self.gw.fail2ban.unban(ip):
+                        # A proxy-tiltás (TCP 80/443) külön oldható fel; a
+                        # teljes tiltás ettől megmarad, és fordítva.
+                        proxy = data.get("proxy", False) is True
+                        existing = (
+                            self.gw.fail2ban.proxy_banned(ip) if proxy
+                            else self.gw.fail2ban.banned(ip)
+                        )
+                        if not self.gw.fail2ban.unban(ip, proxy=proxy):
                             self._admin_request_rejected(
                                 "not_banned", user=session.user
                             )
@@ -1670,6 +2510,7 @@ class Handler(BaseHTTPRequestHandler):
                             "was_manual": bool(
                                 existing and existing.get("manual")
                             ),
+                            "proxy": proxy,
                         }
                         message = f"{ip} tiltása feloldva."
                 elif action == "unban_all":
@@ -1744,8 +2585,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._admin_sessions_action()
         if path == "/api/admin/settings":
             return self._admin_settings_action()
+        if path == "/api/admin/certs":
+            return self._admin_certs_action()
         if path == "/api/admin/fail2ban":
             return self._admin_fail2ban_action()
+        if path.startswith("/api/gate/"):
+            return self._gate_api(path)
         self._discard_body()
         self._json(404, {"ok": False, "error": "ismeretlen végpont"})
 
@@ -3628,6 +4473,155 @@ class Handler(BaseHTTPRequestHandler):
         self.gw.sync_host_ports()
 
 
+# ---------------------------------------------- Caddy tanúsítvány-gyorsítótár
+#
+# A certmagic (Caddy 2.10.2) kézfogáskor először a memóriájában tartott
+# tanúsítványt adja ki, csak utána kérdezi a get_certificate-et és az ask-et;
+# a konfiguráció újratöltése pedig az on-demand tanúsítványokat nem veszi ki
+# a gyorsítótárból. Az ACME kikapcsolása után így a már kiadott Let's
+# Encrypt-tanúsítványok a Caddy újraindításáig megmaradnának. A portál ezért
+# az admin API (Unix socket a közös caddy-admin köteten) POST /stop hívásával
+# leállítja a Caddyt, amelyet a compose (restart: unless-stopped) azonnal
+# újraindít, üres gyorsítótárral. A /data tárolóhoz nem nyúl: a
+# visszakapcsolt ACME a meglévő tanúsítványt tölti be, új kiadás nélkül.
+
+CADDY_RESTART_PENDING_NAME = "caddy-restart-pending"
+
+
+class _UnixHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, path: str, timeout: float) -> None:
+        super().__init__("localhost", timeout=timeout)
+        self._unix_path = path
+
+    def connect(self) -> None:
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(self._unix_path)
+
+
+class CaddyAdmin:
+    """A Caddy admin API kliense és a gyorsítótár-ürítő háttérszál.
+
+    Az újraindítási igény a jelzőfájlban is megmarad, így a portál
+    újraindítása után is lefut; a sikeres /stop törli. Újraindítás csak
+    kérésre és kérésenként egyszer történik, ciklusban soha.
+    """
+
+    CHECK_INTERVAL = 60.0
+    MAX_BACKOFF = 60.0
+    # A /stop a Caddy grace_period-jéig (5 s) is eltarthat.
+    TIMEOUT = 15.0
+
+    def __init__(self, socket_path: str, pending_path: str) -> None:
+        self.socket_path = socket_path
+        self.pending_path = pending_path
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
+        self._stopping = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._failures = 0
+        # Minden kérés új generáció: a /stop alatt érkezett kérés nem vész el.
+        self._generation = 1 if os.path.exists(pending_path) else 0
+        self._done = 0
+        self._status = {
+            "reachable": None, "checked_at": 0, "restarted_at": 0, "error": "",
+        }
+
+    def _call(self, method: str, path: str) -> int:
+        conn = _UnixHTTPConnection(self.socket_path, self.TIMEOUT)
+        try:
+            conn.request(method, path)
+            response = conn.getresponse()
+            response.read(65536)
+            return response.status
+        finally:
+            conn.close()
+
+    def request_restart(self) -> None:
+        """A Caddy újraindításának kérése (ACME be→ki, tanúsítványfeltöltés)."""
+        with self._lock:
+            self._generation += 1
+        try:
+            with open(self.pending_path, "w", encoding="utf-8"):
+                pass
+        except OSError as exc:
+            # A memóriabeli kérés így is lefut; csak a portál-újraindítás
+            # utáni ismétlés vész el.
+            print(f"[caddy] a jelzőfájl nem írható: {exc}",
+                  file=sys.stderr, flush=True)
+        self._wake.set()
+
+    def run_once(self) -> float:
+        """Egy kör (függő /stop vagy elérhetőség-ellenőrzés); a következő
+        várakozás másodpercben."""
+        with self._lock:
+            generation = self._generation
+        pending = generation != self._done
+        now = int(time.time())
+        try:
+            status = self._call(
+                "POST" if pending else "GET",
+                "/stop" if pending else "/config/admin",
+            )
+            if status != 200:
+                raise OSError(f"HTTP {status}")
+        except (OSError, http.client.HTTPException) as exc:
+            self._failures += 1
+            with self._lock:
+                self._status.update(
+                    reachable=False, checked_at=now, error=str(exc)[:200]
+                )
+            return min(self.MAX_BACKOFF, 2.0 ** self._failures)
+        self._failures = 0
+        with self._lock:
+            self._status.update(reachable=True, checked_at=now, error="")
+            if not pending:
+                return self.CHECK_INTERVAL
+            self._status["restarted_at"] = now
+            self._done = generation
+            cleared = generation == self._generation
+        if cleared:
+            try:
+                os.remove(self.pending_path)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                print(f"[caddy] a jelzőfájl nem törölhető: {exc}",
+                      file=sys.stderr, flush=True)
+        print("[caddy] a Caddy újraindult (tanúsítvány-gyorsítótár ürítve)",
+              flush=True)
+        # Az újraindult Caddy elérhetőségét hamar újra megnézzük.
+        return 5.0
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return dict(self._status, pending=self._generation != self._done)
+
+    def _loop(self) -> None:
+        delay = 0.0
+        while True:
+            self._wake.wait(delay)
+            self._wake.clear()
+            if self._stopping.is_set():
+                return
+            try:
+                delay = self.run_once()
+            except Exception as exc:  # a szál soha ne haljon meg
+                print(f"[caddy] váratlan hiba: {exc}",
+                      file=sys.stderr, flush=True)
+                delay = self.MAX_BACKOFF
+
+    def start(self) -> None:
+        self._thread = threading.Thread(
+            target=self._loop, name="hv-caddy", daemon=True
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stopping.set()
+        self._wake.set()
+
+
 class AppServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -5037,7 +6031,8 @@ def _fail2ban_cli(argv: list[str]) -> int:
                 "Kapcsolók: "
                 f"belépés={'be' if snapshot['enabled'] else 'ki'}, "
                 f"csomagszám={'be' if snapshot['drop_count_enabled'] else 'ki'}, "
-                f"portok={'be' if snapshot['drop_ports_enabled'] else 'ki'}."
+                f"portok={'be' if snapshot['drop_ports_enabled'] else 'ki'}, "
+                f"proxy={'be' if snapshot['proxy_enabled'] else 'ki'}."
             )
             if snapshot["error"]:
                 print(f"FIGYELEM: {snapshot['error']}")
@@ -5054,6 +6049,7 @@ def _fail2ban_cli(argv: list[str]) -> int:
                     "manual": "kézi",
                     "drop": "drop",
                     "login": "login",
+                    "proxy": "proxy (HTTP/S)",
                 }.get(source, source)
                 detail = ban.get("detail") or ""
                 if source == "drop" and detail:
@@ -5302,6 +6298,15 @@ def _serve() -> int:
         )
 
     gw.start()
+    # A Caddy tanúsítvány-gyorsítótárának ürítése (csak a domain proxyval).
+    caddy = None
+    if gateway.PROXY_ENABLED and gateway.CADDY_ADMIN:
+        caddy = CaddyAdmin(
+            gateway.CADDY_ADMIN,
+            os.path.join(gateway.STATE_DIR, CADDY_RESTART_PENDING_NAME),
+        )
+        gw.caddy = caddy
+        caddy.start()
     # A futó démon helyi vezérlőcsatornája: a CLI-műveletek így ugyanabban
     # a folyamatban futnak, és a valódi (élő) munkameneteket is tudják
     # visszavonni. Ha nem indul el, a CLI a helyi módra esik vissza.
@@ -5344,6 +6349,8 @@ def _serve() -> int:
         pass
     finally:
         sweeper_stop.set()
+        if caddy is not None:
+            caddy.stop()
         if control is not None:
             try:
                 control.stop()

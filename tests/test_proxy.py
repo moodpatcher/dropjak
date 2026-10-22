@@ -556,12 +556,26 @@ class ProxyEndpointTests(unittest.TestCase):
         add_session(sessions, cls.ADMIN, full=True, role=gateway.ROLE_ADMIN)
         add_session(sessions, cls.EXPIRED, (host("owui"),), ttl=-1)
         add_session(sessions, cls.SECOND, (host("owui", SECOND_DOMAIN),))
+        # Az audit- és drop-sorok rögzítése a navigáció/401 tesztekhez.
+        cls.audits, cls.drops = [], []
+        cls.certs = settings_store.CertStore(
+            os.path.join(cls.tmp.name, "certs"), logger=lambda *_: None
+        )
         gw = types.SimpleNamespace(
             settings=cls.settings,
             sessions=sessions,
             fail2ban=types.SimpleNamespace(
-                banned=lambda ip: {"ip": ip} if ip == cls.BANNED else None
+                banned=lambda ip: {"ip": ip} if ip == cls.BANNED else None,
+                proxy_banned=lambda ip: None,
+                record_proxy_unauthorized=lambda ip: None,
             ),
+            audit=types.SimpleNamespace(
+                write=lambda event, **fields: cls.audits.append(
+                    (event, fields)
+                )
+            ),
+            record_proxy_drop=lambda *args: cls.drops.append(args),
+            certs=cls.certs,
         )
         cls._old_portal_url = gateway.PORTAL_URL
         gateway.PORTAL_URL = ""

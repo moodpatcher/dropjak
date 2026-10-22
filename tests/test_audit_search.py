@@ -13,6 +13,7 @@ hoz létre, így nincs szükség jelszó/2FA folyamatra.
 from __future__ import annotations
 
 import http.client
+import ipaddress
 import json
 import os
 import sys
@@ -185,6 +186,36 @@ class AuditSearchUnitTests(unittest.TestCase):
             [500.0, 400.0, 300.0, 200.0, 100.0],
         )
 
+    def test_ip_filter_single_cidr_and_combined(self) -> None:
+        net = ipaddress.ip_network
+        self.assertEqual(
+            timestamps(self.audit.read(ip=net("10.0.0.5"))), [300.0, 100.0]
+        )
+        self.assertEqual(
+            timestamps(self.audit.read(ip=net("10.0.0.6/31"))), [500.0, 200.0]
+        )
+        self.assertEqual(len(self.audit.read(ip=net("10.0.0.0/24"))), 5)
+        self.assertEqual(self.audit.read(ip=net("10.0.1.0/24")), [])
+        self.assertEqual(self.audit.read(ip=net("::/0")), [])
+        self.assertEqual(
+            timestamps(self.audit.read(ip=net("10.0.0.5"), event="login")),
+            [300.0],
+        )
+
+    def test_ip_filter_target_ipv6_and_proxy_host_search(self) -> None:
+        extra = os.path.join(self.tmp.name, "extra.jsonl")
+        write_rows(extra, (
+            {"ts": 1.0, "event": "fail2ban_unban", "ip": "10.9.9.9",
+             "target": "203.0.113.7"},
+            {"ts": 2.0, "event": "proxy_challenge_shown", "ip": "2001:db8::5",
+             "host": "x.z1.example.com", "path": "/", "unknown_host": True},
+        ))
+        audit = gateway.AuditLog(extra, logger=quiet)
+        net = ipaddress.ip_network
+        self.assertEqual(timestamps(audit.read(ip=net("203.0.113.0/24"))), [1.0])
+        self.assertEqual(timestamps(audit.read(ip=net("2001:db8::/64"))), [2.0])
+        self.assertEqual(timestamps(audit.read(q="x.z1.example")), [2.0])
+
     def test_search_key_normalization(self) -> None:
         self.assertEqual(gateway._search_key(" ACCESS-GRANTED "), "access granted")
         self.assertEqual(gateway._search_key("a__b--c\t d"), "a b c d")
@@ -299,6 +330,23 @@ class AuditSearchApiTests(unittest.TestCase):
         self.assertIs(data["ok"], True)
         self.assertEqual(data["count"], 0)
         self.assertEqual(data["logs"], [])
+
+    def test_api_ip_filter(self) -> None:
+        for query, expected in (
+            ("ip=10.0.0.6", [200.0]),
+            ("ip=" + urllib.parse.quote("10.0.0.6/31"), [500.0, 200.0]),
+            ("ip=10.0.0.5&event=access_granted", [100.0]),
+        ):
+            with self.subTest(query=query):
+                status, data = self.get_logs(query)
+                self.assertEqual(status, 200, data)
+                self.assertEqual(timestamps(data["logs"]), expected)
+        for bad in ("abc", "10.0.0.5/33", "1", "10.0.0.0/24/1"):
+            with self.subTest(ip=bad):
+                status, data = self.get_logs("ip=" + urllib.parse.quote(bad))
+                self.assertEqual(status, 400, data)
+                self.assertIs(data["ok"], False)
+                self.assertIn("CIDR", data["error"])
 
     def test_api_unknown_event_is_empty_and_ok(self) -> None:
         status, data = self.get_logs("event=nincs_ilyen")

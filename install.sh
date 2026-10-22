@@ -127,7 +127,7 @@ done
 [[ $EUID -eq 0 ]] || die "rootként futtasd: sudo $0"
 command -v systemctl >/dev/null 2>&1 || die "hiányzik a systemd"
 for f in server.py gateway.py settings_store.py fail2ban.py droplog.py \
-         index.html icon.png blocked.png unauthorized.png services.json VERSION \
+         index.html icon.png blocked.png unauthorized.png sus.png services.json VERSION \
          deploy/hatarvedelem.nft deploy/hatarvedelem.service \
          deploy/hatarvedelem-firewall.service; do
   [[ -f "$SRC_DIR/$f" ]] || die "hiányzó fájl: $SRC_DIR/$f"
@@ -527,7 +527,7 @@ install -d -m 0755 "$APP_DIR"
 install -m 0644 "$SRC_DIR/server.py" "$SRC_DIR/gateway.py" \
   "$SRC_DIR/settings_store.py" "$SRC_DIR/fail2ban.py" "$SRC_DIR/droplog.py" \
   "$SRC_DIR/index.html" "$SRC_DIR/icon.png" "$SRC_DIR/blocked.png" \
-  "$SRC_DIR/unauthorized.png" \
+  "$SRC_DIR/unauthorized.png" "$SRC_DIR/sus.png" \
   "$SRC_DIR/services.json" "$SRC_DIR/VERSION" "$APP_DIR/"
 if [[ -f "$SRC_DIR/README.md" ]]; then
   install -m 0644 "$SRC_DIR/README.md" "$APP_DIR/"

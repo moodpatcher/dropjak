@@ -96,6 +96,18 @@ ensure_state_dir() {
     fi
 }
 
+ensure_caddy_admin_dir() {
+    # A Caddy admin socketjének könyvtára (közös kötet a caddy konténerrel).
+    # A rootként, de DAC_OVERRIDE nélkül futó Caddy tulajdonosként hozza
+    # létre benne a socketet; a portál a csoporton át éri el, más senki.
+    _sock=${HV_CADDY_ADMIN:-}
+    [ -n "$_sock" ] && [ "$(id -u)" -eq 0 ] || return 0
+    _dir=$(dirname "$_sock")
+    [ -d "$_dir" ] || return 0
+    chown "0:$APP_USER" "$_dir" && chmod 0750 "$_dir" \
+        || log "FIGYELEM: a Caddy admin könyvtár jogai nem állíthatók be: $_dir"
+}
+
 run_as_app() {
     # A logikai kapcsolókat az env_bool() értelmezi (1/true/yes/on).
     if [ "$(id -u)" -ne 0 ] || [ "$(env_bool HV_RUN_AS_ROOT 0)" = "1" ]; then
@@ -391,6 +403,7 @@ load_firewall() {
 # ------------------------------------------------------------------------ main
 
 ensure_state_dir
+ensure_caddy_admin_dir
 export HV_STATE_DIR="$STATE_DIR"
 
 # Egyedi parancs (pl. felhasználókezelés): a tűzfalhoz nem nyúlunk.

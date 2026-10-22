@@ -505,6 +505,9 @@
   .f2b-fields .full{grid-column:1/-1}
   .f2b-group.is-off .f2b-fields{opacity:.55}
   .f2b-group .field{margin:6px 0 8px}
+  .cert-meta{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:3px 12px;margin:6px 0 8px;font-size:12px}
+  .cert-meta dt{color:var(--muted)}
+  .cert-meta dd{margin:0;overflow-wrap:anywhere}
   /* Proxy-bejegyzés két sorban: aldomain + hostnév + kapcsolók, alatta a cél. */
   .proxy-line{display:flex;flex-wrap:wrap;align-items:flex-end;gap:0 10px}
   .proxy-line .field{flex:0 1 150px;min-width:0}
@@ -515,6 +518,14 @@
   .proxy-line .f2b-toggle,.proxy-line > button{margin:0 0 8px}
   .proxy-line .f2b-toggle{margin-left:auto;font-weight:400}
   .proxy-line > button{padding:5px 7px;font-size:12px;min-height:32px}
+  /* A bejegyzés harmadik, lenyitható része: challenge-feltételek. */
+  .proxy-challenge{margin:0 0 8px;border-top:1px solid var(--line);padding-top:4px}
+  .proxy-challenge summary{cursor:pointer;padding:5px 0;font-size:12.5px;font-weight:600;color:var(--ink)}
+  .proxy-challenge-state{font-weight:400;color:var(--muted);overflow-wrap:anywhere}
+  .proxy-challenge-item{display:flex;align-items:flex-start;gap:8px;margin:7px 0;font-size:12.5px;color:var(--ink);cursor:pointer}
+  .proxy-challenge-item input{flex:0 0 auto;margin-top:1px}
+  .proxy-challenge-item small{display:block;color:var(--muted);font-size:12px;line-height:1.4}
+  .admin-form .proxy-challenge .field{margin:0 0 8px 24px;max-width:120px}
   .admin-form .field{margin:0 0 10px}
   .admin-form label{font-size:12px;margin-bottom:4px}
   .admin-form input,.admin-form select,.admin-form textarea{margin:0;padding:8px 9px;font-size:13.5px}
@@ -564,9 +575,11 @@
   .log-tools input,.log-tools select{margin:0;padding:7px 8px;font-size:12px;border-radius:7px}
   .log-tools input[type=text]{width:150px}
   .log-tools input.log-q{width:180px}
+  .log-tools input.log-ip{width:130px}
   .log-tools button{padding:7px 10px;font-size:12px}
   .log-tools .auto{display:flex;align-items:center;gap:5px;font-size:12px;color:#555;padding-bottom:8px}
   .log-detail{max-width:430px;white-space:normal}
+  .log-subject{font-weight:600;overflow-wrap:anywhere}
   .log-detail details summary{cursor:pointer;color:var(--muted);font-size:12px}
   .log-detail pre{margin:4px 0 0;padding:6px;background:#f7f7f5;border:1px solid var(--line);border-radius:5px;font-size:12px;white-space:pre-wrap;word-break:break-word;max-height:160px;overflow:auto}
   .log-table td{font-size:12px}
@@ -1207,6 +1220,7 @@
         <button type="button" data-admin="groups"><span class="nav-ico" data-icon="groups" aria-hidden="true"></span><span data-i18n="Csoportok">Csoportok</span></button>
         <button type="button" data-admin="rules"><span class="nav-ico" data-icon="rules" aria-hidden="true"></span><span data-i18n="Szabályok">Szabályok</span></button>
         <button type="button" data-admin="domains"><span class="nav-ico" data-icon="domains" aria-hidden="true"></span><span data-i18n="Domainek">Domainek</span></button>
+        <button type="button" data-admin="portproxy"><span class="nav-ico" data-icon="portproxy" aria-hidden="true"></span><span data-i18n="Proxy">Proxy</span></button>
         <button type="button" data-admin="sessions"><span class="nav-ico" data-icon="sessions" aria-hidden="true"></span><span data-i18n="Munkamenetek">Munkamenetek</span></button>
         <button type="button" data-admin="firewall"><span class="nav-ico" data-icon="firewall" aria-hidden="true"></span><span data-i18n="Tűzfal">Tűzfal</span></button>
         <button type="button" data-admin="drops"><span class="nav-ico" data-icon="drops" aria-hidden="true"></span><span data-i18n="Drop napló">Drop napló</span></button>
@@ -2119,6 +2133,7 @@ const ICON_SVGS = {
   groups: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>`,
   rules: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>`,
   domains: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>`,
+  portproxy: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>`,
   sessions: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15.5 14"/></svg>`,
   firewall: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>`,
   drops: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>`,
@@ -2229,6 +2244,45 @@ const I18N = {
     'Elutasítás': 'Reject',
     'Fiókkérelmek': 'Account requests',
     'Fiókkérelmek engedélyezése': 'Allow account requests',
+    'Domain beállítások': 'Domain settings',
+    'A gyökérdomainek és bejegyzéseik HTTPS-tanúsítványa. A feltöltött tanúsítvány elsőbbséget élvez; ahol nincs, ott a Caddy automatikusan kér egyet, ha engedélyezett. A gyökérdomain HTTPS-portálja ugyanezt a tanúsítványt használja.': 'HTTPS certificates for the root domains and their entries. An uploaded certificate takes precedence; where there is none, Caddy requests one automatically if enabled. The root domain\'s HTTPS portal uses the same certificate.',
+    "Automatikus tanúsítvány (Let's Encrypt)": "Automatic certificate (Let's Encrypt)",
+    'Kikapcsolva a Caddy egyetlen névre sem kér ACME-tanúsítványt, és a már kiadottakat sem használja: HTTPS-en csak a feltöltött tanúsítvánnyal lefedett nevek érhetők el. Kikapcsoláskor a Caddy újraindul (néhány másodperc kiesés); a kiadott tanúsítványok megmaradnak, visszakapcsoláskor újra ezeket használja.': 'When off, Caddy requests no ACME certificate for any name and does not use those already issued: only names covered by an uploaded certificate are reachable over HTTPS. Turning it off restarts Caddy (a few seconds of downtime); issued certificates are kept and reused when it is turned back on.',
+    'Caddy': 'Caddy',
+    'elérhető': 'reachable',
+    'nem elérhető': 'unreachable',
+    'még nincs ellenőrizve': 'not checked yet',
+    'utolsó újraindítás': 'last restart',
+    'újraindítás folyamatban': 'restart pending',
+    'Nincs gyökérdomain; a Domainek fülön adhatsz hozzá.': 'No root domain; add one on the Domains tab.',
+    'A tanúsítvány lejárt.': 'The certificate has expired.',
+    'A tanúsítvány 14 napon belül lejár.': 'The certificate expires within 14 days.',
+    'Tárgy (CN)': 'Subject (CN)',
+    'SAN-ok': 'SANs',
+    'Kibocsátó': 'Issuer',
+    'Érvényesség': 'Validity',
+    'Lefedi': 'Covers',
+    'Nem fedi le': 'Does not cover',
+    'Nincs feltöltött tanúsítvány: a Caddy automatikusan kér egyet.': 'No uploaded certificate: Caddy requests one automatically.',
+    'Nincs feltöltött tanúsítvány, és az automatikus tanúsítvány ki van kapcsolva: ez a domain HTTPS-en nem érhető el.': 'No uploaded certificate and automatic certificates are off: this domain is not reachable over HTTPS.',
+    'Tanúsítványlánc (PEM)': 'Certificate chain (PEM)',
+    'Titkos kulcs (PEM)': 'Private key (PEM)',
+    'Válaszd ki a tanúsítványláncot és a titkos kulcsot.': 'Select the certificate chain and the private key.',
+    'Csere': 'Replace',
+    'Feltöltés': 'Upload',
+    'Proxy: jogosulatlan': 'Proxy: unauthorized',
+    'Az automatikus tanúsítvány beállítása mentve.': 'Automatic certificate setting saved.',
+    'A tanúsítvány mentve.': 'Certificate saved.',
+    'A tanúsítvány törölve.': 'Certificate deleted.',
+    'a proxy_acme mező igaz/hamis érték kell': 'the proxy_acme field must be a boolean',
+    'ismeretlen gyökérdomain': 'unknown root domain',
+    'ehhez a gyökérdomainhez nincs feltöltött tanúsítvány': 'no certificate is uploaded for this root domain',
+    'a tanúsítvány mentése nem sikerült': 'saving the certificate failed',
+    'a tanúsítvány és a kulcs nem olvasható, vagy nem tartozik össze': 'the certificate and key cannot be read or do not match',
+    'a tanúsítvány adatai nem olvashatók': 'the certificate details cannot be read',
+    'a tanúsítvány lejárt': 'the certificate has expired',
+    'tanúsítványlánc: csak CERTIFICATE PEM-blokk(ok) lehet(nek)': 'certificate chain: only CERTIFICATE PEM block(s) allowed',
+    'titkos kulcs: egyetlen, jelszó nélküli PRIVATE KEY PEM-blokk': 'private key: a single unencrypted PRIVATE KEY PEM block',
     'Tűzfal neve': 'Firewall name',
     'A név a portál fejlécében, a böngésző címében és az új 2FA-beiratkozások hitelesítő-bejegyzésében jelenik meg. Üresen a Dropjak név érvényes.': 'The name appears in the portal header, the browser title and the authenticator entry of new 2FA enrollments. Empty means Dropjak.',
     'A tűzfal neve mentve.': 'Firewall name saved.',
@@ -2245,6 +2299,39 @@ const I18N = {
     'Privát: csak a bejegyzést tartalmazó domain szabályt választó munkamenet éri el. Publikus: bárki elérheti bejelentkezés nélkül (a fail2ban által tiltott IP-címek kivételével).': 'Private: only a session that selected a domain rule containing the entry can reach it. Public: anyone can reach it without signing in (except IP addresses banned by fail2ban).',
     'Új útvonal': 'New route',
     'A proxy beállításai mentve.': 'Proxy settings saved.',
+    'Proxy': 'Port proxy',
+    'Kernelszintű TCP/UDP port proxy (nftables DNAT)': 'Kernel-level TCP/UDP port proxy (nftables DNAT)',
+    'ezt a portot a Docker is publikálja; a beállított interfészeken a proxy megelőzi.': 'Docker also publishes this port; on the configured interfaces the proxy takes precedence.',
+    'ezen a porton már figyel egy helyi szolgáltatás; a beállított interfészeken a proxy megelőzi.': 'a local service already listens on this port; on the configured interfaces the proxy takes precedence.',
+    'A host hallgató portjára érkező forgalmat a kernel továbbítja a hostra (Input) vagy egy magánhálózati gépre (Forward); a kliens IP-címe megmarad. A hallgató portot engedélyező szabály kell: Forward proxyhoz forward, Input proxyhoz host (input) irányú szabály, amely a hallgató portot tartalmazza, és a kliens aktív munkamenete. A többiek csomagjai eldobódnak.': 'The kernel forwards traffic arriving on the host\'s listen port to the host itself (Input) or to a private-network machine (Forward); the client IP address is preserved. A rule that allows the listen port is required: a forward rule for a Forward proxy, a host (input) rule for an Input proxy, containing the listen port, plus an active session of the client. Packets from everyone else are dropped.',
+    'Példa: Minecraft és Simple Voice Chat': 'Example: Minecraft and Simple Voice Chat',
+    'Minecraft: TCP 25565, Forward a szerver IP-jére, célport 25565. A szabály a forward TCP 25565-öt engedélyezze.': 'Minecraft: TCP 25565, Forward to the server IP, target port 25565. The rule must allow forward TCP 25565.',
+    'Simple Voice Chat: UDP 24454, Forward ugyanarra a gépre, célport 24454. A Minecraft szerveren a voicechat-server.properties fájlban port=24454; ha a nyilvános (hallgató) port eltér, voice_host=<nyilvános név>:<hallgató port>. A szabály a forward UDP 24454-et is engedélyezze.': 'Simple Voice Chat: UDP 24454, Forward to the same machine, target port 24454. On the Minecraft server set port=24454 in voicechat-server.properties; if the public (listen) port differs, set voice_host=<public name>:<listen port>. The rule must also allow forward UDP 24454.',
+    'SNAT csak akkor kell, ha a cél nem a portálgépen át válaszol (például LAN-kliens a LAN-on lévő célhoz); ekkor a cél a portál címét látja a kliens IP-je helyett.': 'SNAT is only needed if the target does not reply through the portal machine (for example a LAN client to a target on the LAN); the target then sees the portal\'s address instead of the client IP.',
+    'Hallgató port': 'Listen port',
+    'Célport': 'Target port',
+    'Cél IP-cím': 'Target IP address',
+    'Interfész': 'Interface',
+    'WAN + LAN': 'WAN + LAN',
+    'SNAT': 'SNAT',
+    'A cél a portál címét látja a kliens IP-je helyett.': 'The target sees the portal\'s address instead of the client IP.',
+    'Új port proxy': 'New port proxy',
+    'A port proxy beállításai mentve.': 'Port proxy settings saved.',
+    'engedély nélküli port proxy forgalom': 'port proxy traffic without a grant',
+    'portproxy': 'port proxy without a grant',
+    'port_proxies: lista kell': 'port_proxies: a list is required',
+    'port_proxies: legfeljebb 64 bejegyzés lehet': 'port_proxies: at most 64 entries',
+    'port proxy: a bejegyzés JSON-objektum kell': 'port proxy: each entry must be a JSON object',
+    'port proxy: a protokoll tcp, udp vagy both lehet': 'port proxy: the protocol must be tcp, udp or both',
+    'port proxy: a típus input vagy forward lehet': 'port proxy: the type must be input or forward',
+    'port proxy: a hallgató port 1 és 65535 között lehet': 'port proxy: the listen port must be between 1 and 65535',
+    'port proxy: a célport 1 és 65535 között lehet': 'port proxy: the target port must be between 1 and 65535',
+    'port proxy: fenntartott hallgató port (portál, 22, 53, 67, 80, 443, 2019)': 'port proxy: reserved listen port (portal, 22, 53, 67, 80, 443, 2019)',
+    'port proxy: az interfész wan, lan vagy both lehet': 'port proxy: the interface must be wan, lan or both',
+    'az enabled/snat mező igaz/hamis érték kell': 'the enabled/snat field must be true/false',
+    'port proxy: a forward célhoz magánhálózati IPv4-cím kell (10/8, 172.16/12, 192.168/16)': 'port proxy: a forward target needs a private IPv4 address (10/8, 172.16/12, 192.168/16)',
+    'port proxy: az input célport nem lehet 22, 2019 vagy a portál': 'port proxy: the input target port cannot be 22, 2019 or the portal',
+    'port proxy: input proxy célportja nem lehet a hallgató port (ehhez elég egy host szabály)': 'port proxy: an input proxy\'s target port cannot be the listen port (a host rule is enough for that)',
     'proxy_domains: szöveg kell': 'proxy_domains: a string is required',
     'proxy_domains: érvényes, kisbetűs domainnév kell (pl. z1.example.com)': 'proxy_domains: a valid lowercase domain name is required (e.g. z1.example.com)',
     'proxy_domains: lista kell': 'proxy_domains: a list is required',
@@ -2268,6 +2355,30 @@ const I18N = {
     'proxy: a típus input vagy forward lehet': 'proxy: the type must be input or forward',
     'proxy: a láthatóság private vagy public lehet': 'proxy: the visibility must be private or public',
     'proxy: a forward célhoz magánhálózati IPv4-cím kell (10/8, 172.16/12, 192.168/16)': 'proxy: a forward target needs a private IPv4 address (10/8, 172.16/12, 192.168/16)',
+    'Challenge (ellenőrzés)': 'Challenge (verification)',
+    'ki': 'off',
+    'Időköz (óra)': 'Interval (hours)',
+    'Engedélyezett kérésnél a kliens captcha-oldalt kap (403), ha valamelyik bejelölt feltétel teljesül; sikeres captcha után belépő sütit kap. API- és webhook-bejegyzésnél hagyd üresen.': 'For an allowed request the client gets a captcha page (403) when any ticked condition holds; after a solved captcha it gets a pass cookie. Leave empty for API and webhook entries.',
+    'Első megnyitáskor': 'On first open',
+    'Ellenőrzés, ha a kliensnek nincs érvényes belépője ehhez a hosthoz (24 óráig érvényes).': 'Verify when the client has no valid pass for this host (valid for 24 hours).',
+    'X óránként': 'Every X hours',
+    'A belépő a megadott óraszám után lejár.': 'The pass expires after the given number of hours.',
+    'Naponta első megnyitáskor': 'On first open each day',
+    'A belépő éjfélkor (a szerver helyi ideje) lejár.': 'The pass expires at midnight (server local time).',
+    'Ha az IP kapott már 401-et': 'If the IP already got a 401',
+    'Ha a fail2ban proxy-számlálója fut az IP-re; a legutóbbi 401 után új ellenőrzés kell.': 'When the fail2ban proxy counter is running for the IP; a new verification is needed after the latest 401.',
+    'Ha bármely fail2ban-számláló fut rá': 'If any fail2ban counter is running for it',
+    'Belépési, drop-, port- vagy proxy-számláló; a legutóbbi találat után új ellenőrzés kell.': 'Sign-in, drop, port or proxy counter; a new verification is needed after the latest hit.',
+    'Gyanús kliens': 'Suspicious client',
+    'Nincs Accept-Language vagy (oldalmegnyitásnál) Sec-Fetch-Mode, vagy üres/parancssori User-Agent (curl, wget, python-requests…).': 'No Accept-Language or (on page opens) Sec-Fetch-Mode, or an empty/command-line User-Agent (curl, wget, python-requests…).',
+    'Új IP-ről': 'From a new IP',
+    'A belépő az IP-címhez kötődik; IP-váltáskor új ellenőrzés kell.': 'The pass is bound to the IP address; an IP change needs a new verification.',
+    'Sok frissítés / spam': 'Many refreshes / spam',
+    'Ha az IP 30 másodpercen belül 10-szer megnyitja (frissíti) az oldalt; utána új ellenőrzés kell.': 'If the IP opens (refreshes) the page 10 times within 30 seconds; a new verification is needed afterwards.',
+    'proxy: a challenge JSON-objektum kell': 'proxy: the challenge must be a JSON object',
+    'proxy: ismeretlen challenge-feltétel': 'proxy: unknown challenge condition',
+    'proxy: duplikált challenge-feltétel': 'proxy: duplicate challenge condition',
+    'proxy: a challenge-időköz 1 és 720 óra között lehet': 'proxy: the challenge interval must be between 1 and 720 hours',
     'domain szabályhoz nem adható meg port, ICMP vagy teljes hozzáférés': 'a domain rule cannot have ports, ICMP or full access',
     'domains: 1–64 proxy-bejegyzésből álló lista kell': 'domains: a list of 1–64 proxy entries is required',
     'domains: legalább egy proxy-bejegyzést válassz': 'domains: select at least one proxy entry',
@@ -2412,6 +2523,9 @@ const I18N = {
     'Idő': 'Time',
     'Részletek': 'Details',
     'teljes JSON': 'full JSON',
+    'IP-cím / CIDR': 'IP address / CIDR',
+    'egy IP-cím vagy CIDR-tartomány, pl. 192.168.10.0/24': 'a single IP address or CIDR range, e.g. 192.168.10.0/24',
+    'érvénytelen IP-cím vagy CIDR (pl. 192.168.10.0/24)': 'invalid IP address or CIDR (e.g. 192.168.10.0/24)',
     'lejárt': 'expired',
     'Jelenleg nincs nyitott munkamenet. A belépés után itt jelenik meg a hátralévő idő.': 'There are no open sessions. The remaining time appears here after sign-in.',
     'IP-cím': 'IP address',
@@ -2630,6 +2744,7 @@ const I18N = {
 
     // -- naplóesemények --------------------------------------------------
     'portal_opened': 'portal opened',
+    'proxy_page_opened': 'proxy page opened',
     'login_success': 'sign-in successful',
     'login_failed': 'sign-in failed',
     'logout': 'sign-out',
@@ -2695,6 +2810,8 @@ const I18N = {
     'docker-guard': 'Docker guard',
     'dns-revoked': 'revoked DNS',
     'ssh-revoked': 'revoked SSH',
+    'proxy-ban': 'proxy ban (HTTP/HTTPS)',
+    'proxy-unauthorized': 'unauthorized proxy page (401)',
     'container-spoof': 'container spoofing',
     'container-pivot': 'container → LAN pivot',
     'ipv6': 'IPv6',
@@ -2781,6 +2898,11 @@ const I18N = {
     'Portszkennerek észlelése a különböző célportok alapján.': 'Detects port scanners by the number of distinct destination ports.',
     'Eldobott csomag a tiltásig': 'Dropped packets before a ban',
     'Különböző célport a tiltásig': 'Distinct destination ports before a ban',
+    'Proxy: jogosulatlan kérések': 'Proxy: unauthorized requests',
+    'A domain proxy jogosulatlan (401) válaszai a kliens IP-címe szerint. A tiltás csak a HTTP/HTTPS-t (TCP 80/443) zárja; a portál saját portja elérhető marad.': 'Unauthorized (401) domain proxy responses by client IP. The ban blocks only HTTP/HTTPS (TCP 80/443); the portal’s own port stays reachable.',
+    'Jogosulatlan kérés a tiltásig': 'Unauthorized requests before a ban',
+    'proxy': 'proxy',
+    'csak HTTP/HTTPS': 'HTTP/HTTPS only',
     'Drop időablak (perc)': 'Drop window (minutes)',
     'Mindkét drop-mérőszám ezt az időablakot használja.': 'Both drop metrics use this window.',
     'Várakozó drop': 'Pending drops',
@@ -2938,6 +3060,45 @@ const I18N = {
     'Elutasítás': 'Ablehnen',
     'Fiókkérelmek': 'Kontoanfragen',
     'Fiókkérelmek engedélyezése': 'Kontoanfragen erlauben',
+    'Domain beállítások': 'Domain-Einstellungen',
+    'A gyökérdomainek és bejegyzéseik HTTPS-tanúsítványa. A feltöltött tanúsítvány elsőbbséget élvez; ahol nincs, ott a Caddy automatikusan kér egyet, ha engedélyezett. A gyökérdomain HTTPS-portálja ugyanezt a tanúsítványt használja.': 'HTTPS-Zertifikate der Stammdomains und ihrer Einträge. Ein hochgeladenes Zertifikat hat Vorrang; wo keines vorhanden ist, fordert Caddy automatisch eines an, falls aktiviert. Das HTTPS-Portal der Stammdomain verwendet dasselbe Zertifikat.',
+    "Automatikus tanúsítvány (Let's Encrypt)": "Automatisches Zertifikat (Let's Encrypt)",
+    'Kikapcsolva a Caddy egyetlen névre sem kér ACME-tanúsítványt, és a már kiadottakat sem használja: HTTPS-en csak a feltöltött tanúsítvánnyal lefedett nevek érhetők el. Kikapcsoláskor a Caddy újraindul (néhány másodperc kiesés); a kiadott tanúsítványok megmaradnak, visszakapcsoláskor újra ezeket használja.': 'Wenn deaktiviert, fordert Caddy für keinen Namen ein ACME-Zertifikat an und verwendet auch bereits ausgestellte nicht: per HTTPS sind nur Namen erreichbar, die ein hochgeladenes Zertifikat abdeckt. Beim Deaktivieren startet Caddy neu (einige Sekunden Ausfall); ausgestellte Zertifikate bleiben erhalten und werden beim Wiedereinschalten weiterverwendet.',
+    'Caddy': 'Caddy',
+    'elérhető': 'erreichbar',
+    'nem elérhető': 'nicht erreichbar',
+    'még nincs ellenőrizve': 'noch nicht geprüft',
+    'utolsó újraindítás': 'letzter Neustart',
+    'újraindítás folyamatban': 'Neustart ausstehend',
+    'Nincs gyökérdomain; a Domainek fülön adhatsz hozzá.': 'Keine Stammdomain; füge eine im Tab Domains hinzu.',
+    'A tanúsítvány lejárt.': 'Das Zertifikat ist abgelaufen.',
+    'A tanúsítvány 14 napon belül lejár.': 'Das Zertifikat läuft innerhalb von 14 Tagen ab.',
+    'Tárgy (CN)': 'Subjekt (CN)',
+    'SAN-ok': 'SANs',
+    'Kibocsátó': 'Aussteller',
+    'Érvényesség': 'Gültigkeit',
+    'Lefedi': 'Deckt ab',
+    'Nem fedi le': 'Deckt nicht ab',
+    'Nincs feltöltött tanúsítvány: a Caddy automatikusan kér egyet.': 'Kein hochgeladenes Zertifikat: Caddy fordert automatisch eines an.',
+    'Nincs feltöltött tanúsítvány, és az automatikus tanúsítvány ki van kapcsolva: ez a domain HTTPS-en nem érhető el.': 'Kein hochgeladenes Zertifikat und automatische Zertifikate sind deaktiviert: diese Domain ist per HTTPS nicht erreichbar.',
+    'Tanúsítványlánc (PEM)': 'Zertifikatskette (PEM)',
+    'Titkos kulcs (PEM)': 'Privater Schlüssel (PEM)',
+    'Válaszd ki a tanúsítványláncot és a titkos kulcsot.': 'Wähle die Zertifikatskette und den privaten Schlüssel aus.',
+    'Csere': 'Ersetzen',
+    'Feltöltés': 'Hochladen',
+    'Proxy: jogosulatlan': 'Proxy: unberechtigt',
+    'Az automatikus tanúsítvány beállítása mentve.': 'Einstellung für automatische Zertifikate gespeichert.',
+    'A tanúsítvány mentve.': 'Zertifikat gespeichert.',
+    'A tanúsítvány törölve.': 'Zertifikat gelöscht.',
+    'a proxy_acme mező igaz/hamis érték kell': 'das Feld proxy_acme muss ein Wahrheitswert sein',
+    'ismeretlen gyökérdomain': 'unbekannte Stammdomain',
+    'ehhez a gyökérdomainhez nincs feltöltött tanúsítvány': 'für diese Stammdomain ist kein Zertifikat hochgeladen',
+    'a tanúsítvány mentése nem sikerült': 'das Speichern des Zertifikats ist fehlgeschlagen',
+    'a tanúsítvány és a kulcs nem olvasható, vagy nem tartozik össze': 'Zertifikat und Schlüssel sind nicht lesbar oder passen nicht zusammen',
+    'a tanúsítvány adatai nem olvashatók': 'die Zertifikatsdaten sind nicht lesbar',
+    'a tanúsítvány lejárt': 'das Zertifikat ist abgelaufen',
+    'tanúsítványlánc: csak CERTIFICATE PEM-blokk(ok) lehet(nek)': 'Zertifikatskette: nur CERTIFICATE-PEM-Blöcke erlaubt',
+    'titkos kulcs: egyetlen, jelszó nélküli PRIVATE KEY PEM-blokk': 'privater Schlüssel: ein einzelner unverschlüsselter PRIVATE-KEY-PEM-Block',
     'Tűzfal neve': 'Firewall-Name',
     'A név a portál fejlécében, a böngésző címében és az új 2FA-beiratkozások hitelesítő-bejegyzésében jelenik meg. Üresen a Dropjak név érvényes.': 'Der Name erscheint in der Portal-Kopfzeile, im Browsertitel und im Authenticator-Eintrag neuer 2FA-Einrichtungen. Leer bedeutet Dropjak.',
     'A tűzfal neve mentve.': 'Firewall-Name gespeichert.',
@@ -2954,6 +3115,39 @@ const I18N = {
     'Privát: csak a bejegyzést tartalmazó domain szabályt választó munkamenet éri el. Publikus: bárki elérheti bejelentkezés nélkül (a fail2ban által tiltott IP-címek kivételével).': 'Privat: nur eine Sitzung, die eine Domain-Regel mit diesem Eintrag gewählt hat, erreicht ihn. Öffentlich: jeder erreicht ihn ohne Anmeldung (außer von fail2ban gesperrten IP-Adressen).',
     'Új útvonal': 'Neue Route',
     'A proxy beállításai mentve.': 'Proxy-Einstellungen gespeichert.',
+    'Proxy': 'Port-Proxy',
+    'Kernelszintű TCP/UDP port proxy (nftables DNAT)': 'TCP/UDP-Port-Proxy auf Kernelebene (nftables-DNAT)',
+    'ezt a portot a Docker is publikálja; a beállított interfészeken a proxy megelőzi.': 'Docker veröffentlicht diesen Port ebenfalls; auf den eingestellten Schnittstellen hat der Proxy Vorrang.',
+    'ezen a porton már figyel egy helyi szolgáltatás; a beállított interfészeken a proxy megelőzi.': 'auf diesem Port lauscht bereits ein lokaler Dienst; auf den eingestellten Schnittstellen hat der Proxy Vorrang.',
+    'A host hallgató portjára érkező forgalmat a kernel továbbítja a hostra (Input) vagy egy magánhálózati gépre (Forward); a kliens IP-címe megmarad. A hallgató portot engedélyező szabály kell: Forward proxyhoz forward, Input proxyhoz host (input) irányú szabály, amely a hallgató portot tartalmazza, és a kliens aktív munkamenete. A többiek csomagjai eldobódnak.': 'Der Kernel leitet den am Lauschport des Hosts eingehenden Verkehr an den Host selbst (Input) oder an einen Rechner im privaten Netz (Forward) weiter; die Client-IP-Adresse bleibt erhalten. Erforderlich ist eine Regel, die den Lauschport erlaubt: für einen Forward-Proxy eine Forward-Regel, für einen Input-Proxy eine Host-(Input-)Regel mit dem Lauschport, und eine aktive Sitzung des Clients. Pakete aller anderen werden verworfen.',
+    'Példa: Minecraft és Simple Voice Chat': 'Beispiel: Minecraft und Simple Voice Chat',
+    'Minecraft: TCP 25565, Forward a szerver IP-jére, célport 25565. A szabály a forward TCP 25565-öt engedélyezze.': 'Minecraft: TCP 25565, Forward an die Server-IP, Zielport 25565. Die Regel muss Forward-TCP 25565 erlauben.',
+    'Simple Voice Chat: UDP 24454, Forward ugyanarra a gépre, célport 24454. A Minecraft szerveren a voicechat-server.properties fájlban port=24454; ha a nyilvános (hallgató) port eltér, voice_host=<nyilvános név>:<hallgató port>. A szabály a forward UDP 24454-et is engedélyezze.': 'Simple Voice Chat: UDP 24454, Forward an denselben Rechner, Zielport 24454. Auf dem Minecraft-Server in voicechat-server.properties port=24454 setzen; weicht der öffentliche (Lausch-)Port ab, voice_host=<öffentlicher Name>:<Lauschport>. Die Regel muss auch Forward-UDP 24454 erlauben.',
+    'SNAT csak akkor kell, ha a cél nem a portálgépen át válaszol (például LAN-kliens a LAN-on lévő célhoz); ekkor a cél a portál címét látja a kliens IP-je helyett.': 'SNAT ist nur nötig, wenn das Ziel nicht über den Portal-Rechner antwortet (z. B. LAN-Client zu einem Ziel im LAN); das Ziel sieht dann die Portal-Adresse statt der Client-IP.',
+    'Hallgató port': 'Lauschport',
+    'Célport': 'Zielport',
+    'Cél IP-cím': 'Ziel-IP-Adresse',
+    'Interfész': 'Schnittstelle',
+    'WAN + LAN': 'WAN + LAN',
+    'SNAT': 'SNAT',
+    'A cél a portál címét látja a kliens IP-je helyett.': 'Das Ziel sieht die Portal-Adresse statt der Client-IP.',
+    'Új port proxy': 'Neuer Port-Proxy',
+    'A port proxy beállításai mentve.': 'Port-Proxy-Einstellungen gespeichert.',
+    'engedély nélküli port proxy forgalom': 'Port-Proxy-Verkehr ohne Freigabe',
+    'portproxy': 'Port-Proxy ohne Freigabe',
+    'port_proxies: lista kell': 'port_proxies: Liste erforderlich',
+    'port_proxies: legfeljebb 64 bejegyzés lehet': 'port_proxies: höchstens 64 Einträge',
+    'port proxy: a bejegyzés JSON-objektum kell': 'Port-Proxy: jeder Eintrag muss ein JSON-Objekt sein',
+    'port proxy: a protokoll tcp, udp vagy both lehet': 'Port-Proxy: Protokoll muss tcp, udp oder both sein',
+    'port proxy: a típus input vagy forward lehet': 'Port-Proxy: Typ muss input oder forward sein',
+    'port proxy: a hallgató port 1 és 65535 között lehet': 'Port-Proxy: Lauschport muss zwischen 1 und 65535 liegen',
+    'port proxy: a célport 1 és 65535 között lehet': 'Port-Proxy: Zielport muss zwischen 1 und 65535 liegen',
+    'port proxy: fenntartott hallgató port (portál, 22, 53, 67, 80, 443, 2019)': 'Port-Proxy: reservierter Lauschport (Portal, 22, 53, 67, 80, 443, 2019)',
+    'port proxy: az interfész wan, lan vagy both lehet': 'Port-Proxy: Schnittstelle muss wan, lan oder both sein',
+    'az enabled/snat mező igaz/hamis érték kell': 'das Feld enabled/snat muss true/false sein',
+    'port proxy: a forward célhoz magánhálózati IPv4-cím kell (10/8, 172.16/12, 192.168/16)': 'Port-Proxy: ein Forward-Ziel braucht eine private IPv4-Adresse (10/8, 172.16/12, 192.168/16)',
+    'port proxy: az input célport nem lehet 22, 2019 vagy a portál': 'Port-Proxy: Input-Zielport darf nicht 22, 2019 oder das Portal sein',
+    'port proxy: input proxy célportja nem lehet a hallgató port (ehhez elég egy host szabály)': 'Port-Proxy: Zielport eines Input-Proxys darf nicht der Lauschport sein (dafür genügt eine Host-Regel)',
     'proxy_domains: szöveg kell': 'proxy_domains: Text erforderlich',
     'proxy_domains: érvényes, kisbetűs domainnév kell (pl. z1.example.com)': 'proxy_domains: ein gültiger Domainname in Kleinbuchstaben ist erforderlich (z. B. z1.example.com)',
     'proxy_domains: lista kell': 'proxy_domains: Liste erforderlich',
@@ -2977,6 +3171,30 @@ const I18N = {
     'proxy: a típus input vagy forward lehet': 'proxy: der Typ muss input oder forward sein',
     'proxy: a láthatóság private vagy public lehet': 'proxy: die Sichtbarkeit muss private oder public sein',
     'proxy: a forward célhoz magánhálózati IPv4-cím kell (10/8, 172.16/12, 192.168/16)': 'proxy: ein Forward-Ziel braucht eine private IPv4-Adresse (10/8, 172.16/12, 192.168/16)',
+    'Challenge (ellenőrzés)': 'Challenge (Prüfung)',
+    'ki': 'aus',
+    'Időköz (óra)': 'Intervall (Stunden)',
+    'Engedélyezett kérésnél a kliens captcha-oldalt kap (403), ha valamelyik bejelölt feltétel teljesül; sikeres captcha után belépő sütit kap. API- és webhook-bejegyzésnél hagyd üresen.': 'Bei einer erlaubten Anfrage erhält der Client eine Captcha-Seite (403), wenn eine angehakte Bedingung zutrifft; nach gelöstem Captcha erhält er ein Pass-Cookie. Für API- und Webhook-Einträge leer lassen.',
+    'Első megnyitáskor': 'Beim ersten Öffnen',
+    'Ellenőrzés, ha a kliensnek nincs érvényes belépője ehhez a hosthoz (24 óráig érvényes).': 'Prüfen, wenn der Client keinen gültigen Pass für diesen Host hat (24 Stunden gültig).',
+    'X óránként': 'Alle X Stunden',
+    'A belépő a megadott óraszám után lejár.': 'Der Pass läuft nach der angegebenen Stundenzahl ab.',
+    'Naponta első megnyitáskor': 'Beim ersten Öffnen am Tag',
+    'A belépő éjfélkor (a szerver helyi ideje) lejár.': 'Der Pass läuft um Mitternacht ab (lokale Serverzeit).',
+    'Ha az IP kapott már 401-et': 'Wenn die IP bereits ein 401 erhielt',
+    'Ha a fail2ban proxy-számlálója fut az IP-re; a legutóbbi 401 után új ellenőrzés kell.': 'Wenn der fail2ban-Proxyzähler für die IP läuft; nach dem letzten 401 ist eine neue Prüfung nötig.',
+    'Ha bármely fail2ban-számláló fut rá': 'Wenn ein fail2ban-Zähler für sie läuft',
+    'Belépési, drop-, port- vagy proxy-számláló; a legutóbbi találat után új ellenőrzés kell.': 'Anmelde-, Drop-, Port- oder Proxyzähler; nach dem letzten Treffer ist eine neue Prüfung nötig.',
+    'Gyanús kliens': 'Verdächtiger Client',
+    'Nincs Accept-Language vagy (oldalmegnyitásnál) Sec-Fetch-Mode, vagy üres/parancssori User-Agent (curl, wget, python-requests…).': 'Kein Accept-Language oder (beim Seitenaufruf) Sec-Fetch-Mode, oder ein leerer/Kommandozeilen-User-Agent (curl, wget, python-requests…).',
+    'Új IP-ről': 'Von neuer IP',
+    'A belépő az IP-címhez kötődik; IP-váltáskor új ellenőrzés kell.': 'Der Pass ist an die IP-Adresse gebunden; ein IP-Wechsel erfordert eine neue Prüfung.',
+    'Sok frissítés / spam': 'Viele Aktualisierungen / Spam',
+    'Ha az IP 30 másodpercen belül 10-szer megnyitja (frissíti) az oldalt; utána új ellenőrzés kell.': 'Wenn die IP die Seite innerhalb von 30 Sekunden 10-mal öffnet (aktualisiert); danach ist eine neue Prüfung nötig.',
+    'proxy: a challenge JSON-objektum kell': 'proxy: die Challenge muss ein JSON-Objekt sein',
+    'proxy: ismeretlen challenge-feltétel': 'proxy: unbekannte Challenge-Bedingung',
+    'proxy: duplikált challenge-feltétel': 'proxy: doppelte Challenge-Bedingung',
+    'proxy: a challenge-időköz 1 és 720 óra között lehet': 'proxy: das Challenge-Intervall muss zwischen 1 und 720 Stunden liegen',
     'domain szabályhoz nem adható meg port, ICMP vagy teljes hozzáférés': 'eine Domain-Regel darf keine Ports, kein ICMP und keinen Vollzugriff haben',
     'domains: 1–64 proxy-bejegyzésből álló lista kell': 'domains: eine Liste mit 1–64 Proxy-Einträgen ist erforderlich',
     'domains: legalább egy proxy-bejegyzést válassz': 'domains: wähle mindestens einen Proxy-Eintrag',
@@ -3121,6 +3339,9 @@ const I18N = {
     'Idő': 'Zeit',
     'Részletek': 'Details',
     'teljes JSON': 'vollständiges JSON',
+    'IP-cím / CIDR': 'IP-Adresse / CIDR',
+    'egy IP-cím vagy CIDR-tartomány, pl. 192.168.10.0/24': 'eine IP-Adresse oder ein CIDR-Bereich, z. B. 192.168.10.0/24',
+    'érvénytelen IP-cím vagy CIDR (pl. 192.168.10.0/24)': 'ungültige IP-Adresse oder CIDR (z. B. 192.168.10.0/24)',
     'lejárt': 'abgelaufen',
     'Jelenleg nincs nyitott munkamenet. A belépés után itt jelenik meg a hátralévő idő.': 'Derzeit keine offenen Sitzungen. Die verbleibende Zeit erscheint hier nach der Anmeldung.',
     'IP-cím': 'IP-Adresse',
@@ -3341,6 +3562,7 @@ const I18N = {
 
     // -- Protokollereignisse --------------------------------------------
     'portal_opened': 'Portal geöffnet',
+    'proxy_page_opened': 'Proxy-Seite geöffnet',
     'login_success': 'Anmeldung erfolgreich',
     'login_failed': 'Anmeldung fehlgeschlagen',
     'logout': 'Abmeldung',
@@ -3406,6 +3628,8 @@ const I18N = {
     'docker-guard': 'Docker-Schutz',
     'dns-revoked': 'widerrufenes DNS',
     'ssh-revoked': 'widerrufenes SSH',
+    'proxy-ban': 'Proxy-Sperre (HTTP/HTTPS)',
+    'proxy-unauthorized': 'unberechtigte Proxy-Seite (401)',
     'container-spoof': 'Container-Spoofing',
     'container-pivot': 'Container → LAN-Pivot',
     'ipv6': 'IPv6',
@@ -3492,6 +3716,11 @@ const I18N = {
     'Portszkennerek észlelése a különböző célportok alapján.': 'Erkennt Portscanner anhand der Anzahl verschiedener Zielports.',
     'Eldobott csomag a tiltásig': 'Verworfene Pakete bis zur Sperre',
     'Különböző célport a tiltásig': 'Verschiedene Zielports bis zur Sperre',
+    'Proxy: jogosulatlan kérések': 'Proxy: unautorisierte Anfragen',
+    'A domain proxy jogosulatlan (401) válaszai a kliens IP-címe szerint. A tiltás csak a HTTP/HTTPS-t (TCP 80/443) zárja; a portál saját portja elérhető marad.': 'Unautorisierte (401) Antworten des Domain-Proxys nach Client-IP. Die Sperre blockiert nur HTTP/HTTPS (TCP 80/443); der eigene Port des Portals bleibt erreichbar.',
+    'Jogosulatlan kérés a tiltásig': 'Unautorisierte Anfragen bis zur Sperre',
+    'proxy': 'Proxy',
+    'csak HTTP/HTTPS': 'nur HTTP/HTTPS',
     'Mindkét drop-mérőszám ezt az időablakot használja.': 'Beide Drop-Metriken verwenden dieses Zeitfenster.',
     'Drop időablak (perc)': 'Drop-Zeitfenster (Minuten)',
     'Várakozó drop': 'Ausstehende Drops',
@@ -3658,6 +3887,8 @@ const I18N_PATTERNS = {
     [/^Letiltod: (.+)\? Minden nyitott munkamenete azonnal lezárul\.$/, m => `Disable ${m[1]}? All open sessions end immediately.`],
     [/^(.+) letiltva; a munkamenetei lezárultak\.$/, m => `${m[1]} disabled; their sessions were terminated.`],
     [/^Biztosan törlöd: (.+)\?$/, m => `Delete ${m[1]}?`],
+    [/^Törlöd a tanúsítványt: (.+)\?$/, m => `Delete the certificate for ${m[1]}?`],
+    [/^a tanúsítvány SAN-listája nem fedi le: (.+)$/, m => `the certificate's SAN list does not cover: ${m[1]}`],
     [/^Biztosan törlöd a csoportot: (.+)\?$/, m => `Delete group: ${m[1]}?`],
     [/^Biztosan törlöd a szabályt: (.+)\?$/, m => `Delete rule: ${m[1]}?`],
     [/^Felhasználó szerkesztése: (.+)$/, m => `Edit user: ${m[1]}`],
@@ -3700,6 +3931,7 @@ const I18N_PATTERNS = {
     [/^tűzfal hiba: (.+)$/, m => `firewall error: ${m[1]}`],
     [/^(.+): szöveg kell$/, m => `${m[1]}: text required`],
     [/^(.+): nem lehet üres$/, m => `${m[1]}: cannot be empty`],
+    [/^port proxy: a hallgató port már foglalt: (.+)$/, m => `port proxy: the listen port is already taken: ${m[1]}`],
     [/^(.+): 1–32 karakter, kisbetű, szám, kötőjel vagy aláhúzás$/, m => `${m[1]}: 1–32 characters, lowercase letter, digit, hyphen or underscore`],
     [/^(.+): legfeljebb (\d+) elemű lista kell$/, m => `${m[1]}: a list of at most ${m[2]} items is required`],
     [/^(.+): legfeljebb (\d+) port adható meg$/, m => `${m[1]}: at most ${m[2]} ports can be given`],
@@ -3788,6 +4020,8 @@ const I18N_PATTERNS = {
     [/^Letiltod: (.+)\? Minden nyitott munkamenete azonnal lezárul\.$/, m => `${m[1]} deaktivieren? Alle offenen Sitzungen werden sofort beendet.`],
     [/^(.+) letiltva; a munkamenetei lezárultak\.$/, m => `${m[1]} deaktiviert; die Sitzungen wurden beendet.`],
     [/^Biztosan törlöd: (.+)\?$/, m => `${m[1]} wirklich löschen?`],
+    [/^Törlöd a tanúsítványt: (.+)\?$/, m => `Zertifikat für ${m[1]} löschen?`],
+    [/^a tanúsítvány SAN-listája nem fedi le: (.+)$/, m => `die SAN-Liste des Zertifikats deckt nicht ab: ${m[1]}`],
     [/^Biztosan törlöd a csoportot: (.+)\?$/, m => `Gruppe wirklich löschen: ${m[1]}?`],
     [/^Biztosan törlöd a szabályt: (.+)\?$/, m => `Regel wirklich löschen: ${m[1]}?`],
     [/^Felhasználó szerkesztése: (.+)$/, m => `Benutzer bearbeiten: ${m[1]}`],
@@ -3830,6 +4064,7 @@ const I18N_PATTERNS = {
     [/^tűzfal hiba: (.+)$/, m => `Firewall-Fehler: ${m[1]}`],
     [/^(.+): szöveg kell$/, m => `${m[1]}: Text erforderlich`],
     [/^(.+): nem lehet üres$/, m => `${m[1]}: darf nicht leer sein`],
+    [/^port proxy: a hallgató port már foglalt: (.+)$/, m => `Port-Proxy: der Lauschport ist bereits belegt: ${m[1]}`],
     [/^(.+): 1–32 karakter, kisbetű, szám, kötőjel vagy aláhúzás$/, m => `${m[1]}: 1–32 Zeichen, Kleinbuchstabe, Ziffer, Bindestrich oder Unterstrich`],
     [/^(.+): legfeljebb (\d+) elemű lista kell$/, m => `${m[1]}: eine Liste mit höchstens ${m[2]} Einträgen ist erforderlich`],
     [/^(.+): legfeljebb (\d+) port adható meg$/, m => `${m[1]}: höchstens ${m[2]} Ports dürfen angegeben werden`],
@@ -4371,7 +4606,8 @@ const BAN_REASON_KEYS = {
   'no-grant': 'engedély nélküli forgalom',
   'wan-drop': 'WAN felőli vizsgálat',
   'input-wan': 'portvizsgálat a WAN felől',
-  'input-lan': 'portvizsgálat a LAN felől'
+  'input-lan': 'portvizsgálat a LAN felől',
+  'portproxy': 'engedély nélküli port proxy forgalom'
 };
 function showBan(data) {
   const until = Number(data && data.ban_until);
@@ -5581,6 +5817,7 @@ const ADMIN_HEAD_ICONS = {
   'Csoportok': 'groups',
   'Szabályok': 'rules',
   'Domainek': 'domains',
+  'Proxy': 'portproxy',
   'Munkamenetek': 'sessions',
   'Tűzfal-nézet': 'firewall',
   'Tűzfal testreszabása': 'settings',
@@ -6603,7 +6840,12 @@ function renderRuleForm(id) {
 const AUDIT_EVENT_LABELS = {
   // belépés, kilépés, hozzáférés
   portal_opened: ['Portál megnyitva', 'Portal opened', 'Portal geöffnet'],
+  proxy_page_opened: ['Proxy-oldal megnyitva', 'Proxy page opened', 'Proxy-Seite geöffnet'],
+  proxy_challenge_shown: ['Proxy-challenge megjelenítve', 'Proxy challenge shown', 'Proxy-Challenge angezeigt'],
+  proxy_challenge_passed: ['Proxy-challenge teljesítve', 'Proxy challenge passed', 'Proxy-Challenge bestanden'],
+  proxy_challenge_failed: ['Proxy-challenge sikertelen', 'Proxy challenge failed', 'Proxy-Challenge fehlgeschlagen'],
   portal_host_redirect: ['Átirányítás idegen hosztra', 'Redirect to foreign host', 'Weiterleitung zu fremdem Host'],
+  portal_https_redirect: ['Átirányítás a HTTPS-portálra', 'Redirect to HTTPS portal', 'Weiterleitung zum HTTPS-Portal'],
   login_success: ['Sikeres belépés', 'Sign-in successful', 'Anmeldung erfolgreich'],
   login_failed: ['Sikertelen belépés', 'Sign-in failed', 'Anmeldung fehlgeschlagen'],
   login_banned: ['Belépés tiltott IP-ről', 'Sign-in from banned IP', 'Anmeldung von gesperrter IP'],
@@ -6663,6 +6905,7 @@ const AUDIT_EVENT_LABELS = {
   admin_request_rejected: ['Adminisztrátori kérés elutasítva', 'Admin request rejected', 'Admin-Anfrage abgelehnt'],
   admin_logs_read: ['Admin napló megnyitva', 'Admin log read', 'Admin-Protokoll gelesen'],
   admin_settings_changed: ['Beállítás módosítva', 'Settings changed', 'Einstellungen geändert'],
+  admin_portproxy_changed: ['Port proxy módosítva', 'Port proxy changed', 'Port-Proxy geändert'],
   admin_fail2ban_changed: ['Fail2ban-beállítás módosítva', 'Fail2ban settings changed', 'Fail2ban-Einstellungen geändert'],
   admin_session_terminated: ['Munkamenet lezárva (admin)', 'Session terminated (admin)', 'Sitzung beendet (Admin)'],
   admin_session_terminate_failed: ['Munkamenet lezárása sikertelen', 'Session termination failed', 'Sitzungsbeendigung fehlgeschlagen'],
@@ -6717,6 +6960,17 @@ function severityLabel(level) {
   return tr(SEVERITY_LABELS[level] || SEVERITY_LABELS.info);
 }
 
+// A proxy-események fő tárgya (host + útvonal, illetve a domain-
+// beállítás vagy a tanúsítvány gyökere) a részletek első, kiemelt sora.
+function logSubject(entry) {
+  const event = String(entry.event || '');
+  const action = String(entry.action || '');
+  if (event.startsWith('proxy_') && entry.host) return `${entry.host}${entry.path || ''}`;
+  if (event === 'admin_portproxy_changed') return String(entry.port_proxies || '');
+  if (event !== 'admin_settings_changed') return '';
+  if (action === 'proxy') return [entry.proxy_domains, entry.proxy_routes].filter(Boolean).join(' · ');
+  return action.startsWith('proxy_cert_') ? String(entry.target || '') : '';
+}
 function logDetail(entry) {
   const keys = ['rule', 'rule_label', 'rules', 'rule_labels', 'rule_count',
     'removed_rules', 'ports', 'tcp', 'udp', 'icmp', 'full',
@@ -6726,9 +6980,14 @@ function logDetail(entry) {
     'collections_affected', 'pending_ttl', 'expires_at', 'path', 'host',
     'ticket_hash', 'purpose', 'method', 'attempts', 'remaining', 'banned',
     'ban_until', 'session_ip', 'request_ip', 'target_ip', 'count', 'old_user',
-    'new_user', 'was_enrolled', 'removed', 'source', 'actor'];
+    'new_user', 'was_enrolled', 'removed', 'source', 'actor', 'visibility',
+    'triggers', 'unknown_host'];
+  const subject = logSubject(entry);
+  // A kiemelt host/útvonal nem ismétlődik a kulcs=érték sorban.
+  const shown = subject && String(entry.event || '').startsWith('proxy_') ? ['host', 'path'] : [];
   const parts = [];
   for (const key of keys) {
+    if (shown.includes(key)) continue;
     if (entry[key] !== undefined && entry[key] !== '' && entry[key] !== null) {
       const value = key === 'rule_label'
         ? ruleDisplayLabel(entry[key])
@@ -6737,6 +6996,7 @@ function logDetail(entry) {
     }
   }
   const wrapper = el('div', { class: 'log-detail' });
+  if (subject) wrapper.append(el('div', { class: 'log-subject mono', text: subject }));
   wrapper.append(el('div', { text: parts.join(' · ') || '—' }));
   wrapper.append(el('details', {},
     el('summary', { text: tr('teljes JSON') }),
@@ -6777,6 +7037,11 @@ function renderLogs() {
     placeholder: tr(searchPhrase), title: tr(searchPhrase),
     value: logFilter.q
   });
+  const ipPhrase = 'egy IP-cím vagy CIDR-tartomány, pl. 192.168.10.0/24';
+  const ipInput = el('input', {
+    type: 'text', class: 'log-ip', placeholder: '192.168.10.0/24',
+    title: tr(ipPhrase), 'aria-label': tr(ipPhrase), value: logFilter.ip || ''
+  });
   const severitySelect = el('select', {},
     ...[['', 'összes szint'], ['info', 'információ'], ['warn', 'figyelmeztetés'], ['alert', 'riasztás']].map(
       ([value, label]) => el('option', {
@@ -6802,6 +7067,7 @@ function renderLogs() {
       event: eventSelect.value,
       user: userInput.value.trim(),
       q: qInput.value.trim(),
+      ip: ipInput.value.trim(),
       severity: severitySelect.value,
       limit: Number(limitSelect.value) || 500
     };
@@ -6809,17 +7075,17 @@ function renderLogs() {
   };
   for (const [label, node] of [
     ['Esemény', eventSelect], ['Felhasználó', userInput], ['Keresés', qInput],
-    ['Szint', severitySelect], ['Darab', limitSelect]
+    ['IP-cím / CIDR', ipInput], ['Szint', severitySelect], ['Darab', limitSelect]
   ]) {
     tools.append(el('div', { class: 'field' }, el('label', { text: tr(label) }), node));
   }
   tools.append(el('label', { class: 'auto' }, autoBox, tr('automatikus frissítés')));
   tools.append(el('button', { type: 'button', class: 'ghost', onclick: apply }, tr('Frissítés')));
   tools.append(el('button', { type: 'button', class: 'ghost', onclick: () => {
-    logFilter = { event: '', user: '', q: '', severity: '', limit: 500 };
+    logFilter = { event: '', user: '', q: '', ip: '', severity: '', limit: 500 };
     loadLogs(true);
   } }, tr('Szűrők törlése')));
-  for (const node of [userInput, qInput]) {
+  for (const node of [userInput, qInput, ipInput]) {
     node.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); apply(); } });
   }
   adminPanel.append(tools);
@@ -6872,7 +7138,7 @@ function renderLogs() {
   wrap.append(table);
   adminPanel.append(wrap);
 }
-let logFilter = { event: '', user: '', q: '', severity: '', limit: 500 };
+let logFilter = { event: '', user: '', q: '', ip: '', severity: '', limit: 500 };
 async function loadLogs(manual = false) {
   stopLogTimer();
   try {
@@ -6881,6 +7147,7 @@ async function loadLogs(manual = false) {
       event: logFilter.event || '',
       user: logFilter.user || '',
       q: logFilter.q || '',
+      ip: logFilter.ip || '',
       severity: logFilter.severity || ''
     });
     // A kézi olvasást az admin napló is rögzíti; az öt másodperces
@@ -6942,12 +7209,13 @@ async function loadAdminState() {
 
 /* ============================================================ admin: drop napló */
 
-/* A napló csak kétféle sort különböztet meg: a hétköznapi eldobásokat
-   (DROP) és a fail2ban által tiltott forrásokat (fail2ban). A nyers ok a
-   részletes JSON-ban marad. */
+/* A napló háromféle sort különböztet meg: a hétköznapi eldobásokat
+   (DROP), a fail2ban által tiltott forrásokat (fail2ban) és a proxy
+   tiltóoldalát (401, a portál írja). A nyers ok a részletes JSON-ban marad. */
 const DROP_KINDS = [
   { id: 'drop', label: 'DROP', color: '#2563eb' },
-  { id: 'ban', label: 'fail2ban', color: '#b91c1c' }
+  { id: 'ban', label: 'fail2ban', color: '#b91c1c' },
+  { id: 'proxy', label: 'Proxy: jogosulatlan', color: '#d97706' }
 ];
 const DROP_KIND_LABELS = Object.fromEntries(
   DROP_KINDS.map(kind => [kind.id, kind.label])
@@ -6976,7 +7244,7 @@ function dropKindOf(entry) {
   return DROP_KIND_COLORS[kind] ? kind : 'drop';
 }
 function dropKindLabel(kind) {
-  return DROP_KIND_LABELS[kind] || DROP_KIND_LABELS.drop;
+  return tr(DROP_KIND_LABELS[kind] || DROP_KIND_LABELS.drop);
 }
 function dropKindColor(kind) {
   return DROP_KIND_COLORS[kind] || DROP_KIND_COLORS.drop;
@@ -7393,6 +7661,7 @@ function dropDetail(entry) {
   if (entry.hook !== undefined) facts.push(`hook=${entry.hook}`);
   if (entry.mark !== undefined) facts.push(`mark=${entry.mark}`);
   if (entry.reason) facts.push(`reason=${entry.reason}`);
+  if (entry.path) facts.push(`path=${entry.path}`);
   if (entry.event) facts.push(`event=${entry.event}`);
   if (entry.packets) facts.push(`packets=${entry.packets}`);
   if (entry.ban_ts) facts.push(`ban_ts=${clockTime(entry.ban_ts)}`);
@@ -7813,10 +8082,151 @@ function renderSettings() {
   ));
   adminPanel.append(registrationSection);
 
+  adminPanel.append(renderDomainSettingsSection(settings));
+
   adminPanel.append(renderSettingSection('preauth', settings.preauth || []));
+}
+/* Domain beállítások: az ACME-kapcsoló és gyökérdomainenként a feltöltött
+   tanúsítvány metaadata. A kulcs és a PEM soha nem jön vissza a szerverről. */
+function renderDomainSettingsSection(settings) {
+  const acme = settings.proxy_acme !== false;
+  const section = el('div', { class: 'admin-form' });
+  section.append(el('h3', { text: tr('Domain beállítások') }));
+  section.append(el('p', {
+    class: 'port-hint',
+    text: tr('A gyökérdomainek és bejegyzéseik HTTPS-tanúsítványa. A feltöltött tanúsítvány elsőbbséget élvez; ahol nincs, ott a Caddy automatikusan kér egyet, ha engedélyezett. A gyökérdomain HTTPS-portálja ugyanezt a tanúsítványt használja.')
+  }));
+  const acmeCheck = el('input', {
+    type: 'checkbox', id: 'proxy-acme', name: 'proxy_acme', checked: acme
+  });
+  section.append(el('div', { class: 'field' },
+    el('label', { for: 'proxy-acme', style: 'display:flex;gap:7px;align-items:center' },
+      acmeCheck,
+      tr("Automatikus tanúsítvány (Let's Encrypt)")
+    ),
+    el('span', {
+      class: 'port-hint',
+      text: tr('Kikapcsolva a Caddy egyetlen névre sem kér ACME-tanúsítványt, és a már kiadottakat sem használja: HTTPS-en csak a feltöltött tanúsítvánnyal lefedett nevek érhetők el. Kikapcsoláskor a Caddy újraindul (néhány másodperc kiesés); a kiadott tanúsítványok megmaradnak, visszakapcsoláskor újra ezeket használja.')
+    })
+  ));
+  section.append(el('div', { class: 'form-actions' },
+    el('button', {
+      type: 'button', class: 'small',
+      onclick: () => adminSend('/api/admin/settings', {
+        action: 'proxy_acme', enabled: acmeCheck.checked
+      })
+    }, tr('Mentés'))
+  ));
+  // A Caddy admin API állapota (csak bekapcsolt domain proxy mellett).
+  const caddy = adminState && adminState.caddy;
+  if (caddy) {
+    const parts = [
+      tr('Caddy') + ': ' + tr(caddy.reachable === true ? 'elérhető'
+        : caddy.reachable === false ? 'nem elérhető' : 'még nincs ellenőrizve'),
+      tr('utolsó újraindítás') + ': ' + clockTime(caddy.restarted_at)
+    ];
+    if (caddy.pending) parts.push(tr('újraindítás folyamatban'));
+    if (caddy.error) parts.push(tr('hiba') + ': ' + caddy.error);
+    section.append(el('p', {
+      class: 'port-hint', id: 'caddy-status', text: parts.join(' · ')
+    }));
+  }
+  const certs = (adminState && adminState.proxy_certs) || [];
+  if (!certs.length) {
+    section.append(el('p', {
+      class: 'port-hint',
+      text: tr('Nincs gyökérdomain; a Domainek fülön adhatsz hozzá.')
+    }));
+  }
+  for (const cert of certs) section.append(renderCertCard(cert, acme));
+  return section;
+}
+function renderCertCard(cert, acme) {
+  const card = el('div', { class: 'f2b-group' });
+  card.append(el('div', { class: 'f2b-group-title mono', text: cert.root }));
+  if (cert.installed) {
+    if (cert.warning) {
+      card.append(el('div', {
+        class: 'admin-flash err',
+        text: tr(cert.warning === 'expired'
+          ? 'A tanúsítvány lejárt.'
+          : 'A tanúsítvány 14 napon belül lejár.')
+      }));
+    }
+    const meta = el('dl', { class: 'cert-meta' });
+    const row = (label, value) => meta.append(
+      el('dt', { text: tr(label) }),
+      el('dd', { class: 'mono', text: value || '—' })
+    );
+    row('Tárgy (CN)', cert.subject_cn);
+    row('SAN-ok', (cert.sans || []).join(', '));
+    row('Kibocsátó', cert.issuer);
+    row('Érvényesség', `${dropFmtDate(cert.not_before)} – ${dropFmtDate(cert.not_after)}`);
+    row('Lefedi', (cert.covered || []).join(', '));
+    row('Nem fedi le', (cert.uncovered || []).join(', '));
+    row('SHA-256', cert.fingerprint);
+    card.append(meta);
+  } else {
+    card.append(el('p', {
+      class: 'port-hint',
+      text: tr(acme
+        ? 'Nincs feltöltött tanúsítvány: a Caddy automatikusan kér egyet.'
+        : 'Nincs feltöltött tanúsítvány, és az automatikus tanúsítvány ki van kapcsolva: ez a domain HTTPS-en nem érhető el.')
+    }));
+  }
+  const id = cert.root.replace(/[^a-z0-9]/g, '-');
+  const chainInput = el('input', { type: 'file', id: `cert-chain-${id}`, accept: '.pem,.crt,.cer' });
+  const keyInput = el('input', { type: 'file', id: `cert-key-${id}`, accept: '.pem,.key' });
+  card.append(el('div', { class: 'f2b-fields' },
+    el('div', { class: 'field' },
+      el('label', { for: chainInput.id, text: tr('Tanúsítványlánc (PEM)') }), chainInput),
+    el('div', { class: 'field' },
+      el('label', { for: keyInput.id, text: tr('Titkos kulcs (PEM)') }), keyInput)
+  ));
+  const actions = el('div', { class: 'form-actions' });
+  if (cert.installed) {
+    actions.append(el('button', {
+      type: 'button', class: 'danger small',
+      onclick: () => {
+        if (confirm(tr(`Törlöd a tanúsítványt: ${cert.root}?`))) {
+          adminSend('/api/admin/certs', { action: 'delete', root: cert.root });
+        }
+      }
+    }, tr('Törlés')));
+  }
+  actions.append(el('button', {
+    type: 'button', class: 'small',
+    onclick: async () => {
+      const chain = chainInput.files[0];
+      const key = keyInput.files[0];
+      if (!chain || !key) {
+        adminFlash = { text: tr('Válaszd ki a tanúsítványláncot és a titkos kulcsot.'), kind: 'err' };
+        renderAdminPanel();
+        return;
+      }
+      adminSend('/api/admin/certs', {
+        action: 'upload', root: cert.root,
+        cert: await chain.text(), key: await key.text()
+      });
+    }
+  }, tr(cert.installed ? 'Csere' : 'Feltöltés')));
+  card.append(actions);
+  return card;
 }
 /* A proxy-bejegyzések a mentésig csak a DOM-ban élnek; a Mentés a teljes
    listát küldi, a szerver ellenőrzi és tárolja. */
+// A proxy challenge-feltételei [kód, címke, súgó]; a kódok a settings_store
+// PROXY_CHALLENGE_TRIGGERS listája.
+const PROXY_CHALLENGE_TRIGGERS = [
+  ['always', 'Első megnyitáskor', 'Ellenőrzés, ha a kliensnek nincs érvényes belépője ehhez a hosthoz (24 óráig érvényes).'],
+  ['interval', 'X óránként', 'A belépő a megadott óraszám után lejár.'],
+  ['daily', 'Naponta első megnyitáskor', 'A belépő éjfélkor (a szerver helyi ideje) lejár.'],
+  ['after_401', 'Ha az IP kapott már 401-et', 'Ha a fail2ban proxy-számlálója fut az IP-re; a legutóbbi 401 után új ellenőrzés kell.'],
+  ['fail2ban', 'Ha bármely fail2ban-számláló fut rá', 'Belépési, drop-, port- vagy proxy-számláló; a legutóbbi találat után új ellenőrzés kell.'],
+  ['suspicious', 'Gyanús kliens', 'Nincs Accept-Language vagy (oldalmegnyitásnál) Sec-Fetch-Mode, vagy üres/parancssori User-Agent (curl, wget, python-requests…).'],
+  ['new_ip', 'Új IP-ről', 'A belépő az IP-címhez kötődik; IP-váltáskor új ellenőrzés kell.'],
+  ['burst', 'Sok frissítés / spam', 'Ha az IP 30 másodpercen belül 10-szer megnyitja (frissíti) az oldalt; utána új ellenőrzés kell.']
+];
 function renderDomains() {
   const settings = settingsData();
   adminPanel.append(adminHead('Domainek', 'Portállal védett aldomain-proxy'));
@@ -7913,6 +8323,41 @@ function renderDomains() {
     };
     name.addEventListener('input', sync);
     rootSelect.addEventListener('change', sync);
+    const challenge = route.challenge || {};
+    const hours = el('input', {
+      type: 'number', name: 'proxy_challenge_hours', min: 1, max: 720,
+      value: challenge.interval_hours || 24, 'aria-label': tr('Időköz (óra)')
+    });
+    const hoursField = el('div', { class: 'field' },
+      el('label', { text: tr('Időköz (óra)') }), hours);
+    const challengeState = el('span', { class: 'proxy-challenge-state' });
+    const challengeBoxes = [];
+    const syncChallenge = () => {
+      const on = challengeBoxes.filter(box => box.checked);
+      hoursField.hidden = !on.some(box => box.value === 'interval');
+      challengeState.textContent = '· ' + (on.length
+        ? on.map(box => tr(PROXY_CHALLENGE_TRIGGERS.find(t => t[0] === box.value)[1])).join(', ')
+        : tr('ki'));
+    };
+    const challengePart = el('details', { class: 'proxy-challenge' },
+      el('summary', {}, tr('Challenge (ellenőrzés)'), ' ', challengeState),
+      el('p', {
+        class: 'port-hint',
+        text: tr('Engedélyezett kérésnél a kliens captcha-oldalt kap (403), ha valamelyik bejelölt feltétel teljesül; sikeres captcha után belépő sütit kap. API- és webhook-bejegyzésnél hagyd üresen.')
+      }),
+      PROXY_CHALLENGE_TRIGGERS.flatMap(([id, label, hint]) => {
+        const box = el('input', {
+          type: 'checkbox', name: 'proxy_challenge', value: id,
+          checked: (challenge.triggers || []).includes(id)
+        });
+        box.addEventListener('change', syncChallenge);
+        challengeBoxes.push(box);
+        const item = el('label', { class: 'proxy-challenge-item' }, box,
+          el('span', {}, tr(label), el('small', { text: tr(hint) })));
+        return id === 'interval' ? [item, hoursField] : item;
+      })
+    );
+    syncChallenge();
     const row = el('div', { class: 'f2b-group' },
       el('div', { class: 'proxy-line' },
         el('div', { class: 'field' }, el('label', { text: tr('Aldomain') }), name),
@@ -7931,7 +8376,8 @@ function renderDomains() {
         el('div', { class: 'field' }, el('label', { text: tr('Típus') }), kind),
         ipField,
         el('div', { class: 'field port' }, el('label', { text: tr('Port') }), port)
-      )
+      ),
+      challengePart
     );
     // Az eltávolított gyökér a választóban marad, így a mentés jelzi, hogy
     // a bejegyzést előbb át kell helyezni vagy törölni.
@@ -7969,7 +8415,139 @@ function renderDomains() {
               ? { ip: row.querySelector('[name=proxy_ip]').value } : {}),
             port: Number(row.querySelector('[name=proxy_port]').value),
             enabled: row.querySelector('[name=proxy_enabled]').checked,
-            visibility: row.querySelector('[name=proxy_visibility]').value
+            visibility: row.querySelector('[name=proxy_visibility]').value,
+            challenge: {
+              triggers: Array.from(
+                row.querySelectorAll('[name=proxy_challenge]:checked'), box => box.value
+              ),
+              interval_hours: Number(row.querySelector('[name=proxy_challenge_hours]').value)
+            }
+          };
+        })
+      })
+    }, tr('Mentés'))
+  ));
+  adminPanel.append(section);
+}
+/* ============================================================ admin: port proxy */
+
+function renderPortProxy() {
+  const entries = settingsData().port_proxies || [];
+  adminPanel.append(adminHead('Proxy', 'Kernelszintű TCP/UDP port proxy (nftables DNAT)'));
+  const notice = adminNotice(); if (notice) adminPanel.append(notice);
+  for (const warn of (adminState && adminState.port_proxy_warnings) || []) {
+    adminPanel.append(el('div', {
+      class: 'admin-flash',
+      text: `${warn.proto.toUpperCase()} ${warn.port}: ` + tr(warn.docker
+        ? 'ezt a portot a Docker is publikálja; a beállított interfészeken a proxy megelőzi.'
+        : 'ezen a porton már figyel egy helyi szolgáltatás; a beállított interfészeken a proxy megelőzi.')
+    }));
+  }
+  const section = el('div', { class: 'admin-form' });
+  section.append(el('p', {
+    class: 'port-hint',
+    text: tr('A host hallgató portjára érkező forgalmat a kernel továbbítja a hostra (Input) vagy egy magánhálózati gépre (Forward); a kliens IP-címe megmarad. A hallgató portot engedélyező szabály kell: Forward proxyhoz forward, Input proxyhoz host (input) irányú szabály, amely a hallgató portot tartalmazza, és a kliens aktív munkamenete. A többiek csomagjai eldobódnak.')
+  }));
+  section.append(el('details', { class: 'proxy-challenge' },
+    el('summary', {}, tr('Példa: Minecraft és Simple Voice Chat')),
+    el('p', { class: 'port-hint', text: tr('Minecraft: TCP 25565, Forward a szerver IP-jére, célport 25565. A szabály a forward TCP 25565-öt engedélyezze.') }),
+    el('p', { class: 'port-hint', text: tr('Simple Voice Chat: UDP 24454, Forward ugyanarra a gépre, célport 24454. A Minecraft szerveren a voicechat-server.properties fájlban port=24454; ha a nyilvános (hallgató) port eltér, voice_host=<nyilvános név>:<hallgató port>. A szabály a forward UDP 24454-et is engedélyezze.') }),
+    el('p', { class: 'port-hint', text: tr('SNAT csak akkor kell, ha a cél nem a portálgépen át válaszol (például LAN-kliens a LAN-on lévő célhoz); ekkor a cél a portál címét látja a kliens IP-je helyett.') })
+  ));
+  const body = el('div');
+  const addRow = entry => {
+    const label = el('input', {
+      name: 'pp_label', value: entry.label || '', placeholder: 'Minecraft',
+      maxlength: 64, autocomplete: 'off', 'aria-label': tr('Címke')
+    });
+    const enabled = el('input', {
+      type: 'checkbox', name: 'pp_enabled', checked: entry.enabled !== false,
+      'aria-label': tr('aktív')
+    });
+    const proto = el('select', { name: 'pp_proto', 'aria-label': tr('Protokoll') },
+      el('option', { value: 'tcp', text: 'TCP' }),
+      el('option', { value: 'udp', text: 'UDP' }),
+      el('option', { value: 'both', text: 'TCP + UDP' })
+    );
+    proto.value = ['tcp', 'udp', 'both'].includes(entry.proto) ? entry.proto : 'tcp';
+    const port = (name, value, placeholder, aria) => el('input', {
+      type: 'number', name, min: 1, max: 65535, value: value || '',
+      placeholder, 'aria-label': tr(aria)
+    });
+    const listen = port('pp_listen', entry.listen_port, '25565', 'Hallgató port');
+    const target = port('pp_target_port', entry.target_port, '25565', 'Célport');
+    const kind = el('select', { name: 'pp_type', 'aria-label': tr('Típus') },
+      el('option', { value: 'forward', text: tr('Forward') }),
+      el('option', { value: 'input', text: tr('Input (host)') })
+    );
+    kind.value = entry.type === 'input' ? 'input' : 'forward';
+    const ip = el('input', {
+      name: 'pp_ip', value: entry.target_ip || '', placeholder: '192.168.10.20',
+      maxlength: 15, autocomplete: 'off', 'aria-label': tr('Cél IP-cím')
+    });
+    const ipField = el('div', { class: 'field' }, el('label', { text: tr('Cél IP-cím') }), ip);
+    const ifaces = el('select', { name: 'pp_ifaces', 'aria-label': tr('Interfész') },
+      el('option', { value: 'both', text: tr('WAN + LAN') }),
+      el('option', { value: 'wan', text: 'WAN' }),
+      el('option', { value: 'lan', text: 'LAN' })
+    );
+    ifaces.value = ['wan', 'lan', 'both'].includes(entry.ifaces) ? entry.ifaces : 'both';
+    const snat = el('input', { type: 'checkbox', name: 'pp_snat', checked: !!entry.snat });
+    const snatField = el('label', {
+      class: 'f2b-toggle', title: tr('A cél a portál címét látja a kliens IP-je helyett.')
+    }, snat, tr('SNAT'));
+    // A cél IP és az SNAT csak a forward proxyhoz tartozik.
+    const syncKind = () => {
+      const forward = kind.value === 'forward';
+      ipField.hidden = !forward;
+      snatField.hidden = !forward;
+      ip.required = forward;
+    };
+    kind.addEventListener('change', syncKind);
+    syncKind();
+    const row = el('div', { class: 'f2b-group', 'data-id': entry.id || '' },
+      el('div', { class: 'proxy-line' },
+        el('div', { class: 'field host' }, el('label', { text: tr('Címke') }), label),
+        el('label', { class: 'f2b-toggle' }, enabled, tr('aktív')),
+        el('button', {
+          type: 'button', class: 'danger small', onclick: () => row.remove()
+        }, tr('Törlés'))
+      ),
+      el('div', { class: 'proxy-line' },
+        el('div', { class: 'field' }, el('label', { text: tr('Protokoll') }), proto),
+        el('div', { class: 'field port' }, el('label', { text: tr('Hallgató port') }), listen),
+        el('div', { class: 'field' }, el('label', { text: tr('Típus') }), kind),
+        ipField,
+        el('div', { class: 'field port' }, el('label', { text: tr('Célport') }), target),
+        el('div', { class: 'field' }, el('label', { text: tr('Interfész') }), ifaces),
+        snatField
+      )
+    );
+    body.append(row);
+  };
+  for (const entry of entries) addRow(entry);
+  section.append(body);
+  section.append(el('div', { class: 'form-actions' },
+    el('button', {
+      type: 'button', class: 'ghost small', onclick: () => addRow({})
+    }, tr('Új port proxy')),
+    el('button', {
+      type: 'button', class: 'small',
+      onclick: () => adminSend('/api/admin/settings', {
+        action: 'port_proxies',
+        port_proxies: Array.from(body.children, row => {
+          const type = row.querySelector('[name=pp_type]').value;
+          return {
+            ...(row.dataset.id ? { id: row.dataset.id } : {}),
+            label: row.querySelector('[name=pp_label]').value,
+            proto: row.querySelector('[name=pp_proto]').value,
+            listen_port: Number(row.querySelector('[name=pp_listen]').value),
+            type,
+            target_ip: type === 'forward' ? row.querySelector('[name=pp_ip]').value : '',
+            target_port: Number(row.querySelector('[name=pp_target_port]').value),
+            ifaces: row.querySelector('[name=pp_ifaces]').value,
+            snat: type === 'forward' && row.querySelector('[name=pp_snat]').checked,
+            enabled: row.querySelector('[name=pp_enabled]').checked
           };
         })
       })
@@ -8186,8 +8764,9 @@ function fail2banStatusCards(fb) {
   const bans = fb.bans || [];
   const pending = fb.pending || [];
   const dropPending = fb.drop_pending || [];
-  const auto = bans.filter(row => !row.manual && row.source !== 'drop').length;
+  const auto = bans.filter(row => !row.manual && row.source !== 'drop' && row.source !== 'proxy').length;
   const drop = bans.filter(row => !row.manual && row.source === 'drop').length;
+  const proxy = bans.filter(row => row.source === 'proxy').length;
   const manual = bans.filter(row => row.manual).length;
   const loginActive = fb.enabled !== false;
   const dropMaster = fb.drop_enabled !== false;
@@ -8201,7 +8780,7 @@ function fail2banStatusCards(fb) {
   // kikapcsolt mérőszám se nem számol, se nem tilt. A belépés-figyelés
   // kapcsolója ettől független.
   const dropRunning = countActive || portsActive;
-  const running = loginActive || dropRunning;
+  const running = loginActive || dropRunning || fb.proxy_enabled === true;
   const activeMetrics = [];
   if (countActive) activeMetrics.push(tr('csomagszám'));
   if (portsActive) activeMetrics.push(tr('portszám'));
@@ -8214,7 +8793,7 @@ function fail2banStatusCards(fb) {
       tr(running ? 'az automatikus tiltás bekapcsolva' : 'az automatikus tiltás kikapcsolva'),
       running ? '#16a34a' : '#dc2626'),
     dropStat('Tiltott IP', String(bans.length),
-      `${auto} ${tr('automatikus')} · ${drop} ${tr('drop')} · ${manual} ${tr('kézi')}`, '#b91c1c'),
+      `${auto} ${tr('automatikus')} · ${drop} ${tr('drop')} · ${proxy} ${tr('proxy')} · ${manual} ${tr('kézi')}`, '#b91c1c'),
     dropStat('Várakozó próbálkozás', String(pending.length),
       tr('a küszöb elérése előtt'), '#ca8a04'),
     dropStat('Várakozó drop', String(dropPending.length),
@@ -8243,10 +8822,12 @@ function fail2banConfigForm(fb) {
     const dropMax = numberOrSaved('drop_max', fb.drop_max ?? 120);
     const dropPorts = numberOrSaved('drop_ports', fb.drop_ports ?? 12);
     const dropWindowMinutes = numberOrSaved('drop_window_minutes', (fb.drop_window_seconds || 180) / 60);
+    const proxyMax = numberOrSaved('proxy_max', fb.proxy_max ?? 20);
+    const proxyWindowMinutes = numberOrSaved('proxy_window_minutes', (fb.proxy_window_seconds || 600) / 60);
     const dropCountEnabled = boolValue(box, 'drop_count_enabled');
     const dropPortsEnabled = boolValue(box, 'drop_ports_enabled');
-    if (![maxAttempts, windowMinutes, banMinutes, dropMax, dropPorts, dropWindowMinutes]
-        .every(Number.isFinite)) {
+    if (![maxAttempts, windowMinutes, banMinutes, dropMax, dropPorts, dropWindowMinutes,
+      proxyMax, proxyWindowMinutes].every(Number.isFinite)) {
       return fail2banDraftError('Adj meg érvényes számokat a küszöbhöz és az időtartamokhoz.');
     }
     adminSend('/api/admin/fail2ban', {
@@ -8259,7 +8840,10 @@ function fail2banConfigForm(fb) {
       drop_ports_enabled: dropPortsEnabled,
       drop_max: Math.round(dropMax),
       drop_ports: Math.round(dropPorts),
-      drop_window_seconds: Math.round(dropWindowMinutes * 60)
+      drop_window_seconds: Math.round(dropWindowMinutes * 60),
+      proxy_enabled: boolValue(box, 'proxy_enabled'),
+      proxy_max: Math.round(proxyMax),
+      proxy_window_seconds: Math.round(proxyWindowMinutes * 60)
     });
   }});
   box.append(el('h3', { text: tr('Beállítások') }));
@@ -8339,6 +8923,31 @@ function fail2banConfigForm(fb) {
           type: 'number', name: 'drop_ports', required: true,
           min: limits.min_drop_ports ?? 1, max: limits.max_drop_ports ?? 4096, step: 1,
           value: fail2banDraftValue('config', 'drop_ports', fb.drop_ports ?? 12)
+        })
+      )
+    ]
+  ));
+  box.append(makeGroup(
+    'proxy_enabled', fb.proxy_enabled !== false,
+    'Proxy: jogosulatlan kérések',
+    'A domain proxy jogosulatlan (401) válaszai a kliens IP-címe szerint. A tiltás csak a HTTP/HTTPS-t (TCP 80/443) zárja; a portál saját portja elérhető marad.',
+    [
+      el('div', { class: 'field' },
+        el('label', { text: tr('Jogosulatlan kérés a tiltásig') }),
+        el('input', {
+          type: 'number', name: 'proxy_max', required: true,
+          min: limits.min_proxy_max ?? 1, max: limits.max_proxy_max ?? 10000, step: 1,
+          value: fail2banDraftValue('config', 'proxy_max', fb.proxy_max ?? 20)
+        })
+      ),
+      el('div', { class: 'field' },
+        el('label', { text: tr('Időablak (perc)') }),
+        el('input', {
+          type: 'number', name: 'proxy_window_minutes', required: true,
+          min: Math.ceil((limits.min_window ?? 30) / 60),
+          max: Math.floor((limits.max_window ?? 86400) / 60),
+          step: 1,
+          value: fail2banDraftValue('config', 'proxy_window_minutes', minutesOf(fb.proxy_window_seconds || 600))
         })
       )
     ]
@@ -8445,8 +9054,9 @@ function fail2banBannedTable(bans) {
     const deadline = Number(row.until) * 1000;
     const source = row.source || (row.manual ? 'manual' : 'login');
     const label = source === 'drop' ? 'drop'
+      : source === 'proxy' ? 'proxy'
       : source === 'manual' ? 'kézi' : 'automatikus';
-    const pillClass = source === 'drop' ? 'off'
+    const pillClass = source === 'drop' || source === 'proxy' ? 'off'
       : source === 'manual' ? 'admin' : '';
     const typeCell = el('td', {}, el('span', {
       class: 'pill ' + pillClass,
@@ -8459,10 +9069,19 @@ function fail2banBannedTable(bans) {
         text: tr(BAN_REASON_KEYS[row.detail] || row.detail)
       }));
     }
+    // A proxy-tiltás csak a TCP 80/443-at zárja; a feloldása a teljes
+    // tiltást (ha ugyanerre az IP-re van) nem érinti.
+    if (source === 'proxy') {
+      typeCell.append(el('div', {
+        class: 'muted',
+        style: 'margin-top:3px;font-size:10.5px',
+        text: tr('csak HTTP/HTTPS')
+      }));
+    }
     const actions = el('td', { class: 'actions' },
       el('button', {
         type: 'button', class: 'ghost small',
-        onclick: () => fail2banUnban(row.ip)
+        onclick: () => fail2banUnban(row.ip, source === 'proxy')
       }, tr('Feloldás'))
     );
     body.append(el('tr', {},
@@ -8544,9 +9163,9 @@ function fail2banDropPendingTable(pending) {
   wrap.append(table);
   return wrap;
 }
-async function fail2banUnban(ip) {
+async function fail2banUnban(ip, proxy = false) {
   if (!confirm(tr(`Feloldod ${ip} tiltását? A csomagjai ismét áthaladhatnak, ha van érvényes hozzáférésük.`))) return;
-  await adminSend('/api/admin/fail2ban', { action: 'unban', ip });
+  await adminSend('/api/admin/fail2ban', { action: 'unban', ip, proxy });
 }
 async function fail2banUnbanAll() {
   if (!confirm(tr('Feloldod az összes fail2ban tiltást? Minden tiltott IP csomagjai ismét áthaladhatnak.'))) return;
@@ -9364,6 +9983,7 @@ function renderAdminPanel() {
   else if (adminTabName === 'groups') renderGroups();
   else if (adminTabName === 'rules') renderRulesAdmin();
   else if (adminTabName === 'domains') renderDomains();
+  else if (adminTabName === 'portproxy') renderPortProxy();
   else if (adminTabName === 'sessions') renderSessions();
   else if (adminTabName === 'firewall') renderFirewall();
   else if (adminTabName === 'drops') renderDrops();

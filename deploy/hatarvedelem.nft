@@ -120,6 +120,15 @@ add set inet hatarvedelem banned_v4 {
     size 4096
 }
 
+# fail2ban proxy-tiltás: a domain proxyn túl sok jogosulatlan (401) kérést
+# kapó forrás-IP-k. Csak a host TCP 80/443-át zárja (a Caddy mindenét, a
+# HTTPS-portált is); a portál saját portja és minden más hozzáférés marad.
+add set inet hatarvedelem proxy_banned_v4 {
+    type ipv4_addr
+    flags timeout
+    size 4096
+}
+
 # A forward láncot lentebb, a szabályokkal egy tranzakcióban hozzuk létre,
 # -10-es prioritással. Így az a Docker ip filter FORWARD lánca ELŐTT fut, és
 # a Docker DOCKER-USER lánca csak az általa megjelölt csomagokat engedi át.
@@ -147,12 +156,32 @@ add chain inet hatarvedelem block
 add chain inet hatarvedelem preauth_nat
 add chain inet hatarvedelem block_nat
 
+# Port proxy (a portál Proxy fülén beállított DNAT bejegyzések). A portál
+# tölti fel őket induláskor és módosításkor; a sablon nem üríti őket.
+#   portproxy_nat:   DNAT (forward) / redirect (input) a hallgató portra
+#   portproxy_input: a redirectelt forgalom engedélye (allowed_input_*)
+#   portproxy_snat:  a forward bejegyzés kért masquerade-je
+add chain inet hatarvedelem portproxy_nat
+add chain inet hatarvedelem portproxy_input
+add chain inet hatarvedelem portproxy_snat
+
 add chain inet hatarvedelem input {
     type filter hook input priority filter; policy drop;
 }
 
 add chain inet hatarvedelem prerouting {
     type nat hook prerouting priority dstnat; policy accept;
+}
+
+# A port proxy DNAT-je saját, -101-es (dstnat - 1) prioritású láncban fut.
+# Új kapcsolatnál a kernel a nat láncokat prioritás szerint hívja, és az
+# első NAT-kötés után a többit (a Docker -100-as ip nat PREROUTING-ját és a
+# fenti prerouting láncot) már nem futtatja. Így a Proxy bejegyzés a
+# beállított interfészeken determinisztikusan megelőzi a Docker azonos
+# portú publikálását; azonos prioritásnál a sorrend a regisztrációtól
+# függne.
+add chain inet hatarvedelem portproxy_prerouting {
+    type nat hook prerouting priority -101; policy accept;
 }
 
 add chain inet hatarvedelem postrouting {
@@ -173,6 +202,7 @@ add chain inet hatarvedelem forward {
 }
 flush chain inet hatarvedelem input
 flush chain inet hatarvedelem prerouting
+flush chain inet hatarvedelem portproxy_prerouting
 flush chain inet hatarvedelem postrouting
 
 table inet hatarvedelem {
@@ -208,12 +238,16 @@ table inet hatarvedelem {
         # alatt rögzített MAC-címmel kell küldenie. Ez a DHCP-lejárat
         # után más géphez kerülő IP és a LAN-on belüli IP-hamisítás
         # ellen véd. A MAC-t a portál az ARP-táblából rögzíti.
+        # A portos szabályoknál csak az eredeti irányt (a kliens csomagjait)
+        # ellenőrizzük: egy LAN-on lévő DNAT-cél (port proxy forward) válasza
+        # is a LAN-interfészen érkezik, a cél saját IP/MAC párjával, amely
+        # sosem szerepel a client_mac halmazban.
         iifname "__LAN_IF__" ip saddr @allowed_v4 ip saddr . ether saddr != @client_mac limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
         iifname "__LAN_IF__" ip saddr @allowed_v4 ip saddr . ether saddr != @client_mac drop
-        iifname "__LAN_IF__" meta l4proto tcp ct original ip saddr . ct original proto-dst @allowed_tcp ip saddr . ether saddr != @client_mac limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
-        iifname "__LAN_IF__" meta l4proto tcp ct original ip saddr . ct original proto-dst @allowed_tcp ip saddr . ether saddr != @client_mac drop
-        iifname "__LAN_IF__" meta l4proto udp ct original ip saddr . ct original proto-dst @allowed_udp ip saddr . ether saddr != @client_mac limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
-        iifname "__LAN_IF__" meta l4proto udp ct original ip saddr . ct original proto-dst @allowed_udp ip saddr . ether saddr != @client_mac drop
+        iifname "__LAN_IF__" meta l4proto tcp ct direction original ct original ip saddr . ct original proto-dst @allowed_tcp ip saddr . ether saddr != @client_mac limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
+        iifname "__LAN_IF__" meta l4proto tcp ct direction original ct original ip saddr . ct original proto-dst @allowed_tcp ip saddr . ether saddr != @client_mac drop
+        iifname "__LAN_IF__" meta l4proto udp ct direction original ct original ip saddr . ct original proto-dst @allowed_udp ip saddr . ether saddr != @client_mac limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
+        iifname "__LAN_IF__" meta l4proto udp ct direction original ct original ip saddr . ct original proto-dst @allowed_udp ip saddr . ether saddr != @client_mac drop
         iifname "__LAN_IF__" ip saddr @allowed_icmp ip saddr . ether saddr != @client_mac limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
         iifname "__LAN_IF__" ip saddr @allowed_icmp ip saddr . ether saddr != @client_mac drop
 
@@ -364,6 +398,21 @@ table inet hatarvedelem {
         # őrbejegyzése ne vágja el a proxykapcsolatokat. A nem engedélyezett
         # LAN-kliens TCP 80-ját a prerouting továbbra is a portálra
         # irányítja; az engedélyezettét nem, ezért a LAN-on a 80 is kell.
+        # A proxy-tiltott forrás 80/443-a a proxy-elfogadás előtt, a
+        # HV_PROXY-tól függetlenül eldobódik (kikapcsolt proxynál ártalmatlan).
+        # Állapotfüggetlen, ezért a meglévő kapcsolatokat is elvágja.
+        ip saddr @proxy_banned_v4 tcp dport { 80, 443 } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=proxy-ban " group __DROP_LOG_GROUP__
+        ip saddr @proxy_banned_v4 tcp dport { 80, 443 } drop
+        # Port proxy (input): a redirectelt folyam csak akkor megy át, ha a
+        # (kliens IP, EREDETI hallgató port) pár az allowed_input_* halmazban
+        # van; különben csomagonként, naplózva eldobódik (reason=portproxy),
+        # ezért a visszavont engedély a meglévő kapcsolatot is elvágja. A
+        # fail2ban-drop, a blokk, a MAC- és a proxy-tiltás ellenőrzése után,
+        # de a 80/443 proxy-elfogadás, a host-őrök és az established-accept
+        # előtt fut: így a redirect célja (pl. 443) sem nyit meg a nem
+        # engedélyezett kliensnek semmit. A forward proxyhoz nem kell külön
+        # szabály: a forward lánc ct original szabálya engedélyezi.
+        jump portproxy_input
         __PROXY__iifname "__WAN_IF__" tcp dport { 80, 443 } accept
         __PROXY__iifname "__LAN_IF__" tcp dport { 80, 443 } ip saddr . ether saddr @client_mac accept
 
@@ -497,6 +546,12 @@ table inet hatarvedelem {
     }
 
     chain postrouting {
+        # A forward port proxy kért SNAT-ja az általános masquerade előtt.
+        jump portproxy_snat
         oifname "__WAN_IF__" ip saddr __LAN_NET__ masquerade
+    }
+
+    chain portproxy_prerouting {
+        jump portproxy_nat
     }
 }

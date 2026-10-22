@@ -31,6 +31,7 @@ REQUIRED_RUNTIME_FILES = {
     "icon.png",
     "blocked.png",
     "unauthorized.png",
+    "sus.png",
     "services.json",
     "VERSION",
 }

@@ -95,12 +95,19 @@ BAN_EVENT_KIND = "ban"
 # megmaradnak, és a részletes JSON-ban láthatók.
 BAN_GROUP = "ban"
 DROP_GROUP = "drop"
+# A proxy tiltóoldala (401): alkalmazásszintű sor, nem csomag; a portál írja
+# közvetlenül a tárba, ezért a fail2ban drop-jelzéseit nem táplálja.
+PROXY_DROP_REASON = "proxy-unauthorized"
+PROXY_GROUP = "proxy"
 
 
 def reason_group(reason: str) -> str:
-    """A sor felületi kategóriája: fail2ban vagy DROP."""
-    if str(reason or "").strip().lower() == BAN_EVENT_REASON:
+    """A sor felületi kategóriája: fail2ban, proxy vagy DROP."""
+    reason = str(reason or "").strip().lower()
+    if reason == BAN_EVENT_REASON:
         return BAN_GROUP
+    if reason == PROXY_DROP_REASON:
+        return PROXY_GROUP
     return DROP_GROUP
 
 

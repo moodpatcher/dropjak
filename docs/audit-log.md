@@ -32,9 +32,17 @@ Every entry has these common fields:
 
 Event-specific fields follow. String values are truncated to 500 characters;
 scalars are kept as-is. `GET /api/admin/logs` returns newest-first entries and
-supports `limit`, `event`, `user`, `q`, `before` and `severity` filters. The
-**Logs** admin tab exposes those filters, including a **Szint** (severity)
-selector.
+supports `limit`, `event`, `user`, `q`, `before`, `severity` and `ip`
+filters. The **Logs** admin tab exposes those filters, including a **Szint**
+(severity) selector and an **IP-cím / CIDR** field.
+
+The `ip` filter takes a single IPv4/IPv6 address or a CIDR range
+(`192.168.10.0/24`); anything else is a 400 with a Hungarian error. It
+matches when any of `ip`, `target`, `target_ip`, `session_ip` or
+`request_ip` holds an address inside the range, so admin actions on an
+address (e.g. a ban or unban, which carry it in `target`) are found too.
+Like the other filters it is applied while reading every rotated file,
+before `limit`, and combines with `before` paging.
 
 The `event` filter is case-insensitive and separator-insensitive:
 `access_granted`, `ACCESS-GRANTED` and `access granted` all match. The admin
@@ -122,7 +130,21 @@ lost on restart.
   `registration_failed`.
 - **Access:** `access_granted`, `access_modified`, `access_denied`,
   `access_revoked`, `portal_opened`, `portal_host_redirect` (foreign Host
-  header; the host is truncated). Access entries carry `direction`
+  header; the host is truncated), `portal_https_redirect` (a WAN client
+  opened the plain HTTP portal directly and was sent to the HTTPS portal on
+  the first proxy root domain; `target`), `proxy_page_opened` (a page navigation
+  let through to a subdomain-proxy entry: `host`, `path` without query,
+  at most 200 characters, `visibility`, `user` empty for public entries),
+  `proxy_challenge_shown` (an entry's challenge page was served to a page
+  navigation: `host`, `path`, `user`, `triggers` = comma-separated fired
+  trigger ids), `proxy_challenge_passed` (captcha solved, pass cookie set:
+  `host`, `triggers`) and `proxy_challenge_failed` (warning; captcha rejected
+  and counted as a proxy fail2ban hit: `host`, `triggers`, `reason`). For an
+  unknown or disabled subdomain covered by an uploaded certificate the three
+  challenge events carry `unknown_host: true` instead of `triggers` (no
+  `user`), and `passed` sets no pass cookie (the page goes to the root
+  portal). The Logs tab shows `host` + `path` of proxy events as the first,
+  bold detail line. Access entries carry `direction`
   (`forward`, `input`, or `mixed` when a collection rule grants in both
   directions); `ports`/`ports_label` show the union of the granted ports.
 - **Sessions:** `session_replaced` (a new login from the same IP drops older
@@ -132,7 +154,11 @@ lost on restart.
   `session_reaper_error`, `session_shutdown_error`.
 - **Admin:** denied and rejected requests (`admin_denied`,
   `admin_request_rejected`, `admin_action_failed`), user/group/rule CRUD,
-  settings and fail2ban changes, session termination, TOTP reset, admin
+  settings and fail2ban changes (proxy certificate upload/delete as
+  `admin_settings_changed` with `action=proxy_cert_upload|proxy_cert_delete`
+  and only `target` root, `sans`, `not_after`, `fingerprint`), port proxy
+  changes (`admin_portproxy_changed` with `port_proxies` summary,
+  `port_proxy_count` and the conntrack-flushed `flushed_ports`), session termination, TOTP reset, admin
   provisioning, and `admin_logs_read`.
 - **fail2ban:** `fail2ban_ban` (automatic login/drop bans and manual bans,
   with `source`, `manual`, `attempts`, `user`, `until`,
@@ -142,7 +168,8 @@ lost on restart.
 - **Service and firewall:** `service_start` (configuration counts, TTL,
   fail2ban state, dry-run flag), `service_stop` (real revoked-session count),
   `service_start_failed`, `firewall_error` (flush, health, apply, rollback,
-  revoke), `settings_invalid` and `conntrack_failed`.
+  revoke), `settings_invalid` and `conntrack_failed` (`operation=flush_port`
+  for a port proxy flush, with `ip` set to `<proto>/<port>`).
 - **CLI:** `cli_user_created`, `cli_password_changed`, `cli_user_deleted`,
   `cli_totp_reset`, `cli_fail2ban_ban`, `cli_fail2ban_unban` and
   `cli_action_failed`, with `actor="cli"` where applicable. The CLI uses the
@@ -159,7 +186,7 @@ incident response: replacement, IP change, expiry and forced ending.
 The Logs admin tab loads entries automatically every 5 seconds. Only
 user-initiated reads (opening the tab, **Frissítés**, **Szűrők törlése**) send
 `manual=1`; the automatic refresh does not. A manual read appends
-`admin_logs_read` with the admin user, `limit`, the event/user/severity
+`admin_logs_read` with the admin user, `limit`, the event/user/severity/ip
 filters, `q_present`, `before_present` and the number of returned rows. Query
 text itself is not copied into the audit entry.
 

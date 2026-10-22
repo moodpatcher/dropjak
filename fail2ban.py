@@ -14,9 +14,18 @@ tiltás alá kerülnek, ha soha nem próbálnak belépni: a tiltás a csúszóab
 összegyűlt eldobott csomagok száma vagy a különböző célportok száma alapján
 indul. A DNS és a portál forgalma nem számít.
 
-A három figyelt jelzés egymástól függetlenül kapcsolható: a sikertelen
-belépéseké (``enabled``), az eldobott csomagoké (``drop_count_enabled``) és
-a különböző célportoké (``drop_ports_enabled``). Egyik kapcsoló sem függ a
+A negyedik jelzés a domain proxy jogosulatlan (401) válaszait számolja
+(``record_proxy_unauthorized``). Ennek tiltása szűkebb: az IP a
+``proxy_banned_v4`` halmazba kerül, amely csak a host TCP 80/443-át zárja
+(mindent, amit a Caddy szolgál ki). A portál saját portja és minden más
+hozzáférés marad, így a kliens a sima portálon továbbra is beléphet. A
+proxy-tiltás külön nyilvántartásban él: a teljes tiltással együtt is
+létezhet, és egyik feloldása sem érinti a másikat.
+
+A figyelt jelzések egymástól függetlenül kapcsolhatók: a sikertelen
+belépéseké (``enabled``), az eldobott csomagoké (``drop_count_enabled``),
+a különböző célportoké (``drop_ports_enabled``) és a jogosulatlan
+proxykéréseké (``proxy_enabled``). Egyik kapcsoló sem függ a
 másiktól, és a küszöbök nem lehetnek nullák: a kikapcsolás egyetlen módja a
 kapcsoló. A ``drop_enabled`` mező csak visszamenőleges kompatibilitás miatt
 szerepel a kimenetben; értéke a két drop-mérőszám VAGY kapcsolata.
@@ -65,6 +74,10 @@ MIN_DROP_PORTS = 1
 MAX_DROP_PORTS = 4096
 MIN_DROP_WINDOW = 30
 MAX_DROP_WINDOW = 24 * 60 * 60
+# A domain proxy jogosulatlan (401) válaszai; az időablak a belépésekével
+# azonos tartományú.
+MIN_PROXY_MAX = 1
+MAX_PROXY_MAX = 10000
 MAX_BANS = 4096
 MAX_TRACKED_IPS = 4096
 MAX_DROP_EVENTS = 10000
@@ -174,6 +187,17 @@ DEFAULT_DROP_WINDOW = _clamp(
     MIN_DROP_WINDOW,
     MAX_DROP_WINDOW,
 )
+# Proxy-alapú tiltás: a /api/proxy/auth 401-es válaszai a valódi kliens-IP
+# szerint. Csak a host TCP 80/443-át zárja (proxy_banned_v4).
+DEFAULT_PROXY_ENABLED = _env_bool("HV_FAIL2BAN_PROXY", True)
+DEFAULT_PROXY_MAX = _env_int_in_range(
+    "HV_FAIL2BAN_PROXY_MAX", 20, MIN_PROXY_MAX, MAX_PROXY_MAX
+)
+DEFAULT_PROXY_WINDOW = _clamp(
+    _env_int("HV_FAIL2BAN_PROXY_WINDOW", 600, MIN_WINDOW),
+    MIN_WINDOW,
+    MAX_WINDOW,
+)
 
 # A portál saját, helyi forgalmát (healthcheck, helyi adminisztráció) nem
 # tiltjuk le automatikusan. A 127.0.0.0/8 többi címe (tesztkörnyezet) marad.
@@ -230,6 +254,9 @@ def validate_config(data, current: dict | None = None) -> dict:
         "drop_max": DEFAULT_DROP_MAX,
         "drop_ports": DEFAULT_DROP_PORTS,
         "drop_window_seconds": DEFAULT_DROP_WINDOW,
+        "proxy_enabled": DEFAULT_PROXY_ENABLED,
+        "proxy_max": DEFAULT_PROXY_MAX,
+        "proxy_window_seconds": DEFAULT_PROXY_WINDOW,
     }
     # A mentett fájlból hiányzó új mezők az alapértéket kapják; a
     # jelenlegi konfiguráció értékei maradnak, ha a kérés nem írja felül.
@@ -263,6 +290,9 @@ def validate_config(data, current: dict | None = None) -> dict:
     if legacy_drop is False:
         drop_count_enabled = False
         drop_ports_enabled = False
+    proxy_enabled = data.get("proxy_enabled", current["proxy_enabled"])
+    if not isinstance(proxy_enabled, bool):
+        raise Fail2banError("a proxy_enabled mező igaz/hamis érték kell")
 
     def integer(name: str, label: str, minimum: int, maximum: int) -> int:
         raw = data.get(name, current[name])
@@ -299,6 +329,15 @@ def validate_config(data, current: dict | None = None) -> dict:
             "drop_window_seconds", "a hálózati időablak",
             MIN_DROP_WINDOW, MAX_DROP_WINDOW,
         ),
+        "proxy_enabled": proxy_enabled,
+        "proxy_max": integer(
+            "proxy_max", "a jogosulatlan proxykérések száma",
+            MIN_PROXY_MAX, MAX_PROXY_MAX,
+        ),
+        "proxy_window_seconds": integer(
+            "proxy_window_seconds", "a proxy időablak",
+            MIN_WINDOW, MAX_WINDOW,
+        ),
     }
 
 
@@ -306,7 +345,7 @@ def _ban_view(record: dict, now: float | None = None) -> dict:
     now = time.time() if now is None else now
     manual = bool(record.get("manual", False))
     source = record.get("source")
-    if source not in ("manual", "login", "drop"):
+    if source not in ("manual", "login", "drop", "proxy"):
         source = "manual" if manual else "login"
     return {
         "ip": record["ip"],
@@ -341,6 +380,9 @@ class Fail2ban:
         drop_max: int = DEFAULT_DROP_MAX,
         drop_ports: int = DEFAULT_DROP_PORTS,
         drop_window_seconds: int = DEFAULT_DROP_WINDOW,
+        proxy_enabled: bool = DEFAULT_PROXY_ENABLED,
+        proxy_max: int = DEFAULT_PROXY_MAX,
+        proxy_window_seconds: int = DEFAULT_PROXY_WINDOW,
         on_ban=None,
     ) -> None:
         self.firewall = firewall
@@ -369,6 +411,11 @@ class Fail2ban:
             "drop_window_seconds": _clamp(
                 drop_window_seconds, MIN_DROP_WINDOW, MAX_DROP_WINDOW
             ),
+            "proxy_enabled": bool(proxy_enabled),
+            "proxy_max": _clamp(proxy_max, MIN_PROXY_MAX, MAX_PROXY_MAX),
+            "proxy_window_seconds": _clamp(
+                proxy_window_seconds, MIN_WINDOW, MAX_WINDOW
+            ),
         }
         # IP -> {"times": [timestamp, ...], "user": str}; nem perzisztált.
         self._attempts: dict[str, dict] = {}
@@ -378,6 +425,11 @@ class Fail2ban:
         self._drop_event_count = 0
         # IP -> ban rekord; perzisztált.
         self._bans: dict[str, dict] = {}
+        # IP -> a 401-es proxyválaszok időbélyegei; nem perzisztált.
+        self._proxy_hits: dict[str, list[float]] = {}
+        # IP -> proxy-tiltás (csak TCP 80/443) rekordja; perzisztált, a
+        # teljes tiltástól független nyilvántartás.
+        self._proxy_bans: dict[str, dict] = {}
         # Az evictionkor sikertelenül feloldott kernel-elemek címei. Nem
         # perzisztált; a következő műveleteknél újrapróbáljuk a törlést,
         # hogy ne maradjon láthatatlan, akár 30 napig élő tiltás.
@@ -571,9 +623,23 @@ class Fail2ban:
             if len(bans) >= MAX_BANS:
                 break
             bans[record["ip"]] = record
+        # A régi fájlban nincs proxy_bans: üres lista.
+        proxy_bans: dict[str, dict] = {}
+        raw_proxy = raw.get("proxy_bans", [])
+        if not isinstance(raw_proxy, list):
+            raw_proxy = []
+        for item in raw_proxy:
+            record = self._parse_record(item, now)
+            if record is None:
+                continue
+            if len(proxy_bans) >= MAX_BANS:
+                break
+            record.update(source="proxy", manual=False, detail="")
+            proxy_bans[record["ip"]] = record
         with self._lock:
             self._config = config
             self._bans = bans
+            self._proxy_bans = proxy_bans
             self._error = ""
             self._disk_stamp = stamp
 
@@ -617,10 +683,8 @@ class Fail2ban:
         }
 
     def _payload_locked(self) -> dict:
-        return {
-            "version": 1,
-            "config": dict(self._config),
-            "bans": [
+        def rows(bans: dict[str, dict]) -> list[dict]:
+            return [
                 {
                     "ip": record["ip"],
                     "since": record["since"],
@@ -632,9 +696,15 @@ class Fail2ban:
                     "detail": record.get("detail", ""),
                 }
                 for record in sorted(
-                    self._bans.values(), key=lambda row: row["since"]
+                    bans.values(), key=lambda row: row["since"]
                 )
-            ],
+            ]
+
+        return {
+            "version": 1,
+            "config": dict(self._config),
+            "bans": rows(self._bans),
+            "proxy_bans": rows(self._proxy_bans),
         }
 
     def _state_owner(self, directory: str) -> tuple[int, int] | None:
@@ -900,6 +970,176 @@ class Fail2ban:
         self._notify(view)
         return view
 
+    def record_proxy_unauthorized(self, ip: str) -> dict | None:
+        """Egy jogosulatlan (401) domain-proxy válasz rögzítése.
+
+        A ``/api/proxy/auth`` hívja a valódi kliens-IP-vel (a Caddy XFF-
+        értéke), csak privát bejegyzés 401-es válaszánál. A teljesen vagy
+        proxyra tiltott IP nem számít tovább. A sikeres proxykérés a
+        számlálót nem nullázza: a drop-számlálókhoz hasonlóan csak a
+        csúszóablak felejt. Küszöbnél a tiltás csak a TCP 80/443-at zárja.
+        """
+        try:
+            address = normalize_ip(ip)
+        except Fail2banError:
+            return None
+        with self._lock:
+            self._refresh_locked()
+            if not self._config["proxy_enabled"]:
+                return None
+            now = time.time()
+            for bans in (self._bans, self._proxy_bans):
+                existing = bans.get(address)
+                if existing is not None:
+                    if existing["until"] > now:
+                        return None
+                    del bans[address]
+            window = self._config["proxy_window_seconds"]
+            times = [
+                stamp for stamp in self._proxy_hits.get(address, ())
+                if now - stamp <= window
+            ]
+            times.append(now)
+            self._proxy_hits[address] = times
+            if len(times) < self._config["proxy_max"]:
+                if len(self._proxy_hits) > MAX_TRACKED_IPS:
+                    self._prune_proxy_hits_locked(now)
+                return None
+            record = self._proxy_ban_locked(
+                address, self._config["ban_seconds"], attempts=len(times)
+            )
+            view = _ban_view(record, time.time())
+        self._notify(view)
+        return view
+
+    def _prune_proxy_hits_locked(self, now: float) -> None:
+        window = self._config["proxy_window_seconds"]
+        for ip, times in list(self._proxy_hits.items()):
+            times = [stamp for stamp in times if now - stamp <= window]
+            if times:
+                self._proxy_hits[ip] = times
+            else:
+                del self._proxy_hits[ip]
+        if len(self._proxy_hits) > MAX_TRACKED_IPS:
+            ordered = sorted(
+                self._proxy_hits.items(), key=lambda pair: pair[1][-1]
+            )
+            for ip, _ in ordered[: len(self._proxy_hits) - MAX_TRACKED_IPS]:
+                del self._proxy_hits[ip]
+
+    def _proxy_ban_locked(
+        self, address: str, seconds: int, attempts: int = 0
+    ) -> dict:
+        """Proxy-tiltás (proxy_banned_v4): kernel -> memória -> mentés."""
+        seconds = _clamp(int(seconds), MIN_BAN, MAX_BAN)
+        now = time.time()
+        try:
+            self.firewall.proxy_ban(address, seconds)
+        except Exception as exc:
+            raise Fail2banError(
+                f"a(z) {address} proxy-tiltása nem sikerült: {exc}"
+            ) from exc
+        existing = self._proxy_bans.get(address)
+        if len(self._proxy_bans) >= MAX_BANS and existing is None:
+            oldest = min(
+                self._proxy_bans.values(), key=lambda row: row["since"]
+            )
+            # shortcut: a sikertelen kernel-feloldás nem kerül újrapróbálási
+            # sorba (a timeout lejáratja); ha ez számít, az árva-sor kell.
+            try:
+                self.firewall.proxy_unban(oldest["ip"])
+            except Exception as exc:
+                self.log(
+                    f"[fail2ban] a(z) {oldest['ip']} kikerülő proxy-"
+                    f"tiltásának kernel-feloldása nem sikerült: {exc}"
+                )
+            del self._proxy_bans[oldest["ip"]]
+            self._write_audit(
+                "fail2ban_ban_evicted", ip=oldest["ip"], reason="max_bans",
+                source="proxy",
+            )
+        record = {
+            "ip": address,
+            "since": existing["since"] if existing is not None else now,
+            "until": now + seconds,
+            "attempts": max(
+                int(attempts or 0), (existing or {}).get("attempts", 0)
+            ),
+            "user": "",
+            "manual": False,
+            "source": "proxy",
+            "detail": "",
+        }
+        self._proxy_bans[address] = record
+        self._proxy_hits.pop(address, None)
+        self._save_locked(raise_errors=False)
+        return record
+
+    def proxy_banned(self, ip: str) -> dict | None:
+        """Az IP aktív proxy-tiltása (csak TCP 80/443), vagy None."""
+        try:
+            address = normalize_ip(ip)
+        except Fail2banError:
+            return None
+        now = time.time()
+        with self._lock:
+            self._refresh_locked()
+            record = self._proxy_bans.get(address)
+            if record is None:
+                return None
+            if record["until"] <= now:
+                del self._proxy_bans[address]
+                return None
+            return _ban_view(record, now)
+
+    def last_hit(self, ip: str, proxy_only: bool = False) -> float:
+        """Az IP függő (időablakon belüli) számlálóinak legutóbbi találata.
+
+        Csak olvas (a proxy challenge-feltételeihez); 0, ha egyik aktív
+        számláló sem fut rá. ``proxy_only``: csak a proxy-401-ek.
+        """
+        try:
+            address = normalize_ip(ip)
+        except Fail2banError:
+            return 0.0
+        now = time.time()
+        with self._lock:
+            self._refresh_locked()
+            config = self._config
+            stamps = []
+            if config["proxy_enabled"]:
+                stamps += [
+                    stamp for stamp in self._proxy_hits.get(address, ())
+                    if now - stamp <= config["proxy_window_seconds"]
+                ]
+            if not proxy_only:
+                if config["enabled"]:
+                    stamps += [
+                        stamp for stamp in
+                        (self._attempts.get(address) or {}).get("times", ())
+                        if now - stamp <= config["window_seconds"]
+                    ]
+                if any(_drop_metric_state(config)):
+                    stamps += [
+                        event[0] for event in
+                        (self._drop_events.get(address) or {}).get("events", ())
+                        if now - event[0] <= config["drop_window_seconds"]
+                    ]
+        return max(stamps, default=0.0)
+
+    def _kernel_ban(self, record: dict, ttl: int) -> None:
+        """Egy felszabadított rekord visszaállítása a saját halmazába."""
+        if record.get("source") == "proxy":
+            self.firewall.proxy_ban(record["ip"], ttl)
+        else:
+            self.firewall.ban(record["ip"], ttl)
+
+    def _bans_of(self, record: dict) -> dict[str, dict]:
+        return (
+            self._proxy_bans if record.get("source") == "proxy"
+            else self._bans
+        )
+
     def record_success(self, ip: str) -> None:
         """Sikeres belépés után a próbálkozások nullázása (a tiltás marad)."""
         try:
@@ -1035,20 +1275,28 @@ class Fail2ban:
         self._notify(view)
         return view
 
-    def unban(self, ip: str) -> bool:
-        """Egy tiltás feloldása a kernelben és a nyilvántartásban."""
+    def unban(self, ip: str, proxy: bool = False) -> bool:
+        """Egy tiltás feloldása a kernelben és a nyilvántartásban.
+
+        ``proxy=True`` csak a proxy-tiltást (TCP 80/443) oldja fel, egyébként
+        csak a teljes tiltást; a másik fajta érintetlen marad.
+        """
         address = normalize_ip(ip)
         with self._lock:
             self._refresh_locked()
-            known = address in self._bans
+            bans = self._proxy_bans if proxy else self._bans
+            known = address in bans
             try:
-                self.firewall.unban(address)
+                if proxy:
+                    self.firewall.proxy_unban(address)
+                else:
+                    self.firewall.unban(address)
             except Exception as exc:
                 raise Fail2banError(
                     f"a(z) {address} tiltásának feloldása nem sikerült: {exc}"
                 ) from exc
             if known:
-                del self._bans[address]
+                del bans[address]
                 self._save_locked(raise_errors=False)
         return known
 
@@ -1067,6 +1315,17 @@ class Fail2ban:
                     )
                     continue
                 del self._bans[address]
+                removed += 1
+            for address in list(self._proxy_bans):
+                try:
+                    self.firewall.proxy_unban(address)
+                except Exception as exc:
+                    self.log(
+                        f"[fail2ban] a(z) {address} proxy-feloldása nem "
+                        f"sikerült: {exc}"
+                    )
+                    continue
+                del self._proxy_bans[address]
                 removed += 1
             if removed:
                 self._save_locked(raise_errors=False)
@@ -1097,6 +1356,23 @@ class Fail2ban:
             failed: list[tuple[dict, Exception]] = []
             release_login = was_enabled and not new_config["enabled"]
             release_drop = was_drop and not new_config["drop_enabled"]
+            release_proxy = (
+                self._config["proxy_enabled"]
+                and not new_config["proxy_enabled"]
+            )
+            if release_proxy:
+                for address, record in list(self._proxy_bans.items()):
+                    try:
+                        self.firewall.proxy_unban(address)
+                    except Exception as exc:
+                        failed.append((dict(record), exc))
+                        self.log(
+                            f"[fail2ban] a(z) {address} proxy-feloldása nem "
+                            f"sikerült: {exc}"
+                        )
+                        continue
+                    released.append(dict(record))
+                    del self._proxy_bans[address]
             if release_login or release_drop:
                 for address, record in list(self._bans.items()):
                     if record["manual"]:
@@ -1127,7 +1403,7 @@ class Fail2ban:
                 for record in released:
                     remaining = max(1, int(record["until"] - time.time()))
                     try:
-                        self.firewall.ban(record["ip"], remaining)
+                        self._kernel_ban(record, remaining)
                         restored += 1
                     except Exception as exc:
                         self._error = str(exc)
@@ -1140,7 +1416,7 @@ class Fail2ban:
                             ip=record["ip"],
                             reason=str(exc),
                         )
-                    self._bans[record["ip"]] = record
+                    self._bans_of(record)[record["ip"]] = record
                 self._write_audit(
                     "fail2ban_bans_release_failed",
                     count=len(failed),
@@ -1160,7 +1436,7 @@ class Fail2ban:
                 for record in released:
                     remaining = max(1, int(record["until"] - time.time()))
                     try:
-                        self.firewall.ban(record["ip"], remaining)
+                        self._kernel_ban(record, remaining)
                     except Exception as exc:
                         self._error = str(exc)
                         self.log(
@@ -1174,7 +1450,7 @@ class Fail2ban:
                         )
                     # A rekordot a sikertelen újratiltás után is vissza kell
                     # tenni: a felület ne felejtse el a tiltást.
-                    self._bans[record["ip"]] = record
+                    self._bans_of(record)[record["ip"]] = record
                 raise
             if not new_config["enabled"]:
                 self._attempts.clear()
@@ -1193,24 +1469,38 @@ class Fail2ban:
             ):
                 self._drop_events.clear()
                 self._drop_event_count = 0
+            if any(
+                previous[key] != new_config[key]
+                for key in ("proxy_enabled", "proxy_max", "proxy_window_seconds")
+            ):
+                self._proxy_hits.clear()
             if released:
                 # A naplóban a forrás szerinti bontás is szerepel, hogy a
                 # belépés és a drop együttes kikapcsolása ne veszítse el
                 # a drop-rész információját.
                 login_count = sum(
                     1 for record in released
-                    if release_login and record.get("source") != "drop"
+                    if release_login
+                    and record.get("source") not in ("drop", "proxy")
                 )
                 drop_count = sum(
                     1 for record in released
                     if release_drop and record.get("source") == "drop"
                 )
+                proxy_count = sum(
+                    1 for record in released if record.get("source") == "proxy"
+                )
                 self._write_audit(
                     "fail2ban_bans_released",
                     count=len(released),
-                    reason="disabled" if release_login else "drop_disabled",
+                    reason=(
+                        "disabled" if release_login
+                        else "drop_disabled" if release_drop
+                        else "proxy_disabled"
+                    ),
                     login_count=login_count,
                     drop_count=drop_count,
+                    proxy_count=proxy_count,
                 )
             return self.snapshot()
 
@@ -1233,14 +1523,26 @@ class Fail2ban:
             ]
             for address in expired:
                 del self._bans[address]
-            elements = []
-            for record in self._bans.values():
-                remaining = int(record["until"] - now)
-                if remaining <= 0:
-                    continue
-                elements.append((record["ip"], max(1, remaining)))
+            proxy_expired = [
+                address
+                for address, record in self._proxy_bans.items()
+                if record["until"] <= now
+            ]
+            for address in proxy_expired:
+                del self._proxy_bans[address]
+            expired += proxy_expired
+
+            def elements_of(bans: dict[str, dict]) -> list[tuple[str, int]]:
+                return [
+                    (record["ip"], max(1, int(record["until"] - now)))
+                    for record in bans.values()
+                    if int(record["until"] - now) > 0
+                ]
+
+            elements = elements_of(self._bans)
             try:
                 self.firewall.sync_bans(elements)
+                self.firewall.sync_proxy_bans(elements_of(self._proxy_bans))
             except Exception as exc:
                 self._error = str(exc)
                 self.log(
@@ -1272,12 +1574,20 @@ class Fail2ban:
             ]
             for address in expired:
                 del self._bans[address]
+            for address in [
+                address for address, record in self._proxy_bans.items()
+                if record["until"] <= now
+            ]:
+                del self._proxy_bans[address]
             self._prune_attempts_locked(now)
             self._prune_drop_events_locked(now)
+            self._prune_proxy_hits_locked(now)
+            # A proxy-tiltások (source="proxy") ugyanabban a listában jelennek
+            # meg; ugyanaz az IP teljes tiltással együtt kétszer is szerepelhet.
             bans = [
                 _ban_view(record, now)
                 for record in sorted(
-                    self._bans.values(),
+                    [*self._bans.values(), *self._proxy_bans.values()],
                     key=lambda row: (row["until"], row["ip"]),
                 )
             ]
@@ -1339,6 +1649,7 @@ class Fail2ban:
                 key=lambda row: (row["count"], row["distinct_ports"]),
                 reverse=True,
             )
+            proxy_pending = len(self._proxy_hits)
             error = self._error
         return {
             "enabled": config["enabled"],
@@ -1353,6 +1664,10 @@ class Fail2ban:
             "drop_max": config["drop_max"],
             "drop_ports": config["drop_ports"],
             "drop_window_seconds": config["drop_window_seconds"],
+            "proxy_enabled": config["proxy_enabled"],
+            "proxy_max": config["proxy_max"],
+            "proxy_window_seconds": config["proxy_window_seconds"],
+            "proxy_pending": proxy_pending,
             "limits": {
                 "min_attempts": MIN_ATTEMPTS,
                 "max_attempts": MAX_ATTEMPTS,
@@ -1366,6 +1681,8 @@ class Fail2ban:
                 "max_drop_ports": MAX_DROP_PORTS,
                 "min_drop_window": MIN_DROP_WINDOW,
                 "max_drop_window": MAX_DROP_WINDOW,
+                "min_proxy_max": MIN_PROXY_MAX,
+                "max_proxy_max": MAX_PROXY_MAX,
             },
             "bans": bans,
             "banned_count": len(bans),
@@ -1394,5 +1711,6 @@ class Fail2ban:
             "drop_max": snapshot["drop_max"],
             "drop_ports": snapshot["drop_ports"],
             "drop_window_seconds": snapshot["drop_window_seconds"],
+            "proxy_enabled": snapshot["proxy_enabled"],
             "error": snapshot["error"],
         }
