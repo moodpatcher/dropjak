@@ -636,6 +636,11 @@
   .tunnel-agent-actions button{padding:5px 8px;font-size:12px;min-height:32px}
   .tunnel-meta{display:flex;flex-wrap:wrap;gap:4px 16px;margin:8px 0 0;font-size:12px;color:var(--muted)}
   .tunnel-meta b{font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
+  /* Enrollment: status note and the one-time token box. */
+  .tunnel-enroll-note{margin:8px 0 0}
+  .tunnel-enroll-token{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin:8px 0 0;padding:8px 10px;font-size:12px;background:var(--amber-bg);border:1px solid var(--amber-line);border-radius:7px}
+  .tunnel-enroll-code{min-width:0;overflow-wrap:anywhere;user-select:all}
+  .tunnel-enroll-token button{padding:5px 8px;font-size:12px;min-height:32px}
   /* Agent status refresh: compact button and last-checked time. */
   .tunnel-status-bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin:0 0 12px}
   .tunnel-status-bar button{padding:5px 9px;font-size:12px;min-height:32px;display:inline-flex;align-items:center;gap:6px}
@@ -3398,6 +3403,18 @@ const I18N = {
     'Frissítés…': 'Refreshing…',
     'Ellenőrizve:': 'Checked:',
     'Az állapot frissítése nem sikerült.': 'Refreshing the status failed.',
+    // Agent enrollment (the agent generates its own keys).
+    'Újrabeléptetés': 'Re-enroll',
+    'Az újrabeléptetés nem sikerült.': 'Re-enrolling failed.',
+    'beléptetésre vár': 'waiting for enrollment',
+    'beléptetés lejárt': 'enrollment expired',
+    'Beléptető kód (csak most látható, egyszer használható):': 'Enrollment token (shown only now, single use):',
+    'A kód a vágólapra került.': 'The token was copied to the clipboard.',
+    'Beléptetésre vár: futtasd a letöltött telepítőt.': 'Waiting for enrollment: run the downloaded installer.',
+    'Beléptetésre vár. A kód már nem látható; új telepítőhöz léptesd be újra.': 'Waiting for enrollment. The token is no longer shown; re-enroll to get a new installer.',
+    'A beléptető kód lejárt; léptesd be újra az ügynököt.': 'The enrollment token has expired; re-enroll the agent.',
+    'Régi, a portálon előállított kulcsok. Újrabeléptetés javasolt: utána a portál csak a nyilvános kulcsot tárolja.': 'Legacy keys generated on the portal. Re-enrolling is recommended: afterwards the portal stores only the public key.',
+    'A telepítő letöltése nem sikerült.': 'Downloading the installer failed.',
     // Reachability test and the reworked agent/service list.
     'Elérés': 'Access',
     'Teszt': 'Test',
@@ -4429,6 +4446,18 @@ const I18N = {
     'Frissítés…': 'Aktualisierung…',
     'Ellenőrizve:': 'Geprüft:',
     'Az állapot frissítése nem sikerült.': 'Die Statusaktualisierung ist fehlgeschlagen.',
+    // Agent enrollment (the agent generates its own keys).
+    'Újrabeléptetés': 'Neu registrieren',
+    'Az újrabeléptetés nem sikerült.': 'Die Neuregistrierung ist fehlgeschlagen.',
+    'beléptetésre vár': 'wartet auf Registrierung',
+    'beléptetés lejárt': 'Registrierung abgelaufen',
+    'Beléptető kód (csak most látható, egyszer használható):': 'Registrierungscode (nur jetzt sichtbar, einmal verwendbar):',
+    'A kód a vágólapra került.': 'Der Code wurde in die Zwischenablage kopiert.',
+    'Beléptetésre vár: futtasd a letöltött telepítőt.': 'Wartet auf Registrierung: Führe das heruntergeladene Installationsprogramm aus.',
+    'Beléptetésre vár. A kód már nem látható; új telepítőhöz léptesd be újra.': 'Wartet auf Registrierung. Der Code ist nicht mehr sichtbar; registriere neu, um ein neues Installationsprogramm zu erhalten.',
+    'A beléptető kód lejárt; léptesd be újra az ügynököt.': 'Der Registrierungscode ist abgelaufen; registriere den Agenten neu.',
+    'Régi, a portálon előállított kulcsok. Újrabeléptetés javasolt: utána a portál csak a nyilvános kulcsot tárolja.': 'Alte, auf dem Portal erzeugte Schlüssel. Eine Neuregistrierung wird empfohlen: danach speichert das Portal nur den öffentlichen Schlüssel.',
+    'A telepítő letöltése nem sikerült.': 'Das Herunterladen des Installationsprogramms ist fehlgeschlagen.',
     // Availability test and the redesigned agent/service list.
     'Elérés': 'Erreichbarkeit',
     'Teszt': 'Test',
@@ -4593,6 +4622,9 @@ const I18N_PATTERNS = {
     [/^Biztosan alaphelyzetbe állítod a 2FA-t: (.+)\? A nyitott munkamenetei lezárulnak\.$/, m => `Reset two-factor authentication for ${m[1]}? Their open sessions will end.`],
     [/^(.+) 2FA beállítása alaphelyzetbe állítva\.$/, m => `Two-factor authentication for ${m[1]} has been reset.`],
     [/^Biztosan törlöd az ügynököt: (.+)\? A szolgáltatásai is törlődnek\.$/, m => `Delete agent ${m[1]}? Its services will also be deleted.`],
+    [/^Újrabeléptetés: (.+)\. A tárolt kulcsok és a szinkron kód törlődnek, a futó ügynök lekapcsolódik, amíg az új telepítővel be nem lép\.$/, m => `Re-enroll ${m[1]}: the stored keys and the sync token are deleted, and the running agent disconnects until it enrolls with the new installer.`],
+    [/^A telepítő letöltődött\. Másold a másik gépre, majd: sudo sh (\S+) — az ügynök maga állítja elő a kulcsait, és az egyszer használható beléptető kóddal jelentkezik be \(30 percig érvényes\)\.$/, m => `The installer has been downloaded. Copy it to the other machine, then run: sudo sh ${m[1]} — the agent generates its own keys and enrolls with the single-use token (valid for 30 minutes).`],
+    [/^A telepítő letöltődött\. Másold a másik gépre, majd: sudo sh (\S+) — az agent\.json WireGuard titkos kulcsot is tartalmaz, őrizd bizalmasan\.$/, m => `The installer has been downloaded. Copy it to the other machine, then run: sudo sh ${m[1]} — agent.json also contains the WireGuard private key; keep it confidential.`],
     [/^Biztosan törlöd a szolgáltatást: (.+)\?$/, m => `Delete service ${m[1]}?`],
     [/^hálózati hiba: (.+)$/, m => `network error: ${m[1]}`],
     [/^tunnel: a WireGuard port 1024 és 65535 között lehet$/, 'tunnel: the WireGuard port must be between 1024 and 65535'],
@@ -4801,6 +4833,9 @@ const I18N_PATTERNS = {
     [/^Biztosan alaphelyzetbe állítod a 2FA-t: (.+)\? A nyitott munkamenetei lezárulnak\.$/, m => `Zwei-Faktor-Authentifizierung für ${m[1]} zurücksetzen? Die offenen Sitzungen werden beendet.`],
     [/^(.+) 2FA beállítása alaphelyzetbe állítva\.$/, m => `Die Zwei-Faktor-Authentifizierung für ${m[1]} wurde zurückgesetzt.`],
     [/^Biztosan törlöd az ügynököt: (.+)\? A szolgáltatásai is törlődnek\.$/, m => `Agent ${m[1]} wirklich löschen? Seine Dienste werden ebenfalls gelöscht.`],
+    [/^Újrabeléptetés: (.+)\. A tárolt kulcsok és a szinkron kód törlődnek, a futó ügynök lekapcsolódik, amíg az új telepítővel be nem lép\.$/, m => `${m[1]} neu registrieren: Die gespeicherten Schlüssel und der Synchronisationscode werden gelöscht, und der laufende Agent trennt sich, bis er sich mit dem neuen Installationsprogramm registriert.`],
+    [/^A telepítő letöltődött\. Másold a másik gépre, majd: sudo sh (\S+) — az ügynök maga állítja elő a kulcsait, és az egyszer használható beléptető kóddal jelentkezik be \(30 percig érvényes\)\.$/, m => `Das Installationsprogramm wurde heruntergeladen. Kopiere es auf den anderen Rechner und führe dann aus: sudo sh ${m[1]} — der Agent erzeugt seine Schlüssel selbst und registriert sich mit dem einmal verwendbaren Code (30 Minuten gültig).`],
+    [/^A telepítő letöltődött\. Másold a másik gépre, majd: sudo sh (\S+) — az agent\.json WireGuard titkos kulcsot is tartalmaz, őrizd bizalmasan\.$/, m => `Das Installationsprogramm wurde heruntergeladen. Kopiere es auf den anderen Rechner und führe dann aus: sudo sh ${m[1]} — agent.json enthält auch den privaten WireGuard-Schlüssel; behandle es vertraulich.`],
     [/^Biztosan törlöd a szolgáltatást: (.+)\?$/, m => `Dienst ${m[1]} wirklich löschen?`],
     [/^hálózati hiba: (.+)$/, m => `Netzwerkfehler: ${m[1]}`],
     [/^tunnel: a WireGuard port 1024 és 65535 között lehet$/, 'tunnel: Der WireGuard-Port muss zwischen 1024 und 65535 liegen'],
@@ -5305,6 +5340,8 @@ let adminFlash = null;        // {text, kind}
 let adminEdit = null;         // {kind:'user'|'group'|'rule', id:string|null}
 let adminDraft = null;        // preserved form values after an error
 let tunnelDeleteConfirm = null; // {kind:'agent'|'service', id, agentId?}
+let tunnelReenrollConfirm = null; // agent id awaiting the re-enroll confirmation
+let tunnelEnrollTokens = new Map(); // agent id -> {token, expires}; memory only
 let tunnelTestResults = new Map(); // `agentId/serviceId` -> test result
 let tunnelTestTimers = new Map();  // timers for hiding the test result
 const TUNNEL_TEST_RESULT_TTL_MS = 60000; // disappears after 1 minute
@@ -7191,6 +7228,7 @@ async function adminSend(path, payload) {
     adminEdit = null;
     adminDraft = null;
     tunnelDeleteConfirm = null;
+    tunnelReenrollConfirm = null;
     fail2banDraft = null;
     renderAdminPanel();
     return true;
@@ -8680,6 +8718,8 @@ const AUDIT_EVENT_LABELS = {
   tunnel_service_test: ['Alagút-szolgáltatás tesztelve', 'Tunnel service tested', 'Tunnel-Dienst getestet'],
   tunnel_agent_config_downloaded: ['Alagút-ügynök konfiguráció letöltve', 'Tunnel agent config downloaded', 'Tunnel-Agent-Konfiguration heruntergeladen'],
   tunnel_config_failed: ['Alagút-konfiguráció sikertelen', 'Tunnel configuration failed', 'Tunnel-Konfiguration fehlgeschlagen'],
+  tunnel_agent_enrolled: ['Alagút-ügynök beléptetve', 'Tunnel agent enrolled', 'Tunnel-Agent registriert'],
+  tunnel_enroll_failed: ['Alagút-ügynök beléptetése sikertelen', 'Tunnel agent enrollment failed', 'Tunnel-Agent-Registrierung fehlgeschlagen'],
   admin_fail2ban_changed: ['Fail2ban-beállítás módosítva', 'Fail2ban settings changed', 'Fail2ban-Einstellungen geändert'],
   admin_session_terminated: ['Munkamenet lezárva (admin)', 'Session terminated (admin)', 'Sitzung beendet (Admin)'],
   admin_session_terminate_failed: ['Munkamenet lezárása sikertelen', 'Session termination failed', 'Sitzungsbeendigung fehlgeschlagen'],
@@ -11111,7 +11151,22 @@ function tunnelActiveState(agent, now) {
   if (handshakeFresh && syncFresh) return 'active';
   return agent.online ? 'online' : 'offline';
 }
+/* A download needs a legacy agent (its keys are on the portal) or a
+   pending one whose one-time token this page still holds. */
+function tunnelCanDownload(agent) {
+  if (!agent) return false;
+  if (agent.enrollment === 'legacy') return true;
+  return agent.enrollment === 'pending' && tunnelEnrollTokens.has(agent.id);
+}
 function tunnelStatusPill(agent) {
+  // Until the agent enrolls there is no peer, so no handshake to show.
+  if (agent && ['pending', 'expired', 'none'].includes(agent.enrollment)) {
+    return el('span', { class: 'status-pill pending' },
+      el('span', { class: 'dot' }),
+      el('span', {
+        text: tr(agent.enrollment === 'pending' ? 'beléptetésre vár' : 'beléptetés lejárt')
+      }));
+  }
   const state = tunnelActiveState(agent);
   const cls = state === 'disabled' ? ' neutral'
     : (state === 'offline' ? ' pending' : '');
@@ -11290,8 +11345,12 @@ async function downloadTunnelConfig(agent) {
   const url = typeof agent === 'object' && agent !== null && agent.bundle_url
     ? agent.bundle_url
     : `/api/admin/tunnels/${encodeURIComponent(id)}/bundle`;
+  // The gateway keeps only the hash of the one-time enrollment token, so
+  // the download sends the token this page was shown (legacy agents need none).
+  const token = tunnelEnrollTokens.get(id);
+  const headers = token ? { 'X-Dropjak-Enroll-Token': token.token } : {};
   try {
-    const response = await fetch(url, { cache: 'no-store', credentials: 'same-origin' });
+    const response = await fetch(url, { cache: 'no-store', credentials: 'same-origin', headers });
     if (!response.ok) {
       let data = {};
       try { data = await response.json(); } catch (err) { /* not JSON */ }
@@ -11313,20 +11372,35 @@ async function downloadTunnelConfig(agent) {
     link.remove();
     setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
     adminFlash = {
-      text: 'A telepítő letöltődött. Másold a másik gépre, majd: sudo sh dropjak-agent-' + id + '.sh — az agent.json WireGuard titkos kulcsot is tartalmaz, őrizd bizalmasan.',
+      text: token
+        ? tr(`A telepítő letöltődött. Másold a másik gépre, majd: sudo sh dropjak-agent-${id}.sh — az ügynök maga állítja elő a kulcsait, és az egyszer használható beléptető kóddal jelentkezik be (30 percig érvényes).`)
+        : tr(`A telepítő letöltődött. Másold a másik gépre, majd: sudo sh dropjak-agent-${id}.sh — az agent.json WireGuard titkos kulcsot is tartalmaz, őrizd bizalmasan.`),
       kind: 'ok'
     };
   } catch (err) {
     if (adminSessionEnded(err)) return;
-    adminFlash = { text: err.message || 'A telepítő letöltése nem sikerült.', kind: 'err' };
+    adminFlash = { text: err.message || tr('A telepítő letöltése nem sikerült.'), kind: 'err' };
   }
   renderAdminPanel();
+}
+/* The one-time enrollment token arrives only in the add/re-enroll
+   response; it lives in this page's memory (never in storage) for the
+   download and the copy box, until it expires. */
+function tunnelRememberEnrollToken(agentId, data) {
+  if (!agentId || !data || !data.enroll_token) return;
+  const row = ((data.tunnels && data.tunnels.agents) || [])
+    .find(item => item.id === agentId);
+  tunnelEnrollTokens.set(agentId, {
+    token: data.enroll_token,
+    expires: row ? Number(row.enroll_expires) || 0 : 0
+  });
 }
 async function addTunnelAgent(label) {
   try {
     const data = await postJson('/api/admin/settings', {
       action: 'tunnel_agent_add', label
     });
+    tunnelRememberEnrollToken(data.agent_id, data);
     if (data.tunnels) {
       adminState = data;
       renderAdminPanel();
@@ -11339,6 +11413,64 @@ async function addTunnelAgent(label) {
     adminFlash = { text: err.message || 'Az ügynök létrehozása nem sikerült.', kind: 'err' };
     renderAdminPanel();
   }
+}
+/* Re-enroll: the stored keys and tokens are dropped, the running agent
+   disconnects, and a new installer (new token) is downloaded. */
+async function reenrollTunnelAgent(agent) {
+  tunnelReenrollConfirm = null;
+  try {
+    const data = await postJson('/api/admin/settings', {
+      action: 'tunnel_agent_reenroll', id: agent.id
+    });
+    tunnelRememberEnrollToken(agent.id, data);
+    if (data.tunnels) {
+      adminState = data;
+      renderAdminPanel();
+    } else {
+      await loadAdminState();
+    }
+    await downloadTunnelConfig(agent.id);
+  } catch (err) {
+    if (adminSessionEnded(err)) return;
+    adminFlash = { text: err.message || tr('Az újrabeléptetés nem sikerült.'), kind: 'err' };
+    renderAdminPanel();
+  }
+}
+/* The token box: shown only while this page holds the unexpired token. */
+function tunnelEnrollTokenBox(agent) {
+  const entry = tunnelEnrollTokens.get(agent.id);
+  if (!entry || agent.enrollment !== 'pending') return null;
+  const code = el('code', { class: 'mono tunnel-enroll-code', text: entry.token });
+  return el('div', { class: 'tunnel-enroll-token' },
+    el('span', { text: tr('Beléptető kód (csak most látható, egyszer használható):') }),
+    code,
+    el('button', {
+      type: 'button', class: 'ghost small',
+      onclick: async () => {
+        const ok = await copyText(entry.token);
+        adminFlash = {
+          text: tr(ok ? 'A kód a vágólapra került.' : 'A vágólapra másolás nem sikerült.'),
+          kind: ok ? 'ok' : 'err'
+        };
+        renderAdminPanel();
+      }
+    }, tr('Másolás')));
+}
+/* Enrollment status of an agent card: legacy keys, waiting, expired. */
+function tunnelEnrollmentNote(agent) {
+  const state = agent.enrollment;
+  if (state === 'pending') {
+    return tunnelEnrollTokens.has(agent.id)
+      ? tr('Beléptetésre vár: futtasd a letöltött telepítőt.')
+      : tr('Beléptetésre vár. A kód már nem látható; új telepítőhöz léptesd be újra.');
+  }
+  if (state === 'expired' || state === 'none') {
+    return tr('A beléptető kód lejárt; léptesd be újra az ügynököt.');
+  }
+  if (state === 'legacy') {
+    return tr('Régi, a portálon előállított kulcsok. Újrabeléptetés javasolt: utána a portál csak a nyilvános kulcsot tárolja.');
+  }
+  return '';
 }
 /* Only one editor can be open at a time: the agent and
    service editors use the same adminEdit state. */
@@ -11741,6 +11873,7 @@ function tunnelAgentCard(agent) {
   const deleting = tunnelDeleteConfirm
     && tunnelDeleteConfirm.kind === 'agent'
     && tunnelDeleteConfirm.id === agent.id;
+  const reenrolling = tunnelReenrollConfirm === agent.id;
   const enabled = el('input', {
     type: 'checkbox', checked: agent.enabled !== false,
     'aria-label': tr('aktív'),
@@ -11761,10 +11894,20 @@ function tunnelAgentCard(agent) {
         tunnelStatusPill(agent)),
       el('div', { class: 'tunnel-agent-actions' },
         el('label', { class: 'f2b-toggle' }, enabled, tr('aktív')),
-        el('button', {
+        // An enrolled agent's keys live only on the agent: a new installer
+        // needs a re-enrollment, so the download is offered only with a token.
+        tunnelCanDownload(agent) ? el('button', {
           type: 'button', class: 'ghost small',
           onclick: () => downloadTunnelConfig(agent)
-        }, tr('Telepítő letöltése')),
+        }, tr('Telepítő letöltése')) : null,
+        reenrolling ? null : el('button', {
+          type: 'button', class: 'ghost small',
+          onclick: () => {
+            tunnelReenrollConfirm = agent.id;
+            adminFlash = null;
+            renderAdminPanel();
+          }
+        }, tr('Újrabeléptetés')),
         el('button', {
           type: 'button', class: 'ghost small',
           onclick: () => tunnelOpenAgentEdit(agent.id)
@@ -11791,6 +11934,26 @@ function tunnelAgentCard(agent) {
     card.append(el('div', { class: 'tunnel-digest' },
       tr('Futtatás előtt ellenőrizd a letöltött fájlt; a sha256sum kimenetének egyeznie kell ezzel az értékkel:'),
       el('code', { class: 'mono', text: `${digest}  dropjak-agent-${agent.id}.sh` })));
+  }
+  const enrollNote = tunnelEnrollmentNote(agent);
+  if (enrollNote) card.append(el('p', { class: 'port-hint tunnel-enroll-note', text: enrollNote }));
+  const tokenBox = tunnelEnrollTokenBox(agent);
+  if (tokenBox) card.append(tokenBox);
+  if (reenrolling) {
+    card.append(el('div', { class: 'delete-confirm' },
+      el('p', {
+        class: 'delete-confirm-text',
+        text: tr(`Újrabeléptetés: ${agent.label}. A tárolt kulcsok és a szinkron kód törlődnek, a futó ügynök lekapcsolódik, amíg az új telepítővel be nem lép.`)
+      }),
+      el('div', { class: 'form-actions' },
+        el('button', { type: 'button', class: 'ghost small', onclick: () => {
+          tunnelReenrollConfirm = null;
+          renderAdminPanel();
+        } }, tr('Mégse')),
+        el('button', {
+          type: 'button', class: 'danger small',
+          onclick: () => reenrollTunnelAgent(agent)
+        }, tr('Újrabeléptetés')))));
   }
   if (deleting) {
     card.append(tunnelDeleteConfirmBox(

@@ -9,7 +9,8 @@ which is deleted immediately after the operation.
 The module swallows every error and exposes it in the ``error`` field: a
 WireGuard failure can never block the portal. ``allowed-ips`` is only the
 agent's own /32 address, so an agent cannot reach other addresses in the
-cloud.
+cloud. An agent gets a peer only once its public key is known (legacy
+gateway-generated keys, or after enrollment).
 """
 
 from __future__ import annotations
@@ -111,7 +112,11 @@ class TunnelManager:
         )
 
     def generate_keys(self) -> dict:
-        """Agent key pair and preshared key (the private key goes over stdin)."""
+        """A key pair and a preshared key (the private key goes over stdin).
+
+        Used for the server key pair; agents generate their own keys and
+        enroll (only legacy agents carry gateway-generated keys).
+        """
         private_key = self._run([self.wg_bin, "genkey"]).stdout.strip()
         public_key = self._run(
             [self.wg_bin, "pubkey"], private_key + "\n"
@@ -198,7 +203,9 @@ class TunnelManager:
             ])
         desired: dict[str, str] = {}
         for agent in tunnels.get("agents", []):
-            if not agent.get("enabled"):
+            # An agent waiting for enrollment has no public key yet, so it
+            # gets no peer: nothing can handshake as it.
+            if not agent.get("enabled") or not agent.get("public_key"):
                 continue
             desired[agent["public_key"]] = agent["address"]
             with self._key_file(agent["preshared_key"]) as psk_path:
@@ -269,7 +276,10 @@ class TunnelManager:
             }
             for agent in agents
         }
-        enabled = [agent for agent in agents if agent.get("enabled")]
+        enabled = [
+            agent for agent in agents
+            if agent.get("enabled") and agent.get("public_key")
+        ]
         error = self.error
         if enabled and tunnels.get("server_private_key"):
             try:

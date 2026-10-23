@@ -1268,12 +1268,26 @@ def _config_counts(bundle: dict) -> dict:
 
 
 _TUNNEL_CONFIG_FORMAT = "dropjak-agent"
+# 1: legacy agents, whose config carries gateway-generated keys and the sync
+# token. 2: enrollment; the agent generates its keys (DJ-08 step 7).
 _TUNNEL_CONFIG_VERSION = 1
+_TUNNEL_CONFIG_ENROLL_VERSION = 2
 _TUNNEL_SYNC_PATH = "/api/tunnel/config"
+# One-time agent enrollment over the portal's public address (HTTPS when
+# available), never over the tunnel. The token is valid for 30 minutes.
+_TUNNEL_ENROLL_PATH = "/api/tunnel/enroll"
+_TUNNEL_ENROLL_SECONDS = 30 * 60
+# The admin's download sends the enrollment token it was shown, because the
+# gateway stores only its hash.
+_TUNNEL_ENROLL_HEADER = "X-Dropjak-Enroll-Token"
+# Enrollment attempts per source IP; the token is 256 bits, so this only
+# bounds the log volume and the work done for a misbehaving client.
+_TUNNEL_ENROLL_RATE = gateway.RateLimiter(window=300, maximum=10)
 _TUNNEL_ACTIONS = frozenset({
     "tunnel_settings",
     "tunnel_agent_add",
     "tunnel_agent_update",
+    "tunnel_agent_reenroll",
     "tunnel_agent_delete",
     "tunnel_service_save",
     "tunnel_service_delete",
@@ -1336,7 +1350,7 @@ def _tunnel_service_public(service: dict) -> dict:
 
 
 def _tunnels_public(gw, settings: dict) -> dict:
-    """Admin view of tunnel agents: without key and token."""
+    """Admin view of tunnel agents: without keys, tokens and hashes."""
     tunnels = settings.get("tunnels")
     if not isinstance(tunnels, dict):
         tunnels = settings_store.default_tunnels()
@@ -1357,14 +1371,22 @@ def _tunnels_public(gw, settings: dict) -> dict:
     else:
         sync_times = dict(sync_times)
     agents = []
+    wall = time.time()
     for agent in tunnels.get("agents", []):
         row = rows.get(agent["id"], {})
         last = sync_times.get(agent["id"])
+        enrollment = settings_store.tunnel_enrollment_state(agent, wall)
         agents.append({
             "id": agent["id"],
             "label": agent["label"],
             "address": agent["address"],
             "enabled": agent["enabled"],
+            # legacy / enrolled / pending / expired / none (settings_store).
+            "enrollment": enrollment,
+            "enroll_expires": (
+                int(agent.get("enroll_expires") or 0)
+                if enrollment in ("pending", "expired") else 0
+            ),
             "online": bool(row.get("online")),
             "last_handshake": int(row.get("last_handshake") or 0),
             "last_sync": (
@@ -1620,6 +1642,7 @@ class Handler(BaseHTTPRequestHandler):
         return (
             path == "/api/login" or path.startswith("/api/login/")
             or path == "/api/password" or path.startswith("/api/admin/")
+            or path == _TUNNEL_ENROLL_PATH
         )
 
     def _https_required(self, path: str) -> bool:
@@ -3611,8 +3634,49 @@ class Handler(BaseHTTPRequestHandler):
         )
         return tunnels, agent
 
-    def _tunnel_agent_config(self, agent: dict, tunnels: dict):
-        """The agent's configuration (with WireGuard keys) and its services."""
+    def _tunnel_enroll_url(self) -> str:
+        """Where a new agent enrolls: the portal's public address.
+
+        HTTPS when available, in this order: an https:// PORTAL_URL, the
+        name the admin reached through Caddy, the portal domain (or first
+        root) of the enabled proxy. Then a plain-HTTP PORTAL_URL, then the
+        Host of this request. Never the tunnel address: the agent has no
+        tunnel before it enrolls.
+        """
+        def base(url: str) -> str:
+            parts = urllib.parse.urlsplit(url)
+            return f"{parts.scheme}://{parts.netloc}" if parts.netloc else ""
+
+        portal_url = gateway.PORTAL_URL
+        host = (self.headers.get("Host") or "").strip()
+        candidates = []
+        if portal_url.startswith("https://"):
+            candidates.append(base(portal_url))
+        if host and self._via_proxy():
+            candidates.append(f"https://{host}")
+        if gateway.PROXY_ENABLED:
+            settings = self.gw.settings.snapshot()
+            name = settings.get("portal_domain") or next(
+                iter(settings.get("proxy_domains") or []), ""
+            )
+            if name:
+                candidates.append(f"https://{name}")
+        if portal_url:
+            candidates.append(base(portal_url))
+        if host:
+            candidates.append(f"http://{host}")
+        url = next((item for item in candidates if item), "")
+        return f"{url}{_TUNNEL_ENROLL_PATH}" if url else ""
+
+    def _tunnel_agent_config(self, agent: dict, tunnels: dict,
+                             enroll_token: str = ""):
+        """The agent's configuration and its services.
+
+        A legacy agent's config carries its gateway-generated private key,
+        PSK and sync token (version 1). Otherwise (version 2) it carries no
+        key at all: the agent generates them and enrolls at ``enroll.url``
+        with the one-time ``enroll_token``.
+        """
         endpoint = tunnels.get("endpoint") or self._tunnel_endpoint_host()
         services = [
             {
@@ -3632,10 +3696,10 @@ class Handler(BaseHTTPRequestHandler):
                 "address": agent["address"],
             },
             "wireguard": {
-                "private_key": agent["private_key"],
+                "private_key": agent.get("private_key", ""),
                 "address": f"{agent['address']}/24",
                 "peer_public_key": tunnels.get("server_public_key", ""),
-                "preshared_key": agent["preshared_key"],
+                "preshared_key": agent.get("preshared_key", ""),
                 "endpoint": (
                     f"{endpoint}:{tunnels['port']}" if endpoint else ""
                 ),
@@ -3647,12 +3711,60 @@ class Handler(BaseHTTPRequestHandler):
                     f"http://{settings_store.TUNNEL_SERVER_ADDRESS}:"
                     f"{settings_store.PORTAL_PORT}{_TUNNEL_SYNC_PATH}"
                 ),
-                "token": agent["token"],
+                "token": agent.get("token", ""),
                 "interval_seconds": 30,
             },
             "services": services,
         }
+        if not settings_store.tunnel_agent_legacy(agent):
+            config["version"] = _TUNNEL_CONFIG_ENROLL_VERSION
+            del config["wireguard"]["private_key"]
+            del config["wireguard"]["preshared_key"]
+            del config["sync"]["token"]
+            config["enroll"] = {
+                "url": self._tunnel_enroll_url(),
+                "token": enroll_token,
+            }
         return config, len(services)
+
+    def _tunnel_download_token(self, session, agent: dict):
+        """The enrollment token for a download, or None after a refusal.
+
+        A legacy agent needs none (its config carries its keys). Otherwise
+        the admin's request must send the token it was shown on "add" or
+        "re-enroll"; it must match the stored hash and not be expired. An
+        enrolled agent cannot be re-downloaded: its keys live only on the
+        agent, so a new installer needs a re-enrollment.
+        """
+        if settings_store.tunnel_agent_legacy(agent):
+            return ""
+        state = settings_store.tunnel_enrollment_state(agent)
+        token = (self.headers.get(_TUNNEL_ENROLL_HEADER) or "").strip()
+        if state == "pending" and token and hmac.compare_digest(
+            settings_store.token_hash(token),
+            str(agent.get("enroll_token_hash") or ""),
+        ):
+            return token
+        reason = {
+            "enrolled": "agent_enrolled",
+            "expired": "enroll_expired",
+        }.get(state, "enroll_token_required")
+        self._admin_tunnel_agent_rejected(session, agent["id"], reason)
+        self._json(
+            409,
+            {
+                "ok": False,
+                "code": reason,
+                "error": (
+                    "the agent is enrolled; re-enroll it to download a new "
+                    "installer"
+                    if state == "enrolled" else
+                    "the enrollment token is missing or no longer valid; "
+                    "re-enroll the agent to get a new one"
+                ),
+            },
+        )
+        return None
 
     def _admin_tunnel_agent_rejected(self, session, agent_id: str,
                                      reason: str) -> None:
@@ -3691,7 +3803,10 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _admin_tunnel_config(self, path: str) -> None:
-        """Downloadable configuration of an agent (with keys, admin only)."""
+        """Downloadable configuration of an agent (admin only).
+
+        It carries the enrollment token (or a legacy agent's keys).
+        """
         session = self._admin_guard()
         if session is None:
             return
@@ -3714,7 +3829,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(
                 404, {"ok": False, "error": "no such agent"}
             )
-        config, count = self._tunnel_agent_config(agent, tunnels)
+        enroll_token = self._tunnel_download_token(session, agent)
+        if enroll_token is None:
+            return
+        config, count = self._tunnel_agent_config(
+            agent, tunnels, enroll_token
+        )
         body = json.dumps(config, ensure_ascii=False, indent=2).encode("utf-8")
         self._audit(
             "tunnel_agent_config_downloaded",
@@ -3758,6 +3878,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(
                 404, {"ok": False, "error": "no such agent"}
             )
+        enroll_token = self._tunnel_download_token(session, agent)
+        if enroll_token is None:
+            return
         directory = _tunnel_agent_bundle_dir()
         contents = {}
         try:
@@ -3779,7 +3902,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(
                 500, {"ok": False, "error": "the agent bundle is not available"}
             )
-        config, count = self._tunnel_agent_config(agent, tunnels)
+        config, count = self._tunnel_agent_config(
+            agent, tunnels, enroll_token
+        )
         payload = io.BytesIO()
         with tarfile.open(fileobj=payload, mode="w:gz") as tar:
             _tar_member(tar, "compose.yml", compose.encode("utf-8"), 0o644)
@@ -3836,10 +3961,18 @@ class Handler(BaseHTTPRequestHandler):
         scheme, _, token = header.partition(" ")
         authorized = False
         if agent is not None and scheme.lower() == "bearer":
-            authorized = hmac.compare_digest(
-                token.strip().encode("utf-8", "replace"),
-                str(agent.get("token", "")).encode("utf-8", "replace"),
-            )
+            token = token.strip()
+            if settings_store.tunnel_agent_legacy(agent):
+                # Legacy agent: the token is stored in clear until re-enroll.
+                authorized = hmac.compare_digest(
+                    token.encode("utf-8", "replace"),
+                    str(agent.get("token", "")).encode("utf-8", "replace"),
+                )
+            elif agent.get("sync_token_hash") and token:
+                authorized = hmac.compare_digest(
+                    settings_store.token_hash(token),
+                    str(agent["sync_token_hash"]),
+                )
         if not authorized:
             return self._json(403, {"ok": False})
         now = time.monotonic()
@@ -3867,6 +4000,130 @@ class Handler(BaseHTTPRequestHandler):
                 "agent": {"id": agent["id"], "label": agent["label"]},
                 "services": services,
             },
+        )
+
+    def _tunnel_enroll_refused(self, agent_id: str, reason: str,
+                               status: int = 403) -> None:
+        self._audit(
+            "tunnel_enroll_failed", target=str(agent_id)[:64], reason=reason,
+        )
+        # One detail-free answer for every token problem: the caller learns
+        # nothing about which agents exist or are waiting.
+        self._json(status, {"ok": False, "error": "enrollment refused"})
+
+    def _tunnel_enroll(self) -> None:
+        """One-time agent enrollment (DJ-08 step 7, DJ-25).
+
+        The agent generated its own WireGuard key pair and PSK and sends the
+        public key and the PSK with ``Authorization: Bearer <enrollment
+        token>``. The token must match the stored SHA-256 (constant time),
+        must not be expired and works once: on success its hash is cleared,
+        the public key and PSK are stored, the WireGuard peer is configured,
+        and a long-lived sync token is returned once; only its hash is kept.
+        Not over the tunnel (tunnel peers get 404 before this point).
+        """
+        ip = self._client_ip()
+        if not _TUNNEL_ENROLL_RATE.allow(ip):
+            self._discard_body()
+            self._audit("tunnel_enroll_failed", reason="rate_limited")
+            return self._json(
+                429, {"ok": False, "error": "too many attempts"},
+                headers={"Retry-After": "300"},
+            )
+        data = self._read_json(limit=4096)
+        if data is None:
+            self._audit("tunnel_enroll_failed", reason="bad_request")
+            return self._json(400, {"ok": False, "error": "bad request"})
+        agent_id = data.get("agent_id")
+        if not isinstance(agent_id, str) or not agent_id \
+                or len(agent_id) > 64:
+            return self._tunnel_enroll_refused("", "bad_request", 400)
+        try:
+            public_key = settings_store.wg_key(
+                data.get("public_key"), "public key"
+            )
+            preshared_key = settings_store.wg_key(
+                data.get("preshared_key"), "preshared key"
+            )
+        except settings_store.SettingsError:
+            return self._tunnel_enroll_refused(agent_id, "invalid_key", 400)
+        header = self.headers.get("Authorization") or ""
+        scheme, _, token = header.partition(" ")
+        token = token.strip()
+        if scheme.lower() != "bearer" or not token:
+            return self._tunnel_enroll_refused(agent_id, "missing_token")
+        sync_token = secrets.token_urlsafe(32)
+        try:
+            with self.gw.admin_lock:
+                snapshot = self.gw.settings.snapshot()
+                if snapshot.get("error"):
+                    raise settings_store.SettingsError(
+                        f"the settings file is invalid: {snapshot['error']}"
+                    )
+                tunnels = snapshot.get("tunnels")
+                if not isinstance(tunnels, dict):
+                    tunnels = settings_store.default_tunnels()
+                agent = next(
+                    (
+                        item for item in tunnels.get("agents", [])
+                        if item["id"] == agent_id
+                    ),
+                    None,
+                )
+                stored = str((agent or {}).get("enroll_token_hash") or "")
+                # Always compare, so an unknown agent costs the same time.
+                matches = hmac.compare_digest(
+                    settings_store.token_hash(token), stored or "0" * 64
+                ) and bool(stored)
+                if agent is None:
+                    return self._tunnel_enroll_refused(
+                        agent_id, "unknown_agent"
+                    )
+                if not stored:
+                    return self._tunnel_enroll_refused(
+                        agent_id, "not_pending"
+                    )
+                if not matches:
+                    return self._tunnel_enroll_refused(
+                        agent_id, "invalid_token"
+                    )
+                if settings_store.tunnel_enrollment_state(agent) != "pending":
+                    return self._tunnel_enroll_refused(agent_id, "expired")
+                if public_key == tunnels.get("server_public_key") or any(
+                    item.get("public_key") == public_key
+                    for item in tunnels["agents"] if item is not agent
+                ):
+                    return self._tunnel_enroll_refused(
+                        agent_id, "duplicate_key", 409
+                    )
+                agent["public_key"] = public_key
+                agent["preshared_key"] = preshared_key
+                agent["sync_token_hash"] = settings_store.token_hash(
+                    sync_token
+                )
+                agent["enroll_token_hash"] = ""
+                agent["enroll_expires"] = 0
+                new_data = self.gw.settings.prepare_tunnels(tunnels)
+                self.gw.apply_settings(new_data)
+        except (settings_store.SettingsError, ValueError) as exc:
+            self._audit(
+                "tunnel_enroll_failed", target=agent_id[:64],
+                reason="settings", error=str(exc)[:200],
+            )
+            return self._json(400, {"ok": False, "error": str(exc)})
+        except (gateway.FirewallError, OSError) as exc:
+            self._audit(
+                "tunnel_enroll_failed", target=agent_id[:64],
+                reason="apply", error=str(exc)[:200],
+            )
+            return self._json(
+                503, {"ok": False, "error": "failed to apply the settings"}
+            )
+        # Neither token nor key enters the log; the agent ID is enough.
+        self._audit("tunnel_agent_enrolled", target=agent_id[:64])
+        self._json(
+            200,
+            {"ok": True, "agent_id": agent_id, "sync_token": sync_token},
         )
 
     def _audit_cert(self, action: str, session, root: str, meta) -> None:
@@ -4706,6 +4963,7 @@ class Handler(BaseHTTPRequestHandler):
         target = str(data.get("id") or data.get("agent_id") or "")[:64]
         extra: dict = {}
         message = ""
+        enroll_token = ""
         # Disabling is always allowed (fail-closed): access from referencing
         # rules ceases, so affected sessions are torn down after the operation.
         # Deletion is still forbidden while a rule references the
@@ -4735,7 +4993,6 @@ class Handler(BaseHTTPRequestHandler):
                         tunnels["endpoint"] = data.get("endpoint")
                     message = "Tunnel settings saved."
                 elif action == "tunnel_agent_add":
-                    keys = self.gw.tunnels.generate_keys()
                     if not (tunnels.get("server_private_key")
                             and tunnels.get("server_public_key")):
                         server = self.gw.tunnels.generate_keys()
@@ -4762,21 +5019,41 @@ class Handler(BaseHTTPRequestHandler):
                         agent["id"] == agent_id for agent in tunnels["agents"]
                     ):
                         agent_id = secrets.token_hex(4)
+                    # The agent generates its own keys and enrolls with this
+                    # one-time token; only its hash is stored (DJ-08/DJ-25).
+                    enroll_token = secrets.token_urlsafe(32)
                     tunnels["agents"].append({
                         "id": agent_id,
                         "label": data.get("label"),
                         "address": address,
-                        "private_key": keys["private_key"],
-                        "public_key": keys["public_key"],
-                        "preshared_key": keys["preshared_key"],
-                        "token": secrets.token_urlsafe(32),
+                        "public_key": None,
+                        **self._tunnel_enrollment(enroll_token),
                         "enabled": True,
                         "services": [],
                     })
                     target = agent_id
                     extra["agent_id"] = agent_id
                     message = (
-                        "Agent created; download its configuration."
+                        "Agent created; download its installer."
+                    )
+                elif action == "tunnel_agent_reenroll":
+                    agent = self._tunnel_agent(tunnels, data.get("id"))
+                    # The stored private key, PSK, plaintext token and the
+                    # sync token hash go away; the peer is removed until the
+                    # agent enrolls again, so old installers stop working.
+                    for name in ("private_key", "token"):
+                        agent.pop(name, None)
+                    enroll_token = secrets.token_urlsafe(32)
+                    agent.update({
+                        "public_key": None,
+                        "preshared_key": "",
+                        "sync_token_hash": "",
+                        **self._tunnel_enrollment(enroll_token),
+                    })
+                    target = agent["id"]
+                    extra["agent_id"] = agent["id"]
+                    message = (
+                        "New enrollment token issued; download the installer."
                     )
                 elif action == "tunnel_agent_update":
                     agent = self._tunnel_agent(tunnels, data.get("id"))
@@ -5070,8 +5347,20 @@ class Handler(BaseHTTPRequestHandler):
             return
         payload = self._admin_state()
         payload.update(extra)
+        if enroll_token:
+            # Shown once: only the response carries it, never the audit log
+            # or the settings file.
+            payload["enroll_token"] = enroll_token
         payload["message"] = message
         self._json(200, payload)
+
+    @staticmethod
+    def _tunnel_enrollment(token: str) -> dict:
+        """The stored half of a new enrollment token: hash and expiry."""
+        return {
+            "enroll_token_hash": settings_store.token_hash(token),
+            "enroll_expires": int(time.time()) + _TUNNEL_ENROLL_SECONDS,
+        }
 
     def _tunnel_test_address(self, agent: dict) -> str:
         """The test target address; overridable in tests (e.g. 127.0.0.1)."""
@@ -5497,6 +5786,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._login_recovery()
         if path == "/api/access":
             return self._access()
+        if path == _TUNNEL_ENROLL_PATH:
+            return self._tunnel_enroll()
         if path == "/api/logout":
             return self._logout()
         if path == "/api/password":

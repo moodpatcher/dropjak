@@ -40,6 +40,7 @@ def key(byte: bytes) -> str:
 KEY_A = key(b"a")
 KEY_B = key(b"b")
 KEY_C = key(b"c")
+KEY_D = key(b"d")
 TOKEN = "t" * 32
 
 
@@ -66,6 +67,39 @@ def agent(agent_id: str = "home", address: str = "10.77.0.2", **over) -> dict:
         "private_key": KEY_A, "public_key": KEY_B,
         "preshared_key": KEY_C, "token": TOKEN, "enabled": True,
         "services": [],
+    }
+    entry.update(over)
+    return entry
+
+
+ENROLL_TOKEN = "e" * 43
+SYNC_TOKEN = "s" * 43
+
+
+def pending_agent(agent_id: str = "home", address: str = "10.77.0.2",
+                  expires: int | None = None, **over) -> dict:
+    """An agent waiting for enrollment: no key, only the token's hash."""
+    entry = {
+        "id": agent_id, "label": "Otthon", "address": address,
+        "public_key": None,
+        "enroll_token_hash": settings_store.token_hash(ENROLL_TOKEN),
+        "enroll_expires": (
+            int(time.time()) + 600 if expires is None else expires
+        ),
+        "enabled": True, "services": [],
+    }
+    entry.update(over)
+    return entry
+
+
+def enrolled_agent(agent_id: str = "home", address: str = "10.77.0.2",
+                   **over) -> dict:
+    """An enrolled agent: public key, PSK and the sync token's hash."""
+    entry = {
+        "id": agent_id, "label": "Otthon", "address": address,
+        "public_key": KEY_D, "preshared_key": KEY_C,
+        "sync_token_hash": settings_store.token_hash(SYNC_TOKEN),
+        "enabled": True, "services": [],
     }
     entry.update(over)
     return entry
@@ -506,6 +540,56 @@ class TunnelSettingsTests(unittest.TestCase):
             settings_store.validate_state({"tunnels": tunnels(agents=[
                 agent(services=[service(), service()]),
             ])})
+
+    def test_enrollment_shapes(self) -> None:
+        # Pending and enrolled agents hold no private key and no token;
+        # the legacy shape still validates (migration).
+        result = settings_store.validate_state({"tunnels": tunnels(agents=[
+            pending_agent(),
+            enrolled_agent(agent_id="office", address="10.77.0.3"),
+            agent(agent_id="old", address="10.77.0.4", public_key=KEY_A),
+        ])})
+        pending, enrolled, legacy = result["tunnels"]["agents"]
+        for row in (pending, enrolled):
+            self.assertNotIn("private_key", row)
+            self.assertNotIn("token", row)
+        self.assertIsNone(pending["public_key"])
+        self.assertEqual(pending["preshared_key"], "")
+        self.assertEqual(pending["enroll_token_hash"],
+                         settings_store.token_hash(ENROLL_TOKEN))
+        self.assertEqual(enrolled["public_key"], KEY_D)
+        self.assertEqual(enrolled["enroll_token_hash"], "")
+        self.assertEqual(enrolled["enroll_expires"], 0)
+        self.assertEqual(legacy["token"], TOKEN)
+        self.assertEqual(
+            [settings_store.tunnel_enrollment_state(row)
+             for row in (pending, enrolled, legacy)],
+            ["pending", "enrolled", "legacy"],
+        )
+        self.assertEqual(settings_store.tunnel_enrollment_state(
+            pending_agent(expires=1)), "expired")
+        for bad in (
+            # Stored keys and an enrollment at the same time.
+            agent(enroll_token_hash=settings_store.token_hash("x")),
+            agent(sync_token_hash=settings_store.token_hash("x")),
+            # Enrolled without PSK or sync token hash.
+            enrolled_agent(preshared_key=""),
+            enrolled_agent(sync_token_hash=""),
+            # Enrolled with an open enrollment.
+            enrolled_agent(enroll_token_hash=settings_store.token_hash("x")),
+            # Waiting, but with a PSK or a sync token hash.
+            pending_agent(preshared_key=KEY_C),
+            pending_agent(sync_token_hash=settings_store.token_hash("x")),
+            # Malformed hash and expiry.
+            pending_agent(enroll_token_hash="ABC"),
+            pending_agent(enroll_expires=-1),
+            pending_agent(enroll_expires=True),
+        ):
+            with self.subTest(bad=bad), \
+                    self.assertRaises(settings_store.SettingsError):
+                settings_store.validate_state({"tunnels": tunnels(
+                    agents=[bad]
+                )})
 
     def test_service_target_and_protocol(self) -> None:
         for target_host in ("", "bad host", "mc:80", None):
@@ -1108,6 +1192,27 @@ class TunnelManagerTests(unittest.TestCase):
             "allowed-ips" in call for call in calls
         ))
 
+    def test_peer_only_after_enrollment(self) -> None:
+        # Waiting for enrollment: no public key, so no peer and no status
+        # lookup; once enrolled the stored public key and PSK make the peer.
+        manager, runner = self.manager(lambda args, input: (0, "", ""))
+        self.assertTrue(manager.reconcile(tunnels(agents=[pending_agent()])))
+        calls = [call[0] for call in runner.calls]
+        self.assertFalse(any("peer" in call for call in calls), calls)
+        status = manager.status(tunnels(agents=[pending_agent()]))
+        self.assertFalse(status["agents"][0]["online"])
+
+        manager, runner = self.manager(lambda args, input: (0, "", ""))
+        self.assertTrue(
+            manager.reconcile(tunnels(agents=[enrolled_agent()]))
+        )
+        peer = [
+            call[0] for call in runner.calls
+            if call[0][:4] == ["wg", "set", "dropjak0", "peer"]
+        ]
+        self.assertEqual(peer[0][4], KEY_D)
+        self.assertIn("10.77.0.2/32", peer[0])
+
     def test_failure_is_isolated(self) -> None:
         manager, _ = self.manager(
             lambda args, input: OSError("no ip")
@@ -1323,6 +1428,7 @@ class TunnelHttpTests(unittest.TestCase):
         self.gw.certs.reset()
         self.gw.tunnel_sync_times.clear()
         self.gw.tunnels = FakeTunnelManager()
+        server._TUNNEL_ENROLL_RATE._hits.clear()
         self.restart_calls: list[float] = []
 
     # -- HTTP helpers ---------------------------------------------------------
@@ -1521,7 +1627,11 @@ class TunnelHttpTests(unittest.TestCase):
         stored = self.gw.settings.snapshot()["tunnels"]
         self.assertTrue(stored["server_private_key"])
         self.assertTrue(stored["server_public_key"])
-        self.assertNotEqual(stored["agents"][0]["private_key"], "")
+        # The agent generates its own keys: the gateway stores none (DJ-25).
+        self.assertIsNone(stored["agents"][0]["public_key"])
+        self.assertNotIn("private_key", stored["agents"][0])
+        self.assertNotIn("token", stored["agents"][0])
+        self.assertTrue(payload["enroll_token"])
 
         status, _, body = self.admin_post(
             "/api/admin/settings",
@@ -1910,6 +2020,17 @@ class TunnelHttpTests(unittest.TestCase):
             cookie=cookie,
         )
         self.assertEqual(status, 200, body)
+        enroll_token = json.loads(body)["enroll_token"]
+        stored = self.gw.settings.snapshot()["tunnels"]
+        row = stored["agents"][0]
+        status, _, body = self.post(
+            "/api/tunnel/enroll",
+            {"agent_id": row["id"], "public_key": KEY_B,
+             "preshared_key": KEY_C},
+            headers={"Authorization": f"Bearer {enroll_token}"},
+        )
+        self.assertEqual(status, 200, body)
+        sync_token = json.loads(body)["sync_token"]
         stored = self.gw.settings.snapshot()["tunnels"]
         row = stored["agents"][0]
         status, _, body = self.admin_post(
@@ -1925,9 +2046,10 @@ class TunnelHttpTests(unittest.TestCase):
         with open(self.audit.path, encoding="utf-8") as fh:
             text = fh.read()
         for secret in (
-            row["private_key"], row["public_key"], row["preshared_key"],
-            row["token"], stored["server_private_key"],
-            stored["server_public_key"],
+            enroll_token, sync_token, row["public_key"],
+            row["preshared_key"], row["sync_token_hash"],
+            settings_store.token_hash(enroll_token),
+            stored["server_private_key"], stored["server_public_key"],
         ):
             self.assertNotIn(secret, text)
 
@@ -2222,6 +2344,393 @@ class TunnelHttpTests(unittest.TestCase):
                 headers={"Authorization": f"Bearer {TOKEN}"},
             )
         self.assertEqual(status, 200)
+
+    # -- enrollment (DJ-08 step 7, DJ-25) -----------------------------------
+
+    def enroll(self, token: str = ENROLL_TOKEN, agent_id: str = "home",
+               public_key: str = KEY_D, preshared_key: str = KEY_C,
+               source: str = "127.0.0.1"):
+        return self.post(
+            "/api/tunnel/enroll",
+            {"agent_id": agent_id, "public_key": public_key,
+             "preshared_key": preshared_key},
+            source=source,
+            headers={"Authorization": f"Bearer {token}"} if token else {},
+        )
+
+    def sync(self, token: str):
+        with mock.patch.object(
+            server.Handler, "_peer_ip", return_value="10.77.0.2"
+        ):
+            self.gw.tunnel_sync_times.clear()
+            status, _, body = self.get(
+                "/api/tunnel/config",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        return status, body
+
+    def audit_events(self, event: str) -> list[dict]:
+        return [
+            json.loads(line) for line in Path(
+                self.tmp.name, "audit.jsonl").read_text().splitlines()
+            if f'"{event}"' in line
+        ]
+
+    def bundle_config(self, body: bytes) -> dict:
+        import io
+        import tarfile
+
+        marker = b"__DROPJAK_PAYLOAD__\n"
+        payload = body[body.index(marker) + len(marker):]
+        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as tar:
+            return json.loads(tar.extractfile("agent.json").read())
+
+    def test_add_stores_only_the_enrollment_token_hash(self) -> None:
+        self.seed([])
+        cookie = self.admin_cookie()
+        before = int(time.time())
+        status, _, body = self.admin_post(
+            "/api/admin/settings",
+            {"action": "tunnel_agent_add", "label": "Otthon"},
+            cookie=cookie,
+        )
+        self.assertEqual(status, 200, body)
+        payload = json.loads(body)
+        token = payload["enroll_token"]
+        self.assertGreaterEqual(len(token), 43)
+        row = self.gw.settings.snapshot()["tunnels"]["agents"][0]
+        self.assertEqual(row["enroll_token_hash"],
+                         settings_store.token_hash(token))
+        self.assertGreaterEqual(row["enroll_expires"], before + 30 * 60)
+        self.assertLessEqual(row["enroll_expires"], int(time.time()) + 1800)
+        self.assertIsNone(row["public_key"])
+        for name in ("private_key", "token"):
+            self.assertNotIn(name, row)
+        text = Path(self.tmp.name, "settings.json").read_text()
+        self.assertNotIn(token, text)
+        # The public view: status only, no token or hash.
+        view = payload["tunnels"]["agents"][0]
+        self.assertEqual(view["enrollment"], "pending")
+        self.assertEqual(view["enroll_expires"], row["enroll_expires"])
+        self.assertNotIn(row["enroll_token_hash"],
+                         json.dumps(payload["tunnels"]))
+        # Shown once: the state endpoint never returns it again.
+        status, _, body = self.get(
+            "/api/admin/state", cookie=cookie, source="127.0.0.5"
+        )
+        self.assertNotIn(token, body.decode())
+        self.assertNotIn(token, Path(self.audit.path).read_text())
+
+    def test_bundle_carries_only_the_enrollment_token(self) -> None:
+        self.seed([pending_agent(services=[service()])],
+                  endpoint="cloud.example.com")
+        cookie, _ = self.admin()
+        path = "/api/admin/tunnels/home/bundle"
+        # The token is needed: the gateway cannot rebuild it from the hash.
+        for headers in ({}, {"X-Dropjak-Enroll-Token": "f" * 43}):
+            with self.subTest(headers=headers):
+                status, _, body = self.get(
+                    path, cookie=cookie, source="127.0.0.5", headers=headers,
+                )
+                self.assertEqual(status, 409, body)
+                self.assertEqual(json.loads(body)["code"],
+                                 "enroll_token_required")
+        status, headers, body = self.get(
+            path, cookie=cookie, source="127.0.0.5",
+            headers={"X-Dropjak-Enroll-Token": ENROLL_TOKEN},
+        )
+        self.assertEqual(status, 200, body[:300])
+        import hashlib
+
+        self.assertEqual(headers["X-Dropjak-SHA256"],
+                         hashlib.sha256(body).hexdigest())
+        config = self.bundle_config(body)
+        self.assertEqual(config["version"], 2)
+        self.assertNotIn("private_key", config["wireguard"])
+        self.assertNotIn("preshared_key", config["wireguard"])
+        self.assertNotIn("token", config["sync"])
+        self.assertEqual(config["wireguard"]["peer_public_key"], KEY_B)
+        self.assertEqual(config["wireguard"]["endpoint"],
+                         "cloud.example.com:51820")
+        self.assertEqual(config["wireguard"]["address"], "10.77.0.2/24")
+        self.assertEqual(config["sync"]["url"],
+                         "http://10.77.0.1:8100/api/tunnel/config")
+        # Enrollment goes to the portal's own address, not to the tunnel.
+        self.assertEqual(config["enroll"], {
+            "url": f"http://127.0.0.1:{self.port}/api/tunnel/enroll",
+            "token": ENROLL_TOKEN,
+        })
+        self.assertNotIn(KEY_A, body.decode("latin-1"))
+        # The JSON config download follows the same rules.
+        status, _, body = self.get(
+            "/api/admin/tunnels/home/config", cookie=cookie,
+            source="127.0.0.5",
+        )
+        self.assertEqual(status, 409, body)
+        status, _, body = self.get(
+            "/api/admin/tunnels/home/config", cookie=cookie,
+            source="127.0.0.5",
+            headers={"X-Dropjak-Enroll-Token": ENROLL_TOKEN},
+        )
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body)["enroll"]["token"], ENROLL_TOKEN)
+        reasons = [row.get("reason") for row in
+                   self.audit_events("tunnel_config_failed")]
+        self.assertIn("enroll_token_required", reasons)
+
+    def test_enroll_url_prefers_https(self) -> None:
+        self.seed([pending_agent()])
+        cookie, _ = self.admin()
+        old = gateway.PORTAL_URL
+        gateway.PORTAL_URL = "https://portal.example.com/"
+        self.addCleanup(setattr, gateway, "PORTAL_URL", old)
+        status, _, body = self.get(
+            "/api/admin/tunnels/home/config", cookie=cookie,
+            source="127.0.0.5",
+            headers={"X-Dropjak-Enroll-Token": ENROLL_TOKEN,
+                     "Host": "portal.example.com"},
+        )
+        self.assertEqual(status, 200, body)
+        self.assertEqual(
+            json.loads(body)["enroll"]["url"],
+            "https://portal.example.com/api/tunnel/enroll",
+        )
+
+    def test_enrollment_token_works_once_and_stores_only_hashes(self) -> None:
+        self.seed([pending_agent(services=[service()])])
+        status, headers, body = self.enroll()
+        self.assertEqual(status, 200, body)
+        self.assertEqual(headers.get("Cache-Control"), "no-store")
+        reply = json.loads(body)
+        sync_token = reply["sync_token"]
+        self.assertEqual(reply["agent_id"], "home")
+        row = self.gw.settings.snapshot()["tunnels"]["agents"][0]
+        self.assertEqual(row["public_key"], KEY_D)
+        self.assertEqual(row["preshared_key"], KEY_C)
+        self.assertEqual(row["sync_token_hash"],
+                         settings_store.token_hash(sync_token))
+        self.assertEqual(row["enroll_token_hash"], "")
+        for name in ("private_key", "token"):
+            self.assertNotIn(name, row)
+        # Neither the settings file nor the audit log holds a token.
+        text = Path(self.tmp.name, "settings.json").read_text()
+        for secret in (sync_token, ENROLL_TOKEN):
+            self.assertNotIn(secret, text)
+            self.assertNotIn(secret, Path(self.audit.path).read_text())
+        stored = json.loads(text)
+        stored_agent = stored["tunnels"]["agents"][0]
+        self.assertNotIn("private_key", stored_agent)
+        self.assertNotIn("token", stored_agent)
+        # The peer is configured from the stored public key.
+        last = self.gw.tunnels.reconciled[-1]["agents"][0]
+        self.assertEqual(last["public_key"], KEY_D)
+        self.assertEqual(self.audit_events("tunnel_agent_enrolled")[-1]
+                         ["target"], "home")
+        # Single use: the same token is refused afterwards.
+        status, _, body = self.enroll(public_key=key(b"e"))
+        self.assertEqual(status, 403, body)
+        self.assertEqual(json.loads(body), {"ok": False,
+                                            "error": "enrollment refused"})
+        self.assertEqual(
+            self.gw.settings.snapshot()["tunnels"]["agents"][0]
+            ["public_key"], KEY_D,
+        )
+        self.assertEqual(
+            self.audit_events("tunnel_enroll_failed")[-1]["reason"],
+            "not_pending",
+        )
+        # The view says enrolled; a new installer needs a re-enrollment.
+        cookie, state = self.admin()
+        self.assertEqual(state["tunnels"]["agents"][0]["enrollment"],
+                         "enrolled")
+        status, _, body = self.get(
+            "/api/admin/tunnels/home/bundle", cookie=cookie,
+            source="127.0.0.5",
+            headers={"X-Dropjak-Enroll-Token": ENROLL_TOKEN},
+        )
+        self.assertEqual(status, 409, body)
+        self.assertEqual(json.loads(body)["code"], "agent_enrolled")
+
+    def test_enrollment_token_refused_after_expiry(self) -> None:
+        self.seed([pending_agent(expires=int(time.time()) - 1)])
+        status, _, body = self.enroll()
+        self.assertEqual(status, 403, body)
+        self.assertEqual(
+            self.audit_events("tunnel_enroll_failed")[-1]["reason"],
+            "expired",
+        )
+        row = self.gw.settings.snapshot()["tunnels"]["agents"][0]
+        self.assertIsNone(row["public_key"])
+        cookie, state = self.admin()
+        self.assertEqual(state["tunnels"]["agents"][0]["enrollment"],
+                         "expired")
+        status, _, body = self.get(
+            "/api/admin/tunnels/home/bundle", cookie=cookie,
+            source="127.0.0.5",
+            headers={"X-Dropjak-Enroll-Token": ENROLL_TOKEN},
+        )
+        self.assertEqual(status, 409, body)
+        self.assertEqual(json.loads(body)["code"], "enroll_expired")
+
+    def test_enroll_rejects_bad_requests(self) -> None:
+        self.seed([pending_agent(), pending_agent(
+            agent_id="other", address="10.77.0.3",
+            enroll_token_hash=settings_store.token_hash("o" * 43),
+        )])
+        cases = (
+            ({"token": "wrong" * 9}, 403, "invalid_token"),
+            ({"token": ""}, 403, "missing_token"),
+            ({"agent_id": "nincs"}, 403, "unknown_agent"),
+            # Another agent's token does not enroll this one.
+            ({"token": "o" * 43}, 403, "invalid_token"),
+            ({"public_key": "nem-kulcs"}, 400, "invalid_key"),
+            ({"preshared_key": base64.b64encode(b"x" * 31).decode()},
+             400, "invalid_key"),
+            # The server's own key cannot become a peer.
+            ({"public_key": KEY_B}, 409, "duplicate_key"),
+        )
+        for over, code, reason in cases:
+            with self.subTest(over=over):
+                status, _, body = self.enroll(**over)
+                self.assertEqual(status, code, body)
+                self.assertEqual(
+                    self.audit_events("tunnel_enroll_failed")[-1]["reason"],
+                    reason,
+                )
+        self.assertIsNone(
+            self.gw.settings.snapshot()["tunnels"]["agents"][0]["public_key"]
+        )
+        # Not over the tunnel: a tunnel peer gets the detail-free 404.
+        with mock.patch.object(
+            server.Handler, "_peer_ip", return_value="10.77.0.2"
+        ):
+            status, _, _ = self.enroll()
+        self.assertEqual(status, 404)
+        # Rate limited per source IP.
+        server._TUNNEL_ENROLL_RATE._hits.clear()
+        statuses = [self.enroll(token="x" * 43)[0] for _ in range(11)]
+        self.assertEqual(statuses[:10], [403] * 10)
+        self.assertEqual(statuses[10], 429)
+        self.assertEqual(
+            self.audit_events("tunnel_enroll_failed")[-1]["reason"],
+            "rate_limited",
+        )
+
+    def test_sync_works_only_with_the_right_token(self) -> None:
+        self.seed([enrolled_agent(services=[service()])])
+        status, body = self.sync(SYNC_TOKEN)
+        self.assertEqual(status, 200, body)
+        self.assertEqual(json.loads(body)["services"][0]["id"], "p25565")
+        for token in ("wrong" * 9, ENROLL_TOKEN,
+                      settings_store.token_hash(SYNC_TOKEN)):
+            with self.subTest(token=token):
+                status, _ = self.sync(token)
+                self.assertEqual(status, 403)
+        # A pending agent has no sync token at all.
+        self.seed([pending_agent()])
+        status, _ = self.sync(ENROLL_TOKEN)
+        self.assertEqual(status, 403)
+
+    def test_full_enrollment_then_sync(self) -> None:
+        self.seed([pending_agent(services=[service()])])
+        status, _, body = self.enroll()
+        self.assertEqual(status, 200, body)
+        status, body = self.sync(json.loads(body)["sync_token"])
+        self.assertEqual(status, 200, body)
+
+    def test_reenroll_migrates_a_legacy_agent(self) -> None:
+        # A legacy agent keeps working until it is re-enrolled.
+        self.seed([agent(private_key=KEY_D, services=[service()])])
+        status, _ = self.sync(TOKEN)
+        self.assertEqual(status, 200)
+        cookie, state = self.admin()
+        self.assertEqual(state["tunnels"]["agents"][0]["enrollment"],
+                         "legacy")
+        status, _, body = self.get(
+            "/api/admin/tunnels/home/bundle", cookie=cookie,
+            source="127.0.0.5",
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(self.bundle_config(body)["version"], 1)
+
+        status, _, body = self.admin_post(
+            "/api/admin/settings",
+            {"action": "tunnel_agent_reenroll", "id": "home"},
+            cookie=cookie,
+        )
+        self.assertEqual(status, 200, body)
+        payload = json.loads(body)
+        token = payload["enroll_token"]
+        self.assertEqual(payload["agent_id"], "home")
+        row = self.gw.settings.snapshot()["tunnels"]["agents"][0]
+        for name in ("private_key", "token"):
+            self.assertNotIn(name, row)
+        self.assertIsNone(row["public_key"])
+        self.assertEqual(row["preshared_key"], "")
+        self.assertEqual(row["sync_token_hash"], "")
+        self.assertEqual(row["enroll_token_hash"],
+                         settings_store.token_hash(token))
+        self.assertEqual(len(row["services"]), 1)
+        text = Path(self.tmp.name, "settings.json").read_text()
+        for secret in (KEY_D, KEY_C, TOKEN, token):
+            self.assertNotIn(secret, text)
+        self.assertNotIn(token, Path(self.audit.path).read_text())
+        # The old installer's token no longer syncs, and there is no peer.
+        status, _ = self.sync(TOKEN)
+        self.assertEqual(status, 403)
+        self.assertIsNone(
+            self.gw.tunnels.reconciled[-1]["agents"][0]["public_key"]
+        )
+        # The new installer carries the new token, and enrollment works.
+        status, _, body = self.get(
+            "/api/admin/tunnels/home/bundle", cookie=cookie,
+            source="127.0.0.5", headers={"X-Dropjak-Enroll-Token": token},
+        )
+        self.assertEqual(status, 200, body[:300])
+        self.assertEqual(self.bundle_config(body)["enroll"]["token"], token)
+        status, _, body = self.enroll(token=token)
+        self.assertEqual(status, 200, body)
+        status, _ = self.sync(json.loads(body)["sync_token"])
+        self.assertEqual(status, 200)
+
+        # Re-enrolling an enrolled agent drops its key and sync token too.
+        status, _, body = self.admin_post(
+            "/api/admin/settings",
+            {"action": "tunnel_agent_reenroll", "id": "home"},
+            cookie=cookie,
+        )
+        self.assertEqual(status, 200, body)
+        row = self.gw.settings.snapshot()["tunnels"]["agents"][0]
+        self.assertIsNone(row["public_key"])
+        self.assertEqual(row["sync_token_hash"], "")
+        status, _, body = self.admin_post(
+            "/api/admin/settings",
+            {"action": "tunnel_agent_reenroll", "id": "nincs"},
+            cookie=cookie,
+        )
+        self.assertEqual(status, 400, body)
+
+    def test_export_holds_no_agent_private_keys_and_round_trips(self) -> None:
+        self.seed([
+            enrolled_agent(),
+            pending_agent(agent_id="new", address="10.77.0.3"),
+            agent(agent_id="old", address="10.77.0.4", public_key=KEY_A),
+        ])
+        bundle = server._config_bundle(self.gw)
+        rows = bundle["sections"]["settings"]["tunnels"]["agents"]
+        enrolled, pending, legacy = rows
+        for row in (enrolled, pending):
+            self.assertNotIn("private_key", row)
+            self.assertNotIn("token", row)
+        self.assertEqual(enrolled["sync_token_hash"],
+                         settings_store.token_hash(SYNC_TOKEN))
+        self.assertEqual(pending["enroll_token_hash"],
+                         settings_store.token_hash(ENROLL_TOKEN))
+        self.assertEqual(legacy["token"], TOKEN)
+        sections = server._validate_config_bundle(
+            self.gw, json.loads(json.dumps(bundle))
+        )
+        self.assertEqual(sections["settings"]["tunnels"]["agents"], rows)
 
     # -- domain-mode tunnel services ------------------------------------------
 

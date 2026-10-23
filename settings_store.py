@@ -144,6 +144,8 @@ TUNNEL_DOMAIN_PORT_HIGH = 60999
 _WG_KEY_BYTES = 32
 # The token is URL-safe, at least 32 characters (secrets.token_urlsafe(32) is 43).
 _TUNNEL_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
+# Enrolled agents keep only SHA-256 hex digests of their tokens (DJ-25).
+_TOKEN_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 # Target hostname: Docker service names may also contain underscores.
 _TUNNEL_HOST_RE = re.compile(
     r"^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9._-]{0,251}[A-Za-z0-9])?$"
@@ -593,6 +595,125 @@ def _wg_key(value, field: str, required: bool = False) -> str:
             f"{field}: invalid WireGuard key (base64, 32 bytes required)"
         )
     return base64.b64encode(raw).decode("ascii")
+
+
+def wg_key(value, field: str) -> str:
+    """A required WireGuard key in canonical form (SettingsError otherwise)."""
+    return _wg_key(value, field, True)
+
+
+def token_hash(token: str) -> str:
+    """SHA-256 hex digest under which enrollment and sync tokens are stored."""
+    return hashlib.sha256(token.encode("utf-8", "replace")).hexdigest()
+
+
+def tunnel_agent_legacy(agent: dict) -> bool:
+    """Whether the agent still has gateway-generated keys (pre-enrollment)."""
+    return bool(agent.get("private_key"))
+
+
+def _token_hash_field(value, field: str) -> str:
+    if value in (None, ""):
+        return ""
+    if not isinstance(value, str) or not _TOKEN_HASH_RE.match(value):
+        raise SettingsError(f"{field}: a SHA-256 hex digest is required")
+    return value
+
+
+def _tunnel_agent_keys(item) -> dict:
+    """The key and token fields of an agent, in one of two shapes.
+
+    Legacy: the gateway generated the agent's key pair, PSK and sync token
+    and stores them in clear. Enrollment (DJ-08/DJ-25): the agent generates
+    its own keys; the gateway keeps only the public key, the PSK the agent
+    sent and SHA-256 digests of the one-time enrollment token and the sync
+    token. ``public_key`` is null until the agent enrolls.
+    """
+    legacy_fields = ("private_key", "token")
+    enroll_fields = ("sync_token_hash", "enroll_token_hash", "enroll_expires")
+    if any(item.get(name) not in (None, "") for name in legacy_fields):
+        if any(item.get(name) not in (None, "", 0) for name in enroll_fields):
+            raise SettingsError(
+                "tunnel: an agent has either stored keys or an enrollment, "
+                "not both"
+            )
+        token = item.get("token")
+        if not isinstance(token, str) or not _TUNNEL_TOKEN_RE.match(token):
+            raise SettingsError(
+                "tunnel: invalid agent token (32+ URL-safe characters are "
+                "required)"
+            )
+        return {
+            "private_key": _wg_key(
+                item.get("private_key"), "tunnel: the agent's private key",
+                True,
+            ),
+            "public_key": _wg_key(
+                item.get("public_key"), "tunnel: the agent's public key", True
+            ),
+            "preshared_key": _wg_key(
+                item.get("preshared_key"), "tunnel: the preshared key", True
+            ),
+            "token": token,
+        }
+    public_key = _wg_key(
+        item.get("public_key"), "tunnel: the agent's public key"
+    ) or None
+    preshared_key = _wg_key(
+        item.get("preshared_key"), "tunnel: the preshared key"
+    )
+    sync_hash = _token_hash_field(
+        item.get("sync_token_hash"), "tunnel: the sync token hash"
+    )
+    enroll_hash = _token_hash_field(
+        item.get("enroll_token_hash"), "tunnel: the enrollment token hash"
+    )
+    expires = item.get("enroll_expires", 0)
+    if expires is None:
+        expires = 0
+    if isinstance(expires, bool) or not isinstance(expires, int) \
+            or expires < 0:
+        raise SettingsError(
+            "tunnel: the enrollment expiry must be a non-negative integer"
+        )
+    if public_key:
+        if not (preshared_key and sync_hash):
+            raise SettingsError(
+                "tunnel: an enrolled agent needs a preshared key and a sync "
+                "token hash"
+            )
+        if enroll_hash:
+            raise SettingsError(
+                "tunnel: an enrolled agent cannot have an open enrollment"
+            )
+        expires = 0
+    elif preshared_key or sync_hash:
+        raise SettingsError(
+            "tunnel: an agent waiting for enrollment has no preshared key or "
+            "sync token"
+        )
+    if not enroll_hash:
+        expires = 0
+    return {
+        "public_key": public_key,
+        "preshared_key": preshared_key,
+        "sync_token_hash": sync_hash,
+        "enroll_token_hash": enroll_hash,
+        "enroll_expires": expires,
+    }
+
+
+def tunnel_enrollment_state(agent: dict, now: float | None = None) -> str:
+    """legacy, enrolled, pending (open token), expired or none."""
+    if tunnel_agent_legacy(agent):
+        return "legacy"
+    if agent.get("public_key"):
+        return "enrolled"
+    if not agent.get("enroll_token_hash"):
+        return "none"
+    now = time.time() if now is None else now
+    return "pending" if now < int(agent.get("enroll_expires") or 0) \
+        else "expired"
 
 
 def _tunnel_address(value) -> str:
@@ -1157,7 +1278,7 @@ def _tunnel_service(item, domains=(), routes=(), portal_domain="",
 
 def _tunnel_agent(item, domains=(), routes=(), portal_domain="",
                   seen_domains=None) -> dict:
-    """Validate an agent (keys, token, address, services)."""
+    """Validate an agent (keys or enrollment, address, services)."""
     if not isinstance(item, dict):
         raise SettingsError("tunnel: the agent must be a JSON object")
     agent_id = item.get("id")
@@ -1167,20 +1288,7 @@ def _tunnel_agent(item, domains=(), routes=(), portal_domain="",
         raise SettingsError("tunnel: invalid agent ID")
     label = _text(item.get("label"), "tunnel: label")
     address = _tunnel_address(item.get("address"))
-    private_key = _wg_key(
-        item.get("private_key"), "tunnel: the agent's private key", True
-    )
-    public_key = _wg_key(
-        item.get("public_key"), "tunnel: the agent's public key", True
-    )
-    preshared_key = _wg_key(
-        item.get("preshared_key"), "tunnel: the preshared key", True
-    )
-    token = item.get("token")
-    if not isinstance(token, str) or not _TUNNEL_TOKEN_RE.match(token):
-        raise SettingsError(
-            "tunnel: invalid agent token (32+ URL-safe characters are required)"
-        )
+    keys = _tunnel_agent_keys(item)
     enabled = item.get("enabled", True)
     if not isinstance(enabled, bool):
         raise SettingsError("the enabled field must be true/false")
@@ -1207,8 +1315,7 @@ def _tunnel_agent(item, domains=(), routes=(), portal_domain="",
         services.append(service)
     return {
         "id": agent_id, "label": label, "address": address,
-        "private_key": private_key, "public_key": public_key,
-        "preshared_key": preshared_key, "token": token,
+        **keys,
         "enabled": enabled, "services": services,
     }
 

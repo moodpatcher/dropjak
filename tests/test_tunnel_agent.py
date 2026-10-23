@@ -225,6 +225,238 @@ class ConfigValidationTests(unittest.TestCase):
             agent.validate_config(config)["services"][0]["label"], "mc")
 
 
+ENROLL_TOKEN = "e" * 43
+
+
+def enroll_config() -> dict:
+    """A version 2 bundle config: no key, an enrollment section instead."""
+    config = base_config()
+    config["version"] = 2
+    del config["wireguard"]["private_key"]
+    del config["wireguard"]["preshared_key"]
+    del config["sync"]["token"]
+    config["enroll"] = {
+        "url": "https://portal.example.com/api/tunnel/enroll",
+        "token": ENROLL_TOKEN,
+    }
+    return config
+
+
+class KeyRunner(FakeRunner):
+    """FakeRunner that also answers wg genkey/pubkey/genpsk."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.generated = 0
+
+    def __call__(self, argv, *, stdin=None, check=True):
+        argv = tuple(argv)
+        if argv == ("wg", "genkey"):
+            self.calls.append((argv, stdin))
+            self.generated += 1
+            return completed(base64.b64encode(
+                bytes([self.generated]) * 32).decode() + "\n")
+        if argv == ("wg", "pubkey"):
+            self.calls.append((argv, stdin))
+            raw = base64.b64decode(stdin.strip())
+            return completed(base64.b64encode(
+                bytes([raw[0] + 100]) * 32).decode() + "\n")
+        if argv == ("wg", "genpsk"):
+            self.calls.append((argv, stdin))
+            return completed(base64.b64encode(
+                bytes([self.generated + 200]) * 32).decode() + "\n")
+        return super().__call__(argv, stdin=stdin, check=check)
+
+
+def enroll_reply(token: str = "s" * 43) -> FakeResponse:
+    return FakeResponse(json.dumps({"ok": True, "agent_id": "home-1",
+                                    "sync_token": token}).encode())
+
+
+class EnrollConfigTests(unittest.TestCase):
+    def test_version_2_has_no_keys_and_an_enroll_section(self) -> None:
+        cfg = agent.validate_config(enroll_config())
+        self.assertEqual(cfg["version"], 2)
+        self.assertIsNone(cfg["wireguard"]["private_key"])
+        self.assertIsNone(cfg["wireguard"]["preshared_key"])
+        self.assertIsNone(cfg["sync"]["token"])
+        self.assertEqual(cfg["enroll"]["token"], ENROLL_TOKEN)
+        # A legacy config has no enroll section.
+        self.assertIsNone(agent.validate_config(base_config())["enroll"])
+
+    def test_version_2_rejects_keys_and_tunnel_enroll_url(self) -> None:
+        mutations = {
+            "private key in v2": lambda c: c["wireguard"].update(
+                private_key=KEY),
+            "psk in v2": lambda c: c["wireguard"].update(preshared_key=KEY),
+            "sync token in v2": lambda c: c["sync"].update(token="x"),
+            "missing enroll": lambda c: c.pop("enroll"),
+            "enroll over the tunnel": lambda c: c["enroll"].update(
+                url="http://10.77.0.1:8100/api/tunnel/enroll"),
+            "enroll scheme": lambda c: c["enroll"].update(url="ftp://x/y"),
+            "enroll token whitespace": lambda c: c["enroll"].update(
+                token="a b"),
+            "unknown enroll key": lambda c: c["enroll"].update(extra=1),
+            "version 3": lambda c: c.update(version=3),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name):
+                config = copy.deepcopy(enroll_config())
+                mutate(config)
+                with self.assertRaises(agent.ConfigError):
+                    agent.validate_config(config)
+        # An enroll section is unknown in a version 1 config.
+        legacy = base_config()
+        legacy["enroll"] = enroll_config()["enroll"]
+        with self.assertRaises(agent.ConfigError):
+            agent.validate_config(legacy)
+
+
+class EnrollmentTests(unittest.TestCase):
+    """Agent-side key generation and one-time enrollment."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.logs: list = []
+
+    def make(self, config=None, responses=(), runner=None):
+        runner = runner or KeyRunner({})
+        opener = FakeOpener(list(responses))
+        instance = make_agent(config or enroll_config(), runner,
+                              self.tmp.name, opener=opener, logs=self.logs)
+        return instance, runner, opener
+
+    def identity(self) -> dict:
+        return json.loads(
+            (Path(self.tmp.name) / agent.IDENTITY_FILE).read_text())
+
+    def test_generates_keys_and_enrolls_once(self) -> None:
+        instance, runner, opener = self.make(responses=[enroll_reply()])
+        self.assertEqual(instance.ensure_identity(), "enrolled")
+        # The private key never appears in an argument list.
+        private = base64.b64encode(b"\x01" * 32).decode()
+        public = base64.b64encode(bytes([101]) * 32).decode()
+        psk = base64.b64encode(bytes([201]) * 32).decode()
+        for argv, stdin in runner.calls:
+            self.assertNotIn(private, " ".join(argv))
+        self.assertIn((("wg", "pubkey"), private + "\n"), runner.calls)
+        # The enroll call: portal URL, bearer token, public key and PSK.
+        request = opener.requests[0]
+        self.assertEqual(request.full_url,
+                         "https://portal.example.com/api/tunnel/enroll")
+        self.assertEqual(request.get_method(), "POST")
+        self.assertEqual(request.get_header("Authorization"),
+                         f"Bearer {ENROLL_TOKEN}")
+        self.assertEqual(json.loads(request.data), {
+            "agent_id": "home-1", "public_key": public,
+            "preshared_key": psk,
+        })
+        # The keys and the sync token fill the runtime config.
+        self.assertEqual(instance.wireguard["private_key"], private)
+        self.assertEqual(instance.wireguard["preshared_key"], psk)
+        self.assertEqual(instance.config["sync"]["token"], "s" * 43)
+        # The identity file is 0600 in the 0700 state directory.
+        path = Path(self.tmp.name) / agent.IDENTITY_FILE
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(Path(self.tmp.name).stat().st_mode),
+                         0o700)
+        stored = self.identity()
+        self.assertEqual(stored["private_key"], private)
+        self.assertEqual(stored["sync_token"], "s" * 43)
+        self.assertNotIn(ENROLL_TOKEN, path.read_text())
+        # Logs carry no key and no token.
+        text = json.dumps(self.logs)
+        for secret in (private, psk, "s" * 43, ENROLL_TOKEN):
+            self.assertNotIn(secret, text)
+
+        # A restart with the same bundle reuses the identity, offline.
+        again, runner2, opener2 = self.make()
+        self.assertEqual(again.ensure_identity(), "state")
+        self.assertEqual(opener2.requests, [])
+        self.assertEqual(runner2.generated, 0)
+        self.assertEqual(again.wireguard["private_key"], private)
+
+    def test_new_enrollment_token_generates_new_keys(self) -> None:
+        instance, _, _ = self.make(responses=[enroll_reply()])
+        instance.ensure_identity()
+        first = self.identity()["private_key"]
+        config = enroll_config()
+        config["enroll"]["token"] = "n" * 43
+        runner = KeyRunner({})
+        runner.generated = 5
+        again, _, opener = self.make(config, [enroll_reply("t" * 43)],
+                                     runner)
+        self.assertEqual(again.ensure_identity(), "enrolled")
+        self.assertEqual(opener.requests[0].get_header("Authorization"),
+                         "Bearer " + "n" * 43)
+        self.assertNotEqual(self.identity()["private_key"], first)
+        self.assertEqual(self.identity()["sync_token"], "t" * 43)
+
+    def test_refusal_is_final_and_keeps_the_keys(self) -> None:
+        refused = urllib.error.HTTPError(
+            "https://portal.example.com/api/tunnel/enroll", 403,
+            "Forbidden", {}, None)
+        instance, _, _ = self.make(responses=[refused])
+        with self.assertRaises(agent.EnrollRefused):
+            instance.ensure_identity()
+        stored = self.identity()
+        self.assertIsNone(stored["sync_token"])
+        self.assertTrue(stored["private_key"])
+        # A malformed reply is final too.
+        instance, _, _ = self.make(
+            responses=[FakeResponse(b'{"ok": true}')])
+        with self.assertRaises(agent.EnrollRefused):
+            instance.ensure_identity()
+
+    def test_transient_failures_are_retried(self) -> None:
+        busy = urllib.error.HTTPError(
+            "https://portal.example.com/api/tunnel/enroll", 429,
+            "Too Many Requests", {}, None)
+        responses = [urllib.error.URLError("portal down"), busy,
+                     enroll_reply()]
+        instance, _, opener = self.make(responses=responses)
+        with mock.patch.object(agent, "ENROLL_RETRY_FIRST", 0):
+            self.assertEqual(instance.ensure_identity(), "enrolled")
+        self.assertEqual(len(opener.requests), 3)
+        warnings = [ev for lvl, ev, _ in self.logs if lvl == "warning"]
+        self.assertEqual(warnings, ["enroll_failed", "enroll_failed"])
+
+    def test_legacy_config_needs_no_enrollment(self) -> None:
+        instance, runner, opener = self.make(config=base_config())
+        self.assertEqual(instance.ensure_identity(), "config")
+        self.assertEqual(runner.calls, [])
+        self.assertEqual(opener.requests, [])
+        self.assertEqual(instance.wireguard["private_key"], KEY)
+        self.assertFalse((Path(self.tmp.name) / agent.IDENTITY_FILE).exists())
+
+    def test_startup_enrolls_before_the_ruleset_and_tunnel(self) -> None:
+        runner = KeyRunner({"172.30.0.5": "eth1"})
+        opener = FakeOpener([enroll_reply()])
+        instance = make_agent(
+            enroll_config(), runner, self.tmp.name,
+            FakeGetaddr({"mc": "172.30.0.5",
+                         "portal.example.com": "203.0.113.9"}),
+            opener, self.logs)
+        with mock.patch.object(agent.Agent, "_set_ip_forward"):
+            instance.startup()
+        commands = [argv for argv, _ in runner.calls]
+        first_nft = next(i for i, argv in enumerate(commands)
+                         if argv[:2] == ("nft", "-f"))
+        genkey = commands.index(("wg", "genkey"))
+        self.assertLess(genkey, first_nft)
+        # The tunnel uses the generated key, through a 0600 temp file.
+        self.assertTrue(any(argv[:3] == ("wg", "set", "wg0")
+                            and "private-key" in argv for argv in commands))
+        # The portal is not in the output allowlist after enrollment.
+        self.assertNotIn("203.0.113.9", runner.nft[0])
+
+    def test_redirects_are_not_followed(self) -> None:
+        handler = agent._NoRedirect()
+        self.assertIsNone(handler.redirect_request(
+            None, None, 302, "Found", {}, "https://elsewhere/"))
+
+
 class RulesetTests(unittest.TestCase):
     def rules(self, proto: str = "both") -> str:
         config = agent.validate_config(base_config())
@@ -842,7 +1074,7 @@ class SelfInstallTests(unittest.TestCase):
     }
 
     def make_installer(self, tmp: str, networks=None, containers=None,
-                       agent_config=None):
+                       agent_config=None, config_extra=None):
         import io
         import tarfile
 
@@ -861,6 +1093,7 @@ class SelfInstallTests(unittest.TestCase):
                          else agent_config)
             config = (json.dumps({
                 "format": "dropjak-agent", "version": 1, "agent": agent,
+                **(config_extra or {}),
             }, indent=2, ensure_ascii=False) + "\n").encode()
             info = tarfile.TarInfo("agent.json")
             info.size = len(config)
@@ -915,10 +1148,11 @@ class SelfInstallTests(unittest.TestCase):
 
     def run_installer(self, tmp: str, networks=None, containers=None,
                       args=(), with_compose=False, agent_config=None,
+                      config_extra=None,
                       **extra_env):
         """Non-interactive run: stdin /dev/null, must never prompt."""
         script, target, bin_dir, log, lib, units = self.make_installer(
-            tmp, networks, containers, agent_config)
+            tmp, networks, containers, agent_config, config_extra)
         if with_compose:
             (target / "compose.yml").write_text("services: {}\n")
         env = self.installer_env(tmp, bin_dir, lib, units, **extra_env)
@@ -1497,7 +1731,19 @@ class SelfInstallTests(unittest.TestCase):
             script = Path(tmp, "dropjak-agent-home.sh")
             digest = hashlib.sha256(script.read_bytes()).hexdigest()
             self.assertIn(f"Installer SHA-256: {digest}", result.stdout)
-            self.assertIn("private key", result.stdout)
+            # A current bundle holds only the one-time enrollment token.
+            self.assertIn("generates its own WireGuard keys", result.stdout)
+            self.assertIn("one-time", result.stdout)
+            self.assertNotIn("private key", result.stdout)
+            self.assertIn("shred -u", result.stdout)
+
+    def test_legacy_bundle_warns_about_the_private_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            result, _, _, _ = self.run_installer(
+                tmp, config_extra={"wireguard": {"private_key": KEY}})
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("contains the agent's private key", result.stdout)
+            self.assertNotIn("one-time", result.stdout)
 
     def test_refuses_directory_writable_by_others(self) -> None:
         for mode in (0o777, 0o775, 0o1777):
