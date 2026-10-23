@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import collections
 import copy
 import getpass
 import hashlib
@@ -64,6 +65,13 @@ STATIC_FILES = {
 # The proxy endpoints may only be called by Caddy running on the host (based
 # on the raw socket peer, not X-Forwarded-For; see _peer_ip).
 PROXY_LOOPBACK = ("127.0.0.1", "::1")
+# Caddy's shared-secret header (gateway.PROXY_KEY). Caddy's get_certificate
+# and ask calls cannot send headers, so there the key comes in the query.
+PROXY_KEY_HEADER = "X-Dropjak-Proxy-Key"
+_PROXY_KEY_QUERY_RE = re.compile(r"([?&]key=)[^&\s]*")
+# The /api/ paths that check their caller themselves (loopback/Caddy or the
+# tunnel agent's token) and are therefore exempt from the Host allowlist.
+_HOST_CHECK_EXEMPT_PREFIXES = ("/api/proxy/", "/api/gate/")
 # Components of the multi-log filter: the shape of event codes (lowercase, digit, _).
 AUDIT_EVENT_CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 
@@ -246,15 +254,22 @@ if (CFG.mode === 'turnstile') {
 }
 """
 
-CONTENT_SECURITY_POLICY = (
-    "default-src 'self'; "
-    "script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com; "
-    "frame-src https://challenges.cloudflare.com; "
-    "style-src 'self' 'unsafe-inline'; "
-    "img-src 'self' data:; "
-    "connect-src 'self' https://challenges.cloudflare.com; "
-    "base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
-)
+TURNSTILE_ORIGIN = "https://challenges.cloudflare.com"
+
+
+def content_security_policy() -> str:
+    """CSP of the HTML pages; the Turnstile origin only while Turnstile is on."""
+    extra = f" {TURNSTILE_ORIGIN}" if gateway.TURNSTILE_ON else ""
+    frames = TURNSTILE_ORIGIN if gateway.TURNSTILE_ON else "'none'"
+    return (
+        "default-src 'self'; "
+        f"script-src 'self' 'unsafe-inline'{extra}; "
+        f"frame-src {frames}; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        f"connect-src 'self'{extra}; "
+        "base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+    )
 
 
 
@@ -297,7 +312,11 @@ _CLI_AGENT_RE = re.compile(
 PROXY_BURST_LIMIT = 10
 PROXY_BURST_WINDOW = 30
 PROXY_BURST_MAX_KEYS = 10000
-_PROXY_BURST: dict[tuple[str, str], tuple[list[float], float]] = {}
+# Least recently used first: a full table evicts the stalest keys only, so a
+# client with many IP+host pairs cannot reset everyone's pending detection.
+_PROXY_BURST: collections.OrderedDict[
+    tuple[str, str], tuple[list[float], float]
+] = collections.OrderedDict()
 _PROXY_BURST_LOCK = threading.Lock()
 
 
@@ -319,11 +338,10 @@ def _proxy_burst(ip: str, host: str, now: float, count: bool) -> float:
             for old in [k for k, (h, f) in _PROXY_BURST.items()
                         if not f and (not h or now - h[-1] >= PROXY_BURST_WINDOW)]:
                 del _PROXY_BURST[old]
-            if len(_PROXY_BURST) >= PROXY_BURST_MAX_KEYS:
-                # shortcut: on a full table every detection is lost; LRU is
-                # needed if real traffic reaches 10,000 IP+host pairs.
-                _PROXY_BURST.clear()
+            while len(_PROXY_BURST) >= PROXY_BURST_MAX_KEYS:
+                _PROXY_BURST.popitem(last=False)
         _PROXY_BURST[key] = (hits, flagged)
+        _PROXY_BURST.move_to_end(key)
         return flagged
 
 
@@ -793,7 +811,10 @@ _FAIL2BAN_CONFIG_KEYS = frozenset({
     "drop_enabled", "drop_count_enabled", "drop_ports_enabled",
     "drop_max", "drop_ports", "drop_window_seconds",
     "proxy_enabled", "proxy_max", "proxy_window_seconds",
+    "drop_exempt",
 })
+# Added after bundle version 2 was released: an older bundle may lack them.
+_FAIL2BAN_OPTIONAL_KEYS = frozenset({"drop_exempt"})
 
 
 class ConfigBundleError(ValueError):
@@ -874,7 +895,8 @@ def _validate_config_bundle(gw, bundle) -> dict:
         )
     raw_fail2ban = raw_sections["fail2ban"]
     if not isinstance(raw_fail2ban, dict) \
-            or set(raw_fail2ban) != _FAIL2BAN_CONFIG_KEYS:
+            or not _FAIL2BAN_CONFIG_KEYS - _FAIL2BAN_OPTIONAL_KEYS \
+            <= set(raw_fail2ban) <= _FAIL2BAN_CONFIG_KEYS:
         raise ConfigBundleError(
             "the fail2ban section is incomplete or contains an unknown field"
         )
@@ -1291,16 +1313,58 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return str(self.client_address[0])
 
+    def _from_caddy(self, query_key: bool = False) -> bool:
+        """Whether the request comes from Caddy running on the host.
+
+        A loopback peer is required. With HV_PROXY_KEY set, the shared
+        secret is required too, so other host processes and host-network
+        containers are no longer trusted as Caddy. ``query_key`` accepts the
+        key from the ``key`` query parameter (get_certificate, ask).
+        """
+        if self._peer_ip() not in PROXY_LOOPBACK:
+            return False
+        if not gateway.PROXY_KEY:
+            return True
+        headers = getattr(self, "headers", None)
+        provided = (headers.get(PROXY_KEY_HEADER) if headers else None) or ""
+        if not provided and query_key:
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            provided = (query.get("key") or [""])[0]
+        return hmac.compare_digest(
+            provided.encode("utf-8", "replace"),
+            gateway.PROXY_KEY.encode("utf-8"),
+        )
+
+    def _tunnel_peer_refused(self, path: str) -> bool:
+        """Tunnel peers may call only the agent sync endpoint.
+
+        The firewall opens the whole portal port to the WireGuard network,
+        but an agent needs nothing else. Every other path (login, account,
+        admin) gets a detail-free 404, even when HV_PORTAL_NET is narrow.
+        Returns True when the response has already been sent.
+        """
+        try:
+            peer = ipaddress.ip_address(self._peer_ip())
+        except ValueError:
+            return False
+        if peer not in settings_store.TUNNEL_SUBNET:
+            return False
+        if self.command == "GET" and path == _TUNNEL_SYNC_PATH:
+            return False
+        self._discard_body()
+        self._json(404, {"ok": False, "error": "unknown endpoint"})
+        return True
+
     def _client_ip(self) -> str:
-        # Trust boundary: X-Forwarded-For is accepted only from a loopback peer
-        # (Caddy running on the host). Caddy's reverse_proxy drops incoming XFF
-        # and sets it to the real remote address, so the last element cannot be
-        # forged. Headers from foreign peers are ignored; on an invalid value
-        # the loopback peer remains.
+        # Trust boundary: X-Forwarded-For is accepted only from Caddy (a
+        # loopback peer, plus the HV_PROXY_KEY shared secret when it is set).
+        # Caddy's reverse_proxy drops incoming XFF and sets it to the real
+        # remote address, so the last element cannot be forged. Headers from
+        # other peers are ignored; on an invalid value the peer remains.
         peer = self._peer_ip()
         headers = getattr(self, "headers", None)
         forwarded = headers.get("X-Forwarded-For") if headers else None
-        if peer in PROXY_LOOPBACK and forwarded:
+        if forwarded and self._from_caddy():
             try:
                 return gateway.normalize_ip(forwarded.split(",")[-1])
             except ValueError:
@@ -1309,7 +1373,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _via_proxy(self) -> bool:
         """Whether the request came through Caddy to a root domain's HTTPS portal."""
-        if self._peer_ip() not in PROXY_LOOPBACK:
+        if not self._from_caddy():
             return False
         host = (self.headers.get("Host") or "").strip().lower()
         return host.partition(":")[0] in self.gw.settings.snapshot().get(
@@ -1320,7 +1384,10 @@ class Handler(BaseHTTPRequestHandler):
         return gateway.COOKIE_SECURE or self._via_proxy()
 
     def log_message(self, fmt: str, *args) -> None:
-        print(f"[{self._client_ip()}] {fmt % args}", flush=True)
+        # The request line of Caddy's get_certificate/ask call carries the
+        # shared secret in the query: it must not reach the log.
+        line = _PROXY_KEY_QUERY_RE.sub(r"\1<redacted>", fmt % args)
+        print(f"[{self._client_ip()}] {line}", flush=True)
 
     def _cookie_token(self) -> str:
         return self._cookie(gateway.COOKIE_NAME)
@@ -1374,7 +1441,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Frame-Options", "DENY")
         if ctype.startswith("text/html"):
-            self.send_header("Content-Security-Policy", CONTENT_SECURITY_POLICY)
+            self.send_header("Content-Security-Policy", content_security_policy())
         for name, value in (headers or {}).items():
             self.send_header(name, value)
         self.end_headers()
@@ -1532,6 +1599,65 @@ class Handler(BaseHTTPRequestHandler):
             )
             return None
         return session
+
+    def _step_up(self, session: gateway.Session, data: dict | None,
+                 action: str) -> bool:
+        """Fresh proof of identity before a sensitive admin action.
+
+        The admin session alone (valid for the whole network grant, up to
+        30 days) is not enough for export, import and reset: the request
+        must carry the admin's current password, and the current TOTP code
+        when 2FA is enrolled. A failure counts like a failed login (rate
+        limit, account lock, fail2ban). On failure the response is sent and
+        False is returned; the session itself stays valid.
+        """
+        ip = self._client_ip()
+        data = data if isinstance(data, dict) else {}
+        password = data.get("password")
+        code = data.get("code")
+        record = self.gw.users.record(session.user)
+        totp = bool(record is not None and record.totp_secret)
+        reason = ""
+        if not isinstance(password, str) or not password:
+            reason = "missing"
+        elif not self.gw.login_rate.allow(ip):
+            reason = "rate_limited"
+        elif self._account_lock_applies(ip) \
+                and self.gw.account_lockout.locked(session.user):
+            reason = "account_locked"
+        elif len(password) > 1024 \
+                or not self.gw.users.verify(session.user, password):
+            reason = "invalid_password"
+        elif totp and not (
+            isinstance(code, str) and self.gw.users.verify_totp(
+                session.user, code.strip()
+            )
+        ):
+            reason = "invalid_code"
+        if not reason:
+            return True
+        self._audit(
+            "step_up_failed", user=session.user, action=action, reason=reason,
+        )
+        if reason in ("invalid_password", "invalid_code"):
+            self._account_failure(ip, session.user)
+            try:
+                self.gw.fail2ban.record_failure(ip, session.user)
+            except fail2ban_mod.Fail2banError as exc:
+                _log_fail2ban_error(
+                    ip, exc, self.gw.audit, operation="record_failure"
+                )
+        self._json(
+            429 if reason in ("rate_limited", "account_locked") else 403,
+            {
+                "ok": False,
+                "error": "Enter your password (and 2FA code) again to "
+                         "continue.",
+                "code": "step_up_required",
+                "totp": totp,
+            },
+        )
+        return False
 
     def _admin_state(self) -> dict:
         users = []
@@ -1737,13 +1863,80 @@ class Handler(BaseHTTPRequestHandler):
 
     def _portal_host_matches(self) -> bool:
         # On the root domains, Caddy serves the portal over HTTPS.
-        if not gateway.PORTAL_URL or self._via_proxy():
+        if self._via_proxy():
             return True
+        if not gateway.PORTAL_URL:
+            # No canonical address: the page may stay under any host the
+            # /api/ endpoints also accept (see _host_allowed).
+            return self._host_allowed()
         host = (self.headers.get("Host") or "").strip().lower()
         if not host:
             return True
         target = urllib.parse.urlsplit(gateway.PORTAL_URL).netloc.lower()
         return host == target
+
+    def _portal_redirect_url(self) -> str:
+        """Where a foreign Host is sent: PORTAL_URL, or the address the
+        connection arrived on (the gateway's own IP on that interface)."""
+        if gateway.PORTAL_URL:
+            return gateway.PORTAL_URL
+        try:
+            local = gateway.normalize_ip(self.connection.getsockname()[0])
+        except (OSError, ValueError, IndexError):
+            return "/"
+        if ":" in local:
+            local = f"[{local}]"
+        return f"http://{local}:{gateway.PORT}/"
+
+    def _host_allowed(self) -> bool:
+        """Whether the Host header names this portal (DNS rebinding guard).
+
+        Accepted: an IP literal (a rebinding page always uses a host name),
+        the PORTAL_URL host, HV_PORTAL_HOSTS, and through Caddy the root
+        domains and the portal's own address. A request without Host is not
+        from a browser and is accepted.
+        """
+        host = (self.headers.get("Host") or "").strip().lower()
+        if not host:
+            return True
+        name = host
+        if name.startswith("["):
+            name = name[1:].partition("]")[0]
+        elif name.count(":") == 1:
+            name = name.partition(":")[0]
+        try:
+            ipaddress.ip_address(name)
+            return True
+        except ValueError:
+            pass
+        if host in gateway.PORTAL_HOSTS or name in gateway.PORTAL_HOSTS:
+            return True
+        if gateway.PORTAL_URL and \
+                host == urllib.parse.urlsplit(gateway.PORTAL_URL).netloc.lower():
+            return True
+        if self._from_caddy():
+            settings = self.gw.settings.snapshot()
+            if name in settings.get("proxy_domains", []) \
+                    or name == settings.get("portal_domain", ""):
+                return True
+        return False
+
+    def _reject_unknown_host(self, path: str) -> bool:
+        """421 for an /api/ request under a foreign Host; True if it was sent."""
+        if not path.startswith("/api/") or path == _TUNNEL_SYNC_PATH \
+                or path.startswith(_HOST_CHECK_EXEMPT_PREFIXES):
+            return False
+        if self._host_allowed():
+            return False
+        self._audit(
+            "host_rejected",
+            host=(self.headers.get("Host") or "")[:200],
+            path=path[:200],
+        )
+        self._discard_body()
+        self.close_connection = True
+        self._json(421, {"ok": False, "error": "unknown host"})
+        return True
 
     def _https_portal_url(self) -> str:
         """HTTPS target for a portal opened directly (http) from the WAN, or "".
@@ -1786,6 +1979,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         self._body_read = False
         path = urllib.parse.urlsplit(self.path).path
+        if self._tunnel_peer_refused(path):
+            return
+        if self._reject_unknown_host(path):
+            return
 
         if path == "/api/challenge":
             return self._challenge()
@@ -1817,8 +2014,6 @@ class Handler(BaseHTTPRequestHandler):
             return self._admin_settings_api()
         if path == "/api/admin/fail2ban":
             return self._admin_fail2ban_api()
-        if path == "/api/admin/config/export":
-            return self._admin_config_export()
         if path.startswith("/api/proxy/"):
             return self._proxy_api(path)
         if path.startswith("/api/gate/"):
@@ -1839,14 +2034,15 @@ class Handler(BaseHTTPRequestHandler):
         # Captive portal: an HTTP request with a foreign Host is redirected to
         # the gateway's own address so the cookie and state stay in one place.
         if not self._portal_host_matches():
+            target = self._portal_redirect_url()
             self._audit(
                 "portal_host_redirect",
                 host=(self.headers.get("Host") or "")[:200],
-                target=gateway.PORTAL_URL,
+                target=target,
             )
             return self._send(
                 302, b"", "text/plain; charset=utf-8",
-                headers={"Location": gateway.PORTAL_URL},
+                headers={"Location": target},
             )
 
         if path in ("/", "/index.html") or path not in (
@@ -1976,7 +2172,9 @@ class Handler(BaseHTTPRequestHandler):
         # Caddy calls this for every proxied request: only the entry's page
         # load gets an audit, the 401 a drop row; fail2ban counts only the
         # private entry's 401 responses. A foreign peer must learn nothing.
-        if self._peer_ip() not in PROXY_LOOPBACK:
+        if not self._from_caddy(
+            query_key=path in ("/api/proxy/cert", "/api/proxy/ask")
+        ):
             return self._send(404, b"", "text/plain; charset=utf-8")
         if path in ("/api/proxy/unauthorized.png", "/api/proxy/sus.png"):
             return self._static(path.rpartition("/")[2])
@@ -2236,7 +2434,7 @@ class Handler(BaseHTTPRequestHandler):
         """
         host = (self.headers.get("Host") or "").strip().lower().partition(":")[0]
         target, unknown_root = None, ""
-        if self._peer_ip() in PROXY_LOOPBACK and path == "/api/gate/challenge":
+        if self._from_caddy() and path == "/api/gate/challenge":
             target, _ = self._proxy_target(host)
             if target is None:
                 unknown_root = self._proxy_unknown_root(host)
@@ -3122,18 +3320,23 @@ class Handler(BaseHTTPRequestHandler):
                 ("check-containment.sh", 0o755),
             ):
                 _tar_member(tar, name, contents[name], mode)
+        bundle = header + payload.getvalue()
+        # The installer prints its own SHA-256; the admin compares it with
+        # this value (shown by the UI, kept in the audit log) before running.
+        digest = hashlib.sha256(bundle).hexdigest()
         self._audit(
             "tunnel_agent_config_downloaded",
             user=session.user, target=agent["id"], services=count,
-            bundle=True,
+            bundle=True, sha256=digest,
         )
         self._send(
-            200, header + payload.getvalue(), "application/x-sh",
+            200, bundle, "application/x-sh",
             headers={
                 "Content-Disposition": (
                     "attachment; filename="
                     f'"dropjak-agent-{agent["id"]}.sh"'
                 ),
+                "X-Dropjak-SHA256": digest,
             },
         )
 
@@ -3214,6 +3417,8 @@ class Handler(BaseHTTPRequestHandler):
     # -- configuration bundle --------------------------------------------------
 
     def _admin_config_export(self) -> None:
+        # POST, because the request carries the admin's password (step-up):
+        # the bundle holds every secret of the installation.
         session = self._admin_guard()
         if session is None:
             return
@@ -3225,6 +3430,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(
                 403, {"ok": False, "error": "invalid request origin"}
             )
+        data = self._read_json(4096)
+        if not self._step_up(session, data, "config_export"):
+            return
         try:
             bundle = _config_bundle(self.gw)
         except ConfigBundleError as exc:
@@ -3290,6 +3498,8 @@ class Handler(BaseHTTPRequestHandler):
                     "site_name": _effective_site_name(self.gw),
                 },
             )
+        if not self._step_up(session, data, "config_import"):
+            return
         try:
             checked = _validate_config_bundle(self.gw, data["bundle"])
         except ConfigBundleError as exc:
@@ -3420,6 +3630,8 @@ class Handler(BaseHTTPRequestHandler):
                     "site_name": expected,
                 },
             )
+        if not self._step_up(session, data, "config_reset"):
+            return
 
         with self.gw.admin_lock:
             # Runtime state first; if this fails, nothing is deleted.
@@ -4671,7 +4883,7 @@ class Handler(BaseHTTPRequestHandler):
                             "drop_ports_enabled", "drop_max",
                             "drop_ports", "drop_window_seconds",
                             "proxy_enabled", "proxy_max",
-                            "proxy_window_seconds",
+                            "proxy_window_seconds", "drop_exempt",
                         )
                         if key in data
                     }
@@ -4686,7 +4898,7 @@ class Handler(BaseHTTPRequestHandler):
                             "drop_count_active", "drop_ports_active",
                             "drop_max", "drop_ports", "drop_window_seconds",
                             "proxy_enabled", "proxy_max",
-                            "proxy_window_seconds",
+                            "proxy_window_seconds", "drop_exempt",
                         )
                     }
                     audit_extra["released"] = max(
@@ -4792,6 +5004,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         self._body_read = False
         path = urllib.parse.urlsplit(self.path).path
+        if self._tunnel_peer_refused(path):
+            return
+        if self._reject_unknown_host(path):
+            return
         if path == "/api/register":
             return self._register()
         if path == "/api/login":
@@ -4822,6 +5038,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._admin_certs_action()
         if path == "/api/admin/fail2ban":
             return self._admin_fail2ban_action()
+        if path == "/api/admin/config/export":
+            return self._admin_config_export()
         if path == "/api/admin/config/import":
             return self._admin_config_import()
         if path == "/api/admin/config/reset":
@@ -4968,7 +5186,17 @@ class Handler(BaseHTTPRequestHandler):
                 user=user,
                 reason="failed to create the user",
             )
-            return self._json(400, {"ok": False, "error": str(exc)})
+            # The store's message may carry internal details (paths, I/O
+            # errors): only the log gets it, the anonymous caller does not.
+            print(f"[{ip}] account request failed: {exc}", flush=True)
+            return self._json(
+                400,
+                {
+                    "ok": False,
+                    "error": "The request could not be recorded. "
+                             "Try again later.",
+                },
+            )
         self._audit("registration_requested", target=user)
         print(f"[{ip}] account request recorded: {user!r}", flush=True)
         self._json(
@@ -5036,9 +5264,13 @@ class Handler(BaseHTTPRequestHandler):
             self._audit("login_failed", user=user, reason=f"captcha: {why}")
             return self._json(403, {"ok": False, "error": f"Captcha: {why}"})
 
+        if self._account_locked_reply(ip, user):
+            return
+
         if not self.gw.users.verify(user, password):
             self._audit("login_failed", user=user, reason="invalid username or password")
             print(f"[{ip}] failed login: {user!r}", flush=True)
+            self._account_failure(ip, user)
             try:
                 ban = self.gw.fail2ban.record_failure(ip, user)
             except fail2ban_mod.Fail2banError as exc:
@@ -5083,6 +5315,7 @@ class Handler(BaseHTTPRequestHandler):
             )
         if record is None or not record.enabled:
             self._audit("login_failed", user=user, reason="disabled user")
+            self._account_failure(ip, user)
             try:
                 self.gw.fail2ban.record_failure(ip, user)
             except fail2ban_mod.Fail2banError as exc:
@@ -5093,6 +5326,7 @@ class Handler(BaseHTTPRequestHandler):
                 403, {"ok": False, "error": "Invalid username or password."}
             )
 
+        self.gw.account_lockout.record_success(user)
         if record.totp_required:
             fingerprint = _record_fingerprint(record)
             if not record.totp_secret:
@@ -5151,6 +5385,50 @@ class Handler(BaseHTTPRequestHandler):
 
         self.gw.fail2ban.record_success(ip)
         self._login_session_response(record)
+
+    def _account_lock_applies(self, ip: str) -> bool:
+        # LAN clients are on site and fail2ban limits them per IP; the account
+        # lock must not let a WAN attacker lock the admin out of the LAN too.
+        if gateway.LAN_NETWORK is None:
+            return True
+        try:
+            return ipaddress.ip_address(ip) not in gateway.LAN_NETWORK
+        except ValueError:
+            return True
+
+    def _account_locked_reply(self, ip: str, user: str) -> bool:
+        """429 while the login name is locked; True if it was sent."""
+        if not self._account_lock_applies(ip):
+            return False
+        remaining = self.gw.account_lockout.locked(user)
+        if not remaining:
+            return False
+        self._audit(
+            "login_failed", user=user, reason="account locked",
+            remaining=remaining,
+        )
+        self._json(
+            429,
+            {
+                "ok": False,
+                "error": "Too many failed attempts for this account. "
+                         "Try again later.",
+                "code": "account_locked",
+                "remaining": remaining,
+            },
+            headers={"Retry-After": str(remaining)},
+        )
+        return True
+
+    def _account_failure(self, ip: str, user: str) -> None:
+        if not self._account_lock_applies(ip):
+            return
+        length = self.gw.account_lockout.record_failure(user)
+        if length:
+            self._audit("account_locked", user=user, lock_seconds=length)
+            print(
+                f"[{ip}] account locked for {length} s: {user!r}", flush=True
+            )
 
     def _login_session_response(
         self,
@@ -5239,7 +5517,8 @@ class Handler(BaseHTTPRequestHandler):
             "user": record.name,
             "role": record.role,
             "admin": record.is_admin,
-            "session": session.token[:10],
+            # The session id, never a part of the cookie value.
+            "sid": session.sid,
             "pending_ttl": self.gw.sessions.pending_ttl,
             "must_change_password": record.must_change_password,
         }
@@ -6882,13 +7161,103 @@ class CaddyAdmin:
         self._wake.set()
 
 
+def _transport_warnings() -> list[str]:
+    """Startup warnings about how the portal is exposed (plain HTTP, Caddy).
+
+    The firewall template gets HV_PORTAL_NET (empty: HV_MGMT_NET); a broad,
+    non-private source network means the portal port is open to the
+    internet, where the direct portal speaks plain HTTP.
+    """
+    warnings: list[str] = []
+    raw = (
+        os.environ.get("HV_PORTAL_NET", "").strip()
+        or os.environ.get("HV_MGMT_NET", "").strip()
+    )
+    try:
+        network = ipaddress.ip_network(raw, strict=False) if raw else None
+    except ValueError:
+        network = None
+    if network is not None and not network.is_private \
+            and network.prefixlen < 24 and not gateway.COOKIE_SECURE:
+        warnings.append(
+            f"HV_PORTAL_NET={network} opens the portal port to the internet "
+            "over plain HTTP: passwords, 2FA codes and session cookies "
+            "cross the network unencrypted. Serve WAN users through the "
+            "Caddy HTTPS proxy (HV_PROXY=1, COMPOSE_PROFILES=proxy), set "
+            "HV_COOKIE_SECURE=1, and narrow HV_PORTAL_NET to a management "
+            "network."
+        )
+    if gateway.PROXY_ENABLED and len(gateway.PROXY_KEY) < 32:
+        warnings.append(
+            "HV_PROXY=1 without an HV_PROXY_KEY of at least 32 characters: "
+            "every process on the host (and every host-network container) "
+            "is trusted as Caddy, including X-Forwarded-For and the "
+            "certificate private keys. Generate one with "
+            "'openssl rand -hex 32' and give it to both services."
+        )
+    if not gateway.PORTAL_URL and not gateway.PORTAL_HOSTS:
+        warnings.append(
+            "neither HV_PORTAL_URL nor HV_PORTAL_HOSTS is set: the /api/ "
+            "endpoints answer only under an IP address or a Caddy root "
+            "domain; add the DNS names you open the portal under to "
+            "HV_PORTAL_HOSTS."
+        )
+    return warnings
+
+
 class AppServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
     def __init__(self, address: tuple[str, int], gw: gateway.Gateway) -> None:
         self.gateway = gw
+        # Every connection holds a thread for as long as it is open (also
+        # idle keep-alive and slowly trickling clients), so their number is
+        # capped in total and per source IP; over the cap the new connection
+        # is closed at once, before a thread is started.
+        self.max_connections = gateway.MAX_CONNECTIONS
+        self.max_connections_per_ip = gateway.MAX_CONNECTIONS_PER_IP
+        self._conn_lock = threading.Lock()
+        self._conn_total = 0
+        self._conn_per_ip: dict[str, int] = {}
         super().__init__(address, Handler)
+
+    def _conn_acquire(self, ip: str) -> bool:
+        with self._conn_lock:
+            if self._conn_total >= self.max_connections:
+                return False
+            count = self._conn_per_ip.get(ip, 0)
+            if ip not in PROXY_LOOPBACK and count >= self.max_connections_per_ip:
+                return False
+            self._conn_total += 1
+            self._conn_per_ip[ip] = count + 1
+            return True
+
+    def _conn_release(self, ip: str) -> None:
+        with self._conn_lock:
+            self._conn_total = max(0, self._conn_total - 1)
+            count = self._conn_per_ip.get(ip, 0) - 1
+            if count > 0:
+                self._conn_per_ip[ip] = count
+            else:
+                self._conn_per_ip.pop(ip, None)
+
+    def process_request(self, request, client_address) -> None:
+        ip = str(client_address[0])
+        if not self._conn_acquire(ip):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._conn_release(ip)
+            raise
+
+    def process_request_thread(self, request, client_address) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._conn_release(str(client_address[0]))
 
 
 # ------------------------------------------------- local control channel
@@ -8557,6 +8926,9 @@ def _serve() -> int:
             "To create one: python3 server.py user add <name>",
             flush=True,
         )
+
+    for line in _transport_warnings():
+        print(f"WARNING: {line}", flush=True)
 
     gw.start()
     # Flush Caddy's certificate cache (only with the domain proxy).

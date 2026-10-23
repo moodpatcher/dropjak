@@ -1352,6 +1352,116 @@ class UserStoreTests(unittest.TestCase):
         self.assertIsNotNone(self.store.record("admin"))
         self.assertEqual(self.store.record("admin").role, gateway.ROLE_ADMIN)
 
+    def test_usernames_are_unique_case_insensitively(self) -> None:
+        """DJ-29: no look-alike "Admin" next to "admin"."""
+        self.store.add("admin", "hosszu-jelszo-1", role=gateway.ROLE_ADMIN)
+        for name in ("Admin", "ADMIN"):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(gateway.UserStoreError, "already exists"):
+                    self.store.add(name, "hosszu-jelszo-2")
+        raw = self.store.export_records()
+        raw["Admin"] = dict(raw["admin"])
+        with self.assertRaisesRegex(gateway.UserStoreError, "duplicate username"):
+            self.store.validate_import_records(raw)
+
+    def test_import_rejects_iterations_below_loader_minimum(self) -> None:
+        self.store.add("alice", "hosszu-jelszo-1")
+        raw = self.store.export_records()
+        raw["alice"]["iterations"] = 9_999
+        with self.assertRaisesRegex(gateway.UserStoreError, "invalid password data"):
+            self.store.validate_import_records(raw)
+        raw["alice"]["iterations"] = 10_000
+        self.store.validate_import_records(raw)
+
+    def test_login_rehashes_to_current_iterations(self) -> None:
+        self.store.add("alice", "hosszu-jelszo-1")
+        newer = gateway.UserStore(self.path, iterations=12_000)
+        self.assertTrue(newer.verify("alice", "hosszu-jelszo-1"))
+        self.assertEqual(newer.record("alice").iterations, 12_000)
+        self.assertTrue(newer.verify("alice", "hosszu-jelszo-1"))
+        self.assertFalse(newer.verify("alice", "rossz-jelszo-1"))
+
+
+class AccountLockoutTests(unittest.TestCase):
+    """DJ-06: the per-account counter behind the login."""
+
+    def test_locks_after_threshold_and_doubles(self) -> None:
+        lock = gateway.AccountLockout(maximum=3, window=60, base=10, cap=25)
+        self.assertEqual(lock.record_failure("Bob"), 0)
+        self.assertEqual(lock.record_failure("bob"), 0)
+        self.assertEqual(lock.locked("BOB"), 0)
+        self.assertEqual(lock.record_failure("bob "), 10)
+        self.assertGreater(lock.locked("bob"), 0)
+        # Second lock: doubled; third: capped.
+        with mock.patch.object(gateway.time, "time", return_value=time.time() + 11):
+            self.assertEqual(lock.locked("bob"), 0)
+            for _ in range(2):
+                lock.record_failure("bob")
+            self.assertEqual(lock.record_failure("bob"), 20)
+        with mock.patch.object(gateway.time, "time", return_value=time.time() + 40):
+            for _ in range(2):
+                lock.record_failure("bob")
+            self.assertEqual(lock.record_failure("bob"), 25)
+
+    def test_success_clears_and_names_are_independent(self) -> None:
+        lock = gateway.AccountLockout(maximum=2, window=60, base=10, cap=10)
+        lock.record_failure("alice")
+        lock.record_success("alice")
+        self.assertEqual(lock.record_failure("alice"), 0)
+        lock.record_failure("carol")
+        self.assertEqual(lock.locked("alice"), 0)
+        self.assertEqual(lock.record_failure("carol"), 10)
+        self.assertEqual(lock.locked("alice"), 0)
+
+    def test_memory_is_bounded(self) -> None:
+        lock = gateway.AccountLockout(maximum=5, window=60, base=10, cap=10)
+        with mock.patch.object(gateway.AccountLockout, "MAX_NAMES", 50):
+            for index in range(200):
+                lock.record_failure(f"spray-{index}")
+            self.assertLessEqual(len(lock._state), 50)
+
+
+class TransportWarningTests(unittest.TestCase):
+    """DJ-00, DJ-10, DJ-14: startup warnings about the exposure."""
+
+    def warnings(self, env: dict, **patches) -> list[str]:
+        values = {
+            "COOKIE_SECURE": False, "PROXY_ENABLED": False, "PROXY_KEY": "",
+            "PORTAL_URL": "http://192.168.10.1:8100",
+            "PORTAL_HOSTS": frozenset(),
+        }
+        values.update(patches)
+        clean = {"HV_PORTAL_NET": "", "HV_MGMT_NET": ""}
+        clean.update(env)
+        with mock.patch.dict(os.environ, clean), \
+                mock.patch.multiple(gateway, **values):
+            return server._transport_warnings()
+
+    def test_public_portal_over_plain_http_warns(self) -> None:
+        out = self.warnings({"HV_PORTAL_NET": "0.0.0.0/0"})
+        self.assertEqual(len(out), 1, out)
+        self.assertIn("plain HTTP", out[0])
+        self.assertIn("HV_COOKIE_SECURE=1", out[0])
+        # Via the old base value too.
+        self.assertTrue(self.warnings({"HV_MGMT_NET": "0.0.0.0/0"}))
+
+    def test_narrow_or_secure_portal_does_not_warn(self) -> None:
+        self.assertEqual(self.warnings({"HV_PORTAL_NET": "192.168.10.0/24"}), [])
+        self.assertEqual(self.warnings({"HV_PORTAL_NET": "203.0.113.0/28"}), [])
+        self.assertEqual(
+            self.warnings({"HV_PORTAL_NET": "0.0.0.0/0"}, COOKIE_SECURE=True),
+            [],
+        )
+
+    def test_proxy_without_key_and_missing_host_names_warn(self) -> None:
+        out = self.warnings({}, PROXY_ENABLED=True)
+        self.assertTrue(any("HV_PROXY_KEY" in line for line in out), out)
+        self.assertEqual(
+            self.warnings({}, PROXY_ENABLED=True, PROXY_KEY="k" * 32), []
+        )
+        out = self.warnings({}, PORTAL_URL="")
+        self.assertTrue(any("HV_PORTAL_HOSTS" in line for line in out), out)
+
 
 class UserStoreAccountRequestTests(unittest.TestCase):
     """The account request (pending) data model, approval and rejection."""
@@ -2172,6 +2282,38 @@ class AdminProvisionTests(unittest.TestCase):
         self.assertTrue(self.store.provisioned_from("admin"))
         self.assertTrue(self.store.record("admin").must_change_password)
         self.assertTrue(self.store.verify("admin", "hosszu-jelszo-1"))
+
+    def test_marker_uses_random_salt(self) -> None:
+        """DJ-27: no global salt; equal passwords give different markers."""
+        first = gateway.provision_marker("hosszu-jelszo-1", 10_000)
+        second = gateway.provision_marker("hosszu-jelszo-1", 10_000)
+        self.assertNotEqual(first, second)
+        self.assertTrue(first.startswith("v2$10000$"))
+        self.assertLessEqual(len(first), 128)
+        for marker in (first, second):
+            self.assertTrue(gateway.provision_marker_matches(
+                marker, "hosszu-jelszo-1", 10_000
+            ))
+            self.assertFalse(gateway.provision_marker_matches(
+                marker, "masik-jelszo-2", 10_000
+            ))
+
+    def test_legacy_v1_marker_is_upgraded_without_password_reset(self) -> None:
+        self.store.add(
+            "admin", "hosszu-jelszo-1", role=gateway.ROLE_ADMIN, rules=()
+        )
+        self.store.set_password("admin", "sajat-jelszo-3")
+        legacy = hashlib.pbkdf2_hmac(
+            "sha256", b"hosszu-jelszo-1", gateway._PROVISION_SALT, 10_000
+        ).hex()
+        self.store.set_metadata("admin", provisioned_from=legacy)
+        self.assertEqual(
+            self._provision(True, "admin", "hosszu-jelszo-1"), "unchanged"
+        )
+        marker = self.store.provisioned_from("admin")
+        self.assertTrue(marker.startswith("v2$"))
+        self.assertTrue(self.store.verify("admin", "sajat-jelszo-3"))
+        self.assertFalse(self.store.record("admin").must_change_password)
 
 
 # ------------------------------------------------------------------ session
@@ -5209,6 +5351,248 @@ class HttpTests(unittest.TestCase):
             self.assertNotIn(hidden, body, hidden)
 
 
+    # -- security review fixes (web/auth) ---------------------------------
+
+    def _audit_rows(self, started: float, event: str) -> list[dict]:
+        return [
+            row for row in audit_since(self.audit, started)
+            if row.get("event") == event
+        ]
+
+    def test_unknown_host_on_api_returns_421(self) -> None:
+        """DJ-14: a DNS-rebinding host name cannot reach /api/*."""
+        started = time.time()
+        host = f"attacker.test:{self.port}"
+        status, _, body = self.get("/api/status", headers={"Host": host})
+        self.assertEqual(status, 421, body)
+        ch = solve(self.challenge())
+        status, _, body = self.post_json(
+            "/api/login",
+            {"user": "alice", "pass": "hosszu-jelszo-1", "captcha": ch},
+            headers={"Host": host, "Origin": f"http://{host}"},
+        )
+        self.assertEqual(status, 421, body)
+        self.assertEqual(json.loads(body)["error"], "unknown host")
+        rows = self._audit_rows(started, "host_rejected")
+        self.assertEqual(len(rows), 2, rows)
+        self.assertEqual(rows[0]["host"], host)
+        # The captive page under a foreign host moves to the address the
+        # connection arrived on (no PORTAL_URL here), where /api/ works.
+        status, headers, _ = self.get("/", headers={"Host": host})
+        self.assertEqual(status, 302)
+        self.assertEqual(
+            headers["Location"], f"http://127.0.0.1:{gateway.PORT}/"
+        )
+
+    def test_known_hosts_on_api_are_accepted(self) -> None:
+        for host in (f"127.0.0.1:{self.port}", "127.0.0.1", f"[::1]:{self.port}"):
+            with self.subTest(host=host):
+                status, _, _ = self.get("/api/status", headers={"Host": host})
+                self.assertEqual(status, 200)
+        with mock.patch.object(
+            gateway, "PORTAL_HOSTS", frozenset({"portal.lan"})
+        ):
+            status, _, _ = self.get(
+                "/api/status", headers={"Host": f"portal.lan:{self.port}"}
+            )
+            self.assertEqual(status, 200)
+        with mock.patch.object(
+            gateway, "PORTAL_URL", "http://gw.example.test:8100"
+        ):
+            status, _, _ = self.get(
+                "/api/status", headers={"Host": "gw.example.test:8100"}
+            )
+            self.assertEqual(status, 200)
+            status, _, _ = self.get(
+                "/api/status", headers={"Host": "other.example.test:8100"}
+            )
+            self.assertEqual(status, 421)
+
+    def _portal_opened_ip(self, headers: dict) -> str:
+        started = time.time()
+        status, _, _ = self.get("/", headers=headers)
+        self.assertEqual(status, 200)
+        rows = self._audit_rows(started, "portal_opened")
+        self.assertTrue(rows)
+        return rows[-1]["ip"]
+
+    def test_forwarded_for_needs_proxy_key_when_configured(self) -> None:
+        """DJ-10: with HV_PROXY_KEY, a bare loopback peer is not Caddy."""
+        forwarded = {"X-Forwarded-For": "203.0.113.9"}
+        # Without a key configured: the old loopback trust.
+        self.assertEqual(self._portal_opened_ip(forwarded), "203.0.113.9")
+        key = "k" * 40
+        with mock.patch.object(gateway, "PROXY_KEY", key):
+            self.assertEqual(self._portal_opened_ip(forwarded), "127.0.0.1")
+            self.assertEqual(
+                self._portal_opened_ip(
+                    {**forwarded, server.PROXY_KEY_HEADER: "wrong"}
+                ),
+                "127.0.0.1",
+            )
+            self.assertEqual(
+                self._portal_opened_ip(
+                    {**forwarded, server.PROXY_KEY_HEADER: key}
+                ),
+                "203.0.113.9",
+            )
+            # The proxy endpoints answer only to the keyed caller.
+            status, _, _ = self.get("/api/proxy/unauthorized.png")
+            self.assertEqual(status, 404)
+            status, _, _ = self.get(
+                "/api/proxy/unauthorized.png",
+                headers={server.PROXY_KEY_HEADER: key},
+            )
+            self.assertEqual(status, 200)
+            status, _, _ = self.get("/api/proxy/cert?server_name=x.test")
+            self.assertEqual(status, 404)
+            status, _, _ = self.get(
+                f"/api/proxy/cert?server_name=x.test&key={key}"
+            )
+            self.assertNotEqual(status, 404)
+
+    def test_proxy_key_is_redacted_from_request_log(self) -> None:
+        line = server._PROXY_KEY_QUERY_RE.sub(
+            r"\1<redacted>",
+            '"GET /api/proxy/cert?server_name=a.test&key=s3cr3t HTTP/1.1" 204 -',
+        )
+        self.assertNotIn("s3cr3t", line)
+        self.assertIn("key=<redacted>", line)
+
+    def test_account_lock_across_source_ips(self) -> None:
+        """DJ-06: failures from many IPs lock the login name itself."""
+        self.gw.account_lockout = gateway.AccountLockout(
+            maximum=3, window=60, base=60, cap=60
+        )
+        self.addCleanup(
+            setattr, self.gw, "account_lockout", gateway.AccountLockout()
+        )
+        started = time.time()
+        for source in ("127.0.0.21", "127.0.0.22", "127.0.0.23"):
+            status, _, body = self.login_from("bob", "rossz-jelszo", source)
+            self.assertEqual(status, 403, body)
+        # The right password from yet another IP is refused while locked.
+        status, headers, body = self.login_from(
+            "bob", "hosszu-jelszo-2", "127.0.0.24"
+        )
+        self.assertEqual(status, 429, body)
+        self.assertEqual(json.loads(body)["code"], "account_locked")
+        self.assertIn("Retry-After", headers)
+        self.assertNotIn("Set-Cookie", headers)
+        rows = self._audit_rows(started, "account_locked")
+        self.assertEqual([row["user"] for row in rows], ["bob"])
+        self.assertEqual(gateway.audit_severity("account_locked"), "alert")
+        # An unknown name is locked the same way (no enumeration).
+        for source in ("127.0.0.21", "127.0.0.22", "127.0.0.23"):
+            self.login_from("nincs-ilyen", "rossz-jelszo", source)
+        status, _, body = self.login_from(
+            "nincs-ilyen", "rossz-jelszo", "127.0.0.24"
+        )
+        self.assertEqual(status, 429, body)
+        # LAN clients are exempt: the admin on site can still sign in.
+        with mock.patch.object(
+            gateway, "LAN_NETWORK", ipaddress.ip_network("127.0.0.0/24")
+        ):
+            status, _, body = self.login_from(
+                "bob", "hosszu-jelszo-2", "127.0.0.25"
+            )
+            self.assertEqual(status, 200, body)
+        self.gw.sessions.revoke_user("bob")
+
+    def test_totp_enrollment_is_an_alert(self) -> None:
+        """DJ-12: every first-use enrollment is surfaced to admins."""
+        self.require_totp("alice")
+        started = time.time()
+        self.enroll_totp("alice", "hosszu-jelszo-1")
+        rows = self._audit_rows(started, "totp_enrolled")
+        self.assertEqual(len(rows), 1, rows)
+        self.assertEqual(rows[0]["severity"], "alert")
+        self.assertTrue(rows[0]["ip"])
+
+    def test_login_success_audit_has_no_token_part(self) -> None:
+        """DJ-26: login_success logs the session id, not the cookie."""
+        started = time.time()
+        status, headers, body = self.login("alice", "hosszu-jelszo-1")
+        self.assertEqual(status, 200, body)
+        token = self.cookie_from(headers).split("=", 1)[1]
+        rows = self._audit_rows(started, "login_success")
+        self.assertEqual(len(rows), 1, rows)
+        self.assertNotIn("session", rows[0])
+        self.assertTrue(rows[0]["sid"])
+        self.assertNotIn(token[:10], json.dumps(rows[0]))
+        self.assertIn("session", gateway.SENSITIVE_AUDIT_KEYS)
+        self.gw.sessions.revoke_user("alice")
+
+    def test_csp_allows_cloudflare_only_with_turnstile(self) -> None:
+        """DJ-28: the Turnstile origins are not allowed when it is off."""
+        with mock.patch.object(gateway, "TURNSTILE_ON", False):
+            _, headers, _ = self.get("/")
+            self.assertNotIn(
+                "challenges.cloudflare.com",
+                headers["Content-Security-Policy"],
+            )
+        with mock.patch.object(gateway, "TURNSTILE_ON", True):
+            _, headers, _ = self.get("/")
+            self.assertIn(
+                "https://challenges.cloudflare.com",
+                headers["Content-Security-Policy"],
+            )
+
+    def test_connection_cap_per_source_ip(self) -> None:
+        """DJ-13: one source cannot hold an unbounded number of threads."""
+        self.server.max_connections_per_ip = 3
+        self.addCleanup(
+            setattr, self.server, "max_connections_per_ip",
+            gateway.MAX_CONNECTIONS_PER_IP,
+        )
+        source = "127.0.0.31"
+        idle: list[socket.socket] = []
+
+        def close_idle() -> None:
+            for sock in idle:
+                sock.close()
+            idle.clear()
+
+        self.addCleanup(close_idle)
+
+        def wait_count(expected: int) -> None:
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                if self.server._conn_per_ip.get(source, 0) == expected:
+                    return
+                time.sleep(0.01)
+            self.fail(f"connection count did not reach {expected}")
+
+        for _ in range(3):
+            idle.append(socket.create_connection(
+                ("127.0.0.1", self.port), timeout=5,
+                source_address=(source, 0),
+            ))
+        wait_count(3)
+        extra = socket.create_connection(
+            ("127.0.0.1", self.port), timeout=5, source_address=(source, 0)
+        )
+        try:
+            extra.sendall(
+                b"GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+            )
+            try:
+                data = extra.recv(1024)
+            except ConnectionResetError:
+                data = b""
+            self.assertEqual(data, b"")
+        finally:
+            extra.close()
+        # Other sources are still served.
+        status, _, _ = self.get("/api/status", source="127.0.0.32")
+        self.assertEqual(status, 200)
+        # Closing the idle connections frees the slots.
+        close_idle()
+        wait_count(0)
+        status, _, _ = self.get("/api/status", source=source)
+        self.assertEqual(status, 200)
+
+
 class RegistrationHttpTests(unittest.TestCase):
     """Public account request: a separate, isolated application with its own settings file."""
 
@@ -5486,6 +5870,29 @@ class RegistrationHttpTests(unittest.TestCase):
         pending = self.users.pending_records()
         self.assertEqual([item.name for item in pending], ["bob"])
         self.assertEqual(pending[0].email, "b@c.co")
+
+    def test_registration_rejects_case_variant_of_existing_name(self) -> None:
+        """DJ-29: a public request cannot register "Alice" next to "alice"."""
+        self.enable()
+        self.gw.register_rate = gateway.RateLimiter(window=600, maximum=1000)
+        self.users.add("alice", "hosszu-jelszo-1")
+        status, _, body = self.register("Alice", "uj-jelszo-12", "a@b.co")
+        self.assertEqual(status, 409, body)
+        self.assertEqual(json.loads(body)["code"], "username_taken")
+        self.assertIsNone(self.users.record("Alice"))
+
+    def test_registration_store_error_is_generic(self) -> None:
+        """DJ-29: internal store errors do not reach the anonymous caller."""
+        self.enable()
+        self.gw.register_rate = gateway.RateLimiter(window=600, maximum=1000)
+        with mock.patch.object(
+            self.users, "add",
+            side_effect=gateway.UserStoreError("/var/lib/secret/users.json: EIO"),
+        ):
+            status, _, body = self.register("erin", "hosszu-jelszo-1", "e@f.co")
+        self.assertEqual(status, 400, body)
+        self.assertNotIn(b"/var/lib", body)
+        self.assertNotIn(b"EIO", body)
 
     def test_registration_rejects_foreign_origin(self) -> None:
         self.enable()
@@ -11097,9 +11504,21 @@ dz674+jH6I8AVw==
     def bundle(self) -> dict:
         return server._config_bundle(self.gw)
 
+    def export(self, cookie: str = "", password: str = "root-jelszo-1",
+               source: str = "127.0.0.5", origin: str = "",
+               code: str | None = None) -> tuple:
+        payload = {"password": password}
+        if code is not None:
+            payload["code"] = code
+        return self.post(
+            "/api/admin/config/export", payload, cookie=cookie,
+            source=source, origin=origin,
+        )
+
     def import_bundle(self, bundle: dict, confirm=None,
-                      cookie: str = "") -> tuple:
-        payload = {"bundle": bundle}
+                      cookie: str = "",
+                      password: str = "root-jelszo-1") -> tuple:
+        payload = {"bundle": bundle, "password": password}
         if confirm is not None:
             payload["confirm"] = confirm
         return self.post(
@@ -11107,9 +11526,11 @@ dz674+jH6I8AVw==
             cookie=cookie or self.login(), source="127.0.0.5",
         )
 
-    def reset_config(self, confirm: str, cookie: str = "") -> tuple:
+    def reset_config(self, confirm: str, cookie: str = "",
+                     password: str = "root-jelszo-1") -> tuple:
         return self.post(
-            "/api/admin/config/reset", {"confirm": confirm},
+            "/api/admin/config/reset",
+            {"confirm": confirm, "password": password},
             cookie=cookie or self.login(), source="127.0.0.5",
         )
 
@@ -11169,9 +11590,7 @@ dz674+jH6I8AVw==
         self.seed_site()
         cookie = self.login()
         started = time.time()
-        status, headers, body = self.get(
-            "/api/admin/config/export", cookie=cookie, source="127.0.0.5"
-        )
+        status, headers, body = self.export(cookie)
         self.assertEqual(status, 200, body[:300])
         self.assertTrue(
             headers.get("Content-Disposition", "").startswith(
@@ -11223,23 +11642,82 @@ dz674+jH6I8AVw==
     def test_export_requires_admin_and_same_origin(self) -> None:
         self.users.add("alice", "alice-jelszo-1")
         started = time.time()
-        status, _, _ = self.get(
-            "/api/admin/config/export", source="127.0.0.5"
-        )
+        status, _, _ = self.export()
         self.assertEqual(status, 403)
         alice = self.login("alice", "alice-jelszo-1")
-        status, _, _ = self.get(
-            "/api/admin/config/export", cookie=alice, source="127.0.0.5"
-        )
+        status, _, _ = self.export(alice, password="alice-jelszo-1")
         self.assertEqual(status, 403)
         cookie = self.login()
-        status, _, body = self.get(
-            "/api/admin/config/export", cookie=cookie, source="127.0.0.5",
-            origin="http://evil.example",
-        )
+        status, _, body = self.export(cookie, origin="http://evil.example")
         self.assertEqual(status, 403, body)
         rows = self.audit_rows(started, "config_export_failed")
         self.assertTrue(any(row.get("reason") == "invalid_origin" for row in rows))
+        self.assertEqual(self.restart_calls, [])
+
+    def test_export_requires_fresh_password(self) -> None:
+        """DJ-11: the admin cookie alone does not release the bundle."""
+        self.seed_site()
+        cookie = self.login()
+        started = time.time()
+        # The old GET form no longer exists.
+        status, _, _ = self.get(
+            "/api/admin/config/export", cookie=cookie, source="127.0.0.5"
+        )
+        self.assertEqual(status, 404)
+        for password in ("", "rossz-jelszo-1"):
+            with self.subTest(password=password):
+                status, headers, body = self.export(cookie, password=password)
+                self.assertEqual(status, 403, body)
+                data = json.loads(body)
+                self.assertEqual(data["code"], "step_up_required")
+                self.assertNotIn(b"PRIVATE KEY", body)
+                self.assertNotIn("Content-Disposition", headers)
+        rows = self.audit_rows(started, "step_up_failed")
+        self.assertEqual(
+            sorted(row["reason"] for row in rows),
+            ["invalid_password", "missing"],
+        )
+        self.assertTrue(all(row["action"] == "config_export" for row in rows))
+        self.assertEqual(self.audit_rows(started, "config_exported"), [])
+        # The session survives a failed step-up; the right password works.
+        status, _, body = self.export(cookie)
+        self.assertEqual(status, 200, body[:300])
+
+    def test_export_requires_totp_code_when_enrolled(self) -> None:
+        secret = gateway.generate_totp_secret()
+        self.users.enroll_totp("root", secret, [])
+        cookie = self.login()
+        status, _, body = self.export(cookie)
+        self.assertEqual(status, 403, body)
+        self.assertTrue(json.loads(body)["totp"])
+        status, _, body = self.export(cookie, code=wrong_totp_code(secret))
+        self.assertEqual(status, 403, body)
+        status, _, body = self.export(cookie, code=fresh_totp_code(secret))
+        self.assertEqual(status, 200, body[:300])
+
+    def test_import_and_reset_require_fresh_password(self) -> None:
+        self.seed_site()
+        cookie = self.login()
+        before = self.state_snapshot()
+        bundle = self.bundle()
+        for path, payload in (
+            ("/api/admin/config/import",
+             {"bundle": bundle, "confirm": "Tesztoldal"}),
+            ("/api/admin/config/reset", {"confirm": "Tesztoldal"}),
+        ):
+            for password in (None, "rossz-jelszo-1"):
+                with self.subTest(path=path, password=password):
+                    body_obj = dict(payload)
+                    if password is not None:
+                        body_obj["password"] = password
+                    status, _, body = self.post(
+                        path, body_obj, cookie=cookie, source="127.0.0.5"
+                    )
+                    self.assertEqual(status, 403, body)
+                    self.assertEqual(
+                        json.loads(body)["code"], "step_up_required"
+                    )
+                    self.assertEqual(self.state_snapshot(), before)
         self.assertEqual(self.restart_calls, [])
 
     def test_import_and_reset_require_same_origin(self) -> None:
@@ -12671,6 +13149,28 @@ process.stdout.write(JSON.stringify(
         self.assertIn("Passwort-Hashes", de)
         self.assertIn("privaten Schlüsseln", de)
 
+    def test_config_actions_ask_for_password_again(self) -> None:
+        """DJ-11: export, import and reset send the step-up fields."""
+        export = self._js_function("exportConfigBundle", self.source)
+        self.assertIn("method: 'POST'", export)
+        self.assertIn("askStepUp(", export)
+        for name in ("importConfigBundle", "resetConfig"):
+            body = self._js_function(name, self.source)
+            self.assertIn("askStepUp(", body)
+            self.assertIn("...stepUp", body)
+        step_up = self._js_function("askStepUp", self.source)
+        self.assertIn("type: 'password'", step_up)
+        self.assertIn("autocomplete: 'one-time-code'", step_up)
+        en, de, _, _ = self._i18n_sections()
+        for source in (
+            "Folytatás",
+            "2FA-kód (ha be van kapcsolva)",
+            "A művelethez add meg újra a jelszavadat (és a 2FA-kódot, "
+            "ha be van kapcsolva).",
+        ):
+            self.assertIn(f"'{source}': '", en, source)
+            self.assertIn(f"'{source}': '", de, source)
+
     def test_config_state_nonempty_in_node(self) -> None:
         nonempty = self._js_function("configStateNonEmpty", self.source)
         site_name = self._js_function("configSiteName", self.source)
@@ -13855,7 +14355,9 @@ class DropLogParserTests(unittest.TestCase):
         mode = dl._mode_message(5, 124)
         self.assertEqual(mode[20:22], struct.pack("=H", 10))
         self.assertEqual(mode[22:24], struct.pack("=H", dl.NFULA_CFG_MODE))
-        self.assertEqual(mode[24:28], struct.pack("!I", 65535))
+        # Only the headers are copied (DJ-07), not whole packets.
+        self.assertEqual(mode[24:28], struct.pack("!I", 128))
+        self.assertEqual(dl.DROP_LOG_COPY_RANGE, 128)
 
 
 class DropLogStoreTests(unittest.TestCase):
@@ -14528,7 +15030,7 @@ class FirewallCustomTests(unittest.TestCase):
         self.assertEqual(
             preauth_lines[0],
             "add rule inet hatarvedelem preauth "
-            "ip saddr @banned_v4 drop",
+            "ip saddr @banned_v4 ct direction original drop",
         )
         log = (
             'limit rate 30/minute burst 60 packets log prefix '
@@ -14657,7 +15159,7 @@ class FirewallCustomTests(unittest.TestCase):
         self.assertEqual(
             preauth_lines,
             ["add rule inet hatarvedelem preauth "
-             "ip saddr @banned_v4 drop"],
+             "ip saddr @banned_v4 ct direction original drop"],
         )
 
     def test_preauth_requires_lan_interface(self) -> None:
@@ -14701,7 +15203,7 @@ class FirewallCustomTests(unittest.TestCase):
         self.assertEqual(
             input_lines[0],
             "add rule inet hatarvedelem preauth_input "
-            "ip saddr @banned_v4 drop",
+            "ip saddr @banned_v4 ct direction original drop",
         )
         for iface in ("eth1", "eth0"):
             with self.subTest(iface=iface, proto="tcp"):
@@ -14802,9 +15304,9 @@ class RulesetTemplateTests(unittest.TestCase):
         )[0]
 
     def test_banned_sources_are_dropped_before_preauth(self) -> None:
-        self.assertIn("ip saddr @banned_v4 drop", self.forward)
+        self.assertIn("ip saddr @banned_v4 ct direction original drop", self.forward)
         self.assertLess(
-            self.forward.index("ip saddr @banned_v4 drop"),
+            self.forward.index("ip saddr @banned_v4 ct direction original drop"),
             self.forward.index("jump preauth"),
         )
 
@@ -14817,9 +15319,9 @@ class RulesetTemplateTests(unittest.TestCase):
             "add set inet hatarvedelem allowed_input_tcp {",
             "add set inet hatarvedelem allowed_input_udp {",
             "ip saddr . tcp dport @allowed_input_tcp "
-            "tcp dport != 8100 accept",
+            "tcp dport != __PORT__ accept",
             "ip saddr . udp dport @allowed_input_udp "
-            "udp dport != 8100 accept",
+            "udp dport != __PORT__ accept",
             "ip saddr . tcp dport @allowed_input_tcp "
             "ip saddr . ether saddr != @client_mac drop",
             "ip saddr . udp dport @allowed_input_udp "
@@ -14832,21 +15334,21 @@ class RulesetTemplateTests(unittest.TestCase):
 
         accept = input_chain.index(
             "ip saddr . tcp dport @allowed_input_tcp "
-            "tcp dport != 8100 accept"
+            "tcp dport != __PORT__ accept"
         )
         # Port 22 is intentionally not excluded from the host accept: a host
-        # rule created by the admin may open it. Only 8100 (portal) is
+        # rule created by the admin may open it. Only the portal port is
         # reserved, and the UDP accept excludes only that.
         accept_line = input_chain.splitlines()[input_chain[:accept].count("\n")]
-        self.assertIn("tcp dport != 8100", accept_line)
+        self.assertIn("tcp dport != __PORT__", accept_line)
         self.assertNotIn("tcp dport != 22", accept_line)
         self.assertIn(
             "ip saddr . udp dport @allowed_input_udp "
-            "udp dport != 8100 accept",
+            "udp dport != __PORT__ accept",
             input_chain,
         )
         # The ban and the MAC binding run before the host accept.
-        self.assertLess(input_chain.index("ip saddr @banned_v4 drop"), accept)
+        self.assertLess(input_chain.index("ip saddr @banned_v4 ct direction original drop"), accept)
         self.assertLess(
             input_chain.index(
                 "ip saddr . tcp dport @allowed_input_tcp "
@@ -15101,13 +15603,13 @@ class RulesetTemplateTests(unittest.TestCase):
         # further attempts; the portal associates these with the single event of
         # the ban.
         self.assertIn('reason=fail2ban ', self.text)
-        self.assertIn("ip saddr @banned_v4 limit rate", self.forward)
+        self.assertIn("ip saddr @banned_v4 ct direction original limit rate", self.forward)
         self.assertLess(
-            self.forward.index("ip saddr @banned_v4 limit rate"),
-            self.forward.index("ip saddr @banned_v4 drop"),
+            self.forward.index("ip saddr @banned_v4 ct direction original limit rate"),
+            self.forward.index("ip saddr @banned_v4 ct direction original drop"),
         )
         self.assertIn(
-            "ip saddr @banned_v4 limit rate", self.text.split(
+            "ip saddr @banned_v4 ct direction original limit rate", self.text.split(
                 "chain input {", 1)[1]
         )
 
@@ -15612,7 +16114,7 @@ class DropBanWiringTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.written = []
 
-            def write(self, record) -> None:
+            def write(self, record, sync=True) -> None:
                 self.written.append(record)
 
         store = FakeStore()

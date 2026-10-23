@@ -440,7 +440,7 @@ class TemplateOrderTests(unittest.TestCase):
         lines = self.chain("input")
         jump = lines.index("jump portproxy_input")
         for before in (
-            "ip saddr @banned_v4 drop", "jump block",
+            "ip saddr @banned_v4 ct direction original drop", "jump block",
             "ip saddr . udp dport @allowed_input_udp ip saddr . ether saddr != @client_mac drop",
             "ip saddr @proxy_banned_v4 tcp dport { 80, 443 } drop",
         ):

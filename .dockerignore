@@ -3,6 +3,7 @@
 .gitignore
 .env
 .secret
+secrets
 __pycache__
 *.py[cod]
 .pytest_cache

@@ -19,6 +19,7 @@ with a size limit.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -67,6 +68,19 @@ DROP_LOG_GROUP = min(
     65535, max(1, _env_int("HV_DROP_LOG_GROUP", 5, 1))
 )
 DROP_LOG_ENABLED = _env_bool("HV_DROP_LOG", True)
+# Bytes of each packet the kernel copies to us. The parser needs only the
+# IPv4 header (at most 60 bytes) and the first 4 bytes of TCP/UDP; copying
+# whole packets (up to 64 KiB) fills the netlink buffer much sooner.
+DROP_LOG_COPY_RANGE = 128
+# After a fatal socket error the listener reopens the socket, waiting
+# 1, 2, 4 ... seconds between attempts, at most 60.
+DROP_LOG_RESTART_MIN_DELAY = 1.0
+DROP_LOG_RESTART_MAX_DELAY = 60.0
+# The listener fsyncs the log file at most this often, not per packet.
+DROP_LOG_SYNC_INTERVAL = 1.0
+# One read() scans at most this many lines across all files, newest first,
+# so an admin page refresh stays cheap even when the log is full.
+DROP_LOG_READ_MAX_LINES = 200_000
 
 
 def _utc_iso(ts: float) -> str:
@@ -384,7 +398,7 @@ def _config_message(
 def _mode_message(
     group: int,
     seq: int,
-    copy_range: int = 65535,
+    copy_range: int = DROP_LOG_COPY_RANGE,
     qthreshold: int = 1,
     timeout: int = 100,
 ) -> bytes:
@@ -418,6 +432,8 @@ class DropLog:
         self.keep = max(1, min(20, int(keep)))
         self.log = logger
         self._lock = threading.Lock()
+        # Written without fsync since the last sync() (listener path).
+        self._unsynced = False
 
     def _rotate_locked(self) -> None:
         try:
@@ -440,6 +456,10 @@ class DropLog:
             os.replace(self.path, f"{self.path}.1")
         except OSError as exc:
             self.log(f"[drop log] rotation failed: {exc}")
+        else:
+            # The rotated file was closed after its last write; what has not
+            # been synced yet is flushed by the kernel's writeback.
+            self._unsynced = False
 
     @staticmethod
     def _clean(entry: dict) -> dict:
@@ -461,7 +481,13 @@ class DropLog:
             out["reason"] = "unknown"
         return out
 
-    def write(self, entry: dict) -> dict:
+    def write(self, entry: dict, sync: bool = True) -> dict:
+        """Append one record.
+
+        ``sync=False`` skips the fsync; the caller must call sync()
+        periodically. The NFLOG listener does this, so a packet flood does
+        not turn into one fsync per packet.
+        """
         record = self._clean(entry)
         line = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
         try:
@@ -474,12 +500,53 @@ class DropLog:
                 )
                 try:
                     os.write(fd, (line + "\n").encode("utf-8"))
-                    os.fsync(fd)
+                    if sync:
+                        os.fsync(fd)
+                    else:
+                        self._unsynced = True
                 finally:
                     os.close(fd)
         except OSError as exc:
             self.log(f"[drop log] write error: {exc}")
         return record
+
+    def sync(self) -> None:
+        """fsync the records written with ``sync=False``."""
+        with self._lock:
+            if not self._unsynced:
+                return
+            self._unsynced = False
+            try:
+                fd = os.open(self.path, os.O_RDONLY)
+            except OSError:
+                return
+            try:
+                os.fsync(fd)
+            except OSError as exc:
+                self.log(f"[drop log] sync error: {exc}")
+            finally:
+                os.close(fd)
+
+    @staticmethod
+    def _lines_newest_first(path: str, block: int = 64 * 1024):
+        """The file's lines from the end backwards, read in blocks.
+
+        Splitting on the newline byte is safe for UTF-8: it never occurs
+        inside a multi-byte character.
+        """
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            position = fh.tell()
+            rest = b""
+            while position > 0:
+                size = min(block, position)
+                position -= size
+                fh.seek(position)
+                parts = (fh.read(size) + rest).split(b"\n")
+                rest = parts[0]
+                for raw in reversed(parts[1:]):
+                    yield raw.decode("utf-8", "replace")
+            yield rest.decode("utf-8", "replace")
 
     def _files(self) -> list[str]:
         files = [self.path]
@@ -509,49 +576,68 @@ class DropLog:
         group = (group or "").strip().lower()
         q = (q or "").strip().lower()
         rows: list[dict] = []
+        # Files and lines are read newest first. The scan stops once it has
+        # ``limit`` rows that survive the fail2ban folding (packets during a
+        # ban fold into their ban row), or after DROP_LOG_READ_MAX_LINES
+        # lines, so one request never parses every rotated file.
+        shown = 0
+        scanned = 0
         for path in self._files():
+            if shown >= limit or scanned >= DROP_LOG_READ_MAX_LINES:
+                break
             try:
-                with open(path, "r", encoding="utf-8") as fh:
-                    for line in fh:
-                        line = line.strip()
-                        if not line:
-                            continue
+                for line in self._lines_newest_first(path):
+                    scanned += 1
+                    if scanned > DROP_LOG_READ_MAX_LINES:
+                        break
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        item = json.loads(line)
+                    except ValueError:
+                        continue
+                    if not isinstance(item, dict):
+                        continue
+                    item_group = reason_group(item.get("reason"))
+                    if group and item_group != group:
+                        continue
+                    item["group"] = item_group
+                    if before is not None:
                         try:
-                            item = json.loads(line)
-                        except ValueError:
-                            continue
-                        if not isinstance(item, dict):
-                            continue
-                        item_group = reason_group(item.get("reason"))
-                        if group and item_group != group:
-                            continue
-                        item["group"] = item_group
-                        if before is not None:
-                            try:
-                                if float(item.get("ts", 0)) >= before:
-                                    continue
-                            except (TypeError, ValueError):
+                            if float(item.get("ts", 0)) >= before:
                                 continue
-                        if src and src not in str(item.get("src", "")).lower():
+                        except (TypeError, ValueError):
                             continue
-                        if dst and dst not in str(item.get("dst", "")).lower():
+                    if src and src not in str(item.get("src", "")).lower():
+                        continue
+                    if dst and dst not in str(item.get("dst", "")).lower():
+                        continue
+                    if proto and proto != str(item.get("proto", "")).lower():
+                        continue
+                    if reason and reason not in str(
+                        item.get("reason", "")
+                    ).lower():
+                        continue
+                    if port is not None:
+                        if port not in (
+                            item.get("sport"), item.get("dport")
+                        ):
                             continue
-                        if proto and proto != str(item.get("proto", "")).lower():
-                            continue
-                        if reason and reason not in str(
-                            item.get("reason", "")
-                        ).lower():
-                            continue
-                        if port is not None:
-                            if port not in (
-                                item.get("sport"), item.get("dport")
-                            ):
-                                continue
-                        if q and q not in json.dumps(
-                            item, ensure_ascii=False, sort_keys=True
-                        ).lower():
-                            continue
-                        rows.append(item)
+                    if q and q not in json.dumps(
+                        item, ensure_ascii=False, sort_keys=True
+                    ).lower():
+                        continue
+                    rows.append(item)
+                    if (
+                        str(item.get("reason", "")).strip().lower()
+                        != BAN_EVENT_REASON
+                        or str(item.get("event", "")).strip().lower()
+                        == BAN_EVENT_KIND
+                    ):
+                        shown += 1
+                        if shown >= limit:
+                            break
             except FileNotFoundError:
                 continue
             except OSError as exc:
@@ -694,6 +780,11 @@ class DropLogListener:
         self._received = 0
         self._written = 0
         self._write_errors = 0
+        # Receive-buffer overflows (ENOBUFS: the kernel dropped messages)
+        # and automatic restarts after a socket error; shown in status().
+        self._overruns = 0
+        self._restarts = 0
+        self._last_sync = 0.0
         self.on_drop = None
 
     def set_on_drop(self, callback) -> None:
@@ -704,7 +795,7 @@ class DropLogListener:
         with self._lock:
             self._received += 1
         try:
-            self.store.write(record)
+            self.store.write(record, sync=False)
         except Exception as exc:  # logging must not stop the listener
             with self._lock:
                 self._write_errors += 1
@@ -777,18 +868,12 @@ class DropLogListener:
                         )
                     acks += 1
 
-    def start(self) -> bool:
-        if not self.enabled:
-            self._error = "the drop log is disabled (HV_DROP_LOG=0)"
-            return False
-        if self._thread is not None and self._thread.is_alive():
-            return True
-        self._stop.clear()
-        sock: socket.socket | None = None
+    def _open_socket(self) -> socket.socket:
+        """Open, bind and configure the NFLOG socket (raises OSError)."""
+        sock = socket.socket(
+            socket.AF_NETLINK, socket.SOCK_RAW, NETLINK_NETFILTER
+        )
         try:
-            sock = socket.socket(
-                socket.AF_NETLINK, socket.SOCK_RAW, NETLINK_NETFILTER
-            )
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
             # nl_pid=0 lets the kernel pick the unique port identifier.
             # getpid() cannot be used: in the host network view the
@@ -797,12 +882,24 @@ class DropLogListener:
             sock.bind((0, 0))
             sock.settimeout(1.0)
             self._send_config(sock)
+        except OSError:
+            try:
+                sock.close()
+            except OSError:
+                pass
+            raise
+        return sock
+
+    def start(self) -> bool:
+        if not self.enabled:
+            self._error = "the drop log is disabled (HV_DROP_LOG=0)"
+            return False
+        if self._thread is not None and self._thread.is_alive():
+            return True
+        self._stop.clear()
+        try:
+            sock = self._open_socket()
         except OSError as exc:
-            if sock is not None:
-                try:
-                    sock.close()
-                except OSError:
-                    pass
             with self._lock:
                 self._running = False
                 self._error = str(exc)
@@ -825,24 +922,85 @@ class DropLogListener:
         )
         return True
 
+    def _sync_store(self, force: bool = False) -> None:
+        now = time.monotonic()
+        if force or now - self._last_sync >= DROP_LOG_SYNC_INTERVAL:
+            self._last_sync = now
+            try:
+                self.store.sync()
+            except Exception as exc:  # syncing must not stop the listener
+                self.log(f"[drop log] sync failed: {exc}")
+
+    def _reopen(self, exc: OSError) -> socket.socket | None:
+        """Replace a failed socket, retrying with exponential back-off.
+
+        Returns the new socket, or None if stop() was called meanwhile.
+        """
+        with self._lock:
+            old = self._sock
+            self._sock = None
+            self._running = False
+            self._error = str(exc)
+        if old is not None:
+            try:
+                old.close()
+            except OSError:
+                pass
+        self.log(f"[drop log] listener error: {exc}; restarting")
+        delay = DROP_LOG_RESTART_MIN_DELAY
+        while not self._stop.wait(delay):
+            try:
+                sock = self._open_socket()
+            except OSError as again:
+                with self._lock:
+                    self._error = str(again)
+                delay = min(delay * 2, DROP_LOG_RESTART_MAX_DELAY)
+                continue
+            with self._lock:
+                if self._stop.is_set():
+                    sock.close()
+                    return None
+                self._sock = sock
+                self._running = True
+                self._restarts += 1
+                self._error = ""
+            self.log("[drop log] listener restarted")
+            return sock
+        return None
+
     def _loop(self) -> None:
         sock = self._sock
-        if sock is None:
-            return
-        while not self._stop.is_set():
+        overrun_logged: float | None = None
+        while sock is not None and not self._stop.is_set():
             try:
                 data = sock.recv(256 * 1024)
             except socket.timeout:
+                self._sync_store()
                 continue
             except OSError as exc:
                 if self._stop.is_set():
                     break
-                with self._lock:
-                    self._running = False
-                    self._error = str(exc)
-                self.log(f"[drop log] listener error: {exc}")
-                break
+                if exc.errno == errno.ENOBUFS:
+                    # The receive buffer overflowed and the kernel dropped
+                    # log messages. The socket is still bound: count the
+                    # loss, log it at most once a minute and go on.
+                    with self._lock:
+                        self._overruns += 1
+                    if (
+                        overrun_logged is None
+                        or time.monotonic() - overrun_logged >= 60.0
+                    ):
+                        overrun_logged = time.monotonic()
+                        self.log(
+                            "[drop log] WARNING: receive buffer overflow, "
+                            "log messages were lost"
+                        )
+                    continue
+                sock = self._reopen(exc)
+                continue
             self._handle(data)
+            self._sync_store()
+        self._sync_store(force=True)
         with self._lock:
             self._running = False
 
@@ -873,6 +1031,8 @@ class DropLogListener:
                 "received": self._received,
                 "written": self._written,
                 "errors": self._write_errors,
+                "overruns": self._overruns,
+                "restarts": self._restarts,
             }
 
 

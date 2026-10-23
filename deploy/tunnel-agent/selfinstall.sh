@@ -6,8 +6,11 @@
 #         sudo sh dropjak-agent-<id>.sh delete      # remove the container
 #         (also accepts --delete or -d)
 #
-# The installer is idempotent: it installs into the current directory ($PWD or
-# DROPJAK_DIR). On a TTY it asks for the network interactively from a numbered
+# The installer is idempotent. Run as root it installs into its own root-owned
+# directory, /opt/dropjak-agent/<container name> (DROPJAK_DIR overrides it; an
+# earlier install in the current directory is updated in place). Rootless, it
+# installs into the current directory. A group- or world-writable directory,
+# or one owned by another user, is refused. On a TTY it asks for the network interactively from a numbered
 # list, and the agent joins EXACTLY ONE network: the one selected. It never
 # joins multiple networks. It can reach only containers on that network, by
 # container name (DNS), like the playit.gg agent. In non-interactive use
@@ -28,15 +31,20 @@ die() {
 if [ "$(id -u)" -ne 0 ]; then
     if ! docker info >/dev/null 2>&1; then
         printf '%s\n' "Administrator privileges are required (sudo); restarting." >&2
-        # $PWD after sudo is not guaranteed, so pass it through.
-        exec sudo env DROPJAK_DIR="$PWD" \
+        # $PWD after sudo is not guaranteed, so pass it through. DROPJAK_DIR
+        # is passed only if the user set it: otherwise root picks its own
+        # fixed directory.
+        exec sudo env DROPJAK_PWD="$PWD" \
+            ${DROPJAK_DIR:+DROPJAK_DIR="$DROPJAK_DIR"} \
             ${DROPJAK_NETWORK:+DROPJAK_NETWORK="$DROPJAK_NETWORK"} \
             ${DROPJAK_NO_PROMPT:+DROPJAK_NO_PROMPT="$DROPJAK_NO_PROMPT"} \
             sh "$0" "$@"
     fi
 fi
-# By default install into the current directory; ask for the network.
-DIR="${DROPJAK_DIR:-${PWD:-.}}"
+# The directory the installer was started from; the install directory is
+# chosen once the bundled agent.json names the agent (see choose_install_dir).
+ORIG_PWD="${DROPJAK_PWD:-${PWD:-.}}"
+DIR="${DROPJAK_DIR:-$ORIG_PWD}"
 # Keep an absolute installer path for the delete hint printed after install.
 SCRIPT_PATH=$0
 case "$SCRIPT_PATH" in
@@ -337,6 +345,71 @@ delete_agent() {
     return 0
 }
 
+# --- Integrity, staging and the install directory -------------------------
+# This file holds the agent's private key. Print its SHA-256 first, so the
+# admin can match it against the value the Dropjak admin page showed for this
+# download (verify with sha256sum before running, too).
+INSTALLER_SHA256=$(sha256sum "$0" 2>/dev/null | cut -d' ' -f1 || true)
+printf 'Installer SHA-256: %s\n' "${INSTALLER_SHA256:-unavailable}"
+
+# The package is extracted into a private (0700) staging directory, never
+# straight into the install directory; it is removed on every exit.
+STAGE=$(mktemp -d "${TMPDIR:-/tmp}/dropjak-agent.XXXXXX") \
+    || die "cannot create a private staging directory"
+trap 'rm -rf "$STAGE"' EXIT
+trap 'exit 130' HUP INT TERM
+PAYLOAD_LINE=$(grep -anm1 "^$MARKER\$" "$0" | cut -d: -f1)
+PAYLOAD_LINE=$((PAYLOAD_LINE + 1))
+tail -n +"$PAYLOAD_LINE" "$0" | tar -xz -C "$STAGE" \
+    || die "the package at the end of this file is damaged"
+if [ ! -f "$STAGE/agent.json" ] || [ -L "$STAGE/agent.json" ]; then
+    die "the package does not contain agent.json."
+fi
+
+# The bundled configuration names this agent: the label makes the container
+# recognisable on a host that runs more than one agent, the id keeps the name
+# unique. The same value is written to container-name for the delete action
+# and for check-containment.sh.
+CONTAINER_NAME=$(container_name_from_json "$STAGE/agent.json")
+
+# DROPJAK_DIR wins. An earlier install in the starting directory is updated
+# in place (its container keeps its compose project). Otherwise root uses a
+# fixed root-owned directory, and a rootless run the starting directory.
+choose_install_dir() {
+    if [ -n "${DROPJAK_DIR:-}" ]; then
+        DIR=$DROPJAK_DIR
+    elif [ -f "$ORIG_PWD/container-name" ] && [ -f "$ORIG_PWD/compose.yml" ]; then
+        DIR=$ORIG_PWD
+    elif [ "$(id -u)" -eq 0 ]; then
+        DIR="${DROPJAK_BASE:-/opt/dropjak-agent}/$CONTAINER_NAME"
+    else
+        DIR=$ORIG_PWD
+    fi
+}
+
+# Root writes the key and runs chmod/chown in this directory, so nobody else
+# may be able to change it: no symlink, owned by root or the invoking user,
+# no group or world write bit.
+check_install_dir() {
+    _cid=$1
+    [ ! -L "$_cid" ] || die "refusing a symbolic link as install directory: $_cid"
+    [ -e "$_cid" ] || return 0
+    [ -d "$_cid" ] || die "the install path is not a directory: $_cid"
+    _cid_owner=$(stat -c '%u' "$_cid" 2>/dev/null) \
+        && _cid_mode=$(stat -c '%a' "$_cid" 2>/dev/null) \
+        || die "cannot read the owner and mode of $_cid"
+    case "$_cid_owner" in
+        0|"${SUDO_UID:-$(id -u)}") ;;
+        *) die "refusing $_cid: it is owned by another user (uid $_cid_owner)" ;;
+    esac
+    if [ $((0$_cid_mode & 022)) -ne 0 ]; then
+        die "refusing $_cid: other users can write to it (mode $_cid_mode); use a private directory or DROPJAK_DIR"
+    fi
+}
+
+choose_install_dir
+check_install_dir "$DIR"
+
 if [ "$ACTION" = "install" ] && [ -t 0 ] \
         && [ "${DROPJAK_NO_PROMPT:-0}" != "1" ]; then
     select_action_interactively
@@ -587,27 +660,21 @@ case "$(printf '%s' "$NET_DRIVER" | tr '[:upper:]' '[:lower:]')" in
         die "the selected network driver is not bridge: $NET ($NET_DRIVER)" ;;
 esac
 
-# Extract the package (compose.yml is generated afterwards, so the network
-# always reflects the host's current state).
-PAYLOAD_LINE=$(grep -anm1 "^$MARKER\$" "$0" | cut -d: -f1)
-PAYLOAD_LINE=$((PAYLOAD_LINE + 1))
-mkdir -p "$DIR"
+# Create the install directory (a fresh root directory is 0700) and check it
+# again: it must still be private after mkdir.
+if [ ! -e "$DIR" ]; then
+    mkdir -p "$DIR"
+    if [ "$(id -u)" -eq 0 ]; then
+        chmod 0700 "$DIR"
+    fi
+fi
+check_install_dir "$DIR"
 # An earlier, interrupted compose run may have created agent.json as an empty
-# directory; tar can only write a file there.
+# directory; only a file may be there.
 if [ -d "$DIR/agent.json" ]; then
-    rmdir "$DIR/agent.json" 2>/dev/null || true
+    rmdir "$DIR/agent.json" 2>/dev/null \
+        || die "$DIR/agent.json is a directory; remove it and run again"
 fi
-tail -n +"$PAYLOAD_LINE" "$0" | tar -xz -C "$DIR"
-if [ ! -f "$DIR/agent.json" ]; then
-    printf '%s\n' "Error: the package does not contain agent.json." >&2
-    exit 1
-fi
-
-# The bundled configuration names this agent: the label makes the container
-# recognisable on a host that runs more than one agent, the id keeps the name
-# unique. The same value is written to container-name for the delete action
-# and for check-containment.sh.
-CONTAINER_NAME=$(container_name_from_json "$DIR/agent.json")
 
 # Clean up an earlier version's installation: the multi-network model's
 # reconcile helper and its 30-second timer must not remain on the host.
@@ -677,7 +744,7 @@ cleanup_legacy
 # derived from the bundled agent.json so several agents on one host can be
 # told apart; each agent still needs its own install directory.
 write_compose() {
-    compose_tmp="$DIR/.compose.yml.tmp"
+    compose_tmp="$STAGE/compose.yml"
     {
         cat <<YAML
 # Dropjak home tunnel agent - file generated by the installer.
@@ -719,31 +786,37 @@ volumes:
   agent-state:
 YAML
     } > "$compose_tmp"
-    mv -f "$compose_tmp" "$DIR/compose.yml"
 }
 
 write_compose
-if ! docker compose -f "$DIR/compose.yml" config -q >/dev/null 2>&1; then
+if ! docker compose -f "$STAGE/compose.yml" config -q >/dev/null 2>&1; then
     printf 'Error: the generated compose.yml is invalid.\n' >&2
     exit 1
 fi
 # Remember the resolved name next to compose.yml: the delete action and
 # check-containment.sh read it, so both use the same name without re-parsing
 # agent.json.
-printf '%s\n' "$CONTAINER_NAME" > "$DIR/container-name"
-chmod 644 "$DIR/container-name"
+printf '%s\n' "$CONTAINER_NAME" > "$STAGE/container-name"
 
-# Files created by the installer are root-owned; the key is 0600.
+# Owners and modes are set in the private staging directory; then each file
+# is renamed into place. A rename replaces whatever is at the target path
+# (even a symlink) instead of following it. The key is 0600.
 for file in compose.yml container-name Dockerfile agent.py \
         check-containment.sh agent.json; do
-    [ -e "$DIR/$file" ] || continue
+    [ -e "$STAGE/$file" ] || continue
     if [ "$(id -u)" -eq 0 ]; then
-        chown root:root "$DIR/$file" || true
+        chown root:root "$STAGE/$file" || true
     fi
 done
-chmod 600 "$DIR/agent.json"
-chmod 644 "$DIR/compose.yml" "$DIR/container-name" "$DIR/Dockerfile"
-chmod 755 "$DIR/agent.py" "$DIR/check-containment.sh"
+chmod 600 "$STAGE/agent.json"
+chmod 644 "$STAGE/compose.yml" "$STAGE/container-name" "$STAGE/Dockerfile"
+chmod 755 "$STAGE/agent.py" "$STAGE/check-containment.sh"
+for file in compose.yml container-name Dockerfile agent.py \
+        check-containment.sh agent.json; do
+    [ -e "$STAGE/$file" ] || continue
+    mv -f "$STAGE/$file" "$DIR/$file" \
+        || die "cannot move $file into $DIR"
+done
 
 printf '%s\n' "Building and starting the agent: $CONTAINER_NAME ($DIR)"
 cd "$DIR"
@@ -762,6 +835,10 @@ printf 'To check the container and the network:  sudo DROPJAK_CONTAINER=%s sh "%
     "$CONTAINER_NAME" "$DIR"
 printf 'To delete the agent container (%s):  sudo sh "%s" delete\n' \
     "$CONTAINER_NAME" "$SCRIPT_PATH"
+printf '%s\n' \
+    "This installer file contains the agent's private key. Delete it once you" \
+    "no longer need it:  shred -u \"$SCRIPT_PATH\"" \
+    "Without it the agent is removed with:  sudo docker compose -f \"$DIR/compose.yml\" down"
 
 exit 0
 __DROPJAK_PAYLOAD__

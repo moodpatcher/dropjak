@@ -1132,7 +1132,7 @@ class ProxyFirewallTemplateTests(unittest.TestCase):
         self.assertIn(self.LAN, lines)
         chain = rendered[rendered.index("chain input {"):]
         wan = chain.index(self.WAN)
-        self.assertLess(chain.index("ip saddr @banned_v4 drop"), wan)
+        self.assertLess(chain.index("ip saddr @banned_v4 ct direction original drop"), wan)
         self.assertLess(chain.index("jump block"), wan)
         self.assertLess(
             chain.index("ether saddr != @client_mac drop"), wan

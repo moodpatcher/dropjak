@@ -135,6 +135,10 @@ if not ADMIN_PASSWORD and ADMIN_PASSWORD_FILE:
             ADMIN_PASSWORD = _admin_pw_file.read().rstrip("\r\n")
     except (OSError, UnicodeError):
         ADMIN_PASSWORD = ""
+# Child processes (nft, conntrack, ip, wg) must not inherit the password.
+# This does not clear /proc/<pid>/environ or `docker inspect`; prefer
+# HV_ADMIN_PASSWORD_FILE.
+os.environ.pop("HV_ADMIN_PASSWORD", None)
 
 PORT = _env_int("PORT", 8100, 1)
 CHALLENGE_TTL = _env_int("HV_CHALLENGE_TTL", 600, 30)   # seconds
@@ -169,6 +173,17 @@ PBKDF2_ITERATIONS = _env_int("HV_PBKDF2_ITERATIONS", 600_000, 10_000)
 
 RATE_WINDOW = _env_int("HV_RATE_WINDOW", 60, 1)
 RATE_MAX = _env_int("HV_RATE_MAX", 10, 1)
+# Per-account lock against password guessing from many source IPs: after
+# ACCOUNT_LOCK_MAX failures within ACCOUNT_LOCK_WINDOW seconds the login name
+# is locked for ACCOUNT_LOCK_BASE seconds, doubling up to ACCOUNT_LOCK_CAP.
+ACCOUNT_LOCK_MAX = _env_int("HV_ACCOUNT_LOCK_MAX", 10, 1)
+ACCOUNT_LOCK_WINDOW = _env_int("HV_ACCOUNT_LOCK_WINDOW", 900, 30)
+ACCOUNT_LOCK_BASE = _env_int("HV_ACCOUNT_LOCK_BASE", 60, 1)
+ACCOUNT_LOCK_CAP = _env_int("HV_ACCOUNT_LOCK_CAP", 900, 1)
+# Concurrent portal connections (one thread each): in total and per source
+# IP. Loopback (Caddy, healthcheck) counts only towards the total.
+MAX_CONNECTIONS = _env_int("HV_MAX_CONNECTIONS", 256, 8)
+MAX_CONNECTIONS_PER_IP = _env_int("HV_MAX_CONNECTIONS_PER_IP", 16, 1)
 
 NFT_BIN = os.environ.get("HV_NFT_BIN", "").strip() or shutil.which("nft") or "/usr/sbin/nft"
 NFT_TABLE = os.environ.get("HV_NFT_TABLE", "hatarvedelem").strip()
@@ -209,6 +224,57 @@ DROP_BAN_REASONS = frozenset(
     {"no-grant", "wan-drop", "input-wan", "input-lan", "portproxy"}
 )
 DROP_BAN_SKIP_TCP_PORTS = frozenset({53})
+
+
+def infra_exempt_addresses(
+    resolv_path: str = "/etc/resolv.conf",
+    route_path: str = "/proc/net/route",
+) -> list[str]:
+    """Infrastructure the drop-based fail2ban must never ban.
+
+    The host's IPv4 upstream resolvers and its default-route gateways. A
+    forged packet with one of these sources would otherwise cut DNS or the
+    uplink for the whole network. Read once at startup; addresses added
+    later belong in HV_FAIL2BAN_DROP_EXEMPT or the admin list.
+    """
+    found: list[str] = []
+    try:
+        with open(resolv_path, "r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                parts = line.split()
+                if len(parts) >= 2 and parts[0] == "nameserver":
+                    found.append(parts[1])
+    except OSError:
+        pass
+    try:
+        with open(route_path, "r", encoding="ascii", errors="replace") as fh:
+            next(fh, None)
+            for line in fh:
+                fields = line.split()
+                # Destination 0.0.0.0 with the RTF_GATEWAY flag (0x2).
+                if (
+                    len(fields) >= 4 and fields[1] == "00000000"
+                    and int(fields[3], 16) & 0x2
+                ):
+                    found.append(
+                        str(ipaddress.IPv4Address(
+                            int(fields[2], 16).to_bytes(4, sys.byteorder)
+                        ))
+                    )
+    except (OSError, ValueError):
+        pass
+    result: list[str] = []
+    for item in found:
+        try:
+            address = ipaddress.ip_address(item)
+        except ValueError:
+            continue
+        if (
+            address.version == 4 and not address.is_loopback
+            and str(address) not in result
+        ):
+            result.append(str(address))
+    return result
 # Order of the chains that appear in the raw (iptables -L -n style) output
 # of the admin Firewall view. The custom chains follow forward, so that the
 # pre-auth and block rules are in one place in a readable order.
@@ -352,6 +418,19 @@ MAC_BINDING = bool(HV_LAN_IF and LAN_NETWORK is not None)
 ARP_PATH = os.environ.get("HV_ARP_PATH", "").strip() or "/proc/net/arp"
 
 PORTAL_URL = os.environ.get("HV_PORTAL_URL", "").strip()
+# Further host names (host or host:port, comma separated) under which the
+# portal's /api/ endpoints answer, besides IP literals, the PORTAL_URL host
+# and the Caddy root domains (DNS rebinding protection, see server.py).
+PORTAL_HOSTS = frozenset(
+    item.strip().lower()
+    for item in os.environ.get("HV_PORTAL_HOSTS", "").split(",")
+    if item.strip()
+)
+# Shared secret between Caddy and the portal (HV_PROXY_KEY, at least 32
+# characters). When set, a loopback peer counts as Caddy only with this
+# value in X-Dropjak-Proxy-Key; without it every loopback process is
+# trusted (the old behaviour, a startup warning).
+PROXY_KEY = os.environ.get("HV_PROXY_KEY", "").strip()
 # Whether the Caddy domain proxy is enabled (HV_PROXY=1): in that case the
 # portal is also reachable over HTTPS on the root domains.
 PROXY_ENABLED = _env_bool("HV_PROXY", False)
@@ -908,15 +987,21 @@ AUDIT_SEVERITY = {
     "totp_recovery_used": "warn", "access_revoked": "warn",
     "totp_ticket_rejected": "warn", "totp_failed": "warn",
     "totp_enroll_failed": "warn", "session_replaced": "warn",
+    # Enrollment binds the second factor to whoever knew the password at
+    # that moment (trust on first use): every enrollment is shown to admins.
+    "totp_enrolled": "alert",
     "session_ip_changed": "warn", "session_ended": "warn",
     "fail2ban_unban": "warn", "fail2ban_bans_released": "warn",
     "fail2ban_ban_evicted": "warn",
+    "fail2ban_ban_refused": "alert",
     "fail2ban_ban_evict_failed": "warn",
     "fail2ban_bans_release_failed": "warn",
     "fail2ban_ban_restore_failed": "warn",
     "admin_request_rejected": "warn",
     "admin_session_terminate_failed": "warn",
     "portal_host_redirect": "warn", "proxy_challenge_failed": "warn",
+    "host_rejected": "warn", "account_locked": "alert",
+    "step_up_failed": "warn",
     "cli_password_changed": "warn",
     "cli_user_deleted": "warn", "cli_totp_reset": "warn",
     "cli_action_failed": "warn", "cli_fail2ban_unban": "warn",
@@ -932,12 +1017,13 @@ AUDIT_SEVERITY = {
 }
 DEFAULT_SEVERITY = "info"
 
-# These values must never reach the log. Exact key match: ``ticket_hash``,
-# ``session`` and ``sid`` are allowed.
+# These values must never reach the log. Exact key match: ``ticket_hash``
+# and ``sid`` are allowed; ``session`` is dropped as a backstop, because a
+# session token (or a part of it) must never be logged.
 SENSITIVE_AUDIT_KEYS = {
     "pass", "password", "password_hash", "hash", "secret", "totp_secret",
     "code", "recovery", "recovery_code", "cookie", "token", "ticket",
-    "otpauth_uri",
+    "otpauth_uri", "session",
 }
 
 
@@ -1732,7 +1818,7 @@ def _validate_host_ports(direction: str, ports: Ports) -> None:
     """Restrictions of a host (input) rule; forward rules are unaffected.
 
     A host rule may open only an explicit TCP/UDP port: full access, ICMP
-    and a service list are not allowed. Only the portal's port (8100) is
+    and a service list are not allowed. Only the portal's port (PORT) is
     reserved. TCP port 22 (SSH) may be opened as an ordinary host port;
     this is the only route to host SSH, therefore an administrator creates
     the rule and assigns it to the user. UDP 22 is not SSH but an ordinary
@@ -1748,9 +1834,9 @@ def _validate_host_ports(direction: str, ports: Ports) -> None:
         raise ValueError(
             "a host rule requires at least one TCP or UDP port"
         )
-    if 8100 in ports.tcp or 8100 in ports.udp:
+    if PORT in ports.tcp or PORT in ports.udp:
         raise ValueError(
-            "port 8100 (portal) cannot be opened with a host rule"
+            f"port {PORT} (portal) cannot be opened with a host rule"
         )
 
 
@@ -3824,7 +3910,9 @@ class Firewall:
         if not dst:
             return ""
         try:
-            network = ipaddress.ip_network(dst, strict=False)
+            # strict: a destination with host bits is a typo; widening it
+            # silently to the network would open more than intended.
+            network = ipaddress.ip_network(dst, strict=True)
         except ValueError as exc:
             raise FirewallError(f"invalid {kind} destination: {dst}") from exc
         if network.version != 4:
@@ -3912,16 +4000,18 @@ class Firewall:
         # before the pre-auth jump; this rule protects even if the chain
         # order later changes or a pre-auth entry would match an established
         # connection. The ban thus overrides every allowed/pre-auth port;
-        # only the portal and DHCP remain reachable.
+        # only the portal and DHCP remain reachable. Like the base chains it
+        # matches the original direction only, so replies from a banned
+        # remote host to a client's pre-auth connection still pass.
         lines.append(
             f"add rule inet {self.table} preauth "
-            f"ip saddr @{self.ban_set} drop"
+            f"ip saddr @{self.ban_set} ct direction original drop"
         )
         # The first rule of the input pre-auth chain likewise drops the
         # banned sources, so that the ban does not open host ports either.
         lines.append(
             f"add rule inet {self.table} preauth_input "
-            f"ip saddr @{self.ban_set} drop"
+            f"ip saddr @{self.ban_set} ct direction original drop"
         )
         for entry in block:
             proto = str(entry.get("proto", "")).strip().lower()
@@ -4030,12 +4120,28 @@ class Firewall:
                 f"add rule inet {self.table} preauth ct state established "
                 f"{match} meta mark set {self.fwd_mark} accept"
             )
+        reserved_input = settings_store.preauth_reserved_input_ports()
         for entry in input_preauth:
             proto = str(entry.get("proto", "")).strip().lower()
             if proto not in ("tcp", "udp"):
                 raise FirewallError("invalid pre-auth entry")
             ports = self._custom_ports(entry, "pre-auth")
             dst = self._custom_dst(entry, "pre-auth")
+            # SSH, DNS, DHCP, Caddy admin and the portal port are never opened
+            # before login. The settings store rejects new entries like this;
+            # an entry stored by an older version is applied without them
+            # (fail-closed), so it cannot stop the portal from starting.
+            skipped = [port for port in ports if port in reserved_input]
+            if skipped:
+                self.log(
+                    "[firewall] WARNING: input pre-auth "
+                    f"{entry.get('id') or entry.get('label') or ''} skips "
+                    "reserved host ports: "
+                    + ", ".join(str(port) for port in skipped)
+                )
+                ports = [port for port in ports if port not in reserved_input]
+                if not ports:
+                    continue
             match = f"meta l4proto {proto}"
             if dst:
                 match += f" ct original ip daddr {dst}"
@@ -5807,6 +5913,41 @@ class Firewall:
             return False, str(exc)
         return True, "ok"
 
+    def state_token(self) -> int | None:
+        """Generation of the live table, or None if it needs a resync.
+
+        The value is the table's kernel handle: a deleted and reloaded table
+        (``flush ruleset``, an nftables.service restart, the Docker watchdog's
+        reload) gets a new handle, and with it empty custom chains and empty
+        ban and host-guard sets. None means the table is missing, or the
+        portal's own first rule in ``preauth`` (the ban drop, rendered on
+        every apply) is gone because the chains were flushed. In dry-run mode
+        the value is constant.
+        """
+        if self.dry_run:
+            return 0
+        listing = self._run(["-j", "list", "tables", "inet"], check=False)
+        handle = None
+        try:
+            data = json.loads(listing.stdout or b"{}")
+        except ValueError:
+            return None
+        for item in data.get("nftables", []):
+            table = item.get("table") if isinstance(item, dict) else None
+            if isinstance(table, dict) and table.get("name") == self.table:
+                handle = table.get("handle")
+        if not isinstance(handle, int) or isinstance(handle, bool):
+            return None
+        chain = self._run(
+            ["list", "chain", "inet", self.table, "preauth"], check=False
+        )
+        # The marker must match the rule _custom_rules renders (DJ-01 made it
+        # direction-aware); nft lists it back in the same form.
+        marker = f"ip saddr @{self.ban_set} ct direction original drop"
+        if marker.encode() not in (chain.stdout or b""):
+            return None
+        return handle
+
 
 def _audit_conntrack_failure(
     audit, ip: str, returncode: int, detail: str, operation: str = "flush"
@@ -6797,7 +6938,36 @@ class UserStore:
         digest = hashlib.pbkdf2_hmac(
             "sha256", password.encode("utf-8"), record.salt, record.iterations
         )
-        return hmac.compare_digest(digest, record.digest)
+        if not hmac.compare_digest(digest, record.digest):
+            return False
+        if record.iterations != self.iterations:
+            # Rehash to the current count, so every account converges to
+            # the setting and the cost of a known and an unknown name (the
+            # dummy digest) is the same again.
+            self._rehash(name, password, record.digest)
+        return True
+
+    def _rehash(self, name: str, password: str, old_digest: bytes) -> None:
+        try:
+            with self._lock, self._locked():
+                data = self._read_raw()
+                item = data.get(name)
+                # Changed in the meantime (password change): leave it alone.
+                if not isinstance(item, dict) \
+                        or str(item.get("hash", "")) != old_digest.hex():
+                    return
+                salt = secrets.token_bytes(16)
+                item["salt"] = salt.hex()
+                item["hash"] = hashlib.pbkdf2_hmac(
+                    "sha256", password.encode("utf-8"), salt, self.iterations
+                ).hex()
+                item["iterations"] = self.iterations
+                data[name] = item
+                self._write_raw(data)
+                self._cache = None
+                self._cache_key = None
+        except UserStoreError as exc:
+            log(f"[users] rehash failed: {exc}")
 
     def names(self) -> list[str]:
         return sorted(self._load().keys())
@@ -6951,7 +7121,10 @@ class UserStore:
             raise UserStoreError("invalid role")
         with self._locked():
             data = self._read_raw()
-            if name in data:
+            # Case-insensitive: "Admin" next to "admin" would confuse the
+            # approving admin.
+            folded = name.casefold()
+            if any(existing.casefold() == folded for existing in data):
                 raise UserStoreError(f"a user with this name already exists: {name}")
             data[name] = self._new_record(
                 name, password, role=role, enabled=enabled, rules=rules,
@@ -7327,9 +7500,15 @@ class UserStore:
         if not isinstance(raw, dict):
             raise UserStoreError("the users section must be a JSON object")
         clean: dict[str, dict] = {}
+        folded: set[str] = set()
         for name, item in raw.items():
             if not isinstance(name, str) or not USERNAME_RE.match(name):
                 raise UserStoreError(f"invalid username: {name!r}")
+            if name.casefold() in folded:
+                raise UserStoreError(
+                    f"{name}: duplicate username (names are case-insensitive)"
+                )
+            folded.add(name.casefold())
             if not isinstance(item, dict):
                 raise UserStoreError(f"{name}: invalid user entry")
             try:
@@ -7341,7 +7520,11 @@ class UserStore:
                 raise UserStoreError(f"{name}: invalid password data") from exc
             # More than 5 million iterations would already be a denial of
             # service.
-            if len(salt) != 16 or len(digest) != 32 or not 1 <= iterations <= 5_000_000:
+            # The loader uses at least 10,000 iterations, so a lower count
+            # could never verify; more than 5 million would already be a
+            # denial of service.
+            if len(salt) != 16 or len(digest) != 32 \
+                    or not 10_000 <= iterations <= 5_000_000:
                 raise UserStoreError(f"{name}: invalid password data")
             if created < 0:
                 raise UserStoreError(f"{name}: invalid creation time")
@@ -7460,20 +7643,55 @@ class UserStore:
             self._cache_key = None
 
 
+# Version 1 markers used this salt in every installation; they are still
+# recognised (and replaced by a version 2 marker on the next start).
 _PROVISION_SALT = b"hatarvedelem-provision-v1"
+_PROVISION_V2 = "v2"
 
 
-def provision_marker(password: str, iterations: int = PBKDF2_ITERATIONS) -> str:
+def provision_marker(
+    password: str,
+    iterations: int = PBKDF2_ITERATIONS,
+    salt: bytes | None = None,
+) -> str:
     """Marker for recognising that the password from .env is unchanged.
 
     Thus a password change made through the UI does not "revert" on the
     next container start, while a new password given in .env takes effect.
+    Format ``v2$<iterations>$<salt hex>$<digest hex>``: a random salt per
+    marker, so markers cannot be matched against a precomputed table and
+    are not comparable across installations.
     """
+    iterations = max(10_000, int(iterations))
+    salt = secrets.token_bytes(16) if salt is None else salt
     digest = hashlib.pbkdf2_hmac(
-        "sha256", password.encode("utf-8"), _PROVISION_SALT,
-        max(10_000, int(iterations)),
+        "sha256", password.encode("utf-8"), salt, iterations
     )
-    return digest.hex()
+    return f"{_PROVISION_V2}${iterations}${salt.hex()}${digest.hex()}"
+
+
+def provision_marker_matches(
+    marker: str, password: str, iterations: int = PBKDF2_ITERATIONS
+) -> bool:
+    """Whether ``marker`` was made from ``password`` (version 1 or 2)."""
+    if not isinstance(marker, str) or not marker:
+        return False
+    parts = marker.split("$")
+    if len(parts) == 4 and parts[0] == _PROVISION_V2:
+        try:
+            rounds = int(parts[1])
+            salt = bytes.fromhex(parts[2])
+        except ValueError:
+            return False
+        if not 10_000 <= rounds <= 5_000_000 or len(salt) != 16:
+            return False
+        expected = provision_marker(password, rounds, salt)
+    else:
+        expected = hashlib.pbkdf2_hmac(
+            "sha256", password.encode("utf-8"), _PROVISION_SALT,
+            max(10_000, int(iterations)),
+        ).hex()
+    return hmac.compare_digest(marker.encode(), expected.encode())
 
 
 def provision_admin(store: UserStore) -> str:
@@ -7522,13 +7740,18 @@ def provision_admin(store: UserStore) -> str:
     if record is not None and (not record.is_admin or not record.enabled):
         store.set_metadata(ADMIN_USER, role=ROLE_ADMIN, enabled=True)
         changed = True
-    if stored_marker != marker:
+    if not provision_marker_matches(
+        stored_marker, ADMIN_PASSWORD, store.iterations
+    ):
         # The password changed in .env: that is authoritative, and it must
         # also be changed on first sign-in.
         store.set_password(ADMIN_USER, ADMIN_PASSWORD, must_change_password=True)
         store.set_metadata(ADMIN_USER, role=ROLE_ADMIN, enabled=True,
                            provisioned_from=marker)
         return "updated"
+    if not stored_marker.startswith(_PROVISION_V2 + "$"):
+        # Same password, old (global salt) marker: only the marker changes.
+        store.set_metadata(ADMIN_USER, provisioned_from=marker)
     return "updated" if changed else "unchanged"
 
 
@@ -7728,6 +7951,7 @@ class SessionManager:
         audit: AuditLog | None = None,
         rule_check=None,
         guard_check=None,
+        state_check=None,
     ) -> None:
         self.firewall = firewall
         self.ttl = max(MIN_TTL, min(int(ttl), MAX_TTL))
@@ -7742,6 +7966,11 @@ class SessionManager:
         # only if this returns true. The default None keeps the previous
         # behaviour for callers that do not use a port guard.
         self.guard_check = guard_check
+        # Callback: whether the kernel table is the one the portal last
+        # synchronized (block chains, bans, host guards). While it returns
+        # false, no grant is issued: a reloaded bare table would let a new
+        # grant bypass the admin's block entries.
+        self.state_check = state_check
         self._lock = threading.Lock()
         self._sessions: dict[str, Session] = {}
         # IP -> (timestamp, reason): the explanation of the most recently
@@ -8721,6 +8950,12 @@ class SessionManager:
                         "host access is safely disabled"
                     )
 
+            if self.state_check is not None and not self.state_check():
+                raise FirewallError(
+                    "the firewall table was reloaded and is being "
+                    "resynchronized; try again in a few seconds"
+                )
+
             old_union = self._grant_tuple(session.grants)
             removed: tuple[Ports, ...] = ()
             if session.authorized:
@@ -9124,6 +9359,80 @@ class RateLimiter:
                 del self._hits[key]
 
 
+class AccountLockout:
+    """Failed password attempts per login name, across all source IPs.
+
+    fail2ban and the rate limiter count per IP, so an attacker with many
+    addresses could guess one account's password without limit. After
+    ``maximum`` failures within ``window`` seconds the name is locked for
+    ``base`` seconds; every further lock doubles it up to ``cap``. Names are
+    compared case-insensitively, and unknown names are counted the same way,
+    so the lock does not reveal which accounts exist. In memory only: a
+    restart clears it, like the rate limiter.
+    """
+
+    MAX_NAMES = 10_000
+
+    def __init__(
+        self,
+        maximum: int = ACCOUNT_LOCK_MAX,
+        window: int = ACCOUNT_LOCK_WINDOW,
+        base: int = ACCOUNT_LOCK_BASE,
+        cap: int = ACCOUNT_LOCK_CAP,
+    ) -> None:
+        self.maximum = max(1, int(maximum))
+        self.window = max(1, int(window))
+        self.base = max(1, int(base))
+        self.cap = max(self.base, int(cap))
+        self._lock = threading.Lock()
+        # name -> [failure times], lock until, number of locks so far
+        self._state: dict[str, tuple[list[float], float, int]] = {}
+
+    @staticmethod
+    def _key(name: str) -> str:
+        return str(name).strip().lower()[:64]
+
+    def locked(self, name: str) -> int:
+        """Remaining lock in whole seconds (0: not locked)."""
+        now = time.time()
+        with self._lock:
+            state = self._state.get(self._key(name))
+            if state is None or state[1] <= now:
+                return 0
+            return max(1, int(state[1] - now + 0.999))
+
+    def record_failure(self, name: str) -> int:
+        """Count a failure; returns the new lock length when it just locked."""
+        now = time.time()
+        key = self._key(name)
+        with self._lock:
+            hits, until, locks = self._state.get(key, ([], 0.0, 0))
+            hits = [t for t in hits if now - t < self.window]
+            hits.append(now)
+            length = 0
+            if len(hits) >= self.maximum and until <= now:
+                length = min(self.cap, self.base * (2 ** min(locks, 16)))
+                until = now + length
+                locks += 1
+                hits = []
+            self._state[key] = (hits, until, locks)
+            if len(self._state) > self.MAX_NAMES:
+                self._prune_locked(now)
+            return length
+
+    def record_success(self, name: str) -> None:
+        with self._lock:
+            self._state.pop(self._key(name), None)
+
+    def _prune_locked(self, now: float) -> None:
+        for key, (hits, until, _) in list(self._state.items()):
+            if until <= now and not [t for t in hits if now - t < self.window]:
+                del self._state[key]
+        # Still too many (a spray of random names): drop the oldest.
+        while len(self._state) > self.MAX_NAMES:
+            self._state.pop(next(iter(self._state)))
+
+
 # ------------------------------------------------------------------- captcha
 
 # Process-wide key: after a restart the old challenges are invalid.
@@ -9226,6 +9535,9 @@ class Gateway:
     # save.
     _custom_lock = threading.RLock()
     PORTPROXY_REFRESH_SECONDS = 10
+    # How often the portal checks that the kernel table is still the one it
+    # synchronized (see check_firewall_state).
+    FIREWALL_CHECK_SECONDS = 5
 
     def __init__(
         self,
@@ -9299,6 +9611,11 @@ class Gateway:
         # reference list must not delete a freshly added port of a rule
         # created in the meantime.
         self._host_ports_lock = threading.Lock()
+        # The table generation (Firewall.state_token) after the last full
+        # synchronization; None until prepare() has run. A different live
+        # value means the table was lost and reloaded bare.
+        self._fw_token: int | None = None
+        self._fw_lost_logged = False
         self.sessions = (
             sessions
             if sessions is not None
@@ -9309,6 +9626,7 @@ class Gateway:
                 audit=self.audit,
                 rule_check=self._rule_available,
                 guard_check=self._host_ports_healthy,
+                state_check=self._firewall_in_sync,
             )
         )
         if self.sessions.audit is None:
@@ -9320,6 +9638,7 @@ class Gateway:
                 self.firewall,
                 path=fail2ban_mod.FAIL2BAN_PATH,
                 audit=self.audit,
+                exempt=infra_exempt_addresses(),
                 on_ban=self._on_fail2ban_ban,
             )
         )
@@ -9337,6 +9656,8 @@ class Gateway:
         self.login_rate = (
             rate_limiter if rate_limiter is not None else RateLimiter()
         )
+        # Per-account failure counter (across source IPs), see AccountLockout.
+        self.account_lockout = AccountLockout()
         # Account requests have their own limit: they must not consume the
         # sign-in budget.
         self.register_rate = RateLimiter(window=600, maximum=3)
@@ -9457,6 +9778,84 @@ class Gateway:
             current.grants == rule.grants
             and current.session_domains == rule.session_domains
         )
+
+    def _firewall_in_sync(self) -> bool:
+        """Whether the live table is the one prepare()/the last resync filled.
+
+        Called by ``SessionManager.authorize()`` under the session lock; it
+        only runs nft, it takes no lock. Before prepare() (no token yet) it
+        does not block, so the startup order is unchanged.
+        """
+        if self._fw_token is None:
+            return True
+        try:
+            return self.firewall.state_token() == self._fw_token
+        except FirewallError:
+            return False
+
+    def check_firewall_state(self) -> bool:
+        """Detect a lost or reloaded table and restore the portal's state.
+
+        After a table loss the template reload (Docker watchdog, native
+        nftables.service restart) brings back only the bare rules: the block,
+        pre-auth, port proxy and tunnel chains, the bans and the host guard
+        sets are empty. This re-runs everything prepare() pushes, except the
+        startup flush. Until it succeeds, ``_host_ports_ok`` is false and
+        ``_firewall_in_sync`` refuses new grants. Returns True if a resync ran.
+        Existing sessions are not re-granted: their kernel elements went with
+        the old table, so those clients have to authorize again.
+        """
+        if self._fw_token is None or self._firewall_in_sync():
+            return False
+        with Gateway._custom_lock:
+            token = self.firewall.state_token()
+            if token == self._fw_token:
+                return False
+            self._host_ports_ok = False
+            exists, _why = self.firewall.healthy()
+            if not exists:
+                if not self._fw_lost_logged:
+                    self._fw_lost_logged = True
+                    log(
+                        "[firewall] ERROR: the nftables table is missing; "
+                        "new grants are refused until it is reloaded"
+                    )
+                    self._write_audit(
+                        "firewall_error", operation="table_lost",
+                        reason="table missing",
+                    )
+                return False
+            log(
+                "[firewall] WARNING: the nftables table was reloaded; "
+                "restoring host guards, bans and custom chains"
+            )
+            self.sync_host_ports()
+            bans_ok = self.fail2ban.sync()
+            try:
+                self._apply_custom_settings()
+            except FirewallError:
+                return False
+            new_token = self.firewall.state_token()
+            if new_token is None or not self._host_ports_ok or not bans_ok:
+                self._write_audit(
+                    "firewall_error", operation="resync",
+                    reason="partial resync; retrying",
+                )
+                return False
+            self._fw_token = new_token
+            self._fw_lost_logged = False
+            self._write_audit(
+                "firewall_resync", reason="table reloaded",
+                sessions=self.sessions.count(),
+            )
+            return True
+
+    def _firewall_watch_loop(self) -> None:
+        while not self._fw_watch_stop.wait(self.FIREWALL_CHECK_SECONDS):
+            try:
+                self.check_firewall_state()
+            except Exception as exc:  # the thread must never die
+                log(f"[firewall] state check error: {exc}")
 
     def _host_ports_healthy(self) -> bool:
         """The state of the host-port guard set; retries once after a failure.
@@ -9846,6 +10245,14 @@ class Gateway:
             )
         # Installing the settings file's pre-auth and block rules.
         self._apply_custom_settings()
+        # The generation of the table we just filled; check_firewall_state()
+        # compares against it. None (unreadable) makes the first check resync.
+        try:
+            self._fw_token = self.firewall.state_token()
+        except FirewallError:
+            self._fw_token = None
+        if self._fw_token is None:
+            self._fw_token = -1
 
     def _apply_custom_settings(self, snapshot: dict | None = None) -> None:
         """Installing the pre-auth and block rules into nftables.
@@ -10029,6 +10436,10 @@ class Gateway:
         threading.Thread(
             target=self._portproxy_loop, name="hv-portproxy", daemon=True
         ).start()
+        self._fw_watch_stop = threading.Event()
+        threading.Thread(
+            target=self._firewall_watch_loop, name="hv-fwwatch", daemon=True
+        ).start()
         try:
             fail2ban_enabled = bool(self.fail2ban.snapshot().get("enabled"))
         except Exception:
@@ -10048,9 +10459,10 @@ class Gateway:
             log(f"[drop log] inactive: {status.get('error') or 'unknown reason'}")
 
     def stop(self) -> None:
-        stop_event = getattr(self, "_portproxy_stop", None)
-        if stop_event is not None:
-            stop_event.set()
+        for name in ("_portproxy_stop", "_fw_watch_stop"):
+            stop_event = getattr(self, name, None)
+            if stop_event is not None:
+                stop_event.set()
         try:
             self.drops.stop()
         except Exception as exc:  # shutdown must not get stuck on logging

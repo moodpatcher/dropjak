@@ -16,10 +16,17 @@
 #     requests a challenge, it returns a 403 captcha page instead;
 #   - /api/gate/challenge: the challenge page's captcha (/__dropjak/challenge).
 # {$PORT} is the portal port; compose passes it in.
+# {$HV_PROXY_KEY} is the secret shared with the portal: with it the portal
+# trusts X-Forwarded-For and serves /api/proxy/* only to Caddy, not to any
+# other process on the host. It goes only to the portal (forward_auth and the
+# portal's own upstream), never to a proxied application. get_certificate
+# and ask cannot send headers, so there it is in the query.
 #
 # The admin API is only on a Unix socket, without a TCP port, on the
 # caddy-admin volume mounted only into the portal's and Caddy's container
-# (the directory is root:hatarvedelem 0750, set by the portal's entrypoint).
+# (the directory is root:hatarvedelem 2750, set by the portal's entrypoint).
+# The setgid directory gives the socket the hatarvedelem group, so mode 0660
+# lets only Caddy (owner) and the portal (group) use the full admin API.
 # The portal's only call is POST /stop: when ACME is disabled and when a
 # certificate is uploaded, it stops Caddy, and compose (restart:
 # unless-stopped) starts it again with an empty certificate cache. certmagic
@@ -27,11 +34,11 @@
 # it loads from /data only with ask's permission, so even after a restart it
 # does not load with ACME disabled.
 {
-	admin unix//run/caddy-admin/admin.sock|0666
+	admin unix//run/caddy-admin/admin.sock|0660
 	# /stop (and docker stop) waits at most this long for open connections.
 	grace_period 5s
 	on_demand_tls {
-		ask http://127.0.0.1:{$PORT:8100}/api/proxy/ask
+		ask http://127.0.0.1:{$PORT:8100}/api/proxy/ask?key={$HV_PROXY_KEY}
 	}
 	servers {
 		protocols h1 h2
@@ -41,24 +48,36 @@
 https:// {
 	tls {
 		on_demand
-		get_certificate http http://127.0.0.1:{$PORT:8100}/api/proxy/cert
+		get_certificate http http://127.0.0.1:{$PORT:8100}/api/proxy/cert?key={$HV_PROXY_KEY}
 	}
+	# HTTPS only for these names from now on (no includeSubDomains: other
+	# subdomains may still need plain HTTP).
+	header Strict-Transport-Security "max-age=31536000"
+	# Set by forward_auth (copy_headers) from the portal's answer; the
+	# portal itself is never the upstream of a proxied application.
+	@portal header X-Dropjak-Upstream 127.0.0.1:{$PORT:8100}
 	# The image of the login and challenge pages comes from the portal,
 	# without authentication.
 	handle /__dropjak/unauthorized.png {
 		rewrite * /api/proxy/unauthorized.png
-		reverse_proxy 127.0.0.1:{$PORT:8100}
+		reverse_proxy 127.0.0.1:{$PORT:8100} {
+			header_up X-Dropjak-Proxy-Key {$HV_PROXY_KEY}
+		}
 	}
 	handle /__dropjak/sus.png {
 		rewrite * /api/proxy/sus.png
-		reverse_proxy 127.0.0.1:{$PORT:8100}
+		reverse_proxy 127.0.0.1:{$PORT:8100} {
+			header_up X-Dropjak-Proxy-Key {$HV_PROXY_KEY}
+		}
 	}
 	# The challenge page's captcha (GET: puzzle, POST: solution + session
 	# cookie); the portal answers only on the host of a challenge entry or of
 	# an unknown subdomain covered by the uploaded certificate.
 	handle /__dropjak/challenge {
 		rewrite * /api/gate/challenge
-		reverse_proxy 127.0.0.1:{$PORT:8100}
+		reverse_proxy 127.0.0.1:{$PORT:8100} {
+			header_up X-Dropjak-Proxy-Key {$HV_PROXY_KEY}
+		}
 	}
 	handle {
 		# Caddy passes a non-2xx response (401 login page, 302, 404) to the
@@ -66,9 +85,17 @@ https:// {
 		forward_auth 127.0.0.1:{$PORT:8100} {
 			uri /api/proxy/auth
 			copy_headers X-Dropjak-Upstream
+			header_up X-Dropjak-Proxy-Key {$HV_PROXY_KEY}
+		}
+		# The root domain / own address is the portal itself: only this
+		# upstream gets the key (matcher: @portal above).
+		reverse_proxy @portal 127.0.0.1:{$PORT:8100} {
+			header_up -X-Dropjak-Upstream
+			header_up X-Dropjak-Proxy-Key {$HV_PROXY_KEY}
 		}
 		reverse_proxy {http.request.header.X-Dropjak-Upstream} {
 			header_up -X-Dropjak-Upstream
+			header_up -X-Dropjak-Proxy-Key
 			# The challenge login cookie does not reach the target application.
 			header_up Cookie "__Host-dropjak_pass=[^;]*;?\s*" ""
 			header_up Cookie ";\s*$" ""
@@ -88,6 +115,7 @@ http:// {
 	handle {
 		forward_auth 127.0.0.1:{$PORT:8100} {
 			uri /api/proxy/redirect
+			header_up X-Dropjak-Proxy-Key {$HV_PROXY_KEY}
 		}
 	}
 	# Portal unreachable: the old redirect.

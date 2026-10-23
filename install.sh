@@ -600,6 +600,17 @@ fi
 install -d -m 0755 /etc/nftables
 install -m 0600 "$TMP_NFT" "$NFT_FILE"
 
+# A distribution nftables config that starts with "flush ruleset" deletes the
+# Dropjak table whenever nftables.service is restarted or reloaded.
+# dropjak-firewall.service follows those (PartOf=/ReloadPropagatedFrom=), but
+# until it has run, nothing filters.
+for distro_conf in /etc/nftables.conf /etc/sysconfig/nftables.conf; do
+  if [[ -r "$distro_conf" ]] && grep -Eq '^[[:space:]]*flush[[:space:]]+ruleset' "$distro_conf"; then
+    warn "$distro_conf contains 'flush ruleset': restarting nftables.service briefly removes the Dropjak rules."
+    warn "Prefer 'destroy table'/'flush table' for the distribution's own tables there."
+  fi
+done
+
 note "Enabling IP forwarding"
 cat > "$SYSCTL_FILE" <<'EOF'
 # Dropjak: the machine forwards traffic as a router.
@@ -684,15 +695,22 @@ if grep -qE '__[A-Z0-9_]+__' "$SYSTEMD_UNIT" "$FIREWALL_UNIT"; then
   die "an unfilled placeholder remained in the systemd units"
 fi
 
-# The mark and NFLOG group of the rendered rules must match the values used by
-# the portal and the drop-log listener. The unit template does not contain these,
-# so we pass them as a drop-in.
+# The mark, NFLOG group, interfaces and LAN network of the rendered rules must
+# match the values used by the portal and the drop-log listener. The unit
+# template does not contain these, so we pass them as a drop-in. Without
+# HV_LAN_IF/HV_LAN_NET the portal records no client MAC, while the rules drop
+# every LAN grant without one, and pre-auth/port proxy entries cannot be
+# applied at all.
 ENV_DROPIN_DIR="${SYSTEMD_DIR}/${SERVICE}.service.d"
 install -d -m 0755 "$ENV_DROPIN_DIR"
 cat > "$ENV_DROPIN_DIR/10-dropjak-env.conf" <<EOF
 [Service]
 Environment=HV_FWD_MARK=$FWD_MARK
 Environment=HV_DROP_LOG_GROUP=$DROP_LOG_GROUP
+Environment=HV_LAN_IF=$LAN_IF
+Environment=HV_WAN_IF=$WAN_IF
+Environment=HV_LAN_NET=$LAN_NET
+Environment=HV_PORTAL_NET=$PORTAL_NET
 EOF
 chmod 0644 "$ENV_DROPIN_DIR/10-dropjak-env.conf"
 

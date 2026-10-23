@@ -1154,6 +1154,14 @@
   .motd-dialog h2{margin:0 0 12px;font-size:var(--fs-xl)}
   .motd-text{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.55}
   .motd-dialog button{margin-top:20px}
+  /* Re-authentication before export, import and reset (askStepUp). */
+  .step-up-dialog{
+    width:calc(100% - 32px);max-width:400px;padding:20px;color:var(--ink);
+    background:var(--card);border:1px solid var(--line);border-radius:12px
+  }
+  .step-up-dialog::backdrop{background:rgba(0,0,0,.45)}
+  .step-up-dialog label{display:block;margin:0 0 10px}
+  .step-up-dialog input{display:block;width:100%;margin-top:4px}
 </style>
 </head>
 <body>
@@ -2671,6 +2679,9 @@ const I18N = {
     'Keresés a szabályok között…': 'Search rules…',
     'Keresés a csoportok között…': 'Search groups…',
     'Mégse': 'Cancel',
+    'Folytatás': 'Continue',
+    '2FA-kód (ha be van kapcsolva)': '2FA code (if enabled)',
+    'A művelethez add meg újra a jelszavadat (és a 2FA-kódot, ha be van kapcsolva).': 'Enter your password again for this action (and your 2FA code if enabled).',
     'Mentés': 'Save',
     'Új csoport': 'New group',
     'Még nincs csoport.': 'No groups yet.',
@@ -3150,6 +3161,9 @@ const I18N = {
     'proxy': 'proxy',
     'csak HTTP/HTTPS': 'HTTP/HTTPS only',
     'Drop időablak (perc)': 'Drop window (minutes)',
+    'Drop-jelzésre soha nem tiltott címek': 'Never banned on drop signals',
+    'Soronként egy IPv4-cím vagy CIDR. Az eldobott csomag forráscíme hamisítható, ezért ezeket a címeket a drop-mérőszámok soha nem tiltják le (a bejelentkezési és a kézi tiltás továbbra is működik).': 'One IPv4 address or CIDR per line. The source of a dropped packet can be forged, so the drop metrics never ban these addresses (login and manual bans still apply).',
+    'Beépített (környezeti változó, DNS, alapértelmezett átjáró):': 'Built in (environment, DNS, default gateway):',
     'Mindkét drop-mérőszám ezt az időablakot használja.': 'Both drop metrics use this window.',
     'Várakozó drop': 'Pending drops',
     'a drop-alapú tiltás kikapcsolva': 'drop-based banning is disabled',
@@ -3685,6 +3699,9 @@ const I18N = {
     'Keresés a szabályok között…': 'Regeln durchsuchen…',
     'Keresés a csoportok között…': 'Gruppen durchsuchen…',
     'Mégse': 'Abbrechen',
+    'Folytatás': 'Weiter',
+    '2FA-kód (ha be van kapcsolva)': '2FA-Code (falls aktiviert)',
+    'A művelethez add meg újra a jelszavadat (és a 2FA-kódot, ha be van kapcsolva).': 'Gib für diese Aktion dein Passwort erneut ein (und den 2FA-Code, falls aktiviert).',
     'Mentés': 'Speichern',
     'Új csoport': 'Neue Gruppe',
     'Még nincs csoport.': 'Noch keine Gruppen.',
@@ -4167,6 +4184,9 @@ const I18N = {
     'csak HTTP/HTTPS': 'nur HTTP/HTTPS',
     'Mindkét drop-mérőszám ezt az időablakot használja.': 'Beide Drop-Metriken verwenden dieses Zeitfenster.',
     'Drop időablak (perc)': 'Drop-Zeitfenster (Minuten)',
+    'Drop-jelzésre soha nem tiltott címek': 'Bei Drop-Signalen nie gesperrte Adressen',
+    'Soronként egy IPv4-cím vagy CIDR. Az eldobott csomag forráscíme hamisítható, ezért ezeket a címeket a drop-mérőszámok soha nem tiltják le (a bejelentkezési és a kézi tiltás továbbra is működik).': 'Eine IPv4-Adresse oder ein CIDR pro Zeile. Die Absenderadresse eines verworfenen Pakets kann gefälscht sein, daher sperren die Drop-Metriken diese Adressen nie (Anmelde- und manuelle Sperren gelten weiterhin).',
+    'Beépített (környezeti változó, DNS, alapértelmezett átjáró):': 'Eingebaut (Umgebungsvariable, DNS, Standard-Gateway):',
     'Várakozó drop': 'Ausstehende Drops',
     'a drop-alapú tiltás kikapcsolva': 'die drop-basierte Sperre ist deaktiviert',
     'Várakozó drop-események': 'Ausstehende Drop-Ereignisse',
@@ -8543,6 +8563,9 @@ const AUDIT_EVENT_LABELS = {
   proxy_challenge_failed: ['Proxy-challenge sikertelen', 'Proxy challenge failed', 'Proxy-Challenge fehlgeschlagen'],
   portal_host_redirect: ['Átirányítás idegen hosztra', 'Redirect to foreign host', 'Weiterleitung zu fremdem Host'],
   portal_https_redirect: ['Átirányítás a HTTPS-portálra', 'Redirect to HTTPS portal', 'Weiterleitung zum HTTPS-Portal'],
+  host_rejected: ['Ismeretlen hoszt elutasítva', 'Unknown host rejected', 'Unbekannter Host abgelehnt'],
+  account_locked: ['Fiók ideiglenesen zárolva', 'Account temporarily locked', 'Konto vorübergehend gesperrt'],
+  step_up_failed: ['Sikertelen újrahitelesítés', 'Re-authentication failed', 'Erneute Anmeldung fehlgeschlagen'],
   login_success: ['Sikeres belépés', 'Sign-in successful', 'Anmeldung erfolgreich'],
   login_failed: ['Sikertelen belépés', 'Sign-in failed', 'Anmeldung fehlgeschlagen'],
   login_banned: ['Belépés tiltott IP-ről', 'Sign-in from banned IP', 'Anmeldung von gesperrter IP'],
@@ -8585,7 +8608,8 @@ const AUDIT_EVENT_LABELS = {
   fail2ban_ban: ['Fail2ban-tiltás', 'Fail2ban ban', 'Fail2ban-Sperre'],
   fail2ban_unban: ['Fail2ban-feloldás', 'Fail2ban unban', 'Fail2ban-Freigabe'],
   fail2ban_bans_released: ['Fail2ban-tiltások feloldva', 'Fail2ban bans released', 'Fail2ban-Sperren aufgehoben'],
-  fail2ban_ban_evicted: ['Legrégebbi tiltás törölve', 'Oldest ban evicted', 'Älteste Sperre entfernt'],
+  fail2ban_ban_evicted: ['Automatikus tiltás kiszorítva', 'Automatic ban evicted', 'Automatische Sperre entfernt'],
+  fail2ban_ban_refused: ['Tiltás elutasítva (megtelt lista)', 'Ban refused (list full)', 'Sperre abgelehnt (Liste voll)'],
   fail2ban_ban_evict_failed: ['Tiltás törlése a tűzfalból sikertelen', 'Ban eviction from firewall failed', 'Sperre aus der Firewall entfernen fehlgeschlagen'],
   fail2ban_bans_release_failed: ['Fail2ban-tiltások feloldása sikertelen', 'Fail2ban ban release failed', 'Fail2ban-Sperren freigeben fehlgeschlagen'],
   fail2ban_ban_restore_failed: ['Fail2ban-tiltás visszaállítása sikertelen', 'Fail2ban ban restore failed', 'Fail2ban-Sperre wiederherstellen fehlgeschlagen'],
@@ -8593,6 +8617,7 @@ const AUDIT_EVENT_LABELS = {
   fail2ban_load_error: ['Fail2ban-állapot betöltése sikertelen', 'Fail2ban state load failed', 'Fail2ban-Status laden fehlgeschlagen'],
   fail2ban_sync_failed: ['Fail2ban-tűzfalszinkronizálás sikertelen', 'Fail2ban firewall sync failed', 'Fail2ban-Firewall-Synchronisierung fehlgeschlagen'],
   firewall_error: ['Tűzfalhiba', 'Firewall error', 'Firewall-Fehler'],
+  firewall_resync: ['Tűzfal újraszinkronizálva', 'Firewall resynced', 'Firewall neu synchronisiert'],
   conntrack_failed: ['Kapcsolatkövetés törlése sikertelen', 'Conntrack flush failed', 'Conntrack-Löschung fehlgeschlagen'],
   settings_invalid: ['Érvénytelen beállítások', 'Invalid settings', 'Ungültige Einstellungen'],
 
@@ -9960,10 +9985,52 @@ function configSiteName() {
   const value = settingsData().site_name;
   return (typeof value === 'string' && value.trim()) || 'Dropjak';
 }
+/* Re-authentication before export, import and reset: the server requires
+   the admin's password, and the 2FA code when it is enrolled. Resolves to
+   { password, code } or null when cancelled. */
+function askStepUp(title) {
+  return new Promise(resolve => {
+    const password = el('input', { type: 'password', autocomplete: 'current-password', required: true });
+    const code = el('input', {
+      type: 'text', inputmode: 'numeric', autocomplete: 'one-time-code', maxlength: '6'
+    });
+    const dialog = el('dialog', { class: 'step-up-dialog' });
+    let done = false;
+    const finish = value => {
+      if (done) return;
+      done = true;
+      if (dialog.open) dialog.close();
+      dialog.remove();
+      resolve(value);
+    };
+    dialog.append(el('form', {
+      class: 'admin-form',
+      onsubmit: event => {
+        event.preventDefault();
+        finish({ password: password.value, code: code.value.trim() });
+      }
+    },
+      el('h3', { text: title }),
+      el('p', { class: 'port-hint', text: tr('A művelethez add meg újra a jelszavadat (és a 2FA-kódot, ha be van kapcsolva).') }),
+      el('label', {}, tr('Jelszó'), password),
+      el('label', {}, tr('2FA-kód (ha be van kapcsolva)'), code),
+      el('div', { class: 'form-actions' },
+        el('button', { type: 'submit', class: 'small' }, tr('Folytatás')),
+        el('button', { type: 'button', class: 'ghost small', onclick: () => finish(null) }, tr('Mégse')))));
+    dialog.addEventListener('cancel', () => finish(null));
+    document.body.append(dialog);
+    dialog.showModal();
+    password.focus();
+  });
+}
 async function exportConfigBundle() {
+  const stepUp = await askStepUp(tr('Konfiguráció exportálása'));
+  if (!stepUp) return;
   try {
     const response = await fetch('/api/admin/config/export', {
-      cache: 'no-store', credentials: 'same-origin'
+      method: 'POST', cache: 'no-store', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(stepUp)
     });
     let data = {};
     if (!response.ok) {
@@ -10015,10 +10082,12 @@ async function importConfigBundle(input) {
     }
     confirmText = typed;
   }
+  const stepUp = await askStepUp(tr('Konfiguráció importálása'));
+  if (!stepUp) return;
   adminFlash = { text: 'Az importálás folyamatban van…', kind: 'ok' };
   renderAdminPanel();
   try {
-    await postJson('/api/admin/config/import', { bundle, confirm: confirmText });
+    await postJson('/api/admin/config/import', { bundle, confirm: confirmText, ...stepUp });
     adminFlash = {
       text: 'A konfiguráció betöltve. A szolgáltatás újraindul; az oldal néhány másodperc múlva újratöltődik.',
       kind: 'ok'
@@ -10040,8 +10109,10 @@ async function resetConfig() {
     return;
   }
   if (!confirm(tr('Biztosan törlöd a teljes konfigurációt? Ez nem vonható vissza.'))) return;
+  const stepUp = await askStepUp(tr('Gyári visszaállítás'));
+  if (!stepUp) return;
   try {
-    await postJson('/api/admin/config/reset', { confirm: typed });
+    await postJson('/api/admin/config/reset', { confirm: typed, ...stepUp });
     adminFlash = {
       text: 'A visszaállítás megtörtént. A szolgáltatás újraindul; az oldal néhány másodperc múlva újratöltődik.',
       kind: 'ok'
@@ -12063,7 +12134,10 @@ function fail2banConfigForm(fb) {
       drop_window_seconds: Math.round(dropWindowMinutes * 60),
       proxy_enabled: boolValue(box, 'proxy_enabled'),
       proxy_max: Math.round(proxyMax),
-      proxy_window_seconds: Math.round(proxyWindowMinutes * 60)
+      proxy_window_seconds: Math.round(proxyWindowMinutes * 60),
+      // Drop-signal allowlist: one address or CIDR per line (or comma).
+      drop_exempt: String(formValue(box, 'drop_exempt'))
+        .split(/[\s,]+/).filter(Boolean)
     });
   }});
   box.append(el('h3', { text: tr('Beállítások') }));
@@ -12199,6 +12273,18 @@ function fail2banConfigForm(fb) {
           value: fail2banDraftValue('config', 'drop_window_minutes', minutesOf(fb.drop_window_seconds || 180))
         }),
         el('span', { class: 'port-hint', text: tr('Mindkét drop-mérőszám ezt az időablakot használja.') })
+      ),
+      el('div', { class: 'field' },
+        el('label', { text: tr('Drop-jelzésre soha nem tiltott címek') }),
+        el('textarea', {
+          name: 'drop_exempt', rows: 3, spellcheck: 'false',
+          // A textarea's initial value is its text content.
+          text: fail2banDraftValue('config', 'drop_exempt', (fb.drop_exempt || []).join('\n'))
+        }),
+        el('span', { class: 'port-hint', text: tr('Soronként egy IPv4-cím vagy CIDR. Az eldobott csomag forráscíme hamisítható, ezért ezeket a címeket a drop-mérőszámok soha nem tiltják le (a bejelentkezési és a kézi tiltás továbbra is működik).') }),
+        (fb.drop_exempt_builtin || []).length
+          ? el('span', { class: 'port-hint', text: tr('Beépített (környezeti változó, DNS, alapértelmezett átjáró):') + ' ' + fb.drop_exempt_builtin.join(', ') })
+          : null
       )
     )
   ));

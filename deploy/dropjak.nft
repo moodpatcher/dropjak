@@ -56,10 +56,10 @@ add set inet hatarvedelem allowed_udp {
 # Host (input) rules: the portal machine's own services, which we open
 # to the logged-in client's IP until the session TTL. We store them
 # separately from the forward sets, and only the incoming (input) chain
-# accepts traffic from them. Only port 8100 (portal) is reserved: the
+# accepts traffic from them. Only the portal port (PORT) is reserved: the
 # portal's validation does not allow adding it here, and the accept rule
 # below also excludes it. Port 22 can be declared by a host rule created by
-# an administrator; host acceptance excludes 8100 regardless.
+# an administrator; host acceptance excludes the portal port regardless.
 add set inet hatarvedelem allowed_input_tcp {
     type ipv4_addr . inet_service
     flags interval,timeout
@@ -134,6 +134,17 @@ add set inet hatarvedelem proxy_banned_v4 {
     flags timeout
     size 4096
 }
+
+# Destinations the gateway never forwards to, whatever grant or pre-auth
+# entry a client has (DJ-02). 169.254.0.0/16 is link-local: on cloud VMs the
+# provider's metadata service (169.254.169.254) lives there, and masquerade
+# would present the client's request as the VM's own. The elements below are
+# re-added on every load; extra provider networks can be added the same way.
+add set inet hatarvedelem no_forward_v4 {
+    type ipv4_addr
+    flags interval
+}
+add element inet hatarvedelem no_forward_v4 { 169.254.0.0/16 }
 
 # The forward chain is created further below, in the same transaction as the
 # rules, with priority -10. Thus it runs BEFORE the Docker ip filter FORWARD
@@ -245,6 +256,11 @@ table inet hatarvedelem {
         iifname "__LAN_IF__" ip saddr != __LAN_NET__ drop
         iifname "__WAN_IF__" ip saddr __LAN_NET__ limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-wan " group __DROP_LOG_GROUP__
         iifname "__WAN_IF__" ip saddr __LAN_NET__ drop
+        # A LAN source is only valid on the LAN interface. Without this, a
+        # process on any other interface (a Docker bridge, an extra NIC or VLAN)
+        # could use a LAN client's grants with that client's address.
+        iifname != "__LAN_IF__" ip saddr __LAN_NET__ limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-lan " group __DROP_LOG_GROUP__
+        iifname != "__LAN_IF__" ip saddr __LAN_NET__ drop
 
         # fail2ban-banned source: logged dropping of forwarded traffic.
         # This rule runs before the permitting sets and the pre-auth chain,
@@ -252,9 +268,12 @@ table inet hatarvedelem {
         # ban either. Logging is sampled (the limit only restricts the log);
         # the portal assigns these hits to the ban's single event, so the
         # interface does not get a per-packet line. When the ban expires, the
-        # kernel deletes the element by itself.
-        ip saddr @banned_v4 limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=fail2ban " group __DROP_LOG_GROUP__
-        ip saddr @banned_v4 drop
+        # kernel deletes the element by itself. Only the original direction
+        # is dropped: replies to connections that a LAN client opened toward
+        # a banned address still pass, so banning a remote host does not
+        # cut it off for every client.
+        ip saddr @banned_v4 ct direction original limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=fail2ban " group __DROP_LOG_GROUP__
+        ip saddr @banned_v4 ct direction original drop
 
         # MAC binding: anyone using an allowed IP must send with the MAC address
         # recorded during the session. This protects against an IP moving to another
@@ -282,6 +301,26 @@ table inet hatarvedelem {
         # (session, pre-auth, container), so an active session cannot bypass it
         # either; no conntrack flush is needed, because every packet reaches it.
         jump block
+
+        # Destinations that no grant may reach (link-local / cloud metadata,
+        # see the no_forward_v4 set). It runs before every accept, so neither a
+        # full-access session, a port grant, a pre-auth entry nor the container
+        # exception can reach them.
+        ip daddr @no_forward_v4 limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=no-forward " group __DROP_LOG_GROUP__
+        ip daddr @no_forward_v4 drop
+
+        # Grants are not scoped by destination, so without these rules a grant
+        # would also reach every container IP on the Docker bridges and, from
+        # the WAN side, the LAN. A new flow may enter a Docker bridge or the LAN
+        # from the WAN only if it was DNAT-ed (a published port or a port
+        # proxy entry). Only the original direction is checked: the replies of
+        # flows the container or the LAN host started are not affected.
+        oifname "docker*" ct direction original ct status != dnat limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=container-direct " group __DROP_LOG_GROUP__
+        oifname "docker*" ct direction original ct status != dnat drop
+        oifname "br-*" ct direction original ct status != dnat limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=container-direct " group __DROP_LOG_GROUP__
+        oifname "br-*" ct direction original ct status != dnat drop
+        iifname "__WAN_IF__" oifname "__LAN_IF__" ct direction original ct status != dnat limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=wan-drop " group __DROP_LOG_GROUP__
+        iifname "__WAN_IF__" oifname "__LAN_IF__" ct direction original ct status != dnat drop
 
         # Port-restricted access. The ct original proto-dst means the destination port
         # BEFORE DNAT, so for container ports published by Docker the
@@ -367,6 +406,10 @@ table inet hatarvedelem {
         iifname "__LAN_IF__" ip saddr != __LAN_NET__ drop
         iifname "__WAN_IF__" ip saddr __LAN_NET__ limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-wan " group __DROP_LOG_GROUP__
         iifname "__WAN_IF__" ip saddr __LAN_NET__ drop
+        # A LAN source is only valid on the LAN interface (loopback was
+        # accepted above).
+        iifname != "__LAN_IF__" ip saddr __LAN_NET__ limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-lan " group __DROP_LOG_GROUP__
+        iifname != "__LAN_IF__" ip saddr __LAN_NET__ drop
 
         # fail2ban-banned source toward the host. The portal and DHCP are exceptions:
         # a banned client can still reach the login page (where it sees the reason for
@@ -374,12 +417,13 @@ table inet hatarvedelem {
         # service (SSH, DNS, ICMP) and forward traffic is dropped,
         # even if a pre-auth rule would allow it. The portal records the fact of the ban
         # as a single drop-log event; packets logged with sampling during the ban are
-        # assigned to this event.
+        # assigned to this event. As in forward, replies to the gateway's own
+        # connections (DNS upstream, NTP, ACME) are not dropped.
         iifname "__LAN_IF__" udp sport 68 udp dport 67 accept
         iifname "__LAN_IF__" tcp dport __PORT__ accept
         ip saddr __PORTAL_NET__ tcp dport __PORT__ accept
-        ip saddr @banned_v4 limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=fail2ban " group __DROP_LOG_GROUP__
-        ip saddr @banned_v4 drop
+        ip saddr @banned_v4 ct direction original limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=fail2ban " group __DROP_LOG_GROUP__
+        ip saddr @banned_v4 ct direction original drop
 
         # The admin-configured block also applies to traffic toward the host.
         # It is unconditional, so host permissions and existing host connections
@@ -387,7 +431,11 @@ table inet hatarvedelem {
         # and the portal remains untouched, so a block entry cannot lock out the portal
         # or emergency access. The block chain matches the conntrack original tuple,
         # so it runs for every packet; no conntrack flush is needed.
-        jump block
+        # Only the original direction: a reply packet in the input chain belongs
+        # to a connection the host itself opened (ACME, image pulls), and its
+        # original tuple names the remote server, so a destination-less block
+        # entry would otherwise cut the host's own outbound traffic.
+        ct direction original jump block
 
         # Pre-login host (input) permissions. The block has already run,
         # so the block overrides this too; it stands before the portal and SSH rules
@@ -443,9 +491,11 @@ table inet hatarvedelem {
         __PROXY__iifname "__LAN_IF__" tcp dport { 80, 443 } ip saddr . ether saddr @client_mac accept
 
         # An existing TCP DNS connection must not stay alive after the permission
-        # expires either. (Every UDP DNS request is a separate packet, so those are
-        # closed by the permitting rules below.) We exclude the allowed host (input)
-        # TCP 53 rule: the host connection's actual permission is checked by the
+        # expires either. UDP gets the same guard: a client that keeps one source
+        # port keeps its conntrack entry established, and without the guard its
+        # queries would fall through to the general established accept after
+        # revocation (a DNS tunnel). We exclude the allowed host (input)
+        # TCP/UDP 53 rule: the host connection's actual permission is checked by the
         # host_service_* guard below, so the DNS guard does not break it during the
         # rule's lifetime.
         iifname "__LAN_IF__" tcp dport 53 ct state established,related \
@@ -454,6 +504,12 @@ table inet hatarvedelem {
         iifname "__LAN_IF__" tcp dport 53 ct state established,related \
             ip saddr != @allowed_v4 ip saddr . tcp dport != @allowed_tcp \
             ip saddr . tcp dport != @allowed_input_tcp drop
+        iifname "__LAN_IF__" udp dport 53 ct state established,related \
+            ip saddr != @allowed_v4 ip saddr . udp dport != @allowed_udp \
+            ip saddr . udp dport != @allowed_input_udp limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=dns-revoked " group __DROP_LOG_GROUP__
+        iifname "__LAN_IF__" udp dport 53 ct state established,related \
+            ip saddr != @allowed_v4 ip saddr . udp dport != @allowed_udp \
+            ip saddr . udp dport != @allowed_input_udp drop
 
         # An existing SSH connection stays alive only while the (IP, 22) pair is in
         # the allowed_input_tcp set, i.e. while the host rule assigned to the user
@@ -478,8 +534,8 @@ table inet hatarvedelem {
         # An existing host (input) connection must not stay alive either if the IP
         # was removed from the allowed_input_tcp/allowed_input_udp set. The input chain
         # sees only client→host packets toward the host services; the destination port
-        # of portal-redirected packets is already 8100 at that point, so the packet-level
-        # tcp/udp dport is the correct key. The DNS/53 and DHCP accept rules are above;
+        # of portal-redirected packets is already the portal port at that point, so the
+        # packet-level tcp/udp dport is the correct key. The DNS/53 and DHCP accept rules are above;
         # for every other host port the host_service_* sets (add-only) close the flow
         # when the permission disappears. Thus it closes even when the conntrack flush
         # is omitted and when nf_conntrack_tcp_loose revives the flow.
@@ -487,15 +543,18 @@ table inet hatarvedelem {
         # exclusively the domain of the SSH-specific guard (above), so the same
         # connection is not decided in two places. The UDP guard gets no such
         # exception: the SSH guard is TCP-only, and UDP 22 is an ordinary host port.
-        tcp dport @host_service_tcp tcp dport != 22 ct state established,related \
+        # Only the original direction is checked: for the replies of the host's
+        # own outbound connections the dport is a local ephemeral port, which a
+        # host rule range may cover.
+        tcp dport @host_service_tcp tcp dport != 22 ct state established,related ct direction original \
             ip saddr . tcp dport != @allowed_input_tcp \
             limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=host-revoked " group __DROP_LOG_GROUP__
-        tcp dport @host_service_tcp tcp dport != 22 ct state established,related \
+        tcp dport @host_service_tcp tcp dport != 22 ct state established,related ct direction original \
             ip saddr . tcp dport != @allowed_input_tcp drop
-        udp dport @host_service_udp ct state established,related \
+        udp dport @host_service_udp ct state established,related ct direction original \
             ip saddr . udp dport != @allowed_input_udp \
             limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=host-revoked " group __DROP_LOG_GROUP__
-        udp dport @host_service_udp ct state established,related \
+        udp dport @host_service_udp ct state established,related ct direction original \
             ip saddr . udp dport != @allowed_input_udp drop
 
         ct state established,related accept
@@ -519,12 +578,12 @@ table inet hatarvedelem {
         # rule created by an admin and assigned to the user explicitly includes it,
         # and the session is active. The portal adds the IP after the rule and TTL
         # are selected; the password alone does not. It is removed immediately on
-        # logout, and on expiry via the kernel timeout. Port 8100 (portal) remains
+        # logout, and on expiry via the kernel timeout. The portal port remains
         # reserved, and this rule excludes it too (protection against manually
         # added elements). For direct emergency access, a separate breakglass rule
         # can be used.
-        ip saddr . tcp dport @allowed_input_tcp tcp dport != 8100 accept
-        ip saddr . udp dport @allowed_input_udp udp dport != 8100 accept
+        ip saddr . tcp dport @allowed_input_tcp tcp dport != __PORT__ accept
+        ip saddr . udp dport @allowed_input_udp udp dport != __PORT__ accept
 
         # The host DNS service (dnsmasq) is reachable only based on the selected rule.
         # Without this, a DNS tunnel through the host would be open even before the

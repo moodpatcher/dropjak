@@ -5,6 +5,12 @@ Documentation=file:///opt/hatarvedelem/README.md
 # rules first; ours follows afterwards, so neither overwrites the other
 # due to an accidental ordering. If no such unit exists, After= has no effect.
 After=nftables.service
+# A distribution config that starts with "flush ruleset" (the Debian default)
+# deletes our table on every nftables restart or reload. With these, systemd
+# reloads our rules right after it, and the portal notices the new table and
+# refills its chains and sets.
+PartOf=nftables.service
+ReloadPropagatedFrom=nftables.service
 # The rules should reach the kernel before the network comes up. Because of
 # iifname/oifname, the interfaces do not need to exist yet for this.
 DefaultDependencies=no

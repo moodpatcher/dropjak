@@ -113,6 +113,17 @@ PORT_PROXY_RESERVED_LISTEN = (22, 53, 67, 80, 443, 2019)
 # The input proxy's target cannot be SSH (it can only be opened by an
 # explicit TCP 22 host rule), Caddy admin or the portal.
 PORT_PROXY_RESERVED_INPUT_TARGET = (22, 2019)
+# Host ports an input-direction pre-auth entry cannot open before login: SSH
+# (only an explicit TCP 22 host rule with a session opens it), DNS (a
+# pre-login DNS tunnel), DHCP, Caddy admin, and the portal port, which is
+# always open anyway.
+PREAUTH_RESERVED_INPUT = (22, 53, 67, 2019)
+
+
+def preauth_reserved_input_ports() -> tuple[int, ...]:
+    """The reserved input pre-auth ports, including the portal port."""
+    return tuple(sorted(set(PREAUTH_RESERVED_INPUT) | {PORTAL_PORT}))
+
 # WireGuard tunnel (cloud side): agents get an address on the 10.77.0.0/24
 # network, the server is 10.77.0.1. Internal (tunnel) ports are unique per
 # agent; listening ports share a namespace with port proxies.
@@ -1390,9 +1401,14 @@ def _normalize_dst(raw) -> str:
     if not raw:
         return ""
     try:
-        network = ipaddress.ip_network(raw, strict=False)
+        # strict: "10.0.0.5/8" is a typo, not a request for all of 10/8.
+        network = ipaddress.ip_network(raw, strict=True)
     except ValueError as exc:
-        raise SettingsError(f"invalid destination: {raw}") from exc
+        raise SettingsError(
+            f"invalid destination (host bits must be zero): {raw}"
+            if "has host bits set" in str(exc)
+            else f"invalid destination: {raw}"
+        ) from exc
     if network.version != 4:
         raise SettingsError(f"only an IPv4 destination can be given: {raw}")
     if network.is_multicast:
@@ -1492,6 +1508,27 @@ def normalize_entry(kind: str, entry, entry_id: str = "") -> dict:
     if kind == "preauth":
         normalized["direction"] = direction
     return normalized
+
+
+def check_preauth_input_ports(entry: dict) -> None:
+    """Reject an input pre-auth entry that would open a reserved host port.
+
+    Called for new and edited entries only. A stored entry from an older
+    version must not invalidate the whole settings file on load (that
+    would drop every block entry); the firewall renderer skips its
+    reserved ports instead.
+    """
+    if entry.get("direction") != "input":
+        return
+    reserved = sorted(
+        set(entry.get("ports") or ()) & set(preauth_reserved_input_ports())
+    )
+    if reserved:
+        raise SettingsError(
+            "an input pre-auth entry cannot open these host ports: "
+            + ", ".join(str(port) for port in reserved)
+            + " (SSH needs a host rule and a session)"
+        )
 
 
 def legacy_proxy_domain(data) -> str:
@@ -1685,6 +1722,8 @@ class SettingsStore:
                     f"{kind}: at most {MAX_ENTRIES} entries are allowed"
                 )
             normalized = normalize_entry(kind, entry)
+            if kind == "preauth":
+                check_preauth_input_ports(normalized)
             if any(item["id"] == normalized["id"] for item in entries):
                 raise SettingsError("duplicate entry ID")
             entries.append(normalized)
@@ -1709,6 +1748,8 @@ class SettingsStore:
                 entries[index]["enabled"] = enabled
             else:
                 normalized = normalize_entry(kind, entry, entry_id)
+                if kind == "preauth":
+                    check_preauth_input_ports(normalized)
                 entries[index] = normalized
         else:
             raise SettingsError(f"unknown operation: {action!r}")

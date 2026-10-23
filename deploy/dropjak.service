@@ -22,11 +22,15 @@ Environment=HV_AUDIT_LOG=/var/lib/hatarvedelem/audit.jsonl
 Environment=HV_AUDIT_MAX_BYTES=10485760
 Environment=HV_AUDIT_KEEP=5
 Environment=HV_SERVICES_FILE=/opt/hatarvedelem/services.json
-# Startup admin account (optional). If you enable it, all three lines are required.
-# The password is stored in the unit file as plain text; the file must be 0600.
+# Startup admin account (optional). Do not put the password in the unit file
+# (unit files are world-readable, and the variable stays in the process
+# environment). Store it in a root-only file and pass it as a credential:
 # Environment=HV_ADMIN_ENABLED=1
 # Environment=HV_ADMIN_USER=admin
-# Environment=HV_ADMIN_PASSWORD=change-me
+# LoadCredential=admin-password:/etc/dropjak/admin-password
+# Environment=HV_ADMIN_PASSWORD_FILE=%d/admin-password
+# Set HV_ADMIN_ENABLED=0 after the first start: while it is on, every start
+# re-enables the account and restores its admin role.
 Environment=HV_PORTAL_URL=__PORTAL_URL__
 Environment=HV_NFT_TABLE=hatarvedelem
 Environment=HV_NFT_SET=allowed_v4

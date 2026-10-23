@@ -218,7 +218,7 @@ class ApplyCustomBlockGenerationTests(BlockGenerationTestCase):
         lines = self.apply_block(
             [
                 {
-                    "dst": " 203.0.113.77/24 ",
+                    "dst": " 203.0.113.0/24 ",
                     "proto": "udp",
                     "ports": [53],
                 },
@@ -226,10 +226,20 @@ class ApplyCustomBlockGenerationTests(BlockGenerationTestCase):
             ]
         )
         script = "\n".join(lines)
-        # A network with host bits normalizes to the network address.
         self.assertIn("ct original ip daddr 203.0.113.0/24", script)
-        self.assertNotIn("203.0.113.77", script)
         self.assertIn("ct original ip daddr 192.0.2.7/32", script)
+
+    def test_destination_with_host_bits_is_rejected(self) -> None:
+        """DJ-36: "203.0.113.77/24" is a typo, not a request for the /24."""
+        for kind in ("block", "preauth"):
+            with self.subTest(kind=kind):
+                self.scripts.clear()
+                self.run_calls.clear()
+                entry = {"dst": "203.0.113.77/24", "proto": "udp", "ports": [53]}
+                with self.assertRaises(gateway.FirewallError):
+                    self.firewall.apply_custom(**{kind: [entry]})
+                self.assertEqual(self.scripts, [])
+                self.assertEqual(self.run_calls, [])
 
     def test_block_nat_only_for_tcp_port_80_with_destination(self) -> None:
         """The condition for ``block_nat``: TCP, port 80 and a given destination."""
@@ -626,7 +636,7 @@ class ApplyCustomSettingsTests(BlockGenerationTestCase):
             self.chain_lines(lines, "preauth"),
             [
                 f"add rule inet {self.table} preauth "
-                f"ip saddr @{self.firewall.ban_set} drop"
+                f"ip saddr @{self.firewall.ban_set} ct direction original drop"
             ],
         )
         self.assertNotIn("8080", self.scripts[0])

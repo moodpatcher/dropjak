@@ -81,6 +81,7 @@ IFACE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,15}$")
 IFACE_ADDR_RE = re.compile(
     r"^\s*\d+:\s+([^@\s:]+)(?:@[^:\s]+)?\s+inet\s+"
     r"(\d+\.\d+\.\d+\.\d+)/(\d+)\b")
+ROUTE_VIA_RE = re.compile(r"\bvia\s+(\d+\.\d+\.\d+\.\d+)\b")
 HOST_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,252}[A-Za-z0-9])?$")
 ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 TOKEN_RE = re.compile(r"^[!-~]+$")
@@ -635,14 +636,33 @@ class Agent:
         candidates.sort(key=lambda item: (-item["prefixlen"], item["dev"]))
         return str(candidates[0]["dev"])
 
+    def route_gateways(self) -> set[ipaddress.IPv4Address]:
+        """Every next-hop (``via``) address in this netns's IPv4 routes.
+
+        Docker and Podman let a network use any gateway address, not just
+        .1; the real one shows up here as the default route's next hop. If
+        the routes cannot be listed, the sync fails rather than guessing.
+        """
+        try:
+            result = self.run(["ip", "-4", "route", "show", "table", "all"])
+        except CommandError as exc:
+            raise ApplyError(f"cannot list routes: {exc}") from exc
+        return {
+            ipaddress.IPv4Address(match.group(1))
+            for match in ROUTE_VIA_RE.finditer(result.stdout or "")
+        }
+
     def check_target(self, service_id: str, ip: str, dev: str) -> None:
         """Only container addresses on the chosen bridge subnet are targets.
 
-        The Docker bridge gateway (by default the network's .1 address) represents the host,
-        so it cannot be a tunnel target: otherwise the host's services
-        (for example SSH) would be reachable from the cloud. The network/broadcast address and the agent's
-        own address are forbidden in the same way. The check runs on the selected interface's
-        subnet that contains the target.
+        The Docker bridge gateway represents the host, so it cannot be a
+        tunnel target: otherwise the host's services (for example SSH) would
+        be reachable from the cloud. Both the real next hops of the routing
+        table and the network's .1 address (Docker's default gateway, the
+        only guess for a second network without a route) are refused. The
+        network/broadcast address and the agent's own address are forbidden
+        in the same way. The check runs on the selected interface's subnet
+        that contains the target.
         """
         address = ipaddress.IPv4Address(ip)
         candidates = [
@@ -657,7 +677,8 @@ class Agent:
         own = candidates[0]["ip"]
         gateway = network.network_address + 1
         if address in (network.network_address,
-                       network.broadcast_address, own, gateway):
+                       network.broadcast_address, own, gateway) \
+                or address in self.route_gateways():
             raise ApplyError(
                 f"service {service_id}: {ip} is not a container address "
                 f"on {dev}"

@@ -9,9 +9,12 @@
 # (dropjak-boot.service), and the container entrypoint deletes it
 # after loading the final rules.
 #
-# Besides the forward chain, it also drops input port 22: host SSH must
-# not be reachable before the portal starts. The portal takes over after
-# the final rules are loaded. The table can be reloaded IDEMPOTENTLY.
+# Besides the forward chain, the input chain is closed as well (policy drop):
+# host SSH, DNS and every other host service must not be reachable before
+# the portal starts, and this table stays in place if the container exits
+# before loading the final rules (for example with an invalid .env). The
+# portal takes over after the final rules are loaded. The table can be
+# reloaded IDEMPOTENTLY.
 #
 # Manual load:  nft -f /etc/nftables/dropjak-boot.nft
 # Removal:      nft delete table inet hatarvedelem_boot
@@ -23,7 +26,7 @@ add chain inet hatarvedelem_boot forward {
 }
 
 add chain inet hatarvedelem_boot input {
-    type filter hook input priority filter; policy accept;
+    type filter hook input priority filter; policy drop;
 }
 
 add chain inet hatarvedelem_boot loopback_guard {
@@ -34,13 +37,18 @@ flush chain inet hatarvedelem_boot forward
 flush chain inet hatarvedelem_boot input
 flush chain inet hatarvedelem_boot loopback_guard
 
-# The portal is not running yet, so host SSH is dropped from everywhere
-# until the final rules are loaded. Loopback is the exception so that
-# local administration is not blocked.
+# The portal is not running yet, so host input is dropped from everywhere
+# until the final rules are loaded. Exceptions: loopback, so that local
+# administration is not blocked; replies to the host's own outbound
+# connections (Docker image pulls, NTP, DNS lookups); and DHCP requests, so
+# LAN clients keep their addresses. Host SSH (TCP 22) stays closed; use the
+# provider console during this window.
 table inet hatarvedelem_boot {
     chain input {
         iifname "lo" accept
         tcp dport 22 drop
+        ct state established,related accept
+        udp sport 68 udp dport 67 accept
     }
 
     # On the host net.ipv4.conf.all.route_localnet=1 (for the input port proxy

@@ -79,11 +79,18 @@ class BlockPrecedenceTemplateTests(unittest.TestCase):
             index for index, rule in enumerate(rules) if pattern.search(rule)
         ]
 
-    def only_jump(self, rules: list[str], chain: str) -> int:
+    def only_jump(
+        self, rules: list[str], chain: str, prefix: str = ""
+    ) -> int:
         jumps = self.jump_indices(rules, chain)
         self.assertEqual(len(jumps), 1, (chain, jumps))
-        self.assertEqual(rules[jumps[0]], f"jump {chain}")
+        self.assertEqual(rules[jumps[0]], f"{prefix}jump {chain}")
         return jumps[0]
+
+    # In the input chain the block jump is limited to the original
+    # direction (DJ-33): every client->host packet is original-direction, a
+    # reply-direction packet there belongs to a connection the host opened.
+    INPUT_BLOCK = "ct direction original "
 
     # -- forward -----------------------------------------------------------
 
@@ -99,7 +106,7 @@ class BlockPrecedenceTemplateTests(unittest.TestCase):
         block = self.only_jump(self.forward, "block")
 
         ban_logs = self.indices(self.forward, "reason=fail2ban")
-        ban_drops = self.indices(self.forward, "ip saddr @banned_v4 drop")
+        ban_drops = self.indices(self.forward, "ip saddr @banned_v4 ct direction original drop")
         self.assertTrue(ban_logs)
         self.assertEqual(len(ban_drops), 1, ban_drops)
         # Banned packets must still be logged as fail2ban, not as block.
@@ -155,13 +162,15 @@ class BlockPrecedenceTemplateTests(unittest.TestCase):
 
     # -- input -------------------------------------------------------------
 
-    def test_input_has_exactly_one_unconditional_block_jump(self) -> None:
+    def test_input_has_exactly_one_interface_free_block_jump(self) -> None:
         jumps = self.jump_indices(self.input, "block")
         self.assertEqual(len(jumps), 1, jumps)
-        self.assertEqual(self.input[jumps[0]], "jump block")
+        self.assertEqual(
+            self.input[jumps[0]], self.INPUT_BLOCK + "jump block"
+        )
 
     def test_input_block_runs_after_exemptions_and_ban_drop(self) -> None:
-        block = self.only_jump(self.input, "block")
+        block = self.only_jump(self.input, "block", self.INPUT_BLOCK)
 
         # Loopback, breakglass, IPv6, DHCP and the early portal accepts stay
         # reachable; a block entry must not lock out the portal or rescue.
@@ -174,7 +183,7 @@ class BlockPrecedenceTemplateTests(unittest.TestCase):
             'iifname "__LAN_IF__" udp sport 68 udp dport 67 accept',
             'iifname "__LAN_IF__" tcp dport __PORT__ accept',
             "ip saddr __PORTAL_NET__ tcp dport __PORT__ accept",
-            "ip saddr @banned_v4 drop",
+            "ip saddr @banned_v4 ct direction original drop",
         )
         for rule in ordered_before:
             hits = self.indices(self.input, rule)
@@ -195,7 +204,7 @@ class BlockPrecedenceTemplateTests(unittest.TestCase):
                 )
 
     def test_input_block_precedes_mac_guards_and_host_grants(self) -> None:
-        block = self.only_jump(self.input, "block")
+        block = self.only_jump(self.input, "block", self.INPUT_BLOCK)
 
         for needle in (
             "reason=mac",
@@ -212,9 +221,9 @@ class BlockPrecedenceTemplateTests(unittest.TestCase):
 
         for rule in (
             "ip saddr . tcp dport @allowed_input_tcp "
-            "tcp dport != 8100 accept",
+            "tcp dport != __PORT__ accept",
             "ip saddr . udp dport @allowed_input_udp "
-            "udp dport != 8100 accept",
+            "udp dport != __PORT__ accept",
         ):
             grant = self.input.index(rule)
             self.assertLess(block, grant, rule)
@@ -226,7 +235,7 @@ class BlockPrecedenceTemplateTests(unittest.TestCase):
         self.assertIn(
             "add chain inet hatarvedelem preauth_input", self.template
         )
-        block = self.only_jump(self.input, "block")
+        block = self.only_jump(self.input, "block", self.INPUT_BLOCK)
         preauth_input = self.only_jump(self.input, "preauth_input")
         self.assertLess(block, preauth_input)
 
@@ -236,7 +245,7 @@ class BlockPrecedenceTemplateTests(unittest.TestCase):
             "reason=ssh-revoked",
             "reason=host-revoked",
             "ip saddr . tcp dport @allowed_input_tcp "
-            "tcp dport != 8100 accept",
+            "tcp dport != __PORT__ accept",
         ):
             hits = self.indices(self.input, rule)
             self.assertTrue(hits, rule)

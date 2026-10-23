@@ -12,6 +12,7 @@ groups.json.lock
 audit.jsonl
 audit.jsonl.*
 .secret
+secrets/
 
 # Test and tool leftovers
 .pytest_cache/

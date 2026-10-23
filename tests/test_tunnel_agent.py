@@ -78,8 +78,10 @@ class FakeRunner:
 
     def __init__(self, routes: dict[str, str] | None = None,
                  default_dev: str = "eth0",
-                 subnets: dict[str, tuple[str, int]] | None = None):
+                 subnets: dict[str, tuple[str, int]] | None = None,
+                 route_table: str = ""):
         self.routes = routes or {}
+        self.route_table = route_table
         self.default_dev = default_dev
         self.subnets = subnets or {"eth1": ("172.30.0.2", 24)}
         self.calls: list[tuple[tuple[str, ...], str | None]] = []
@@ -87,6 +89,8 @@ class FakeRunner:
     def __call__(self, argv, *, stdin=None, check=True):
         argv = tuple(argv)
         self.calls.append((argv, stdin))
+        if argv == ("ip", "-4", "route", "show", "table", "all"):
+            return completed(self.route_table)
         if argv[:3] == ("ip", "route", "show"):
             out = f"default via 192.0.2.1 dev {self.default_dev}\n"
             return completed(out)
@@ -443,6 +447,44 @@ class ResolutionTests(unittest.TestCase):
                     with self.assertRaises(agent.ApplyError):
                         instance.resolve_services(
                             agent.validate_config(config)["services"])
+
+    def test_real_default_gateway_is_rejected_even_if_not_dot_one(
+            self) -> None:
+        # A custom network whose gateway (the host) is .254, not .1.
+        routes = ("default via 172.30.0.254 dev eth1\n"
+                  "172.30.0.0/24 dev eth1 proto kernel scope link "
+                  "src 172.30.0.2\n")
+        for target, allowed in (("172.30.0.254", False),
+                                ("172.30.0.5", True)):
+            with self.subTest(target):
+                runner = FakeRunner(subnets={"eth1": ("172.30.0.2", 24)},
+                                    route_table=routes)
+                config = base_config()
+                config["services"][0]["target"] = f"{target}:25565"
+                with tempfile.TemporaryDirectory() as tmp:
+                    instance = make_agent(base_config(), runner, tmp,
+                                          FakeGetaddr({}))
+                    services = agent.validate_config(config)["services"]
+                    if allowed:
+                        entries, _ = instance.resolve_services(services)
+                        self.assertEqual(entries[0]["ip"], target)
+                    else:
+                        with self.assertRaises(agent.ApplyError):
+                            instance.resolve_services(services)
+
+    def test_route_listing_failure_fails_closed(self) -> None:
+        def failing(argv, *, stdin=None, check=True):
+            if tuple(argv[:3]) == ("ip", "-4", "route"):
+                raise agent.CommandError("ip failed")
+            return FakeRunner(subnets={"eth1": ("172.30.0.2", 24)})(
+                argv, stdin=stdin, check=check)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = make_agent(base_config(), failing, tmp,
+                                  FakeGetaddr({"mc": "172.30.0.5"}))
+            with self.assertRaises(agent.ApplyError):
+                instance.resolve_services(
+                    agent.validate_config(base_config())["services"])
 
     def test_target_dns_name_resolving_outside_subnets_is_rejected(
             self) -> None:
@@ -1443,6 +1485,101 @@ class SelfInstallTests(unittest.TestCase):
             self.assertNotIn("Network [", second.stdout)
             self.assertTrue((target / "compose.yml").is_file())
             self.assertEqual(log.read_text().count("compose up -d --build"), 2)
+
+    # -- installer hardening (DJ-08) -----------------------------------------
+
+    def test_prints_sha256_of_the_installer_file(self) -> None:
+        import hashlib
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result, _, _, _ = self.run_installer(tmp)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            script = Path(tmp, "dropjak-agent-home.sh")
+            digest = hashlib.sha256(script.read_bytes()).hexdigest()
+            self.assertIn(f"Installer SHA-256: {digest}", result.stdout)
+            self.assertIn("private key", result.stdout)
+
+    def test_refuses_directory_writable_by_others(self) -> None:
+        for mode in (0o777, 0o775, 0o1777):
+            with self.subTest(mode=oct(mode)), \
+                    tempfile.TemporaryDirectory() as tmp:
+                script, target, bin_dir, _, lib, units = \
+                    self.make_installer(tmp)
+                target.chmod(mode)
+                env = self.installer_env(tmp, bin_dir, lib, units)
+                result = subprocess.run(
+                    ["sh", str(script)], capture_output=True, text=True,
+                    timeout=60, stdin=subprocess.DEVNULL, env=env,
+                    cwd=target)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("other users can write", result.stderr)
+                self.assertEqual(list(target.iterdir()), [])
+
+    def test_refuses_symlinked_install_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            real = Path(tmp, "elsewhere")
+            real.mkdir()
+            link = Path(tmp, "link")
+            link.symlink_to(real)
+            result, _, _, _ = self.run_installer(tmp, DROPJAK_DIR=str(link))
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("symbolic link", result.stderr)
+            self.assertEqual(list(real.iterdir()), [])
+
+    def test_planted_symlinks_are_replaced_not_followed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            victim = Path(tmp, "victim")
+            victim.write_text("keep\n")
+            victim.chmod(0o640)
+            script, target, bin_dir, _, lib, units = self.make_installer(tmp)
+            for name in ("container-name", "compose.yml", "agent.json"):
+                (target / name).symlink_to(victim)
+            env = self.installer_env(tmp, bin_dir, lib, units)
+            result = subprocess.run(
+                ["sh", str(script)], capture_output=True, text=True,
+                timeout=60, stdin=subprocess.DEVNULL, env=env, cwd=target)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(victim.read_text(), "keep\n")
+            self.assertEqual(stat.S_IMODE(victim.stat().st_mode), 0o640)
+            for name in ("container-name", "compose.yml", "agent.json"):
+                self.assertFalse((target / name).is_symlink(), name)
+            self.assertEqual(
+                stat.S_IMODE((target / "agent.json").stat().st_mode), 0o600)
+
+    def test_staging_payload_is_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            staging = Path(tmp, "tmpdir")
+            staging.mkdir()
+            result, _, _, _ = self.run_installer(tmp, TMPDIR=str(staging))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(list(staging.iterdir()), [])
+            # A failed run cleans up too.
+            failed, _, _, _ = self.run_installer(
+                tmp, TMPDIR=str(staging), DROPJAK_NETWORK="no-such-net")
+            self.assertNotEqual(failed.returncode, 0)
+            self.assertEqual(list(staging.iterdir()), [])
+
+    def test_root_installs_into_fixed_private_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            script, target, bin_dir, _, lib, units = self.make_installer(tmp)
+            fake_id = bin_dir / "id"
+            fake_id.write_text(
+                '#!/bin/sh\n[ "$1" = "-u" ] && { echo 0; exit 0; }\n'
+                'exec /usr/bin/id "$@"\n')
+            fake_id.chmod(0o755)
+            base = Path(tmp, "opt")
+            env = self.installer_env(
+                tmp, bin_dir, lib, units, DROPJAK_BASE=str(base),
+                SUDO_UID=str(os.getuid()))
+            result = subprocess.run(
+                ["sh", str(script)], capture_output=True, text=True,
+                timeout=60, stdin=subprocess.DEVNULL, env=env, cwd=target)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            installed = base / DEFAULT_AGENT_NAME
+            self.assertTrue((installed / "agent.json").is_file())
+            self.assertEqual(stat.S_IMODE(installed.stat().st_mode), 0o700)
+            # Nothing lands in the directory the installer was started from.
+            self.assertEqual(list(target.iterdir()), [])
 
     @unittest.skipIf(os.geteuid() == 0, "the system directory is the default as root")
     def test_rootless_install_does_not_create_helper(self) -> None:

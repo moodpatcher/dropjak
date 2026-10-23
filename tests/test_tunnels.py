@@ -2028,6 +2028,17 @@ class TunnelHttpTests(unittest.TestCase):
             headers.get("Content-Disposition"),
             'attachment; filename="dropjak-agent-home.sh"',
         )
+        # The digest the admin compares with the installer's banner (DJ-08).
+        import hashlib
+
+        digest = hashlib.sha256(body).hexdigest()
+        self.assertEqual(headers.get("X-Dropjak-SHA256"), digest)
+        downloads = [
+            json.loads(line) for line in Path(
+                self.tmp.name, "audit.jsonl").read_text().splitlines()
+            if '"tunnel_agent_config_downloaded"' in line
+        ]
+        self.assertEqual(downloads[-1].get("sha256"), digest)
         # A single file: a shell prefix, then the tar.gz package.
         marker = b"__DROPJAK_PAYLOAD__\n"
         self.assertTrue(body.startswith(b"#!/bin/sh\n"), body[:20])
@@ -2141,6 +2152,36 @@ class TunnelHttpTests(unittest.TestCase):
         ):
             status, _, _ = self.get(path)
         self.assertEqual(status, 403)
+
+    def test_tunnel_peer_reaches_only_the_sync_endpoint(self) -> None:
+        self.seed([agent(services=[service()])])
+        with mock.patch.object(
+            server.Handler, "_peer_ip", return_value="10.77.0.2"
+        ):
+            for path in (
+                "/", "/api/status", "/api/challenge", "/api/admin/state",
+                "/api/admin/fail2ban", "/api/tunnel/config/../status",
+            ):
+                with self.subTest(path=path):
+                    status, _, body = self.get(
+                        path, headers={"Authorization": f"Bearer {TOKEN}"}
+                    )
+                    self.assertEqual(status, 404, body)
+            for path in ("/api/login", "/api/register", "/api/tunnel/config"):
+                with self.subTest(path=path):
+                    status, _, _ = self.post(
+                        path, {"user": "root", "pass": "root-jelszo-1"}
+                    )
+                    self.assertEqual(status, 404)
+            # The one endpoint an agent needs still works.
+            status, _, body = self.get(
+                "/api/tunnel/config",
+                headers={"Authorization": f"Bearer {TOKEN}"},
+            )
+            self.assertEqual(status, 200, body)
+        # Outside the tunnel network nothing changes.
+        status, _, _ = self.get("/api/status")
+        self.assertEqual(status, 200)
 
     def test_sync_disabled_agent_rejected(self) -> None:
         self.seed([agent(enabled=False)])
@@ -2526,7 +2567,8 @@ class TunnelHttpTests(unittest.TestCase):
             lambda delay=0.5: self.restart_calls.append(delay),
         ):
             status, _, body = self.admin_post(
-                "/api/admin/config/reset", {"confirm": "Dropjak"},
+                "/api/admin/config/reset",
+                {"confirm": "Dropjak", "password": "root-jelszo-1"},
                 cookie=cookie,
             )
         self.assertEqual(status, 200, body)

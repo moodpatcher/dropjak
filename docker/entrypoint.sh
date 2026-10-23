@@ -143,12 +143,34 @@ ensure_caddy_admin_dir() {
     # The directory for Caddy's admin socket (a shared volume with the caddy container).
     # Caddy, running as root but without DAC_OVERRIDE, creates the socket in it
     # as the owner; the portal accesses it through the group, no one else.
+    # The setgid bit makes the socket inherit the group, so the Caddyfile can
+    # use mode 0660 instead of a world-writable socket.
     _sock=${HV_CADDY_ADMIN:-}
     [ -n "$_sock" ] && [ "$(id -u)" -eq 0 ] || return 0
     _dir=$(dirname "$_sock")
     [ -d "$_dir" ] || return 0
-    chown "0:$APP_USER" "$_dir" && chmod 0750 "$_dir" \
+    chown "0:$APP_USER" "$_dir" && chmod 2750 "$_dir" \
         || log "WARNING: cannot set the permissions of the Caddy admin directory: $_dir"
+}
+
+stage_admin_secret() {
+    # HV_ADMIN_PASSWORD_FILE usually points at a root-owned file on the
+    # read-only /run/secrets mount (docker-compose.yml). The portal runs as
+    # $APP_USER, so we copy it to the private tunnel run directory, readable
+    # only by that user, and point the variable there. The password never
+    # enters the environment this way.
+    _src=${HV_ADMIN_PASSWORD_FILE:-}
+    [ -n "$_src" ] && [ -r "$_src" ] && [ "$(id -u)" -eq 0 ] || return 0
+    _dir=${HV_TUNNEL_RUN_DIR:-/run/dropjak}
+    _dst="$_dir/admin-password"
+    if ( umask 077 && cat "$_src" >"$_dst" ) \
+            && chown "$APP_USER:$APP_USER" "$_dst" && chmod 0400 "$_dst"; then
+        HV_ADMIN_PASSWORD_FILE=$_dst
+        export HV_ADMIN_PASSWORD_FILE
+    else
+        rm -f "$_dst"
+        log "WARNING: cannot stage the admin password file: $_src"
+    fi
 }
 
 run_as_app() {
@@ -159,9 +181,13 @@ run_as_app() {
     command -v setpriv >/dev/null 2>&1 \
         || die "setpriv not found (util-linux package required)"
     # setpriv passes NET_ADMIN with ambient capabilities, because a non-root
-    # user cannot get capabilities by default in the container.
+    # user cannot get capabilities by default in the container. The bounding
+    # set is cut to the same two: CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID
+    # and SETPCAP are needed only by this script, never by the portal.
+    # Dropping from the bounding set needs SETPCAP (docker-compose.yml).
     exec setpriv \
         --reuid="$APP_USER" --regid="$APP_USER" --init-groups \
+        --bounding-set=-all,+net_admin,+net_bind_service \
         --inh-caps=+net_admin,+net_bind_service \
         --ambient-caps=+net_admin,+net_bind_service \
         -- "$@"
@@ -177,6 +203,9 @@ render_ruleset() {
     HV_LAN_NET=${HV_LAN_NET:-}
     HV_MGMT_NET=${HV_MGMT_NET:-}
     HV_PORTAL_NET=${HV_PORTAL_NET:-$HV_MGMT_NET}
+    # A plain assignment does not export a variable that was absent from the
+    # environment, and require_env reads the environment (printenv).
+    export HV_PORTAL_NET
     PORT=${PORT:-8100}
     HV_FWD_MARK=${HV_FWD_MARK:-0x44524a4b}
     HV_DROP_LOG_GROUP=${HV_DROP_LOG_GROUP:-5}
@@ -264,8 +293,15 @@ docker_forward_guard() {
         log "ERROR: cannot set up Docker forward protection (DOCKER-USER drop)"
         return 1
     fi
+    # A marked packet is accepted here only if it does not leave through a
+    # Docker bridge. Toward a bridge it continues to Docker's own rules
+    # (published-port DNAT, isolation, Docker 28's block of unpublished
+    # ports); an accept here would skip them. A plain return for every
+    # marked packet would not work: Docker's FORWARD chain has no rule for
+    # LAN->WAN traffic, and its policy is drop.
     if ! "$NFT_BIN" insert rule ip filter DOCKER-USER \
-            meta mark "$HV_FWD_MARK" accept \
+            meta mark "$HV_FWD_MARK" oifname != '"docker*"' \
+            oifname != '"br-*"' accept \
             comment '"hv-docker-fwd-mark"'; then
         log "ERROR: cannot set up Docker forward permission (DOCKER-USER accept)"
         return 1
@@ -317,6 +353,11 @@ start_firewall_watchdog() {
             if [ -z "$forward" ] || ! printf '%s' "$forward" | grep -q '@client_mac'; then
                 log "WARNING: the Dropjak forward chain is incomplete; reloading"
                 if "$NFT_BIN" -c -f "$RENDERED" && "$NFT_BIN" -f "$RENDERED"; then
+                    # The reload restores only the template. The portal
+                    # notices the new table within seconds and refills the
+                    # block/pre-auth chains, bans and host guards
+                    # (Gateway.check_firewall_state); until then it issues
+                    # no new grant.
                     log "firewall reloaded"
                 else
                     log "ERROR: firewall reload failed"
@@ -516,6 +557,7 @@ load_firewall() {
 ensure_state_dir
 ensure_tunnel_run_dir
 ensure_caddy_admin_dir
+stage_admin_secret
 export HV_STATE_DIR="$STATE_DIR"
 
 # Custom command (e.g. user management): we do not touch the firewall.

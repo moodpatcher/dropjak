@@ -269,7 +269,9 @@ class CaddyAdminDeployTests(unittest.TestCase):
         text = (ROOT / "deploy" / "Caddyfile").read_text(encoding="utf-8")
         admin = [line.strip() for line in text.splitlines()
                  if line.strip().startswith("admin ")]
-        self.assertEqual(admin, ["admin unix//run/caddy-admin/admin.sock|0666"])
+        # Owner and group only (DJ-30); the group comes from the setgid dir.
+        self.assertEqual(admin, ["admin unix//run/caddy-admin/admin.sock|0660"])
+        self.assertNotIn("|0666", text)
         self.assertIn("grace_period 5s", text)
         # Disabled ACME is still gated by ask.
         self.assertIn("ask http://127.0.0.1:{$PORT:8100}/api/proxy/ask", text)
@@ -283,7 +285,7 @@ class CaddyAdminDeployTests(unittest.TestCase):
 
     def test_entrypoint_sets_admin_dir_permissions(self) -> None:
         text = (ROOT / "docker" / "entrypoint.sh").read_text(encoding="utf-8")
-        self.assertIn('chown "0:$APP_USER" "$_dir" && chmod 0750 "$_dir"', text)
+        self.assertIn('chown "0:$APP_USER" "$_dir" && chmod 2750 "$_dir"', text)
         self.assertIn("\nensure_caddy_admin_dir\n", text)
 
 

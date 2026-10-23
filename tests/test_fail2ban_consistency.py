@@ -128,9 +128,9 @@ class Fail2banConsistencyBase(unittest.TestCase):
 class EvictionTests(Fail2banConsistencyBase):
     def test_eviction_releases_kernel_element_and_audits(self) -> None:
         with mock.patch.object(fail2ban_mod, "MAX_BANS", 2):
-            self.manager.ban("192.0.2.1", 600, manual=True)
-            self.manager.ban("192.0.2.2", 600, manual=True)
-            self.manager.ban("192.0.2.3", 600, manual=True)
+            self.manager.ban("192.0.2.1", 600, manual=False)
+            self.manager.ban("192.0.2.2", 600, manual=False)
+            self.manager.ban("192.0.2.3", 600, manual=False)
 
         # The oldest kernel element was released too, not just memory.
         self.assertNotIn("192.0.2.1", self.fw.kernel)
@@ -148,10 +148,10 @@ class EvictionTests(Fail2banConsistencyBase):
 
     def test_eviction_unban_failure_is_queued_and_retried(self) -> None:
         with mock.patch.object(fail2ban_mod, "MAX_BANS", 2):
-            self.manager.ban("192.0.2.11", 600, manual=True)
-            self.manager.ban("192.0.2.12", 600, manual=True)
+            self.manager.ban("192.0.2.11", 600, manual=False)
+            self.manager.ban("192.0.2.12", 600, manual=False)
             self.fw.unban_fail = lambda ip: ip == "192.0.2.11"
-            view = self.manager.ban("192.0.2.13", 600, manual=True)
+            view = self.manager.ban("192.0.2.13", 600, manual=False)
 
         # The new protective ban was created despite the release failure.
         self.assertEqual(view["ip"], "192.0.2.13")
@@ -177,15 +177,55 @@ class EvictionTests(Fail2banConsistencyBase):
         with mock.patch.object(fail2ban_mod, "MAX_BANS", 1), \
                 mock.patch.object(fail2ban_mod, "MAX_ORPHAN_UNBANS", 2):
             self.fw.unban_fail = lambda ip: True
-            self.manager.ban("192.0.2.21", 600, manual=True)
+            self.manager.ban("192.0.2.21", 600, manual=False)
             for last_octet in range(22, 27):
                 self.manager.ban(
-                    f"192.0.2.{last_octet}", 600, manual=True
+                    f"192.0.2.{last_octet}", 600, manual=False
                 )
 
         self.assertEqual(len(self.manager._orphan_unbans), 2)
         failed = self.audit.find("fail2ban_ban_evict_failed")
         self.assertTrue(any(row.get("queued") is False for row in failed))
+
+    def test_manual_bans_are_never_evicted(self) -> None:
+        with mock.patch.object(fail2ban_mod, "MAX_BANS", 3):
+            self.manager.ban("192.0.2.41", 3600, manual=True)
+            self.manager.ban("192.0.2.42", 600, manual=False)
+            self.manager.ban("192.0.2.43", 300, manual=False)
+            # Full: the automatic ban expiring soonest (.43) makes room,
+            # not the oldest entry (the manual .41).
+            self.manager.ban("192.0.2.44", 600, manual=False)
+
+        self.assertIsNotNone(self.manager.banned("192.0.2.41"))
+        self.assertIn("192.0.2.41", self.fw.kernel)
+        self.assertIsNone(self.manager.banned("192.0.2.43"))
+        self.assertNotIn("192.0.2.43", self.fw.kernel)
+        evicted = self.audit.find("fail2ban_ban_evicted")
+        self.assertEqual([row["ip"] for row in evicted], ["192.0.2.43"])
+
+    def test_full_of_manual_bans_refuses_new_ban_before_kernel(self) -> None:
+        with mock.patch.object(fail2ban_mod, "MAX_BANS", 2):
+            self.manager.ban("192.0.2.51", 3600, manual=True)
+            self.manager.ban("192.0.2.52", 3600, manual=True)
+            self.fw.calls.clear()
+            with self.assertRaises(fail2ban_mod.Fail2banError):
+                self.manager.ban("192.0.2.53", 600, manual=False)
+            # A drop-signal ban is refused the same way; the caller logs it.
+            for port in range(1, 4):
+                self.manager.record_drop(
+                    "192.0.2.54", proto="tcp", dport=port, reason="input-wan"
+                )
+            with self.assertRaises(fail2ban_mod.Fail2banError):
+                self.manager.record_drop(
+                    "192.0.2.54", proto="tcp", dport=4, reason="input-wan"
+                )
+
+        self.assertEqual(self.fw.calls, [])
+        self.assertEqual(
+            set(self.fw.kernel), {"192.0.2.51", "192.0.2.52"}
+        )
+        self.assertIsNotNone(self.manager.banned("192.0.2.51"))
+        self.assertTrue(self.audit.find("fail2ban_ban_refused"))
 
 
 # ------------------------------------------------------------------ sync
@@ -216,9 +256,9 @@ class SyncTtlTests(Fail2banConsistencyBase):
 
     def test_successful_sync_clears_orphan_queue(self) -> None:
         with mock.patch.object(fail2ban_mod, "MAX_BANS", 1):
-            self.manager.ban("192.0.2.71", 600, manual=True)
+            self.manager.ban("192.0.2.71", 600, manual=False)
             self.fw.unban_fail = lambda ip: True
-            self.manager.ban("192.0.2.72", 600, manual=True)
+            self.manager.ban("192.0.2.72", 600, manual=False)
 
         self.assertEqual(self.manager._orphan_unbans, ["192.0.2.71"])
         # sync_bans() empties the whole set, so the orphan element disappears.

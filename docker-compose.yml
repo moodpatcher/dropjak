@@ -22,9 +22,11 @@ services:
     read_only: true
 
     # The container only gets the necessary capabilities. CHOWN/DAC_OVERRIDE/
-    # FOWNER/SETUID/SETGID are needed exclusively by the entrypoint: to fix the
-    # volume permissions and to switch user with setpriv.
-    # The portal process itself only runs with NET_ADMIN and NET_BIND_SERVICE.
+    # FOWNER/SETUID/SETGID/SETPCAP are needed exclusively by the entrypoint: to
+    # fix the volume permissions and to switch user with setpriv (SETPCAP lets
+    # setpriv cut the portal's bounding set). The portal process itself only
+    # runs with NET_ADMIN and NET_BIND_SERVICE, and its bounding set holds
+    # nothing else.
     cap_drop:
       - ALL
     cap_add:
@@ -35,6 +37,7 @@ services:
       - FOWNER
       - SETUID
       - SETGID
+      - SETPCAP
 
     # ip_forward must be enabled on the HOST. We deliberately do not use the
     # compose sysctls setting: with host networking, runc rejects net.* sysctls.
@@ -58,12 +61,20 @@ services:
       # the provider console open.
       HV_ADMIN_ENABLED: ${HV_ADMIN_ENABLED:-0}
       HV_ADMIN_USER: ${HV_ADMIN_USER:-}
+      # Prefer the file below: an environment variable is visible in
+      # docker inspect and /proc for the container's lifetime. Leave this
+      # empty when the file is used (a non-empty variable takes precedence).
       HV_ADMIN_PASSWORD: ${HV_ADMIN_PASSWORD:-}
-      # Safer alternative: a read-only file (Docker secret).
-      # If the file is given, it is used instead of HV_ADMIN_PASSWORD.
-      HV_ADMIN_PASSWORD_FILE: ${HV_ADMIN_PASSWORD_FILE:-}
+      # The password file, from the ./secrets directory mounted below
+      # (create ./secrets/dropjak_admin_password, mode 0600, owner root).
+      # The entrypoint hands a private copy to the portal user.
+      HV_ADMIN_PASSWORD_FILE: ${HV_ADMIN_PASSWORD_FILE:-/run/secrets/dropjak_admin_password}
       PORT: ${PORT:-8100}
       HV_PORTAL_URL: ${HV_PORTAL_URL:-}
+      # Further DNS names of the portal (comma separated); the /api/
+      # endpoints answer only under these, an IP address, the HV_PORTAL_URL
+      # host and the Caddy root domains (DNS rebinding protection).
+      HV_PORTAL_HOSTS: ${HV_PORTAL_HOSTS:-}
       HV_SERVICES_FILE: ${HV_SERVICES_FILE:-/opt/hatarvedelem/services.json}
       # State files on the volume. The rules, groups and their
       # assignments are managed by the admin interface.
@@ -87,6 +98,14 @@ services:
       HV_PBKDF2_ITERATIONS: ${HV_PBKDF2_ITERATIONS:-600000}
       HV_RATE_WINDOW: ${HV_RATE_WINDOW:-60}
       HV_RATE_MAX: ${HV_RATE_MAX:-10}
+      # Per-account lock across source IPs (LAN clients are never locked).
+      HV_ACCOUNT_LOCK_MAX: ${HV_ACCOUNT_LOCK_MAX:-10}
+      HV_ACCOUNT_LOCK_WINDOW: ${HV_ACCOUNT_LOCK_WINDOW:-900}
+      HV_ACCOUNT_LOCK_BASE: ${HV_ACCOUNT_LOCK_BASE:-60}
+      HV_ACCOUNT_LOCK_CAP: ${HV_ACCOUNT_LOCK_CAP:-900}
+      # Concurrent portal connections (one thread each): total / per IP.
+      HV_MAX_CONNECTIONS: ${HV_MAX_CONNECTIONS:-256}
+      HV_MAX_CONNECTIONS_PER_IP: ${HV_MAX_CONNECTIONS_PER_IP:-16}
       HV_FLUSH_ON_START: ${HV_FLUSH_ON_START:-1}
       # Default: 0 (safe). If 1, kernel grants from before the restart
       # can stay alive without a session until the TTL (up to 30 days);
@@ -119,6 +138,9 @@ services:
       HV_FAIL2BAN_DROP_MAX: ${HV_FAIL2BAN_DROP_MAX:-120}
       HV_FAIL2BAN_DROP_PORTS: ${HV_FAIL2BAN_DROP_PORTS:-12}
       HV_FAIL2BAN_DROP_WINDOW: ${HV_FAIL2BAN_DROP_WINDOW:-180}
+      # Extra addresses/CIDRs a dropped packet can never get banned (comma
+      # separated, e.g. agent endpoints); HV_MGMT_NET is always exempt.
+      HV_FAIL2BAN_DROP_EXEMPT: ${HV_FAIL2BAN_DROP_EXEMPT:-}
       # Proxy-based banning: the domain proxy's 401 responses; only closes
       # 80/443. Can be set at runtime in the interface.
       HV_FAIL2BAN_PROXY: ${HV_FAIL2BAN_PROXY:-1}
@@ -133,6 +155,9 @@ services:
       # 1: the firewall opens TCP 80/443 for the caddy proxy service
       # (together with COMPOSE_PROFILES=proxy). See the .env.example file.
       HV_PROXY: ${HV_PROXY:-0}
+      # Secret shared with the caddy service (openssl rand -hex 32); without
+      # it every host process is trusted as Caddy.
+      HV_PROXY_KEY: ${HV_PROXY_KEY:-}
       # The Caddy admin API Unix socket is on the caddy-admin volume; the portal
       # restarts Caddy through it when ACME is disabled (cache flush).
       HV_CADDY_ADMIN: ${HV_CADDY_ADMIN:-/run/caddy-admin/admin.sock}
@@ -152,6 +177,9 @@ services:
       # without it the container runs in UTC). The image reads it even
       # without tzdata, and it works with a read-only root as well.
       - /etc/localtime:/etc/localtime:ro
+      # Secrets (the admin password file). A directory mount rather than a
+      # compose secrets: entry, so a missing file does not stop the start.
+      - ./secrets:/run/secrets:ro
 
     # The root filesystem is read-only; the template's temporary file is
     # created on the /run tmpfs.
@@ -195,6 +223,7 @@ services:
       - no-new-privileges:true
     environment:
       PORT: ${PORT:-8100}
+      HV_PROXY_KEY: ${HV_PROXY_KEY:-}
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data

@@ -86,6 +86,11 @@ MAX_DROP_EVENTS = 10000
 # and cannot grow without bound: if it fills up, the oldest orphan element
 # remains until its TTL expires.
 MAX_ORPHAN_UNBANS = 256
+# Drop signals come from the first packet of a connection that never
+# completed, so their source address is not verified and can be forged.
+# Addresses in these networks are never banned on drop signals alone; the
+# admin list holds at most this many entries.
+MAX_DROP_EXEMPT = 64
 
 
 def _env_int(name: str, default: int, minimum: int = 0) -> int:
@@ -205,6 +210,62 @@ DEFAULT_PROXY_WINDOW = _clamp(
 _AUTO_EXEMPT = {"127.0.0.1"}
 
 
+def normalize_exempt(value) -> list[str]:
+    """Validate the drop-signal allowlist: IPv4 addresses or CIDRs.
+
+    Returns the canonical, de-duplicated network strings in input order.
+    Host bits are allowed (``192.0.2.7/24`` becomes ``192.0.2.0/24``), so
+    an admin can paste an interface address with its prefix.
+    """
+    if not isinstance(value, list):
+        raise Fail2banError("the drop_exempt field must be a list")
+    if len(value) > MAX_DROP_EXEMPT:
+        raise Fail2banError(
+            f"the drop_exempt list holds at most {MAX_DROP_EXEMPT} entries"
+        )
+    result: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise Fail2banError("drop_exempt entries must be strings")
+        try:
+            network = ipaddress.ip_network(item.strip(), strict=False)
+        except ValueError as exc:
+            raise Fail2banError(
+                f"invalid drop_exempt entry: {item.strip()[:64]}"
+            ) from exc
+        if network.version != 4:
+            raise Fail2banError("drop_exempt takes IPv4 entries only")
+        if str(network) not in result:
+            result.append(str(network))
+    return result
+
+
+def _env_exempt() -> tuple:
+    """Built-in drop-signal allowlist from the environment.
+
+    ``HV_MGMT_NET`` (the admin's management network) is always exempt, plus
+    the comma-separated ``HV_FAIL2BAN_DROP_EXEMPT`` list (agent endpoints,
+    upstream resolvers, other infrastructure). Invalid entries are skipped:
+    the environment must not stop the portal from starting.
+    """
+    raw = ",".join(
+        os.environ.get(name, "")
+        for name in ("HV_MGMT_NET", "HV_FAIL2BAN_DROP_EXEMPT")
+    )
+    networks = []
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            network = ipaddress.ip_network(item, strict=False)
+        except ValueError:
+            continue
+        if network.version == 4 and network not in networks:
+            networks.append(network)
+    return tuple(networks)
+
+
 def _default_log(message: str) -> None:
     print(message, flush=True)
 
@@ -258,6 +319,7 @@ def validate_config(data, current: dict | None = None) -> dict:
         "proxy_enabled": DEFAULT_PROXY_ENABLED,
         "proxy_max": DEFAULT_PROXY_MAX,
         "proxy_window_seconds": DEFAULT_PROXY_WINDOW,
+        "drop_exempt": [],
     }
     # New fields missing from the saved file get the default value; current
     # configuration values remain unless the request overrides them.
@@ -339,6 +401,9 @@ def validate_config(data, current: dict | None = None) -> dict:
             "proxy_window_seconds", "the proxy time window",
             MIN_WINDOW, MAX_WINDOW,
         ),
+        "drop_exempt": normalize_exempt(
+            data.get("drop_exempt", current["drop_exempt"])
+        ),
     }
 
 
@@ -384,6 +449,8 @@ class Fail2ban:
         proxy_enabled: bool = DEFAULT_PROXY_ENABLED,
         proxy_max: int = DEFAULT_PROXY_MAX,
         proxy_window_seconds: int = DEFAULT_PROXY_WINDOW,
+        drop_exempt=None,
+        exempt=(),
         on_ban=None,
     ) -> None:
         self.firewall = firewall
@@ -417,7 +484,20 @@ class Fail2ban:
             "proxy_window_seconds": _clamp(
                 proxy_window_seconds, MIN_WINDOW, MAX_WINDOW
             ),
+            "drop_exempt": normalize_exempt(list(drop_exempt or [])),
         }
+        # Built-in drop-signal allowlist: the environment plus the
+        # infrastructure addresses the caller passes in (``exempt``). It is
+        # not stored in the file and the admin cannot remove it.
+        builtin = list(_env_exempt())
+        for item in exempt or ():
+            try:
+                network = ipaddress.ip_network(str(item).strip(), strict=False)
+            except ValueError:
+                continue
+            if network.version == 4 and network not in builtin:
+                builtin.append(network)
+        self._builtin_exempt = tuple(builtin)
         # IP -> {"times": [timestamp, ...], "user": str}; not persisted.
         self._attempts: dict[str, dict] = {}
         # IP -> {"events": [(timestamp, "proto/port"), ...], "reason": str};
@@ -818,6 +898,20 @@ class Fail2ban:
             for ip, _ in ordered[: len(self._drop_events) - MAX_TRACKED_IPS]:
                 del self._drop_events[ip]
 
+    def drop_exempt(self, ip: str) -> bool:
+        """True if drop signals from this address must never ban it."""
+        try:
+            address = ipaddress.ip_address(ip)
+        except ValueError:
+            return False
+        if any(address in network for network in self._builtin_exempt):
+            return True
+        with self._lock:
+            listed = list(self._config.get("drop_exempt") or ())
+        return any(
+            address in ipaddress.ip_network(item) for item in listed
+        )
+
     def _notify(self, record: dict) -> None:
         if self._on_ban is None:
             return
@@ -895,6 +989,12 @@ class Fail2ban:
         except Fail2banError:
             return None
         if address in _AUTO_EXEMPT:
+            return None
+        # The source of a dropped first packet is unverified. Allowlisted
+        # infrastructure (management network, agent endpoints, upstream
+        # resolvers, admin list) is never counted, so a forged packet cannot
+        # get it banned. The drop log still records the packet.
+        if self.drop_exempt(address):
             return None
         proto = str(proto or "").strip().lower()[:16]
         port = 0
@@ -1036,17 +1136,23 @@ class Fail2ban:
         """Proxy ban (proxy_banned_v4): kernel -> memory -> save."""
         seconds = _clamp(int(seconds), MIN_BAN, MAX_BAN)
         now = time.time()
+        existing = self._proxy_bans.get(address)
+        # Proxy bans are all automatic: on a full registry the one that
+        # expires soonest makes room (it would be released first anyway).
+        victim = None
+        if len(self._proxy_bans) >= MAX_BANS and existing is None:
+            victim = min(
+                self._proxy_bans.values(),
+                key=lambda row: (row["until"], row["since"]),
+            )
         try:
             self.firewall.proxy_ban(address, seconds)
         except Exception as exc:
             raise Fail2banError(
                 f"failed to proxy-ban {address}: {exc}"
             ) from exc
-        existing = self._proxy_bans.get(address)
-        if len(self._proxy_bans) >= MAX_BANS and existing is None:
-            oldest = min(
-                self._proxy_bans.values(), key=lambda row: row["since"]
-            )
+        if victim is not None:
+            oldest = victim
             # shortcut: a failed kernel release is not put on the retry queue
             # (the timeout expires it); if that matters, the orphan queue is needed.
             try:
@@ -1186,6 +1292,29 @@ class Fail2ban:
         # First try to delete orphan elements left over from earlier
         # evictions; this must not block the new protective ban.
         self._retry_orphan_unbans_locked()
+        # On a full registry only an automatic ban can make room, the one
+        # that expires soonest. Manual bans are never evicted: if only manual
+        # bans remain, the new ban is refused before it reaches the kernel.
+        victim = None
+        if len(self._bans) >= MAX_BANS and address not in self._bans:
+            automatic = [
+                row for row in self._bans.values() if not row["manual"]
+            ]
+            if not automatic:
+                self.log(
+                    "[fail2ban] WARNING: ban list is full of manual bans; "
+                    f"the new ban of {address} was refused"
+                )
+                self._write_audit(
+                    "fail2ban_ban_refused", ip=address, reason="max_bans",
+                    manual=bool(manual), source=source,
+                )
+                raise Fail2banError(
+                    "the ban list is full of manual bans; release one first"
+                )
+            victim = min(
+                automatic, key=lambda row: (row["until"], row["since"])
+            )
         try:
             self.firewall.ban(address, seconds)
         except Exception as exc:
@@ -1216,10 +1345,8 @@ class Fail2ban:
             "source": source,
             "detail": str(detail or "")[:64],
         }
-        if len(self._bans) >= MAX_BANS and address not in self._bans:
-            oldest = min(
-                self._bans.values(), key=lambda row: row["since"]
-            )
+        if victim is not None:
+            oldest = victim
             # The kernel element must be released before dropping the memory
             # record, otherwise an invisible ban would remain until the TTL.
             kernel_released = True
@@ -1235,8 +1362,8 @@ class Fail2ban:
                 )
             del self._bans[oldest["ip"]]
             self.log(
-                f"[fail2ban] ban list is full; the oldest entry "
-                f"({oldest['ip']}) was evicted from the registry"
+                f"[fail2ban] ban list is full; the automatic ban expiring "
+                f"soonest ({oldest['ip']}) was evicted from the registry"
             )
             self._write_audit(
                 "fail2ban_ban_evicted",
@@ -1481,6 +1608,12 @@ class Fail2ban:
             ):
                 self._drop_events.clear()
                 self._drop_event_count = 0
+            elif previous["drop_exempt"] != new_config["drop_exempt"]:
+                # Pending counters of newly allowlisted addresses are dropped;
+                # an existing ban stays until the admin releases it.
+                for address in list(self._drop_events):
+                    if self.drop_exempt(address):
+                        del self._drop_events[address]
             if any(
                 previous[key] != new_config[key]
                 for key in ("proxy_enabled", "proxy_max", "proxy_window_seconds")
@@ -1681,6 +1814,10 @@ class Fail2ban:
             "proxy_max": config["proxy_max"],
             "proxy_window_seconds": config["proxy_window_seconds"],
             "proxy_pending": proxy_pending,
+            "drop_exempt": list(config["drop_exempt"]),
+            "drop_exempt_builtin": [
+                str(network) for network in self._builtin_exempt
+            ],
             "limits": {
                 "min_attempts": MIN_ATTEMPTS,
                 "max_attempts": MAX_ATTEMPTS,
@@ -1696,6 +1833,7 @@ class Fail2ban:
                 "max_drop_window": MAX_DROP_WINDOW,
                 "min_proxy_max": MIN_PROXY_MAX,
                 "max_proxy_max": MAX_PROXY_MAX,
+                "max_drop_exempt": MAX_DROP_EXEMPT,
             },
             "bans": bans,
             "banned_count": len(bans),

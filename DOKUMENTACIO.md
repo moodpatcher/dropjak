@@ -272,7 +272,10 @@ These are properties of the system that the code and the tests must protect. The
 
 #### 5.3. Admin and auth
 - Admin endpoints are protected by `_admin_guard`; POST requests are JSON-only and same-origin checked.
-- The server takes the client IP from the socket peer, not from the `X-Forwarded-For` header.
+- The server takes the client IP from the socket peer. The only exception is Caddy: from a loopback peer the last `X-Forwarded-For` element is used. With `HV_PROXY_KEY` set, the loopback peer must also send that secret (`X-Dropjak-Proxy-Key`, or `?key=` for `get_certificate`/`ask`); without it, every process on the host and every host-network container counts as Caddy (startup warning).
+- `/api/*` answers only under an IP literal, the `HV_PORTAL_URL` host, `HV_PORTAL_HOSTS`, or (through Caddy) a root domain or the portal's own address; anything else is 421 (DNS rebinding).
+- Export, import and factory reset require the admin's password again (and the TOTP code when enrolled); a failure counts like a failed login.
+- Failed logins are also counted per login name across all WAN source IPs (`HV_ACCOUNT_LOCK_*`); LAN clients are never locked.
 - Protection of the last active admin: the last admin cannot be deleted/disabled.
 - Deleting a user also removes group membership.
 - The admin user update restores the previous password hash if the subsequent metadata or membership write fails.
@@ -490,7 +493,7 @@ At the bottom of the **Settings** tab, the entire configuration can be exported 
 
 **Excluded:** audit and drop logs, sessions, active bans and waiting attempts, `.env`, `.secret`, PID/socket/lock files, and Caddy's ACME bundles. Import does not overwrite bans; applying the `fail2ban` setting may release a ban according to the usual rules.
 
-**Export.** `GET /api/admin/config/export`; the response is `Cache-Control: no-store`, `Content-Disposition: attachment`, filename `dropjak-config-<version>-<UTC time>.json`. The file contains password hashes, TOTP secrets, recovery-code hashes and private keys: it must be handled confidentially. A failed export gives a detailed error in the response, but only `config_export_failed` is logged.
+**Export.** `POST /api/admin/config/export`, `{"password": "...", "code": "..."}` (the admin's current password, and the TOTP code when enrolled; `code` is optional otherwise). Import and reset need the same two fields next to their own. The response is `Cache-Control: no-store`, `Content-Disposition: attachment`, filename `dropjak-config-<version>-<UTC time>.json`. The file contains password hashes, TOTP secrets, recovery-code hashes and private keys: it must be handled confidentially. A failed export gives a detailed error in the response, but only `config_export_failed` is logged.
 
 **Import.** `POST /api/admin/config/import`, `{"bundle": {...}, "confirm": "..."}`; the request is at most 8 MiB. The server first validates the entire bundle in memory: schema and version, settings (`validate_state`), user records, rules and groups, certificate pairs (key/PEM match, coverage of the root domain, expiry; an expired pair is acceptable only for restoration), the `fail2ban` section, and referential integrity: rule domain → proxy route, user → rule, group → rule/member, certificate → root domain, collection members. The import intentionally does not require the existence of `service_refs` references, because the referenced tunnels may come in the same bundle; resolution is fail-closed at load and at authorization. At least one enabled, non-pending admin account is mandatory. For an invalid bundle the response is 400, and nothing is written.
 
@@ -532,7 +535,7 @@ The `/api/status` response for an authorized session also contains the `selected
 | `/api/admin/settings` | Pre-auth/block/site settings. |
 | `/api/admin/fail2ban` | fail2ban status, bans, waiting attempts. |
 | `/api/admin/tunnels/status` | Read-only tunnel status: `{ok, checked_at, tunnels}`; the shape of `tunnels` is the same as in the admin state, with `last_sync` in seconds per agent. It does not write settings and does not touch nftables. |
-| `/api/admin/config/export` | Download of the complete configuration bundle (`no-store`, `attachment`). |
+| `/api/admin/config/export` | POST with the admin's password (and TOTP code): download of the complete configuration bundle (`no-store`, `attachment`). |
 
 #### 8.3. Admin POST endpoints
 | Path | Operations |
@@ -4009,7 +4012,7 @@ Dropjak received a built-in, Caddy-based reverse proxy. It forwards subdomains u
 - **Certificates:**
   - `get_certificate http` → `/api/proxy/cert` serves the uploaded certificate.
   - If none is uploaded, on-demand ACME comes. This is enabled by `/api/proxy/ask`, only for listed names.
-- **Client IP:** Caddy sends the real IP in the `X-Forwarded-For` header. The portal accepts it only from a loopback (127.0.0.1/::1) peer.
+- **Client IP:** Caddy sends the real IP in the `X-Forwarded-For` header. The portal accepts it only from a loopback (127.0.0.1/::1) peer that also sends `HV_PROXY_KEY` (when it is set; give the same value to both services).
 - **Firewall (nft):** TCP 80/443 opens only when `HV_PROXY=1`, after the fail2ban drop.
   - From the WAN, for everyone.
   - From the LAN, only for IP+MAC-bound clients.
@@ -4994,6 +4997,57 @@ The running version is stored in [`VERSION`](VERSION).
   follows the real UI payload with an unchanged internal listen port) and one
   new `test_tunnel_ui` static test; the measured suite is **981 tests OK**.
 
+#### Security
+
+Fixes from the 2026-10-23 security review (finding IDs DJ-00 to DJ-36).
+Items marked as design steps in that review (DJ-05, DJ-24, DJ-35, mandatory
+admin TOTP, enrollment codes, agent-side key generation, encrypted export)
+are not part of this change.
+
+- **fail2ban (DJ-01, DJ-22).** Ban rules match only `ct direction original`,
+  so a ban no longer drops replies to LAN clients. Drop-signal bans skip an
+  allowlist: `HV_MGMT_NET`, `HV_FAIL2BAN_DROP_EXEMPT`, the resolvers and the
+  default gateway (built in), plus the editable `drop_exempt` list. Manual
+  bans are never evicted; a registry full of manual bans refuses new bans.
+- **Firewall template (DJ-02, DJ-03, DJ-16, DJ-17, DJ-18, DJ-19, DJ-33,
+  DJ-34).** No forwarding to `169.254.0.0/16`; new flows into Docker bridges
+  and WAN→LAN need DNAT; DOCKER-USER no longer accepts marked packets toward
+  bridges; established UDP 53 flows end on revocation; LAN-network sources
+  only on the LAN interface; host accepts use the rendered portal port; the
+  boot table's input chain is `policy drop`; input `jump block` and the
+  `host_service_*` guards spare reply traffic.
+- **Table resync (DJ-04).** A reloaded or flushed `inet hatarvedelem` table
+  is detected within 5 s and its bans, host guards and custom chains are
+  restored (`firewall_resync` audit); grants are refused until then.
+- **Auth (DJ-06, DJ-11, DJ-12, DJ-14, DJ-26, DJ-27, DJ-29).** Per-account
+  lock across WAN source IPs (`HV_ACCOUNT_LOCK_*`); export (now POST),
+  import and reset need the admin password and TOTP code again; TOTP
+  enrollment is an audit alert; `/api/*` answers 421 under an unknown
+  `Host` (`HV_PORTAL_HOSTS`); the audit log keeps the session id, not a
+  token prefix; the provisioning marker has a random salt; case-variant
+  user names are refused and PBKDF2 hashes are rehashed to the current
+  count.
+- **Proxy trust (DJ-10, DJ-28).** Optional `HV_PROXY_KEY` shared by the
+  portal and Caddy; without it the loopback trust stays, with a startup
+  warning. Caddy sends HSTS; the CSP lists Cloudflare only with Turnstile.
+- **Portal server (DJ-00, DJ-13, DJ-15).** Startup warnings for a public
+  plain-HTTP portal; connection caps (`HV_MAX_CONNECTIONS`,
+  `HV_MAX_CONNECTIONS_PER_IP`); tunnel peers reach only
+  `GET /api/tunnel/config`.
+- **Drop log (DJ-07, DJ-31).** `ENOBUFS` no longer stops the listener, other
+  errors restart it with back-off, no fsync per packet; reads stop at the
+  limit instead of parsing every rotated file.
+- **Settings (DJ-09, DJ-36).** Input pre-auth cannot open 22, 53, 67, 2019
+  or the portal port; destinations with host bits are rejected.
+- **Containers and installers (DJ-08, DJ-20, DJ-21, DJ-23, DJ-30).** The
+  agent installer prints its SHA-256 (the portal sends `X-Dropjak-SHA256`),
+  installs as root into a private 0700 directory and refuses unsafe
+  directories; the portal's capability bounding set is cut to `NET_ADMIN` and
+  `NET_BIND_SERVICE` (`SETPCAP` added to compose for this); the admin
+  password can come from `./secrets/dropjak_admin_password`; the agent
+  refuses every route next hop as a target; the Caddy admin socket is 0660.
+- **Other.** `docker/entrypoint.sh` exports the `HV_PORTAL_NET` fallback.
+
 ### [3.24.0] - 2026-10-22
 
 #### Added
@@ -5362,7 +5416,7 @@ The running version is stored in [`VERSION`](VERSION).
   "created_at", "sections"}`; `sections` always carries `settings`, `rules`,
   `groups`, `users`, `certs` and `fail2ban`. Missing, unknown or
   unsupported-major sections are rejected instead of being dropped.
-- **Export** (`GET /api/admin/config/export`) is admin-only and origin-checked.
+- **Export** (`POST /api/admin/config/export`) is admin-only, origin-checked and needs the admin's password (step-up).
   It returns a `no-store` attachment named
   `dropjak-config-<version>-<UTC>.json`. Users carry PBKDF2 hashes, TOTP
   secrets, recovery-code hashes and the provisioning marker; certificates
