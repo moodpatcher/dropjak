@@ -29,7 +29,7 @@ BOOT_UNIT=/etc/systemd/system/hatarvedelem-boot.service
 SYSCTL_FILE=/etc/sysctl.d/90-hatarvedelem.conf
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
-info() { printf '[hatarvedelem] %s\n' "$*"; }
+info() { printf '[dropjak] %s\n' "$*"; }
 
 [ "$(id -u)" -eq 0 ] || die "run as root: sudo $0"
 
@@ -119,11 +119,31 @@ if systemctl is-active --quiet docker.service 2>/dev/null; then
     info "Docker is already running: the boot table is not loaded now, so that traffic is not interrupted."
     info "it will take effect before Docker on the next reboot."
 else
+    info "loading the early boot protection: forwarding is blocked and host SSH (TCP 22) is closed."
     "$NFT_BIN" -c -f "$BOOT_NFT" || die "invalid boot rule file"
     systemctl enable --now hatarvedelem-boot.service
     systemctl is-active --quiet hatarvedelem-boot.service \
         || die "hatarvedelem-boot.service did not start"
     info "early forward blocking is active."
+    # The boot table drops every inbound TCP 22, including the SSH session that
+    # started this script. Keep that one source address reachable so the
+    # installation can continue over SSH; the container deletes the boot table
+    # as soon as its own rules are loaded.
+    ssh_source=${SSH_CONNECTION%% *}
+    if [ -n "$ssh_source" ]; then
+        case "$ssh_source" in
+            *:*)
+                "$NFT_BIN" insert rule inet hatarvedelem_boot input \
+                    ip6 saddr "$ssh_source" tcp dport 22 accept \
+                    && info "the current SSH session from $ssh_source stays reachable until the portal loads its rules."
+                ;;
+            *)
+                "$NFT_BIN" insert rule inet hatarvedelem_boot input \
+                    ip saddr "$ssh_source" tcp dport 22 accept \
+                    && info "the current SSH session from $ssh_source stays reachable until the portal loads its rules."
+                ;;
+        esac
+    fi
 fi
 
 # --------------------------------------------------------------- warning
@@ -137,4 +157,5 @@ for svc in firewalld ufw; do
 done
 
 info "done."
-info "Next step: cp .env.example .env, edit it, then docker compose up -d --build"
+info "Next step: cp .env.example .env, set the admin password and the interfaces, then docker compose up -d --build"
+info "The first container start closes host SSH again; the way back is the portal (port 8100) with the admin account from .env."

@@ -629,18 +629,31 @@ On the local development machine you **must never run a real firewall load** (`n
 ```bash
 git clone git@github.com:moodpatcher/dropjak.git
 cd dropjak
-sudo ./docker/setup-host.sh
 cp .env.example .env
 chmod 600 .env
-# edit .env: HV_LAN_IF, HV_WAN_IF, HV_LAN_NET, HV_PORTAL_NET, admin
+# edit .env: HV_LAN_IF, HV_WAN_IF, HV_LAN_NET, HV_PORTAL_NET and the admin account
+sudo ./docker/setup-host.sh
 docker compose up -d --build
 docker compose ps
 docker compose logs -f hatarvedelem
 ```
 
-`setup-host.sh` installs nftables, loads the early boot protection, installs the `hatarvedelem-boot.service` unit, and sets `net.ipv4.ip_forward=1`. It does not touch host SSH.
+The `.env` and, above all, the admin account come **before** `setup-host.sh`:
+once the firewall is loaded, the only way in is the portal, and without an admin
+account the portal's admin interface is unreachable and host SSH stays closed.
 
-Before the first start an admin account must be configured, otherwise the portal's admin interface is unreachable and host SSH remains closed. The provider console should be open, or the first start should be done with `HV_SKIP_FIREWALL=1`.
+`setup-host.sh` installs nftables, loads the early boot protection, installs the
+`hatarvedelem-boot.service` unit, and sets `net.ipv4.ip_forward=1`. The boot
+protection closes host SSH (TCP 22) for every source; the script keeps the SSH
+session that started it reachable until the container loads its rules. After
+the first container start the boot table is deleted and the final rules take
+over: TCP 22 then needs a portal session plus an assigned TCP 22 input rule, so
+the provider console should be open, or the first start should be done with
+`HV_SKIP_FIREWALL=1`.
+
+First login after the start: sign in with the admin from `.env`, change the
+password, then create a **Host SSH** (input, TCP 22) rule, assign it to the
+admin, and authorize it from the same IP.
 
 #### 10.2. Build note
 According to the snapshot, the VM has no `buildx`, and `docker compose build` cannot reach the Debian mirrors because the fail-closed forward chain also blocks the build container's egress. The working procedure:
@@ -4611,21 +4624,11 @@ git clone https://github.com/moodpatcher/dropjak.git
 cd dropjak
 ```
 
-##### 2. Prepare the host
+##### 2. Configure
 
-Docker starts late in the boot process. To keep forwarded traffic blocked
-until then, install the early boot guard:
-
-```bash
-sudo ./docker/setup-host.sh
-```
-
-The script installs `nftables` if needed, loads a boot-time `forward` chain
-with `policy drop`, installs the `hatarvedelem-boot.service` unit, and
-persists `net.ipv4.ip_forward=1` in
-`/etc/sysctl.d/90-hatarvedelem.conf`. It does not touch SSH access.
-
-##### 3. Configure
+Do this **before** the firewall is loaded: the first start closes host SSH, and
+the only way back in is the portal. Without an admin account the portal's admin
+interface is unreachable, so the password must be in `.env` before step 4.
 
 ```bash
 cp .env.example .env
@@ -4641,6 +4644,7 @@ Required values:
 | `HV_WAN_IF` | `eth0` | interface facing the internet |
 | `HV_LAN_NET` | `192.168.10.0/24` | client network in CIDR form |
 | `HV_PORTAL_NET` | `0.0.0.0/0` | source networks allowed to reach the portal |
+| `HV_ADMIN_ENABLED` / `HV_ADMIN_USER` / `HV_ADMIN_PASSWORD` | `1` / `admin` / a long random password | first admin, created or updated at container start |
 
 If `HV_PORTAL_NET` is empty, it falls back to `HV_MGMT_NET`. The portal is
 always reachable from the LAN interface. Use `0.0.0.0/0` only if the portal
@@ -4648,6 +4652,25 @@ must be reachable from the internet.
 
 Find interface names with `ip -br link`. All other settings are documented in
 `.env.example`.
+
+##### 3. Prepare the host
+
+Docker starts late in the boot process. To keep forwarded traffic blocked
+until then, install the early boot guard:
+
+```bash
+sudo ./docker/setup-host.sh
+```
+
+The script installs `nftables` if needed, loads a boot-time `forward` chain
+with `policy drop`, installs the `hatarvedelem-boot.service` unit, and
+persists `net.ipv4.ip_forward=1` in
+`/etc/sysctl.d/90-hatarvedelem.conf`.
+
+The boot protection also drops inbound TCP 22. The script keeps the SSH
+session that started it reachable (a single accept rule for that source
+address) until the container loads its rules; every other source is blocked
+immediately.
 
 ##### 4. Start
 
@@ -4664,25 +4687,18 @@ http://<lan-ip>:8100/
 ```
 
 HTTP traffic from unauthenticated clients on port 80 is redirected to the
-portal. The health check polls `/api/status`.
+portal. The health check polls `/api/status`. The first start closes host SSH
+(and every later recreate flushes the grants), so after this step the portal is
+the way back in.
 
-##### 5. Create the first admin
+##### 5. First login and host SSH
 
-Set these values in `.env`, then apply them:
+The admin from `.env` is created (or its password updated) on container start.
+Sign in at `http://<lan-ip>:8100/`, change the initial password, then create a
+**Host SSH** (input, TCP 22) rule, assign it to the admin, and authorize it
+from the same IP if you need SSH.
 
-```ini
-HV_ADMIN_ENABLED=1
-HV_ADMIN_USER=admin
-HV_ADMIN_PASSWORD=<a-long-random-password>
-```
-
-```bash
-docker compose up -d
-```
-
-The account is created (or its password updated) on container start. The
-initial password must be changed at first sign-in. The **Admin** tab then
-provides user, group, rule and audit-log management.
+The **Admin** tab then provides user, group, rule and audit-log management.
 
 A user can also be added from the CLI:
 

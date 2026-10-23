@@ -49,8 +49,8 @@ for top in data.get("nftables", []):
 print(", ".join(parts))
 '
 
-log() { printf '[hatarvedelem] %s\n' "$*"; }
-die() { printf '[hatarvedelem] ERROR: %s\n' "$*" >&2; exit 1; }
+log() { printf '[dropjak] %s\n' "$*"; }
+die() { printf '[dropjak] ERROR: %s\n' "$*" >&2; exit 1; }
 
 # Same logic as gateway.py's _env_bool(): 1/true/yes/on is true,
 # 0/false/no/off is false, empty or unknown value uses the default.

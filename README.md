@@ -40,15 +40,10 @@ Compose v2, one LAN-facing and one WAN-facing interface, and
    cd dropjak
    ```
 
-2. **Prepare the host.** Blocks forwarding before Docker starts and persists
-   `ip_forward`; it does not touch SSH.
-
-   ```bash
-   sudo ./docker/setup-host.sh
-   ```
-
-3. **Configure.** Fill in the required values and create the first admin
-   (without an admin account the portal is unusable and host SSH stays closed).
+2. **Configure first — this is the last step that does not touch the
+   firewall.** Fill in the required values and create the first admin. Without
+   an admin account the portal is unusable, and once the firewall loads there
+   is no way back in over SSH.
 
    ```bash
    cp .env.example .env
@@ -65,17 +60,28 @@ Compose v2, one LAN-facing and one WAN-facing interface, and
    HV_ADMIN_PASSWORD=<long-random-password>
    ```
 
+3. **Prepare the host.** Blocks forwarding before Docker starts, persists
+   `ip_forward`, and activates the early boot protection, which closes host
+   SSH (TCP 22) for every source except the SSH session that started the
+   script. That session stays reachable until the container loads its rules.
+
+   ```bash
+   sudo ./docker/setup-host.sh
+   ```
+
 4. **Start the stack.**
 
    ```bash
    docker compose up -d --build
    ```
 
-   Open `http://<lan-ip>:8100/`.
+   Open `http://<lan-ip>:8100/`, sign in with the admin account from `.env`,
+   change the password, then create and assign a **Host SSH** input rule
+   (TCP 22) if you need SSH.
 
-> **Lockout warning.** Loading the firewall cuts host SSH. TCP 22 is reachable
-> only from an IP with an authorized portal session and an explicit TCP 22
-> input rule, so keep the provider console available.
+> **Lockout warning.** The first container start closes host SSH: TCP 22 is
+> reachable only from an IP with an authorized portal session and an explicit
+> TCP 22 input rule. Keep the provider console available.
 
 Optional HTTPS proxy: set `HV_PROXY=1` and `COMPOSE_PROFILES=proxy`, then run
 `docker compose up -d` and add the domain under **Admin → Domains**.
