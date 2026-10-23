@@ -95,7 +95,7 @@ class BlockGenerationTestCase(unittest.TestCase):
         logs = [
             line
             for line in lines
-            if line.startswith(prefix + " limit rate ")
+            if line.startswith(prefix + " update @log_src_v4 { ip saddr limit rate ")
         ]
         drops = [line for line in lines if line == expected_drop]
         self.assertEqual(len(logs), 1, lines)
@@ -333,7 +333,7 @@ class ApplyCustomBlockGenerationTests(BlockGenerationTestCase):
                     continue
                 self.assertGreater(index, 0, chain_lines)
                 log_line = chain_lines[index - 1]
-                prefix, separator, _ = log_line.partition(" limit rate ")
+                prefix, separator, _ = log_line.partition(" update @log_src_v4 ")
                 self.assertTrue(separator, log_line)
                 self.assertIn("reason=block", log_line)
                 self.assertEqual(line, prefix + " drop")

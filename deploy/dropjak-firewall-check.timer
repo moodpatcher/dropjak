@@ -1,0 +1,11 @@
+[Unit]
+Description=Dropjak — check the nftables table every 10 seconds
+Documentation=file:///opt/hatarvedelem/README.md
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=10s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

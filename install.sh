@@ -34,6 +34,8 @@ NFT_FILE="/etc/nftables/dropjak.nft"
 SYSTEMD_DIR="/etc/systemd/system"
 SYSTEMD_UNIT="${SYSTEMD_DIR}/${SERVICE}.service"
 FIREWALL_UNIT="${SYSTEMD_DIR}/${FIREWALL_SERVICE}.service"
+CHECK_UNIT="${SYSTEMD_DIR}/${FIREWALL_SERVICE}-check.service"
+CHECK_TIMER="${SYSTEMD_DIR}/${FIREWALL_SERVICE}-check.timer"
 SYSCTL_FILE="/etc/sysctl.d/90-dropjak.conf"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -50,6 +52,10 @@ GW_IP=""
 PORTAL_NET=""
 PORTAL_URL=""
 SINGLE_NIC=0
+# Extra networks the gateway never forwards to (DJ-02), and the interfaces
+# of input port proxies with a 127.0.0.1 target (route_localnet, DJ-04).
+NO_FORWARD_NETS="${HV_NO_FORWARD_NETS:-}"
+ROUTE_LOCALNET_IFS="${HV_ROUTE_LOCALNET_IFS:-}"
 ASSUME_YES=0
 SKIP_USER=0
 SSH_SRC=""
@@ -99,6 +105,11 @@ Usage: sudo ./install.sh [options]
                        allows TCP 22.
   --port PORT          the portal port (default: 80)
   --portal-url URL     the canonical portal address (default: http://<gateway-ip>)
+  --no-forward-nets L  IPv4 networks never forwarded to, comma separated network
+                       addresses (169.254.0.0/16 is always blocked), e.g. the
+                       WAN subnet and the provider's private networks
+  --route-localnet-ifs L  interfaces of input port proxies whose target listens
+                       only on 127.0.0.1 (route_localnet; never set on "all")
   --yes                do not ask; installs missing packages too, and disables
                        firewalld/ufw as well
   --skip-user          do not create a user
@@ -110,6 +121,8 @@ required; on RHEL 8 it automatically offers the python39 package for this.
 Environment variables (matching the defaults in docker/entrypoint.sh):
   HV_FWD_MARK          nftables mark for the forward rules (default: 0x44524a4b)
   HV_DROP_LOG_GROUP    NFLOG group for the drop log (default: 5)
+  HV_NO_FORWARD_NETS   the default of --no-forward-nets
+  HV_ROUTE_LOCALNET_IFS  the default of --route-localnet-ifs
 EOF
 }
 
@@ -125,6 +138,8 @@ while [[ $# -gt 0 ]]; do
     --port)       PORT="${2:-}"; shift 2 ;;
     --portal-url) PORTAL_URL="${2:-}"; shift 2 ;;
     --single-nic) SINGLE_NIC=1; shift ;;
+    --no-forward-nets) NO_FORWARD_NETS="${2:-}"; shift 2 ;;
+    --route-localnet-ifs) ROUTE_LOCALNET_IFS="${2:-}"; shift 2 ;;
     --yes)        ASSUME_YES=1; shift ;;
     --skip-user)  SKIP_USER=1; shift ;;
     -h|--help)    usage; exit 0 ;;
@@ -138,6 +153,8 @@ for f in server.py gateway.py settings_store.py fail2ban.py droplog.py tunnel.py
          index.html icon.png blocked.png unauthorized.png sus.png ok.png services.json VERSION \
          deploy/dropjak.nft deploy/dropjak.service \
          deploy/dropjak-firewall.service \
+         deploy/dropjak-firewall-check.service \
+         deploy/dropjak-firewall-check.timer \
          deploy/tunnel-agent/compose.agent.yml \
          deploy/tunnel-agent/Dockerfile deploy/tunnel-agent/agent.py \
          deploy/tunnel-agent/selfinstall.sh \
@@ -320,13 +337,37 @@ ensure_dependencies
 
 # ------------------------------------------------------------------ network helpers
 
+# $1: network; $2: "strict" rejects host bits (no silent widening).
 canon_v4_net() {
-  "$PYTHON" - "$1" <<'PY'
+  "$PYTHON" - "$1" "${2:-}" <<'PY'
 import ipaddress, sys
-net = ipaddress.ip_network(sys.argv[1], strict=False)
+try:
+    net = ipaddress.ip_network(sys.argv[1], strict=sys.argv[2] == "strict")
+except ValueError:
+    sys.exit(1)
 if net.version != 4:
     sys.exit(1)
 print(net)
+PY
+}
+
+# The extra elements of the no_forward_v4 set (", net, net"): merged, with
+# the always-present 169.254.0.0/16 cut out (an interval set rejects
+# overlapping elements). Arguments: networks already checked strictly.
+no_forward_elements() {
+  "$PYTHON" - "$@" <<'PY'
+import ipaddress, sys
+link_local = ipaddress.ip_network("169.254.0.0/16")
+extra = []
+nets = [ipaddress.ip_network(item, strict=True) for item in sys.argv[1:]]
+for net in ipaddress.collapse_addresses(nets):
+    if net.subnet_of(link_local):
+        continue
+    if link_local.subnet_of(net):
+        extra.extend(net.address_exclude(link_local))
+    else:
+        extra.append(net)
+print("".join(f", {net}" for net in sorted(extra)))
 PY
 }
 
@@ -486,6 +527,23 @@ if [[ -z "$PORTAL_URL" ]]; then
 fi
 [[ "$PORTAL_URL" =~ $PORTAL_URL_RE ]] || die "invalid portal URL: $PORTAL_URL"
 
+NO_FORWARD_LIST=()
+for net in ${NO_FORWARD_NETS//,/ }; do
+  canon="$(canon_v4_net "$net" strict)" \
+    || die "invalid --no-forward-nets entry (an IPv4 network address is required, e.g. 10.0.0.0/8): $net"
+  NO_FORWARD_LIST+=("$canon")
+done
+NO_FORWARD_ELEMENTS=""
+if (( ${#NO_FORWARD_LIST[@]} )); then
+  NO_FORWARD_ELEMENTS="$(no_forward_elements "${NO_FORWARD_LIST[@]}")"
+fi
+LOCALNET_LIST=()
+for iface in ${ROUTE_LOCALNET_IFS//,/ }; do
+  [[ "$iface" =~ ^[A-Za-z0-9_.:@+-]{1,15}$ ]] \
+    || die "invalid --route-localnet-ifs entry: $iface"
+  LOCALNET_LIST+=("$iface")
+done
+
 if [[ -n "$SSH_SRC" ]] && is_v4 "$SSH_SRC"; then
   if ! "$PYTHON" - "$SSH_SRC" "$PORTAL_NET" <<'PY'
 import ipaddress, sys
@@ -524,6 +582,7 @@ else
 EOF
 fi
 cat <<EOF
+  Never forwarded:     169.254.0.0/16${NO_FORWARD_ELEMENTS}
   Program:             $APP_DIR
   State:               $STATE_DIR
 EOF
@@ -639,13 +698,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# CLIENT_IFS: the interfaces grants may arrive on (DJ-17).
 if [[ $SINGLE_NIC -eq 1 ]]; then
   LAN_PREFIX="# "
+  CLIENT_IFS="\"$WAN_IF\""
 else
   LAN_PREFIX=""
+  CLIENT_IFS="\"$LAN_IF\", \"$WAN_IF\""
 fi
 sed \
   -e "s|__LANONLY__|$LAN_PREFIX|g" \
+  -e "s|__CLIENT_IFS__|$(sed_escape "$CLIENT_IFS")|g" \
   -e "s|__LAN_IF__|$(sed_escape "$LAN_IF")|g" \
   -e "s|__WAN_IF__|$(sed_escape "$WAN_IF")|g" \
   -e "s|__LAN_NET__|$(sed_escape "$LAN_NET")|g" \
@@ -654,6 +717,7 @@ sed \
   -e "s|__FWD_MARK__|$(sed_escape "$FWD_MARK")|g" \
   -e "s|__DROP_LOG_GROUP__|$(sed_escape "$DROP_LOG_GROUP")|g" \
   -e "s|__PROXY__|# |g" \
+  -e "s|__NO_FORWARD_NETS__|$(sed_escape "$NO_FORWARD_ELEMENTS")|g" \
   "$SRC_DIR/deploy/dropjak.nft" > "$TMP_NFT"
 
 if grep -qE '__[A-Z0-9_]+__' "$TMP_NFT"; then
@@ -687,36 +751,76 @@ for distro_conf in /etc/nftables.conf /etc/sysconfig/nftables.conf; do
   fi
 done
 
-note "Enabling IP forwarding"
+note "Enabling IP forwarding and reverse-path filtering"
 # IPv6 is always dropped by the firewall. In two-NIC mode the client LAN must
 # have no other IPv6 router (a rogue router advertisement would give the
 # clients a path around the gateway), so IPv6 is always off on the LAN
 # interface; there is no opt-out. A dot in the name (VLAN) would split the
 # dotted key, so the slash form is used then.
+# The sysctl key of an IPv4 interface setting (slash form for a VLAN name).
+ipv4_conf_key() {
+  if [[ "$1" == *.* ]]; then
+    printf 'net/ipv4/conf/%s/%s' "$1" "$2"
+  else
+    printf 'net.ipv4.conf.%s.%s' "$1" "$2"
+  fi
+}
+# Strict reverse-path filtering on the client-facing interfaces (DJ-17).
+if [[ $SINGLE_NIC -eq 1 ]]; then
+  RP_FILTER_IFS=("$WAN_IF")
+else
+  RP_FILTER_IFS=("$LAN_IF" "$WAN_IF")
+fi
+# Migration: an older docker/setup-host.sh run wrote route_localnet on "all"
+# into the same file. It is never set there any more (DJ-04).
+OLD_ALL_LOCALNET=0
+if [[ -r "$SYSCTL_FILE" ]] && grep -Eq '^[[:space:]]*net[./]ipv4[./]conf[./]all[./]route_localnet[[:space:]]*=[[:space:]]*1' "$SYSCTL_FILE"; then
+  OLD_ALL_LOCALNET=1
+fi
+RP_FILTER_LINES=""
+for iface in "${RP_FILTER_IFS[@]}"; do
+  RP_FILTER_LINES+="$(ipv4_conf_key "$iface" rp_filter) = 1"$'\n'
+done
+LOCALNET_LINES=""
+for iface in "${LOCALNET_LIST[@]}"; do
+  LOCALNET_LINES+="$(ipv4_conf_key "$iface" route_localnet) = 1"$'\n'
+done
 if [[ $SINGLE_NIC -eq 0 ]]; then
   if [[ "$LAN_IF" == *.* ]]; then
     LAN_IPV6_KEY="net/ipv6/conf/${LAN_IF}/disable_ipv6"
   else
     LAN_IPV6_KEY="net.ipv6.conf.${LAN_IF}.disable_ipv6"
   fi
-  cat > "$SYSCTL_FILE" <<EOF
-# Dropjak: the machine forwards traffic as a router.
-net.ipv4.ip_forward = 1
-# IPv6 is always dropped; no IPv6 on the client LAN interface (no opt-out).
-$LAN_IPV6_KEY = 1
-EOF
+  IPV6_LINES="# IPv6 is always dropped; no IPv6 on the client LAN interface (no opt-out).
+$LAN_IPV6_KEY = 1"
 else
-  cat > "$SYSCTL_FILE" <<EOF
+  IPV6_LINES="# Single-NIC mode: there is no separate client LAN interface; IPv6 is
+# dropped by the firewall (which has no IPv6 forwarding path)."
+fi
+cat > "$SYSCTL_FILE" <<EOF
 # Dropjak: the machine forwards traffic as a router.
 net.ipv4.ip_forward = 1
-# Single-NIC mode: there is no separate client LAN interface; IPv6 is
-# dropped by the firewall (which has no IPv6 forwarding path).
+# Strict reverse-path filtering on the client-facing interfaces.
+${RP_FILTER_LINES}# Input port proxies with a 127.0.0.1 target: route_localnet only on their
+# interfaces (--route-localnet-ifs), never on "all".
+${LOCALNET_LINES}${IPV6_LINES}
 EOF
-fi
 if command -v sysctl >/dev/null 2>&1; then
   sysctl -q -w net.ipv4.ip_forward=1 >/dev/null
 else
   printf '1\n' > /proc/sys/net/ipv4/ip_forward
+fi
+for iface in "${RP_FILTER_IFS[@]}"; do
+  printf '1\n' > "/proc/sys/net/ipv4/conf/${iface}/rp_filter" 2>/dev/null \
+    || warn "cannot set rp_filter on ${iface} right now; it will be after a reboot."
+done
+for iface in "${LOCALNET_LIST[@]}"; do
+  printf '1\n' > "/proc/sys/net/ipv4/conf/${iface}/route_localnet" 2>/dev/null \
+    || warn "cannot set route_localnet on ${iface} right now; it will be after a reboot."
+done
+if (( OLD_ALL_LOCALNET )); then
+  printf '0\n' > /proc/sys/net/ipv4/conf/all/route_localnet 2>/dev/null || true
+  warn "route_localnet is no longer set on \"all\"; list the interfaces of input port proxies with a 127.0.0.1 target in --route-localnet-ifs."
 fi
 if [[ $SINGLE_NIC -eq 0 && -w "/proc/sys/net/ipv6/conf/${LAN_IF}/disable_ipv6" ]]; then
   printf '1\n' > "/proc/sys/net/ipv6/conf/${LAN_IF}/disable_ipv6" \
@@ -782,6 +886,11 @@ TMP_FW="$(mktemp)"
 sed -e "s|__NFT_BIN__|$NFT_BIN|g" \
   "$SRC_DIR/deploy/dropjak-firewall.service" > "$TMP_FW"
 install -m 0644 "$TMP_FW" "$FIREWALL_UNIT"
+# Native watchdog (DJ-04): every 10 s, reload the rules if the table is gone.
+sed -e "s|__NFT_BIN__|$NFT_BIN|g" \
+  "$SRC_DIR/deploy/dropjak-firewall-check.service" > "$TMP_FW"
+install -m 0644 "$TMP_FW" "$CHECK_UNIT"
+install -m 0644 "$SRC_DIR/deploy/dropjak-firewall-check.timer" "$CHECK_TIMER"
 
 TMP_UNIT="$(mktemp)"
 sed \
@@ -792,7 +901,7 @@ sed \
   "$SRC_DIR/deploy/dropjak.service" > "$TMP_UNIT"
 install -m 0644 "$TMP_UNIT" "$SYSTEMD_UNIT"
 
-if grep -qE '__[A-Z0-9_]+__' "$SYSTEMD_UNIT" "$FIREWALL_UNIT"; then
+if grep -qE '__[A-Z0-9_]+__' "$SYSTEMD_UNIT" "$FIREWALL_UNIT" "$CHECK_UNIT"; then
   die "an unfilled placeholder remained in the systemd units"
 fi
 
@@ -829,6 +938,8 @@ for hv_set in allowed_v4 allowed_tcp allowed_udp allowed_icmp; do
   "$NFT_BIN" list set inet hatarvedelem "$hv_set" >/dev/null \
     || die "set $hv_set cannot be found after the service started"
 done
+systemctl enable --now "${FIREWALL_SERVICE}-check.timer" >/dev/null \
+  || warn "the firewall check timer could not be enabled"
 
 if ! systemctl restart "$SERVICE"; then
   warn "the service did not start; log:"
@@ -873,6 +984,7 @@ fi
 if command -v restorecon >/dev/null 2>&1; then
   restorecon -R "$APP_DIR" "$STATE_DIR" >/dev/null 2>&1 || true
   restorecon "$NFT_FILE" "$SYSTEMD_UNIT" "$FIREWALL_UNIT" \
+    "$CHECK_UNIT" "$CHECK_TIMER" \
     >/dev/null 2>&1 || true
 fi
 

@@ -1,0 +1,16 @@
+[Unit]
+Description=Dropjak — reload the firewall rules if the nftables table is gone
+Documentation=file:///opt/hatarvedelem/README.md
+# Started every 10 seconds by dropjak-firewall-check.timer (native install).
+# A manual `nft delete table inet hatarvedelem` or a foreign `flush ruleset`
+# would otherwise leave the host without the Dropjak rules until the next
+# boot; dropjak-firewall.service only follows nftables.service restarts.
+# The portal notices the reloaded table and refills its chains and sets.
+After=dropjak-firewall.service
+
+[Service]
+Type=oneshot
+# The same test as the Docker watchdog: a forward chain without its MAC
+# binding rules means a missing table or flushed chains.
+ExecStart=/bin/sh -c '__NFT_BIN__ list chain inet hatarvedelem forward 2>/dev/null | grep -q @client_mac || { echo "the Dropjak nftables table is missing or incomplete; reloading"; systemctl reload-or-restart dropjak-firewall.service; }'
+NoNewPrivileges=yes

@@ -101,6 +101,29 @@ raise SystemExit(0 if network.version == int(sys.argv[1]) else 1)
 PY
 }
 
+no_forward_elements() {
+    # $@: IPv4 networks already checked with valid_network. Prints the extra
+    # elements of the no_forward_v4 set as ", net, net" (empty if none). An
+    # interval set rejects overlapping elements, so the networks are merged
+    # and the always-present 169.254.0.0/16 is cut out of them.
+    "$PYTHON" - "$@" <<'PY'
+import ipaddress
+import sys
+
+link_local = ipaddress.ip_network("169.254.0.0/16")
+nets = [ipaddress.ip_network(item, strict=True) for item in sys.argv[1:]]
+extra = []
+for net in ipaddress.collapse_addresses(nets):
+    if net.subnet_of(link_local):
+        continue
+    if link_local.subnet_of(net):
+        extra.extend(net.address_exclude(link_local))
+    else:
+        extra.append(net)
+print("".join(f", {net}" for net in sorted(extra)))
+PY
+}
+
 valid_port() {
     case "$1" in
         "" | *[!0-9]*) return 1 ;;
@@ -235,12 +258,15 @@ render_ruleset() {
         # side, and the portal is reached by source-IP matching. Every
         # __LANONLY__ template line becomes a comment.
         LAN_PREFIX="# "
+        # The interfaces grants may arrive on (DJ-17): the WAN only.
+        CLIENT_IFS="\"$HV_WAN_IF\""
         if [ -n "$HV_LAN_IF" ] || [ -n "$HV_LAN_NET" ]; then
             log "single-NIC mode: HV_LAN_IF/HV_LAN_NET are set but ignored ($HV_LAN_IF / $HV_LAN_NET)"
         fi
         log "single-NIC mode (HV_SINGLE_NIC=1): DHCP server, LAN DNS, HTTP captive redirect, masquerade, MAC binding and the LAN input block are disabled"
     else
         LAN_PREFIX=""
+        CLIENT_IFS="\"$HV_LAN_IF\", \"$HV_WAN_IF\""
         [ -n "$HV_LAN_IF" ] || die "missing environment variable: HV_LAN_IF (set HV_SINGLE_NIC=1 for a host with a single NIC)"
         [ -n "$HV_LAN_NET" ] || die "missing environment variable: HV_LAN_NET (set HV_SINGLE_NIC=1 for a host with a single NIC)"
         valid_ifname "$HV_LAN_IF" || die "invalid HV_LAN_IF: $HV_LAN_IF"
@@ -265,6 +291,29 @@ render_ruleset() {
     # The portal and the drop-log listener read the same value.
     export HV_FWD_MARK HV_DROP_LOG_GROUP
 
+    # Extra destinations the gateway never forwards to (DJ-02): strict IPv4
+    # networks, comma or space separated. An invalid entry is reported and
+    # skipped instead of stopping the container (a crash loop would leave
+    # the host behind the boot table); 169.254.0.0/16 always stays.
+    _no_forward=""
+    for _net in $(printf '%s' "${HV_NO_FORWARD_NETS:-}" | tr ',' ' '); do
+        if valid_network 4 "$_net"; then
+            _no_forward="$_no_forward $_net"
+        else
+            log "ERROR: invalid HV_NO_FORWARD_NETS entry (an IPv4 network address is required, e.g. 10.0.0.0/8): $_net; skipped"
+        fi
+    done
+    NO_FORWARD_ELEMENTS=""
+    if [ -n "$_no_forward" ]; then
+        # shellcheck disable=SC2086 # one argument per network
+        NO_FORWARD_ELEMENTS=$(no_forward_elements $_no_forward) \
+            || NO_FORWARD_ELEMENTS=""
+        case "$NO_FORWARD_ELEMENTS" in
+            *[!0-9./,\ ]*) NO_FORWARD_ELEMENTS="" ;;
+        esac
+        log "never forwarded besides 169.254.0.0/16:${NO_FORWARD_ELEMENTS#,}"
+    fi
+
     # The proxy 80/443 accept rules only live when HV_PROXY=1;
     # otherwise they remain as comments in the filled-in file.
     if [ "$(env_bool HV_PROXY 0)" = "1" ]; then
@@ -285,6 +334,7 @@ render_ruleset() {
     # lines, so no placeholder may remain in either mode.
     sed \
         -e "s|__LANONLY__|$LAN_PREFIX|g" \
+        -e "s|__CLIENT_IFS__|$CLIENT_IFS|g" \
         -e "s|__LAN_IF__|$HV_LAN_IF|g" \
         -e "s|__WAN_IF__|$HV_WAN_IF|g" \
         -e "s|__LAN_NET__|$HV_LAN_NET|g" \
@@ -293,6 +343,7 @@ render_ruleset() {
         -e "s|__FWD_MARK__|$HV_FWD_MARK|g" \
         -e "s|__DROP_LOG_GROUP__|$HV_DROP_LOG_GROUP|g" \
         -e "s|__PROXY__|$HV_PROXY_PREFIX|g" \
+        -e "s|__NO_FORWARD_NETS__|$NO_FORWARD_ELEMENTS|g" \
         "$TEMPLATE" >"$RENDERED" || die "cannot fill in the rule template"
 
     chmod 0600 "$RENDERED" || true

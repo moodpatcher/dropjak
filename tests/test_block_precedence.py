@@ -156,14 +156,13 @@ class BlockPrecedenceTemplateTests(unittest.TestCase):
 
         preauth = self.forward.index("jump preauth")
         self.assertLess(block, preauth)
-        # Block must also be evaluated before the container egress accepts.
-        container_accepts = [
-            index
-            for index, rule in enumerate(self.forward)
-            if "172.30.0.2" in rule and rule.endswith(" accept")
-        ]
-        self.assertEqual(len(container_accepts), 3, container_accepts)
-        self.assertLess(block, min(container_accepts))
+        # Block must also be evaluated before the container egress accepts
+        # (the portal-filled container_egress chain, DJ-32).
+        container = self.forward.index("jump container_egress")
+        self.assertLess(block, container)
+        self.assertFalse(
+            [rule for rule in self.forward if "172.30.0.2" in rule]
+        )
 
     # -- input -------------------------------------------------------------
 

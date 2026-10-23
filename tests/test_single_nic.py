@@ -39,7 +39,7 @@ def render(env: dict[str, str]) -> str:
         _function(source, name)
         for name in (
             "env_bool", "valid_ifname", "valid_network", "valid_port",
-            "require_env", "render_ruleset",
+            "require_env", "no_forward_elements", "render_ruleset",
         )
     )
     with tempfile.TemporaryDirectory() as tmp:

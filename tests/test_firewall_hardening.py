@@ -84,17 +84,23 @@ class ForwardTemplateTests(unittest.TestCase):
             r"flags interval\s*\}",
         )
         self.assertIn(
-            "add element inet hatarvedelem no_forward_v4 { 169.254.0.0/16 }",
+            "add element inet hatarvedelem no_forward_v4 "
+            "{ 169.254.0.0/16__NO_FORWARD_NETS__ }",
             NFT,
+        )
+        # Refilled in the same transaction: a network removed from
+        # HV_NO_FORWARD_NETS leaves the set on the next load.
+        self.assertLess(
+            NFT.index("flush set inet hatarvedelem no_forward_v4"),
+            NFT.index("add element inet hatarvedelem no_forward_v4"),
         )
 
     def test_no_forward_drop_precedes_every_accept(self) -> None:
         drop = self.forward.index("ip daddr @no_forward_v4 drop")
         self.assertLess(drop, first_accept(self.forward))
         self.assertLess(drop, self.forward.index("jump preauth"))
-        # The container exception cannot reach it either.
-        container = first(self.forward, "ip saddr 172.30.0.2 udp dport 53")
-        self.assertLess(drop, container)
+        # The container egress exceptions cannot reach it either.
+        self.assertLess(drop, self.forward.index("jump container_egress"))
 
     def test_bridges_and_wan_to_lan_need_dnat(self) -> None:
         for rule in (
@@ -297,8 +303,17 @@ class Ipv6DropTests(unittest.TestCase):
                               if script is INSTALL else
                               '"net/ipv6/conf/$LAN_IF/disable_ipv6"', script)
                 # The key goes into the dropjak sysctl.d file, unconditionally.
-                block = script[re.search(r'cat ?> ?"\$SYSCTL_FILE"', script).start():]
-                block = block[:block.index("EOF\n", block.index("\n") + 1)]
+                if script is INSTALL:
+                    block = script[re.search(r'cat ?> ?"\$SYSCTL_FILE"', script).start():]
+                    block = block[:block.index("EOF\n", block.index("\n") + 1)]
+                    # install.sh builds the mode-dependent IPv6 lines first.
+                    self.assertIn("${IPV6_LINES}", block)
+                    start = script.index('  IPV6_LINES="')
+                    block = script[start:script.index("\nelse\n", start)]
+                else:
+                    # setup-host.sh writes the file from a { ... } group.
+                    end = script.index('} >"$SYSCTL_FILE"')
+                    block = script[script.rindex("\n{\n", 0, end):end]
                 self.assertIn("$LAN_IPV6_KEY = 1", block)
                 # No opt-out variable.
                 self.assertNotRegex(script, r"HV_\w*IPV6")

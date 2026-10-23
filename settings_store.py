@@ -132,6 +132,26 @@ MAX_TUNNEL_SERVICES = 64
 TUNNEL_SUBNET = ipaddress.IPv4Network("10.77.0.0/24")
 TUNNEL_SERVER_ADDRESS = "10.77.0.1"
 TUNNEL_DEFAULT_PORT = 51820
+
+
+def _tunnel_sync_port() -> int:
+    """TCP port of the agent sync listener, bound to 10.77.0.1 only (DJ-15).
+
+    HV_TUNNEL_SYNC_PORT, by default the portal port + 1. It can never be the
+    portal port itself: the portal listens on every address.
+    """
+    default = PORTAL_PORT + 1 if PORTAL_PORT < 65535 else PORTAL_PORT - 1
+    raw = os.environ.get("HV_TUNNEL_SYNC_PORT", "").strip()
+    try:
+        port = int(raw) if raw else default
+    except ValueError:
+        return default
+    if not 1 <= port <= 65535 or port == PORTAL_PORT:
+        return default
+    return port
+
+
+TUNNEL_SYNC_PORT = _tunnel_sync_port()
 # The effective (per-port) entries of a port mapping, a service and an agent
 # may also expand to at most this many ports.
 MAX_TUNNEL_PORTS = 256
@@ -565,6 +585,157 @@ def _port_proxies(raw) -> list[dict]:
             keys.add(key)
         entries.append(entry)
     return entries
+
+
+# Container egress (DJ-32): outbound exceptions of single containers on a
+# Docker bridge. The forward chain is fail-closed, so a container that must
+# reach the internet (DNS, package or game-server downloads) needs one.
+MAX_CONTAINER_EGRESS = 16
+# A bridge name, or a name prefix ending in "*" (nft iifname wildcard), for
+# Docker networks whose bridge is re-created with a new br-<id> name.
+_BRIDGE_RE = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9_.:@+-]{0,14}|[A-Za-z0-9_.:@+-]{0,13}\*)$"
+)
+# Settings files written before the container_egress key existed: the
+# template used to carry this exception for the Minecraft container on
+# its dedicated 172.30.0.0/24 Docker network. Such a file loads with this
+# entry, so the container keeps working after the upgrade; the bridge is
+# the br-* pattern because the Docker network's br-<id> name is not known.
+LEGACY_CONTAINER_EGRESS = (
+    {
+        "id": "minecraft", "label": "Minecraft", "address": "172.30.0.2",
+        "bridge": "br-*", "tcp": [53, 80, 443], "udp": [53], "enabled": True,
+    },
+)
+
+
+def _env_network(name: str):
+    try:
+        return ipaddress.IPv4Network(
+            os.environ.get(name, "").strip(), strict=False
+        )
+    except ValueError:
+        return None
+
+
+def _egress_ports(raw, field: str) -> list[int]:
+    """A container egress port list; empty is allowed (the other protocol)."""
+    if raw in (None, ""):
+        return []
+    if not isinstance(raw, list):
+        raise SettingsError(f"container egress: {field}: a list is required")
+    if not raw:
+        return []
+    try:
+        return _normalize_ports(raw)
+    except SettingsError as exc:
+        raise SettingsError(f"container egress: {field}: {exc}") from None
+
+
+def _container_egress_entry(item) -> dict:
+    """Validate and normalize one container egress entry."""
+    if not isinstance(item, dict):
+        raise SettingsError("container egress: the entry must be a JSON object")
+    entry_id = item.get("id")
+    if entry_id in (None, ""):
+        entry_id = secrets.token_hex(4)
+    if not isinstance(entry_id, str) or not _ID_RE.match(entry_id):
+        raise SettingsError("invalid entry ID")
+    label = _text(item.get("label"), "label")
+    raw_address = item.get("address")
+    try:
+        address = ipaddress.IPv4Address(
+            raw_address.strip() if isinstance(raw_address, str) else ""
+        )
+    except ValueError:
+        address = None
+    # Docker allocates bridge networks from private ranges; anything else
+    # (a public, loopback or link-local address) is a typo.
+    if address is None or not any(
+        address in network for network in PROXY_PRIVATE_NETS
+    ):
+        raise SettingsError(
+            "container egress: the address must be a private IPv4 address "
+            "of a container on a Docker bridge (10/8, 172.16/12, 192.168/16)"
+        )
+    # Single-NIC mode ignores HV_LAN_NET (there is no client LAN).
+    single_nic = os.environ.get("HV_SINGLE_NIC", "").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+    lan_net = None if single_nic else _env_network("HV_LAN_NET")
+    if address in TUNNEL_SUBNET or (lan_net is not None and address in lan_net):
+        raise SettingsError(
+            "container egress: the address cannot be in the LAN or the "
+            "tunnel network"
+        )
+    bridge = item.get("bridge")
+    bridge = bridge.strip() if isinstance(bridge, str) else ""
+    if not _BRIDGE_RE.match(bridge):
+        raise SettingsError(
+            "container egress: the bridge must be an interface name (at "
+            "most 15 characters) or a name prefix ending in * (e.g. br-*)"
+        )
+    for name in ("HV_LAN_IF", "HV_WAN_IF"):
+        iface = os.environ.get(name, "").strip()
+        if iface and (
+            bridge == iface
+            or (bridge.endswith("*") and iface.startswith(bridge[:-1]))
+        ):
+            raise SettingsError(
+                "container egress: the bridge cannot be (or match) the LAN "
+                "or WAN interface"
+            )
+    tcp = _egress_ports(item.get("tcp"), "tcp")
+    udp = _egress_ports(item.get("udp"), "udp")
+    if not tcp and not udp:
+        raise SettingsError("container egress: at least one port is required")
+    enabled = item.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise SettingsError("the enabled field must be true/false")
+    return {
+        "id": entry_id, "label": label, "address": str(address),
+        "bridge": bridge, "tcp": tcp, "udp": udp, "enabled": enabled,
+    }
+
+
+def _container_egress(raw) -> list[dict]:
+    """The container egress list; IDs and addresses are unique."""
+    if not isinstance(raw, list):
+        raise SettingsError("container_egress: must be a list")
+    if len(raw) > MAX_CONTAINER_EGRESS:
+        raise SettingsError(
+            f"container_egress: at most {MAX_CONTAINER_EGRESS} entries are "
+            "allowed"
+        )
+    entries: list[dict] = []
+    ids: set[str] = set()
+    addresses: set[str] = set()
+    for item in raw:
+        entry = _container_egress_entry(item)
+        if entry["id"] in ids:
+            raise SettingsError(f"duplicate entry ID: {entry['id']}")
+        if entry["address"] in addresses:
+            raise SettingsError(
+                f"container egress: duplicate address: {entry['address']}"
+            )
+        ids.add(entry["id"])
+        addresses.add(entry["address"])
+        entries.append(entry)
+    return entries
+
+
+def legacy_container_egress() -> list[dict]:
+    """The migrated entry for a settings file without container_egress.
+
+    A file (or an imported bundle) from before the key existed gets the
+    exception the template used to hard-code. If that entry is not valid on
+    this host (its address is inside HV_LAN_NET), the list is empty instead
+    of invalidating the whole file.
+    """
+    try:
+        return _container_egress(copy.deepcopy(list(LEGACY_CONTAINER_EGRESS)))
+    except SettingsError:
+        return []
 
 
 def default_tunnels() -> dict:
@@ -1732,6 +1903,10 @@ def validate_state(data, warnings: list[str] | None = None) -> dict:
             "proxy: a root entry requires a dedicated portal address"
         )
     port_proxies = _port_proxies(data.get("port_proxies", []))
+    if "container_egress" in data:
+        container_egress = _container_egress(data["container_egress"])
+    else:
+        container_egress = legacy_container_egress()
     tunnels = _tunnels(
         data.get("tunnels"), domains, routes, portal_domain
     )
@@ -1755,6 +1930,7 @@ def validate_state(data, warnings: list[str] | None = None) -> dict:
         ),
         # A file without the key (legacy) has no port proxy and no tunnel.
         "port_proxies": port_proxies,
+        "container_egress": container_egress,
         "tunnels": tunnels,
         "preauth": [],
         "block": [],
@@ -1814,6 +1990,7 @@ class SettingsStore:
             "portal_domain": "",
             "portal_challenge": None,
             "port_proxies": [],
+            "container_egress": [],
             "tunnels": default_tunnels(),
             "preauth": [],
             "block": [],
@@ -1844,6 +2021,13 @@ class SettingsStore:
         for warning in warnings:
             # A hand-edited file; the portal writes normalized networks.
             self.log(f"[settings] WARNING: {self.path}: {warning}")
+        if isinstance(raw, dict) and "container_egress" not in raw \
+                and data["container_egress"]:
+            self.log(
+                "[settings] the template's container exception (172.30.0.2, "
+                "TCP 53/80/443, UDP 53) is now the container egress entry "
+                "'minecraft' (bridge br-*); edit it under Admin -> Settings"
+            )
         if isinstance(raw, dict) and "proxy_domains" not in raw \
                 and raw.get("proxy_routes") and not legacy:
             self.log(
@@ -1930,6 +2114,17 @@ class SettingsStore:
         with self._lock:
             data = self._copy_locked()
         data["port_proxies"] = _port_proxies(entries)
+        return validate_state(data)
+
+    def prepare_container_egress(self, entries) -> dict:
+        """Validate the new container egress list (without writing a file).
+
+        The caller applies it to nftables first (Gateway.apply_settings) and
+        only then commits.
+        """
+        with self._lock:
+            data = self._copy_locked()
+        data["container_egress"] = _container_egress(entries)
         return validate_state(data)
 
     def prepare_tunnels(self, tunnels) -> dict:
