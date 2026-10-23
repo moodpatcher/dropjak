@@ -6,9 +6,9 @@
 # traffic even in the early boot phase, before the Docker daemon and the
 # container start:
 #
-#   - /etc/nftables/hatarvedelem-boot.nft  (policy drop on the forward chain)
-#   - /etc/systemd/system/hatarvedelem-boot.service
-#   - /etc/sysctl.d/90-hatarvedelem.conf   (net.ipv4.ip_forward = 1,
+#   - /etc/nftables/dropjak-boot.nft  (policy drop on the forward chain)
+#   - /etc/systemd/system/dropjak-boot.service
+#   - /etc/sysctl.d/90-dropjak.conf   (net.ipv4.ip_forward = 1,
 #     net.ipv4.conf.all.route_localnet = 1 for the input port proxy's
 #     127.0.0.1 destination; the loopback_guard chain drops 127/8 packets
 #     on every non-loopback interface)
@@ -24,19 +24,19 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_DIR=$(cd -- "$SCRIPT_DIR/.." && pwd)
 
-BOOT_NFT=/etc/nftables/hatarvedelem-boot.nft
-BOOT_UNIT=/etc/systemd/system/hatarvedelem-boot.service
-SYSCTL_FILE=/etc/sysctl.d/90-hatarvedelem.conf
+BOOT_NFT=/etc/nftables/dropjak-boot.nft
+BOOT_UNIT=/etc/systemd/system/dropjak-boot.service
+SYSCTL_FILE=/etc/sysctl.d/90-dropjak.conf
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 info() { printf '[dropjak] %s\n' "$*"; }
 
 [ "$(id -u)" -eq 0 ] || die "run as root: sudo $0"
 
-[ -r "$REPO_DIR/deploy/hatarvedelem-boot.nft" ] \
-    || die "missing file: $REPO_DIR/deploy/hatarvedelem-boot.nft"
-[ -r "$REPO_DIR/deploy/hatarvedelem-boot.service" ] \
-    || die "missing file: $REPO_DIR/deploy/hatarvedelem-boot.service"
+[ -r "$REPO_DIR/deploy/dropjak-boot.nft" ] \
+    || die "missing file: $REPO_DIR/deploy/dropjak-boot.nft"
+[ -r "$REPO_DIR/deploy/dropjak-boot.service" ] \
+    || die "missing file: $REPO_DIR/deploy/dropjak-boot.service"
 
 # ------------------------------------------------------------- installing nft
 
@@ -68,17 +68,28 @@ info "nft: $NFT_BIN"
 # --------------------------------------------------------------- files
 
 install -d -m 0755 /etc/nftables
-install -m 0600 "$REPO_DIR/deploy/hatarvedelem-boot.nft" "$BOOT_NFT"
+install -m 0600 "$REPO_DIR/deploy/dropjak-boot.nft" "$BOOT_NFT"
 
 TMP_UNIT=$(mktemp)
 trap 'rm -f "$TMP_UNIT"' EXIT
 sed "s|__NFT_BIN__|$NFT_BIN|g" \
-    "$REPO_DIR/deploy/hatarvedelem-boot.service" >"$TMP_UNIT"
+    "$REPO_DIR/deploy/dropjak-boot.service" >"$TMP_UNIT"
 grep -q '__[A-Z0-9_]*__' "$TMP_UNIT" && die "a placeholder remained in the unit"
 install -m 0644 "$TMP_UNIT" "$BOOT_UNIT"
 
 if command -v restorecon >/dev/null 2>&1; then
     restorecon -F "$BOOT_NFT" "$BOOT_UNIT" >/dev/null 2>&1 || true
+fi
+
+# Upgrading from the previous file names: the old unit would load a second
+# copy of the same table at boot. Stopping it does not open the forward chain
+# (the unit has no ExecStop), and the new unit takes over.
+LEGACY_BOOT_UNIT=/etc/systemd/system/hatarvedelem-boot.service
+LEGACY_BOOT_NFT=/etc/nftables/hatarvedelem-boot.nft
+if [ -e "$LEGACY_BOOT_UNIT" ]; then
+    systemctl disable --now hatarvedelem-boot.service >/dev/null 2>&1 || true
+    rm -f "$LEGACY_BOOT_UNIT" "$LEGACY_BOOT_NFT"
+    info "removed the legacy hatarvedelem-boot unit"
 fi
 
 # --------------------------------------------------------------- sysctl
@@ -115,15 +126,15 @@ systemctl daemon-reload
 # already connected. In that case we only enable it; it takes effect at the
 # next boot.
 if systemctl is-active --quiet docker.service 2>/dev/null; then
-    systemctl enable hatarvedelem-boot.service >/dev/null
+    systemctl enable dropjak-boot.service >/dev/null
     info "Docker is already running: the boot table is not loaded now, so that traffic is not interrupted."
     info "it will take effect before Docker on the next reboot."
 else
     info "loading the early boot protection: forwarding is blocked and host SSH (TCP 22) is closed."
     "$NFT_BIN" -c -f "$BOOT_NFT" || die "invalid boot rule file"
-    systemctl enable --now hatarvedelem-boot.service
-    systemctl is-active --quiet hatarvedelem-boot.service \
-        || die "hatarvedelem-boot.service did not start"
+    systemctl enable --now dropjak-boot.service
+    systemctl is-active --quiet dropjak-boot.service \
+        || die "dropjak-boot.service did not start"
     info "early forward blocking is active."
     # The boot table drops every inbound TCP 22, including the SSH session that
     # started this script. Keep that one source address reachable so the
@@ -152,7 +163,7 @@ for svc in firewalld ufw; do
     if systemctl is-active --quiet "$svc" 2>/dev/null; then
         info "WARNING: $svc is active on the host. Our nftables tables work"
         info "         independently of it, but other Docker containers' forwarded"
-        info "         traffic may also be affected by the hatarvedelem rules. A dedicated gateway is recommended."
+        info "         traffic may also be affected by the Dropjak rules. A dedicated gateway is recommended."
     fi
 done
 

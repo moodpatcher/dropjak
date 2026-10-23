@@ -13,8 +13,8 @@ Conflicts=shutdown.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=__NFT_BIN__ -f /etc/nftables/hatarvedelem-boot.nft
-ExecReload=__NFT_BIN__ -f /etc/nftables/hatarvedelem-boot.nft
+ExecStart=__NFT_BIN__ -f /etc/nftables/dropjak-boot.nft
+ExecReload=__NFT_BIN__ -f /etc/nftables/dropjak-boot.nft
 # Deliberately no ExecStop: stopping must not open the forward chain.
 # Removal is a deliberate operation:
 #   nft delete table inet hatarvedelem_boot

@@ -20,7 +20,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-NFT_TEMPLATE = ROOT / "deploy" / "hatarvedelem.nft"
+NFT_TEMPLATE = ROOT / "deploy" / "dropjak.nft"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 

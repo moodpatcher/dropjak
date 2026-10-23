@@ -8,10 +8,11 @@
 # the VM's forward chain. Therefore there is no ports: mapping, and the portal
 # listens on the host's PORT port (8100 by default).
 services:
-  hatarvedelem:
+  dropjak:
+    container_name: dropjak
     build:
       context: .
-    image: hatarvedelem:2
+    image: dropjak:2
     restart: unless-stopped
     network_mode: host
     # Deliberately no init: true. tini would run as root, but without CAP_KILL
@@ -37,7 +38,7 @@ services:
 
     # ip_forward must be enabled on the HOST. We deliberately do not use the
     # compose sysctls setting: with host networking, runc rejects net.* sysctls.
-    # docker/setup-host.sh permanently records it in /etc/sysctl.d/90-hatarvedelem.conf.
+    # docker/setup-host.sh permanently records it in /etc/sysctl.d/90-dropjak.conf.
 
     environment:
       HV_LAN_IF: ${HV_LAN_IF:-}
@@ -144,7 +145,7 @@ services:
       HV_NFT_SET: allowed_v4
 
     volumes:
-      - hatarvedelem-state:/var/lib/hatarvedelem
+      - dropjak-state:/var/lib/hatarvedelem
       # The Caddy admin socket; only these two containers mount it.
       - caddy-admin:/run/caddy-admin
       # The host timezone (the challenge "daily" condition uses local midnight;
@@ -171,7 +172,7 @@ services:
     logging:
       driver: journald
       options:
-        tag: hatarvedelem
+        tag: dropjak
 
   # Portal-protected subdomain proxy with automatic HTTPS. Only starts with
   # the COMPOSE_PROFILES=proxy setting; HV_PROXY=1 is also needed to open
@@ -180,6 +181,7 @@ services:
   # only through the Unix socket on the caddy-admin volume (no TCP port); the
   # portal requests the stop through it, which restart: unless-stopped restarts.
   caddy:
+    container_name: dropjak-caddy
     image: caddy:2.10.2-alpine
     profiles: ["proxy"]
     restart: unless-stopped
@@ -199,15 +201,18 @@ services:
       - caddy-config:/config
       - caddy-admin:/run/caddy-admin
     depends_on:
-      hatarvedelem:
+      dropjak:
         condition: service_healthy
     logging:
       driver: journald
       options:
-        tag: hatarvedelem-caddy
+        tag: dropjak-caddy
 
 volumes:
-  hatarvedelem-state:
+  # Fixed name: the volume must stay dropjak-state regardless of the checkout
+  # directory (the migration from the old hatarvedelem-state volume is manual).
+  dropjak-state:
+    name: dropjak-state
   caddy-data:
   caddy-config:
   caddy-admin:

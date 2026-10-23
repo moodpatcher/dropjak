@@ -46,15 +46,15 @@ RUN useradd --system --user-group \
 WORKDIR /opt/hatarvedelem
 
 COPY gateway.py server.py droplog.py settings_store.py fail2ban.py tunnel.py index.html icon.png blocked.png unauthorized.png sus.png ok.png services.json VERSION ./
-COPY deploy/hatarvedelem.nft ./deploy/hatarvedelem.nft
+COPY deploy/dropjak.nft ./deploy/dropjak.nft
 # The table providing early boot protection: the set-flag migration during an
 # upgrade loads it before deleting the old table (fail-closed time window).
-COPY deploy/hatarvedelem-boot.nft ./deploy/hatarvedelem-boot.nft
+COPY deploy/dropjak-boot.nft ./deploy/dropjak-boot.nft
 COPY deploy/tunnel-agent ./tunnel-agent
-COPY docker/entrypoint.sh /usr/local/bin/hatarvedelem-entrypoint
+COPY docker/entrypoint.sh /usr/local/bin/dropjak-entrypoint
 
-RUN chmod 0755 /usr/local/bin/hatarvedelem-entrypoint \
-    && chmod 0755 /opt/hatarvedelem/deploy/hatarvedelem.nft \
+RUN chmod 0755 /usr/local/bin/dropjak-entrypoint \
+    && chmod 0755 /opt/hatarvedelem/deploy/dropjak.nft \
     && chown -R root:root /opt/hatarvedelem
 
 # Port 80 traffic is directed here by the nft redirect; the portal itself does
@@ -64,4 +64,4 @@ EXPOSE 8100
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD ["python3", "-c", "import os,urllib.request,sys; p=os.environ.get('PORT','8100'); sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:%s/api/status' % p, timeout=3).status == 200 else 1)"]
 
-ENTRYPOINT ["/usr/local/bin/hatarvedelem-entrypoint"]
+ENTRYPOINT ["/usr/local/bin/dropjak-entrypoint"]

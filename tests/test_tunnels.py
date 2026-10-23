@@ -744,7 +744,7 @@ class TunnelFirewallTests(unittest.TestCase):
         self.fw._run_script = self.scripts.append  # type: ignore[method-assign]
 
     def test_template_chain_and_jump_order(self) -> None:
-        text = (ROOT / "deploy" / "hatarvedelem.nft").read_text(
+        text = (ROOT / "deploy" / "dropjak.nft").read_text(
             encoding="utf-8"
         )
         self.assertIn(f"add chain {T} tunnel_input", text)
@@ -854,7 +854,7 @@ class TunnelFirewallTests(unittest.TestCase):
         # grant is mandatory for the tunnel too, with no preauth bypass.
         self.assertIn(
             "ct original ip saddr . ct original proto-dst @allowed_tcp",
-            (ROOT / "deploy" / "hatarvedelem.nft").read_text(
+            (ROOT / "deploy" / "dropjak.nft").read_text(
                 encoding="utf-8"
             ),
         )

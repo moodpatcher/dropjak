@@ -52,7 +52,7 @@ The document does not contain or quote secrets: there is no `.env` content, pass
 Where the text refers to a file or behavior, the source is the local repository. Where it describes live status, that is a fact of the 2026-10-21 snapshot. Where the two may differ, I indicate it separately.
 
 ### 1. Executive summary
-The Dropjak (internally and in the file names: **hatarvedelem**) is a Linux captive-portal-type network entry gateway. The network is **closed** by default: a client receives traffic only after logging in on the portal and then, in a second step, selecting one or more access rules and a duration specified in whole hours. The authorization is bound to the client's IPv4 address and MAC address and is implemented via a kernel-side nftables set. On expiry or logout the access ceases.
+The Dropjak is a Linux captive-portal-type network entry gateway. The network is **closed** by default: a client receives traffic only after logging in on the portal and then, in a second step, selecting one or more access rules and a duration specified in whole hours. The authorization is bound to the client's IPv4 address and MAC address and is implemented via a kernel-side nftables set. On expiry or logout the access ceases.
 
 The system's main characteristics:
 
@@ -83,7 +83,7 @@ _This section records the live snapshot of 2026-10-21; the document header and t
 | Operating system | Debian 13 | LIVE (snapshot) |
 | Docker Engine | 26.1.5 | LIVE (snapshot) |
 | Project path | `/root/hatarvedelem` | LIVE |
-| State | Docker volume (`hatarvedelem-state`) | LIVE |
+| State | Docker volume (`dropjak-state`) | LIVE |
 | Portal | `http://88.198.151.195:8100/` | LIVE, HTTP 200 |
 | API | `/api/status` → `ok: true`, `version: 3.3.0` | LIVE |
 | Running image | `sha256:55b1b218d361c7a2451d4d0c0b90a7199dfd189591fff401a65d2ba7be90bc97` | LIVE (snapshot) |
@@ -174,7 +174,7 @@ The container does not operate in its own network namespace: it must reach the h
 | `index.html` | Complete single-page portal and admin UI, in three languages. |
 
 #### 3.3. Startup sequence
-1. On the host, `hatarvedelem-boot.service`, installed by `docker/setup-host.sh`, loads early a separate `inet hatarvedelem_boot` table: `forward` policy drop, and blocking host SSH (`tcp dport 22`) until the final rules are loaded.
+1. On the host, `dropjak-boot.service`, installed by `docker/setup-host.sh`, loads early a separate `inet hatarvedelem_boot` table: `forward` policy drop, and blocking host SSH (`tcp dport 22`) until the final rules are loaded.
 2. The Docker daemon starts, then the container.
 3. `entrypoint.sh` checks the mandatory env values (`HV_LAN_IF`, `HV_WAN_IF`, `HV_LAN_NET`, `HV_PORTAL_NET`), renders the template, and loads the `inet hatarvedelem` table.
 4. The entrypoint flushes the dynamic sets so that no authorization remains without a session. `host_service_tcp` / `host_service_udp` are intentionally not flushed.
@@ -293,7 +293,7 @@ These are not open bugs, but deliberately documented residual risks:
 
 ### 6. Data model
 #### 6.1. State files
-In the Docker installation, the `hatarvedelem-state` volume appears at `/var/lib/hatarvedelem`. In the native installation the same is the `StateDirectory`.
+In the Docker installation, the `dropjak-state` volume appears at `/var/lib/hatarvedelem`. In the native installation the same is the `StateDirectory`.
 
 | File | Content | Format / mode |
 |---|---|---|
@@ -635,7 +635,7 @@ chmod 600 .env
 sudo ./docker/setup-host.sh
 docker compose up -d --build
 docker compose ps
-docker compose logs -f hatarvedelem
+docker compose logs -f dropjak
 ```
 
 The `.env` and, above all, the admin account come **before** `setup-host.sh`:
@@ -643,7 +643,7 @@ once the firewall is loaded, the only way in is the portal, and without an admin
 account the portal's admin interface is unreachable and host SSH stays closed.
 
 `setup-host.sh` installs nftables, loads the early boot protection, installs the
-`hatarvedelem-boot.service` unit, and sets `net.ipv4.ip_forward=1`. The boot
+`dropjak-boot.service` unit, and sets `net.ipv4.ip_forward=1`. The boot
 protection closes host SSH (TCP 22) for every source; the script keeps the SSH
 session that started it reachable until the container loads its rules. After
 the first container start the boot table is deleted and the final rules take
@@ -659,7 +659,7 @@ admin, and authorize it from the same IP.
 According to the snapshot, the VM has no `buildx`, and `docker compose build` cannot reach the Debian mirrors because the fail-closed forward chain also blocks the build container's egress. The working procedure:
 
 ```bash
-DOCKER_BUILDKIT=0 docker build --network host -t hatarvedelem:2 .
+DOCKER_BUILDKIT=0 docker build --network host -t dropjak:2 .
 docker compose up -d --force-recreate
 ```
 
@@ -678,13 +678,13 @@ The installer's supported systems: RHEL/AlmaLinux/Rocky/Oracle Linux 8+, Fedora,
 |---|---|
 | `/opt/hatarvedelem` | Python modules, `index.html`, icons, `services.json`, `VERSION`. |
 | `/var/lib/hatarvedelem` | State files (systemd `StateDirectory`). |
-| `/etc/nftables/hatarvedelem.nft` | Rendered rules, `0600`. |
-| `/etc/systemd/system/hatarvedelem.service` | Portal unit. |
-| `/etc/systemd/system/hatarvedelem-firewall.service` | Early firewall unit. |
-| `/etc/systemd/system/hatarvedelem-boot.service` | Docker early boot protection (installed by `setup-host.sh`). |
-| `/etc/sysctl.d/90-hatarvedelem.conf` | `net.ipv4.ip_forward=1`. |
+| `/etc/nftables/dropjak.nft` | Rendered rules, `0600`. |
+| `/etc/systemd/system/dropjak.service` | Portal unit. |
+| `/etc/systemd/system/dropjak-firewall.service` | Early firewall unit. |
+| `/etc/systemd/system/dropjak-boot.service` | Docker early boot protection (installed by `setup-host.sh`). |
+| `/etc/sysctl.d/90-dropjak.conf` | `net.ipv4.ip_forward=1`. |
 
-The `hatarvedelem-firewall.service` has `DefaultDependencies=no`, `Before=network-pre.target`, and intentionally no `ExecStop`: stopping the service does not open the network. The portal unit depends on the firewall unit with `Requires=`, and uses `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`, `RestrictAddressFamilies` and similar hardening.
+The `dropjak-firewall.service` has `DefaultDependencies=no`, `Before=network-pre.target`, and intentionally no `ExecStop`: stopping the service does not open the network. The portal unit depends on the firewall unit with `Requires=`, and uses `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`, `RestrictAddressFamilies` and similar hardening.
 
 The `deploy/hv` helper is **not** installed by `install.sh`; it is made for Docker Compose and uses a hard-coded `/root/hatarvedelem` path.
 
@@ -693,25 +693,43 @@ For Docker:
 
 ```bash
 git pull
-DOCKER_BUILDKIT=0 docker build --network host -t hatarvedelem:2 .
+DOCKER_BUILDKIT=0 docker build --network host -t dropjak:2 .
 docker compose up -d --force-recreate
 ```
 
+Migrating from the old resource names: the image was `hatarvedelem:2`, the
+volume `hatarvedelem-state`, and the container, unit and file names started
+with `hatarvedelem`. The nftables table name deliberately stays
+`inet hatarvedelem`. Stop the old project first (it still owns the old
+container and volume), copy the state, then start the new one:
+
+```bash
+docker compose down
+docker volume create dropjak-state
+docker run --rm \
+  -v "$(docker volume ls -q | grep -m1 '_hatarvedelem-state$')":/from \
+  -v dropjak-state:/to busybox cp -a /from/. /to/
+docker compose up -d --force-recreate
+```
+
+On a native installation `install.sh` installs `dropjak.service` and
+`dropjak-firewall.service`, and disables and removes the old units.
+
 After the recreate the dynamic sets are flushed, so every client must log in and authorize again. The state volume is preserved. In a native installation, re-running `install.sh` updates the files and units; reloading the firewall does not flush the dynamic sets, but the portal's startup flush does.
 
-Before 3.15.1 the upgrade could get stuck: the entrypoint, alongside the old sets without the interval flag, first checked the rendered rules with `nft -c`, so the migration did not even start, the container went into a crash loop, and the `input` chain remained without rules, with `policy drop` (the host became unreachable on every port, including the portal; it worked after a restart, because by then the old table was gone). From 3.15.1 the migration check and the deletion of the old table run before validation; before deletion the early boot protection `deploy/hatarvedelem-boot.nft` (part of the image) is loaded, and it is deleted only after the final rules have loaded successfully. If validation or loading fails after the deletion, the host remains under boot protection, in a fail-closed state.
+Before 3.15.1 the upgrade could get stuck: the entrypoint, alongside the old sets without the interval flag, first checked the rendered rules with `nft -c`, so the migration did not even start, the container went into a crash loop, and the `input` chain remained without rules, with `policy drop` (the host became unreachable on every port, including the portal; it worked after a restart, because by then the old table was gone). From 3.15.1 the migration check and the deletion of the old table run before validation; before deletion the early boot protection `deploy/dropjak-boot.nft` (part of the image) is loaded, and it is deleted only after the final rules have loaded successfully. If validation or loading fails after the deletion, the host remains under boot protection, in a fail-closed state.
 
 #### 10.5. Backup and restore
 ```bash
-VOLUME=$(docker volume ls -q | grep -m1 'hatarvedelem-state')
+VOLUME=$(docker volume ls -q | grep -m1 'dropjak-state')
 docker run --rm \
   -v "$VOLUME":/data \
   -v "$PWD":/backup \
   busybox tar czf /backup/dropjak-state.tar.gz -C /data .
 ```
 
-The volume name depends on the Compose project name; on this VM the project name
-is `hatarvedelem`, so the volume is typically `hatarvedelem_hatarvedelem-state`. The backup contains the `users.json`, `groups.json`, `rules.json`, `audit.jsonl`, `drops.jsonl`, `fail2ban.json`, `firewall-settings.json` files. These may also contain personal data (email) and TOTP secrets, so the backup must be protected as carefully as the live volume.
+The compose file pins the volume name to `dropjak-state`, so `docker volume ls`
+shows exactly that name. The backup contains the `users.json`, `groups.json`, `rules.json`, `audit.jsonl`, `drops.jsonl`, `fail2ban.json`, `firewall-settings.json` files. These may also contain personal data (email) and TOTP secrets, so the backup must be protected as carefully as the live volume.
 
 #### 10.6. SSH lockout and recovery
 After installation or restart, host SSH may be closed. Recovery paths:
@@ -873,8 +891,8 @@ The complete, detailed entries are in the [7. Changelog](#valtozasnaplo) section
 | `install.sh`, `.env.example`, `.dockerignore`, `.gitignore` | Native installer, configuration sample, Docker and git exclusions. |
 | `docker/entrypoint.sh` | Env validation, rendering, nft, set flush, boot table, Docker guard, watchdog, setpriv. |
 | `docker/setup-host.sh` | Boot nft/unit and `ip_forward` on the host. |
-| `deploy/hatarvedelem.nft` | Complete nftables template with seven placeholders. |
-| `deploy/hatarvedelem.service`, `deploy/hatarvedelem-firewall.service`, `deploy/hatarvedelem-boot.service`, `deploy/hatarvedelem-boot.nft` | Systemd units and the early boot table. |
+| `deploy/dropjak.nft` | Complete nftables template with seven placeholders. |
+| `deploy/dropjak.service`, `deploy/dropjak-firewall.service`, `deploy/dropjak-boot.service`, `deploy/dropjak-boot.nft` | Systemd units and the early boot table. |
 | `deploy/hv`, `DOKUMENTACIO.md` ([2.](#telepites)) | Docker operational helper and local guide. |
 | `DOKUMENTACIO.md` ([3.6](#audit-naplo), [3.3](#host-szabalyok)) | Audit and host/SSH rules. |
 | `DOKUMENTACIO.md` ([3.5](#propagacios-matrix), [3.4](#gyujtoszabalyok)) | Invariants/mutation matrix and collection semantics. |
@@ -893,7 +911,7 @@ The list of open tasks lives not in the repo but in the developer's home
 ```bash
 # Docker
 docker compose ps
-docker compose logs -f hatarvedelem
+docker compose logs -f dropjak
 curl -fsS http://127.0.0.1:8100/api/status | python3 -m json.tool
 
 # With the deploy/hv helper (Docker, /root/hatarvedelem)
@@ -923,7 +941,7 @@ The `host_service_tcp` / `host_service_udp` only grow; if a port remains there, 
 #### 15.3. Common errors
 | Symptom | Likely cause | Action |
 |---|---|---|
-| `docker compose build` cannot reach a mirror | The fail-closed forward chain blocks the build container's egress; there is no buildx. | `DOCKER_BUILDKIT=0 docker build --network host -t hatarvedelem:2 .`, then `up -d --force-recreate`. |
+| `docker compose build` cannot reach a mirror | The fail-closed forward chain blocks the build container's egress; there is no buildx. | `DOCKER_BUILDKIT=0 docker build --network host -t dropjak:2 .`, then `up -d --force-recreate`. |
 | SSH interrupted after installation | The startup flush cleared `allowed_input_tcp`. | Portal from the same IP, or provider console, or breakglass. |
 | The portal does not start | Missing mandatory env, faulty CIDR, nft error, state file error. | `docker compose logs`; check `HV_LAN_IF`, `HV_WAN_IF`, `HV_LAN_NET`, `HV_PORTAL_NET`. |
 | The portal is reachable, but the network is not | No valid grant, expired TTL, fail2ban, block, MAC mismatch. | `/api/status`, admin Sessions/Firewall, `nft list set`, `conntrack`. |
@@ -1083,7 +1101,7 @@ kernel timeout. The browser and SSH should start from the same network
 (with a VPN, the same exit IP).
 
 If you have locked yourself out, from the provider console temporarily add the
-line indicated in the comment in the input chain of `deploy/hatarvedelem.nft`, reload
+line indicated in the comment in the input chain of `deploy/dropjak.nft`, reload
 the rules, and then remove it.
 
 ### 2. Service catalog — `services.json`
@@ -1137,7 +1155,7 @@ The mandatory change at first login can be disabled: `hv add alice --no-must-cha
 respectively `hv passwd alice --no-must-change`.
 
 State is in the Docker volume
-(`/var/lib/docker/volumes/hatarvedelem_hatarvedelem-state/_data/`):
+(`/var/lib/docker/volumes/dropjak-state/_data/`):
 `users.json`, `rules.json`, `groups.json`, `audit.jsonl` (and their rotated
 versions). **Do not** edit these by hand — the UI and the CLI manage them.
 The files have 0600 permissions.
@@ -1148,12 +1166,12 @@ The files have 0600 permissions.
 hv backup          # project + full state to: /root/hatarvedelem-backups
 ```
 
-Two archives are created: the project (`hatarvedelem-*.tar.gz`, together
-with `.env`) and the full state (`hatarvedelem-state-*.tar.gz`: users,
+Two archives are created: the project (`dropjak-*.tar.gz`, together
+with `.env`) and the full state (`dropjak-state-*.tar.gz`: users,
 rules, groups, audit log). The directory is `0700`, the files `0600`.
 To restore, stop the container, unpack the project archive under
 `/root`, and the state archive into the
-`/var/lib/docker/volumes/hatarvedelem_hatarvedelem-state/_data/` directory,
+`/var/lib/docker/volumes/dropjak-state/_data/` directory,
 then `hv restart`.
 
 ### Tests
@@ -1173,10 +1191,10 @@ temporarily creates a `claudetest` user, which it deletes at the end.
 | `/root/hatarvedelem/.env` | the live settings (must not be world-readable) |
 | `/root/hatarvedelem/services.json` | scenario descriptions providing the initial rules and the catalog used for port conversion of old rules |
 | `/root/hatarvedelem/README.md` | detailed description, operations, troubleshooting |
-| `/root/hatarvedelem/deploy/hatarvedelem.nft` | the nftables template |
+| `/root/hatarvedelem/deploy/dropjak.nft` | the nftables template |
 | `/root/hatarvedelem-backups/` | backups |
-| `/etc/systemd/system/hatarvedelem-boot.service` | boot protection (fail-closed startup) |
-| `/var/lib/docker/volumes/hatarvedelem_hatarvedelem-state/_data/` | users, rules, groups, audit log |
+| `/etc/systemd/system/dropjak-boot.service` | boot protection (fail-closed startup) |
+| `/var/lib/docker/volumes/dropjak-state/_data/` | users, rules, groups, audit log |
 
 ### If something does not work
 
@@ -1234,7 +1252,7 @@ corrupted record therefore stays pending instead of becoming active.
 
 #### Data model
 
-User records live in `users.json` in the `hatarvedelem-state` volume
+User records live in `users.json` in the `dropjak-state` volume
 (`/var/lib/hatarvedelem/users.json`, mode `0600`). Registration adds two
 stored fields:
 
@@ -1425,7 +1443,7 @@ reset described below).
 
 #### Data model
 
-User records live in `users.json` in the `hatarvedelem-state` volume
+User records live in `users.json` in the `dropjak-state` volume
 (`/var/lib/hatarvedelem/users.json`, mode `0600`). TOTP adds the following
 fields:
 
@@ -1521,7 +1539,7 @@ records the audit event.
 If the admin UI is unavailable, reset from the host:
 
 ```bash
-docker compose exec hatarvedelem python3 /opt/hatarvedelem/server.py \
+docker compose exec dropjak python3 /opt/hatarvedelem/server.py \
   user totp-reset <name>
 ```
 
@@ -1704,7 +1722,7 @@ interface, and whether the host's own firewall is not dropping the packet.
 
 #### Installation
 
-Host rules require the new sets and rules in `deploy/hatarvedelem.nft`. After
+Host rules require the new sets and rules in `deploy/dropjak.nft`. After
 updating the template the container must be rebuilt/restarted; the dynamic
 sets are emptied, so every client must sign in again. Before a production
 deployment, ensure an independent administrative access path (console), and
@@ -2116,7 +2134,7 @@ rows of the table refer to this version.
 
 1. **Fail-closed forward.** The `forward` chain is `policy drop`; only a
    packet matching the dynamic sets and marked with `meta mark` may pass
-   (`deploy/hatarvedelem.nft:172`, `:245-250`); Docker's `DOCKER-USER` chain
+   (`deploy/dropjak.nft:172`, `:245-250`); Docker's `DOCKER-USER` chain
    otherwise drops (`docker/entrypoint.sh:180-239`).
 2. **The password alone never grants access.** A successful login creates
    only an `authorized=False` session (`gateway.py:6211-6285`); permission is
@@ -2167,7 +2185,7 @@ rows of the table refer to this version.
 7. **`host_service_tcp` and `host_service_udp` are an add-only guard set, not
    a grant.** They contain only the host ports ever declared; `sync_host_ports()`
    never deletes from them, and the startup flush also skips them
-   (`deploy/hatarvedelem.nft:80-94`, `gateway.py:3399-3441`, `:3716`). Their
+   (`deploy/dropjak.nft:80-94`, `gateway.py:3399-3441`, `:3716`). Their
    size is 65536, so all at most 65535 valid ports fit, and no guard element
    can silently be lost. The only deleting path is
    `prune_host_service_ports()`, which removes only a port that no persisted
@@ -2401,8 +2419,8 @@ listing or conntrack is unavailable, no port is deleted.
 | Invalid value | The default is `1` (`entrypoint.sh:28-41`) | The default is `True` (`gateway.py:72-80`) | Clean start | PASS |
 | `0` and `HV_ALLOW_STALE_GRANTS_ON_START=1` | Explicit, unsafe opt-in: the flush is skipped (`entrypoint.sh:331-332`) | `stale_allowed`: the flush is skipped, loud log (`gateway.py:6790-6797`) | The old grants may stay alive until the kernel TTL, up to 30 days, without a session | PASS WITH CAVEAT (unsafe opt-in; N5 fixed) |
 | Flush error | `die`, startup stops (`entrypoint.sh:340-341`) | On `FirewallError`: log, audit, exception; startup stops (`gateway.py:6800-6814`) | Fail-closed | PASS |
-| Portal process crash | The container is `restart: unless-stopped` (`docker-compose.yml:15`); in native mode `Restart=on-failure` (`deploy/hatarvedelem.service:39`) | Sessions are lost; the grants remain in the kernel until the TTL | Until restart the old grants are valid without a session | PASS WITH CAVEAT (TTL safety net) |
-| Host restart | The kernel state is cleared; `hatarvedelem-firewall.service` loads the template (`deploy/hatarvedelem-firewall.service:18-21`) | The portal flushes at startup, then reloads fail2ban, the host ports and the settings | Clean state | PASS (runtime assumption: the units are enabled) |
+| Portal process crash | The container is `restart: unless-stopped` (`docker-compose.yml:15`); in native mode `Restart=on-failure` (`deploy/dropjak.service:39`) | Sessions are lost; the grants remain in the kernel until the TTL | Until restart the old grants are valid without a session | PASS WITH CAVEAT (TTL safety net) |
+| Host restart | The kernel state is cleared; `dropjak-firewall.service` loads the template (`deploy/dropjak-firewall.service:18-21`) | The portal flushes at startup, then reloads fail2ban, the host ports and the settings | Clean state | PASS (runtime assumption: the units are enabled) |
 | `HV_SKIP_FIREWALL=1` | Loading the template, the Docker guard and the watchdog are skipped (`entrypoint.sh:392-394`); `env_bool` accepts every true form | The portal's nft calls still run; if the table is missing, the operations fail with an error | No fail-closed guarantee if the table is not loaded | PASS WITH CAVEAT (developer/dangerous opt-in only; N3 fixed) |
 
 `HV_FIREWALL_WATCHDOG` (compose `:123`; `entrypoint.sh:244`) turns the
@@ -2416,7 +2434,7 @@ firewall watchdog off/on; with `0` the watchdog does not run.
   `allowed_input_udp`, `allowed_icmp`, `client_mac`, `banned_v4`
   (`entrypoint.sh:336-338`; `gateway.py:3630-3653`).
 - **Does not flush:** `host_service_tcp`, `host_service_udp` (add-only) and
-  the `breakglass` chain (`deploy/hatarvedelem-firewall.service`).
+  the `breakglass` chain (`deploy/dropjak-firewall.service`).
 - **Reloads:** `fail2ban.sync()` with the saved bans (`gateway.py:6876`,
   `fail2ban.py:1058-1100`); `sync_host_ports()` with the persisted input ports
   (`gateway.py:6854`, `:6576-6666`); `_apply_custom_settings()` with the
@@ -2463,7 +2481,7 @@ does not affect the running process.
   `.env.example:159`) and `HV_SKIP_FIREWALL` (`docker-compose.yml:124`;
   `.env.example:164`) are also available. In native systemd mode the unit
   does not read `.env`, the `Environment=` lines must be modified
-  (`deploy/hatarvedelem.service:16-36`). N5 fixed.
+  (`deploy/dropjak.service:16-36`). N5 fixed.
 
 #### 6. Findings (F1–F11)
 
@@ -3483,19 +3501,19 @@ The proposal: forwarding a domain or subdomain to a port, with automatic SSL, Ca
 ##### 2.1. Network and firewall model
 
 - The Dropjak container runs in `network_mode: host` mode (`docker-compose.yml:16`), with `read_only: true` (`:21`), `cap_drop: ALL`, and receives only `NET_ADMIN`, `NET_BIND_SERVICE`, `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID`, `SETGID` capabilities (`:27-36`). State is in a Docker volume (`:121-122`), the healthcheck polls `/api/status` (`:133-138`).
-- Both the `input` and `forward` chains of the nftables table are `policy drop` (`deploy/hatarvedelem.nft:114-116`, `:133-137`). The `forward` chain has priority -10 so that it runs before Docker's own rules.
+- Both the `input` and `forward` chains of the nftables table are `policy drop` (`deploy/dropjak.nft:114-116`, `:133-137`). The `forward` chain has priority -10 so that it runs before Docker's own rules.
 - The dynamic sets (`allowed_v4`, `allowed_tcp`, `allowed_udp`, `allowed_icmp`, `allowed_input_tcp`, `allowed_input_udp`, `client_mac`) expire with kernel timeouts; every restart clears them (`README.md:21-31`).
-- Pre-auth and block rules live in the `forward` chain and in the `preauth`/`block`/`preauth_nat`/`block_nat` custom chains (`deploy/hatarvedelem.nft:109-112`, `gateway.py:1839-1954`). In the pre-auth WAN direction, they match only DNATed traffic (`ct status dnat`, `gateway.py:1919-1927`).
-- The system examines the pre-DNAT port using `ct original proto-dst` (`deploy/hatarvedelem.nft:198-200`), because Docker's own DNAT may run in the same prerouting stage.
+- Pre-auth and block rules live in the `forward` chain and in the `preauth`/`block`/`preauth_nat`/`block_nat` custom chains (`deploy/dropjak.nft:109-112`, `gateway.py:1839-1954`). In the pre-auth WAN direction, they match only DNATed traffic (`ct status dnat`, `gateway.py:1919-1927`).
+- The system examines the pre-DNAT port using `ct original proto-dst` (`deploy/dropjak.nft:198-200`), because Docker's own DNAT may run in the same prerouting stage.
 - In Docker's `DOCKER-USER` chain, a guard only allows packets marked with `FWD_MARK` and drops everything else (`docker/entrypoint.sh:160-222`). This protects even if the `hatarvedelem` table disappears.
-- From the LAN, TCP 80 is redirected to the portal (`deploy/hatarvedelem.nft:372`); the redirect with the `iifname "__LAN_IF__"` condition matches only the LAN interface.
-- WAN → LAN traffic is masqueraded (`deploy/hatarvedelem.nft:375-377`).
-- IPv6 inbound traffic is dropped by both the `input` and `forward` chains (`deploy/hatarvedelem.nft:147-148`, `:256-257`).
+- From the LAN, TCP 80 is redirected to the portal (`deploy/dropjak.nft:372`); the redirect with the `iifname "__LAN_IF__"` condition matches only the LAN interface.
+- WAN → LAN traffic is masqueraded (`deploy/dropjak.nft:375-377`).
+- IPv6 inbound traffic is dropped by both the `input` and `forward` chains (`deploy/dropjak.nft:147-148`, `:256-257`).
 
 ##### 2.2. Fail2ban and portal behavior
 
-- The `banned_v4` drop in the `forward` chain is before the allowing rules (`deploy/hatarvedelem.nft:168-169`).
-- In the `input` chain, portal acceptance is **before** the ban drop (`deploy/hatarvedelem.nft:279-280`), so that a banned client can also see the ban screen; the ban drop follows (`:281-282`). All other host services and forward traffic are dropped during a ban.
+- The `banned_v4` drop in the `forward` chain is before the allowing rules (`deploy/dropjak.nft:168-169`).
+- In the `input` chain, portal acceptance is **before** the ban drop (`deploy/dropjak.nft:279-280`), so that a banned client can also see the ban screen; the ban drop follows (`:281-282`). All other host services and forward traffic are dropped during a ban.
 - The portal uses the socket peer IP: `_client_ip()` (`server.py:72-76`). There is no `X-Forwarded-For` support.
 - The admin API uses `_admin_guard`, `_origin_ok` (`server.py:93-105`) and a JSON-only body (`server.py:143-163`) for protection; the settings modification pattern is `_admin_settings_action` (`server.py:675-743`): admin guard → origin check → lock → `settings.prepare` → `gw.apply_settings` → audit, on error 400/503, state unchanged.
 - `Gateway.apply_settings()` (`gateway.py:4228-4272`) first applies to nftables, then commits; on a commit error it restores the previous rules. This pattern should be followed for proxy settings too.
@@ -3545,7 +3563,7 @@ Caddy listens on 80/443 in the host network; the portal reaches the `127.0.0.1:2
 
 **Disadvantages:**
 
-- Because of the DNAT for published ports, traffic goes through the `forward` chain; another exception must be inserted between the existing pre-DNAT port matching (`deploy/hatarvedelem.nft:198-200`) and the `DOCKER-USER` guard (`docker/entrypoint.sh:160-222`).
+- Because of the DNAT for published ports, traffic goes through the `forward` chain; another exception must be inserted between the existing pre-DNAT port matching (`deploy/dropjak.nft:198-200`) and the `DOCKER-USER` guard (`docker/entrypoint.sh:160-222`).
 - Caddy cannot reach `127.0.0.1:<published port>`, only the host IP or the container IP, which depends on hairpin/NAT.
 - More moving parts, more failure windows.
 
@@ -3658,7 +3676,7 @@ cloud.example.com {
 3. on success, updating the `proxy_wan` nft chain (see point 5), then atomic commit of `proxy-settings.json`;
 4. on failure of any step, restoring the previous Caddyfile and the previous nft state, state remains unchanged.
 
-At startup Caddy starts after the portal (`depends_on: hatarvedelem: condition: service_healthy`), so it is not yet available during `prepare()`. Next to `Gateway.start()` (`gateway.py:4274-4279`) there should be a **reconciler thread**: it tries to apply the desired config with exponential backoff, then periodically (e.g. 60 s) checks reachability. Because of Caddy's `/config` autosave, a Caddy restart restores the most recently applied config; the portal only diverges if Caddy was down when the setting changed — this is indicated by the failed apply, and the reconciler catches up. For detailed operation, Caddy's `/data` and `/config` volumes are mandatory.
+At startup Caddy starts after the portal (`depends_on: dropjak: condition: service_healthy`), so it is not yet available during `prepare()`. Next to `Gateway.start()` (`gateway.py:4274-4279`) there should be a **reconciler thread**: it tries to apply the desired config with exponential backoff, then periodically (e.g. 60 s) checks reachability. Because of Caddy's `/config` autosave, a Caddy restart restores the most recently applied config; the portal only diverges if Caddy was down when the setting changed — this is indicated by the failed apply, and the reconciler catches up. For detailed operation, Caddy's `/data` and `/config` volumes are mandatory.
 
 ##### 4.5. UI
 
@@ -3687,7 +3705,7 @@ Since Caddy runs in the host network, WAN 80/443 **arrives at the host's own add
 
 ##### 5.2. New chain
 
-In the template, next to the existing custom chains (`deploy/hatarvedelem.nft:109-112`):
+In the template, next to the existing custom chains (`deploy/dropjak.nft:109-112`):
 
 ```nft
 add chain inet hatarvedelem proxy_wan
@@ -3697,7 +3715,7 @@ Loading the template does **not** clear it (unlike the preauth/block chains); th
 
 ##### 5.3. Insertion point in the input chain
 
-Order is key. In the current input chain, portal acceptance is **before** the ban drop (`deploy/hatarvedelem.nft:279-280`), and the ban drop is `:281-282`. The new jump should go **after line 282**:
+Order is key. In the current input chain, portal acceptance is **before** the ban drop (`deploy/dropjak.nft:279-280`), and the ban drop is `:281-282`. The new jump should go **after line 282**:
 
 ```nft
 # after fail2ban drop: a banned source cannot reach public 80/443 either
@@ -3712,12 +3730,12 @@ add rule inet hatarvedelem proxy_wan iifname "__WAN_IF__" tcp dport 443 accept
 ```
 
 - **Fail2ban precedence:** since the jump is after `banned_v4 drop`, a banned IP cannot reach the public sites either. This is the mandatory invariant; the jump **must not** be placed before line 281. The existing preauth pattern reinforces this: the first rule of the preauth chain is also the ban drop (`gateway.py:1861-1864`).
-- **LAN redirect:** the portal redirect `iifname "__LAN_IF__" ... tcp dport 80 redirect to :__PORT__` (`deploy/hatarvedelem.nft:372`) matches only the LAN interface; it does not affect WAN 80. From the LAN, HTTP still goes to the portal.
+- **LAN redirect:** the portal redirect `iifname "__LAN_IF__" ... tcp dport 80 redirect to :__PORT__` (`deploy/dropjak.nft:372`) matches only the LAN interface; it does not affect WAN 80. From the LAN, HTTP still goes to the portal.
 - **LAN 443:** if internal clients also want to reach the public routes on the public IP (hairpin), an `iifname "__LAN_IF__" tcp dport 443 jump proxy_wan` is also needed; this does not grant more rights, since the same service is public from the WAN anyway. In v1 I recommend this as a switch, **off** by default, and documenting that the portal still answers LAN HTTP.
 - **Pre-auth/block semantics:** these rules live in the `forward` chain and do not affect host-local Caddy. The block list therefore does **not** block the public proxy route; this must be documented, because it can be misleading. The proxy does not need to be added to the pre-auth list.
 - **Docker-USER guard:** unaffected. Host-local 80/443 is input, and Caddy's host → container upstream traffic is locally generated, so it does not pass through the `forward`/`DOCKER-USER` chain. The guard (`docker/entrypoint.sh:160-222`) remains unchanged.
 - **Drop-log/fail2ban behavior:** WAN 80/443 previously generated `input-wan` drop events, and drop-based banning saw port scanners. After this, these packets pass to Caddy, so drop-based ban will not see them. Login brute-force and other drop reasons are unchanged. In phase 2, fail2ban integration can be built from the Caddy access log.
-- **IPv6:** because of the input chain's IPv6 drop (`deploy/hatarvedelem.nft:256-257`), Caddy is reachable only over IPv4. There should be **no** AAAA record in DNS for the proxy hostnames, otherwise IPv6-preferring clients hit a wall. IPv6 is a separate project.
+- **IPv6:** because of the input chain's IPv6 drop (`deploy/dropjak.nft:256-257`), Caddy is reachable only over IPv4. There should be **no** AAAA record in DNS for the proxy hostnames, otherwise IPv6-preferring clients hit a wall. IPv6 is a separate project.
 - **Native installation:** the default `PORT=80` of `install.sh` conflicts with Caddy binding 80. The Caddy integration in v1 assumes Docker compose mode; in native mode the portal must be reconfigured, or Caddy will not start.
 - **Portal outage:** the nft rules remain in the kernel and the public routes continue to live; this is acceptable for public services. When the portal restarts, `prepare()`/`_apply_custom_settings()` reapplies the `proxy_wan` chain from the persisted state; on corrupt state an empty chain (fail-closed).
 
@@ -3726,7 +3744,7 @@ add rule inet hatarvedelem proxy_wan iifname "__WAN_IF__" tcp dport 443 accept
 - If `proxy-settings.json` does not exist or is corrupt: `enabled=false`, empty `proxy_wan` → 80/443 closed due to `policy drop`.
 - If Caddy fails to start, the portal does not open the `proxy_wan` chain even if the state is enabled; the apply step aborts on the Caddy error and the state is not committed.
 - If the portal dies, the rules left in the kernel remain in effect; Caddy serves the last good config. No new route is created.
-- Template reload does not clear the `proxy_wan` chain, just as it does not clear the preauth/block chains (`deploy/hatarvedelem.nft:102-112`).
+- Template reload does not clear the `proxy_wan` chain, just as it does not clear the preauth/block chains (`deploy/dropjak.nft:102-112`).
 
 ---
 
@@ -3735,7 +3753,7 @@ add rule inet hatarvedelem proxy_wan iifname "__WAN_IF__" tcp dport 443 accept
 ##### 6.1. DNS requirements
 
 - A public **A record** to the WAN IP for every route. The record must be set before certificate issuance; HTTP-01/TLS-ALPN-01 requires a hostname that is already reachable at the moment of issuance.
-- **AAAA record not recommended**, because nft drops IPv6 inbound traffic (`deploy/hatarvedelem.nft:256-257`). If the hostname also has an AAAA, IPv6-preferring clients will reach nothing.
+- **AAAA record not recommended**, because nft drops IPv6 inbound traffic (`deploy/dropjak.nft:256-257`). If the hostname also has an AAAA, IPv6-preferring clients will reach nothing.
 - **CAA:** if there is a CAA record, `letsencrypt.org` must be allowed; Caddy defaults to Let's Encrypt, falls back to ZeroSSL on error, so either allow both, or pin Let's Encrypt with `acme_ca`.
 - DNS must be configured before enabling the proxy, otherwise Caddy consumes the rate limit with failed authorizations.
 
@@ -3786,7 +3804,7 @@ Not used in v1. If ever added, only with `on_demand_tls { ask ... }`, otherwise 
 ##### 6.8. HTTP → HTTPS and the portal
 
 - Caddy automatically redirects to HTTPS on 80; this works from the WAN.
-- On the LAN, the portal redirect runs first (`deploy/hatarvedelem.nft:372`), so the portal answers LAN HTTP. This is correct because of the captive portal.
+- On the LAN, the portal redirect runs first (`deploy/dropjak.nft:372`), so the portal answers LAN HTTP. This is correct because of the captive portal.
 - Do not put HSTS on the portal, because the portal runs on plain HTTP (`README.md:293-296`).
 
 ##### 6.9. Minecraft and raw TCP
@@ -3827,7 +3845,7 @@ caddy:
     - caddy-config:/config
     - /etc/localtime:/etc/localtime:ro
   depends_on:
-    hatarvedelem:
+    dropjak:
       condition: service_healthy
   logging:
     driver: journald
@@ -3951,13 +3969,13 @@ Sub-goals:
 |---|---|
 | `/home/moodpatcher/hatarvedelem/README.md` | 21-23 (fail-closed), 31-34 (host SSH), 35-39 (Docker), 40-49 (fail2ban), 50-53 (host network), 246-266 (settings), 268-282 (backup), 293-296 (TLS), 302-320 (security) |
 | `/home/moodpatcher/hatarvedelem/docker-compose.yml` | 16 (host network), 21 (read_only), 27-36 (caps), 43-119 (env), 121-122 (state volume), 133-138 (healthcheck) |
-| `/home/moodpatcher/hatarvedelem/deploy/hatarvedelem.nft` | 109-112 (custom chains), 114-116 (input policy), 133-137 (forward policy), 147-148 (IPv6 forward), 168-169 (ban forward), 198-200 (pre-DNAT matching), 256-257 (IPv6 input), 279-282 (portal accept + ban drop), 313 (established), 324-325 (portal accept), 334 (host SSH), 342-345 (DNS), 349-350 (final logs), 372 (LAN redirect), 375-377 (masquerade) |
+| `/home/moodpatcher/hatarvedelem/deploy/dropjak.nft` | 109-112 (custom chains), 114-116 (input policy), 133-137 (forward policy), 147-148 (IPv6 forward), 168-169 (ban forward), 198-200 (pre-DNAT matching), 256-257 (IPv6 input), 279-282 (portal accept + ban drop), 313 (established), 324-325 (portal accept), 334 (host SSH), 342-345 (DNS), 349-350 (final logs), 372 (LAN redirect), 375-377 (masquerade) |
 | `/home/moodpatcher/hatarvedelem/gateway.py` | 160-170 (`RULESET_CHAINS`), 1823-1837 (`clear_custom`), 1839-1954 (`apply_custom`), 1861-1864 (preauth ban drop), 4228-4272 (`apply_settings`), 4274-4279 (`start`) |
 | `/home/moodpatcher/hatarvedelem/settings_store.py` | 126-162 (validation), 148-154 (TCP 80 block), 165-196 (`validate_state`), 199-366 (store) |
 | `/home/moodpatcher/hatarvedelem/server.py` | 72-76 (`_client_ip`), 93-105 (`_origin_ok`), 143-163 (`_read_json`), 234-254 (`_admin_state`), 320-327 (`_portal_host_matches`), 675-743 (settings action), 846-869 (POST routes), 1852-1930 (`_serve`) |
 | `/home/moodpatcher/hatarvedelem/index.html` | 934-942 (admin nav), 4773-5004 (settings UI), 5596-5599 (chain labels), 6314-6321 (tab dispatch) |
 | `/home/moodpatcher/hatarvedelem/docker/entrypoint.sh` | 98-158 (ruleset render), 160-222 (DOCKER-USER guard), 252-280 (firewall load) |
-| `/home/moodpatcher/hatarvedelem/deploy/hatarvedelem-boot.nft` | boot guard; input policy is accept until the main table is loaded |
+| `/home/moodpatcher/hatarvedelem/deploy/dropjak-boot.nft` | boot guard; input policy is accept until the main table is loaded |
 | `/home/moodpatcher/hatarvedelem/tests/test_gateway.py` | 2819-2930 (settings API), 3532-3696 (settings store), 3690-3829 (nft exact-string) |
 
 ---
@@ -4198,7 +4216,7 @@ Dropjak received a built-in, Caddy-based reverse proxy. It forwards subdomains u
   - Earlier tests did not catch this: in the local packet trial the target listened on every address.
 - **Fix:**
   - If ALL sockets on the target port are bound to 127.0.0.0/8, the rule is `dnat ip to 127.0.0.1:<target port>`. This applies to both TCP and UDP; the decision is made based on `/proc/net/{tcp,udp}{,6}`. For a wildcard listener, `redirect` remains: the "naive" wildcard UDP server (Java/Simple Voice Chat, docker-proxy) chooses the response source from the route, which would not match conntrack with 127.0.0.1 DNAT.
-  - For a 127.0.0.1 target, `net.ipv4.conf.all.route_localnet = 1` is needed on the host. In the portal container `/proc/sys` is read-only (Docker ReadonlyPaths), so `docker/setup-host.sh` sets it in `/etc/sysctl.d/90-hatarvedelem.conf`. If it is not enabled, the proxy remains `redirect`, and saving warns.
+  - For a 127.0.0.1 target, `net.ipv4.conf.all.route_localnet = 1` is needed on the host. In the portal container `/proc/sys` is read-only (Docker ReadonlyPaths), so `docker/setup-host.sh` sets it in `/etc/sysctl.d/90-dropjak.conf`. If it is not enabled, the proxy remains `redirect`, and saving warns.
   - **Security:** a new `loopback_guard` chain (prerouting, raw priority, before NAT) in both the main and boot tables: every packet with a 127/8 destination or source arriving on a non-loopback interface is dropped. The loopback service is thus reachable only through the authorized proxy DNAT. As a side effect, Docker's 127.0.0.1 publications cannot be targeted directly from the LAN either (the equivalent of Docker 28+ raw rules; Docker 26 runs on the VM).
   - **Refresher:** the portal recalculates the decision every 10 seconds. If it changed (for example, after a restart Docker publishes later, or route_localnet was enabled), it atomically swaps the chains and deletes the conntrack entries of the affected listening ports. Settings save and the refresher use the same lock.
   - **Client IP:** it is preserved for a native service bound to loopback. For a Docker container, through the 127.0.0.1 publication the container sees the docker-proxy address. If the client IP is needed, use a Forward entry to the container IP.
@@ -4245,7 +4263,7 @@ Dropjak received a built-in, Caddy-based reverse proxy. It forwards subdomains u
 **Restore:**
 
 ```sh
-docker tag hatarvedelem:prev-X hatarvedelem:2
+docker tag dropjak:prev-X dropjak:2
 docker compose up -d --force-recreate
 ```
 
@@ -4288,7 +4306,7 @@ _Source: `docs/security-review-2026-10-21.md` (original title: "Dropjak / border
 
 **Date:** 2026-10-21
 **Method:** static code review (`server.py`, `gateway.py`, `fail2ban.py`,
-`settings_store.py`, `deploy/hatarvedelem.nft`, `docker/entrypoint.sh`,
+`settings_store.py`, `deploy/dropjak.nft`, `docker/entrypoint.sh`,
 `index.html`). Did not touch a live VM, did not run tests.
 **Status:** report only; did not modify any code.
 
@@ -4324,7 +4342,7 @@ segment) can capture the credentials.
 (`gateway.py:3045-3052`). **Every source outside the LAN** (i.e. all WAN clients
 because of 0.0.0.0/0) receives a grant **without** MAC binding, and the forward
 port-accept and input host-accept rules have no `iifname` binding
-(`deploy/hatarvedelem.nft:245-250, 444-445`). So the "5.1.4 MAC binding on the LAN" invariant is in practice true only for LAN sources. Within the LAN
+(`deploy/dropjak.nft:245-250, 444-445`). So the "5.1.4 MAC binding on the LAN" invariant is in practice true only for LAN sources. Within the LAN
 an active attacker can clone both the IP and the MAC from the same
 L2 segment.
 
@@ -4663,9 +4681,9 @@ sudo ./docker/setup-host.sh
 ```
 
 The script installs `nftables` if needed, loads a boot-time `forward` chain
-with `policy drop`, installs the `hatarvedelem-boot.service` unit, and
+with `policy drop`, installs the `dropjak-boot.service` unit, and
 persists `net.ipv4.ip_forward=1` in
-`/etc/sysctl.d/90-hatarvedelem.conf`.
+`/etc/sysctl.d/90-dropjak.conf`.
 
 The boot protection also drops inbound TCP 22. The script keeps the SSH
 session that started it reachable (a single accept rule for that source
@@ -4677,7 +4695,7 @@ immediately.
 ```bash
 docker compose up -d --build
 docker compose ps
-docker compose logs -f hatarvedelem
+docker compose logs -f dropjak
 ```
 
 Open the portal in a browser:
@@ -4703,7 +4721,7 @@ The **Admin** tab then provides user, group, rule and audit-log management.
 A user can also be added from the CLI:
 
 ```bash
-printf '%s\n' '<password>' | docker compose run --rm -T hatarvedelem \
+printf '%s\n' '<password>' | docker compose run --rm -T dropjak \
   python3 /opt/hatarvedelem/server.py user add alice --password-stdin
 ```
 
@@ -4726,7 +4744,7 @@ again. State in the Docker volume is preserved.
 
 ```bash
 docker compose ps
-docker compose logs -f hatarvedelem
+docker compose logs -f dropjak
 ```
 
 The **Firewall** admin tab has two views: a per-IP overview of the kernel
@@ -4782,9 +4800,9 @@ list and on the ban screen.
 If the admin UI is unreachable, the ban list can be managed from the CLI:
 
 ```bash
-docker compose exec hatarvedelem python3 /opt/hatarvedelem/server.py fail2ban list
-docker compose exec hatarvedelem python3 /opt/hatarvedelem/server.py fail2ban unban 203.0.113.10
-docker compose exec hatarvedelem python3 /opt/hatarvedelem/server.py fail2ban unban-all
+docker compose exec dropjak python3 /opt/hatarvedelem/server.py fail2ban list
+docker compose exec dropjak python3 /opt/hatarvedelem/server.py fail2ban unban 203.0.113.10
+docker compose exec dropjak python3 /opt/hatarvedelem/server.py fail2ban unban-all
 ```
 
 Run these as root (the default for `docker compose exec`); the ban/unban
@@ -4819,18 +4837,18 @@ list (fail-closed).
 
 ##### Backup
 
-State is stored in the `hatarvedelem-state` volume
+State is stored in the `dropjak-state` volume
 (`/var/lib/hatarvedelem`): `users.json`, `groups.json`, `rules.json`,
 `audit.jsonl`, `drops.jsonl`, `fail2ban.json` and `firewall-settings.json`.
 
 ```bash
-docker volume ls | grep hatarvedelem-state
+docker volume ls | grep dropjak-state
 
-docker run --rm -v dropjak_hatarvedelem-state:/data -v "$PWD":/backup \
+docker run --rm -v dropjak-state:/data -v "$PWD":/backup \
   busybox tar czf /backup/dropjak-state.tar.gz -C /data .
 ```
 
-The volume name depends on the Compose project name. `docker compose down -v`
+The compose file pins the volume name to `dropjak-state`. `docker compose down -v`
 deletes the volume; without `-v` it is kept.
 
 #### Security notes
@@ -5565,7 +5583,7 @@ The running version is stored in [`VERSION`](VERSION).
   `policy drop` without rules, locking the host out on every port,
   including the portal. The entrypoint now detects the old sets and
   recreates the table **before** validation: it applies the boot table
-  (`deploy/hatarvedelem-boot.nft`, now also shipped in the image) first,
+  (`deploy/dropjak-boot.nft`, now also shipped in the image) first,
   saves the `host_service_*` ports, deletes the old table, and removes the
   boot table only after the final ruleset has loaded. If validation or the
   final load fails after the delete, the host stays fail-closed under the
@@ -5736,7 +5754,7 @@ The running version is stored in [`VERSION`](VERSION).
   `route_localnet` safe and also blocks direct LAN access to Docker
   `127.0.0.1` publications.
 - `docker/setup-host.sh` sets `net.ipv4.conf.all.route_localnet = 1` (in
-  `/etc/sysctl.d/90-hatarvedelem.conf` and live). Without it the proxy keeps
+  `/etc/sysctl.d/90-dropjak.conf` and live). Without it the proxy keeps
   `redirect`, and saving shows a warning for the affected entries (HU/EN/DE).
 - Proxy tab hint about loopback-only targets and the docker-proxy address.
 - Tests: loopback detection, route_localnet, rule choice and refresh unit tests;

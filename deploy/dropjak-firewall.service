@@ -17,8 +17,8 @@ Type=oneshot
 RemainAfterExit=yes
 # nft -f is idempotent: the rules are replaced, while the dynamic set
 # elements (the clients that have logged in) are preserved.
-ExecStart=__NFT_BIN__ -f /etc/nftables/hatarvedelem.nft
-ExecReload=__NFT_BIN__ -f /etc/nftables/hatarvedelem.nft
+ExecStart=__NFT_BIN__ -f /etc/nftables/dropjak.nft
+ExecReload=__NFT_BIN__ -f /etc/nftables/dropjak.nft
 # There is deliberately no ExecStop: stopping the service must not open
 # the network. Removing the rules is a separate, deliberate operation:
 #   nft delete table inet hatarvedelem

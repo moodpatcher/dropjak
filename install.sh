@@ -25,14 +25,15 @@ set -euo pipefail
 
 APP_DIR="/opt/hatarvedelem"
 STATE_DIR="/var/lib/hatarvedelem"
-SERVICE="hatarvedelem"
+SERVICE="dropjak"
 FIREWALL_SERVICE="${SERVICE}-firewall"
+# The system user stays hatarvedelem; the installed paths are unchanged.
 SERVICE_USER="hatarvedelem"
-NFT_FILE="/etc/nftables/hatarvedelem.nft"
+NFT_FILE="/etc/nftables/dropjak.nft"
 SYSTEMD_DIR="/etc/systemd/system"
 SYSTEMD_UNIT="${SYSTEMD_DIR}/${SERVICE}.service"
 FIREWALL_UNIT="${SYSTEMD_DIR}/${FIREWALL_SERVICE}.service"
-SYSCTL_FILE="/etc/sysctl.d/90-hatarvedelem.conf"
+SYSCTL_FILE="/etc/sysctl.d/90-dropjak.conf"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Values used for rendering the template. The same defaults as in
@@ -127,8 +128,8 @@ done
 command -v systemctl >/dev/null 2>&1 || die "systemd is missing"
 for f in server.py gateway.py settings_store.py fail2ban.py droplog.py tunnel.py \
          index.html icon.png blocked.png unauthorized.png sus.png ok.png services.json VERSION \
-         deploy/hatarvedelem.nft deploy/hatarvedelem.service \
-         deploy/hatarvedelem-firewall.service \
+         deploy/dropjak.nft deploy/dropjak.service \
+         deploy/dropjak-firewall.service \
          deploy/tunnel-agent/compose.agent.yml \
          deploy/tunnel-agent/Dockerfile deploy/tunnel-agent/agent.py \
          deploy/tunnel-agent/selfinstall.sh \
@@ -517,7 +518,7 @@ disable_conflicting_firewalls() {
     warn "nftables.service is active or enabled."
     warn "Our own table works alongside it, but the forward rules in it"
     warn "may conflict. Check: nft list ruleset"
-    warn "Our own rules are in hatarvedelem-firewall.service."
+    warn "Our own rules are in dropjak-firewall.service."
   fi
 }
 
@@ -537,9 +538,9 @@ if [[ -f "$SRC_DIR/README.md" ]]; then
   install -m 0644 "$SRC_DIR/README.md" "$APP_DIR/"
 fi
 # The template is placed here as a reference target, matching the Docker layout; the native
-# firewall uses the rendered copy at /etc/nftables/hatarvedelem.nft.
+# firewall uses the rendered copy at /etc/nftables/dropjak.nft.
 install -d -m 0755 "$APP_DIR/deploy"
-install -m 0644 "$SRC_DIR/deploy/hatarvedelem.nft" "$APP_DIR/deploy/"
+install -m 0644 "$SRC_DIR/deploy/dropjak.nft" "$APP_DIR/deploy/"
 # Source of the downloadable agent package (the native installation provides the same).
 install -d -m 0755 "$APP_DIR/tunnel-agent"
 install -m 0644 "$SRC_DIR/deploy/tunnel-agent/Dockerfile" \
@@ -577,7 +578,7 @@ sed \
   -e "s|__FWD_MARK__|$(sed_escape "$FWD_MARK")|g" \
   -e "s|__DROP_LOG_GROUP__|$(sed_escape "$DROP_LOG_GROUP")|g" \
   -e "s|__PROXY__|# |g" \
-  "$SRC_DIR/deploy/hatarvedelem.nft" > "$TMP_NFT"
+  "$SRC_DIR/deploy/dropjak.nft" > "$TMP_NFT"
 
 if grep -qE '__[A-Z0-9_]+__' "$TMP_NFT"; then
   die "an unfilled placeholder remained in the generated nftables rules"
@@ -620,11 +621,11 @@ warn "access, or first start with HV_SKIP_FIREWALL=1, set"
 warn "the rule, and then load the firewall."
 confirm "Load the firewall rules?" || die "aborted"
 if (( recreate_table )); then
-  warn "Due to the old nft set flags, the hatarvedelem table is rebuilt."
+  warn "Due to the old nft set flags, the Dropjak table is rebuilt."
   # Between deletion and the new load, the host may only be under the early boot
   # protection (fail-closed).
   if ! "$NFT_BIN" list table inet hatarvedelem_boot >/dev/null 2>&1; then
-    "$NFT_BIN" -f "$SRC_DIR/deploy/hatarvedelem-boot.nft" \
+    "$NFT_BIN" -f "$SRC_DIR/deploy/dropjak-boot.nft" \
       || die "loading the early boot protection failed"
   fi
   "$NFT_BIN" delete table inet hatarvedelem \
@@ -654,9 +655,20 @@ done
 # ------------------------------------------------------------------ systemd
 
 note "Installing services"
+
+# Upgrading from the previous unit names: a leftover hatarvedelem.service or
+# hatarvedelem-firewall.service would start alongside the new units.
+for legacy in hatarvedelem-firewall hatarvedelem; do
+  if [ -e "${SYSTEMD_DIR}/${legacy}.service" ]; then
+    systemctl disable --now "$legacy" >/dev/null 2>&1 || true
+    rm -f "${SYSTEMD_DIR}/${legacy}.service"
+    warn "removed the legacy ${legacy}.service unit"
+  fi
+done
+
 TMP_FW="$(mktemp)"
 sed -e "s|__NFT_BIN__|$NFT_BIN|g" \
-  "$SRC_DIR/deploy/hatarvedelem-firewall.service" > "$TMP_FW"
+  "$SRC_DIR/deploy/dropjak-firewall.service" > "$TMP_FW"
 install -m 0644 "$TMP_FW" "$FIREWALL_UNIT"
 
 TMP_UNIT="$(mktemp)"
@@ -665,7 +677,7 @@ sed \
   -e "s|__NFT_BIN__|$NFT_BIN|g" \
   -e "s|__PORT__|$PORT|g" \
   -e "s|__PORTAL_URL__|$PORTAL_URL|g" \
-  "$SRC_DIR/deploy/hatarvedelem.service" > "$TMP_UNIT"
+  "$SRC_DIR/deploy/dropjak.service" > "$TMP_UNIT"
 install -m 0644 "$TMP_UNIT" "$SYSTEMD_UNIT"
 
 if grep -qE '__[A-Z0-9_]+__' "$SYSTEMD_UNIT" "$FIREWALL_UNIT"; then
@@ -677,12 +689,12 @@ fi
 # so we pass them as a drop-in.
 ENV_DROPIN_DIR="${SYSTEMD_DIR}/${SERVICE}.service.d"
 install -d -m 0755 "$ENV_DROPIN_DIR"
-cat > "$ENV_DROPIN_DIR/10-hatarvedelem-env.conf" <<EOF
+cat > "$ENV_DROPIN_DIR/10-dropjak-env.conf" <<EOF
 [Service]
 Environment=HV_FWD_MARK=$FWD_MARK
 Environment=HV_DROP_LOG_GROUP=$DROP_LOG_GROUP
 EOF
-chmod 0644 "$ENV_DROPIN_DIR/10-hatarvedelem-env.conf"
+chmod 0644 "$ENV_DROPIN_DIR/10-dropjak-env.conf"
 
 systemctl daemon-reload
 systemctl enable "$FIREWALL_SERVICE" >/dev/null

@@ -505,7 +505,7 @@ class TemplateOrderTests(unittest.TestCase):
         self.assertIn("flush chain inet hatarvedelem loopback_guard", self.text)
         self.assertEqual(self.chain("loopback_guard"), guard)
         self.assertIn("loopback_guard", gateway.RULESET_CHAINS)
-        boot = (ROOT / "deploy" / "hatarvedelem-boot.nft").read_text()
+        boot = (ROOT / "deploy" / "dropjak-boot.nft").read_text()
         self.assertIn("type filter hook prerouting priority raw; policy accept;", boot)
         for rule in guard:
             self.assertIn(rule, boot)

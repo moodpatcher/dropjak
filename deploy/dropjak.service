@@ -3,9 +3,9 @@ Description=Dropjak — network gateway
 Documentation=file:///opt/hatarvedelem/README.md
 # The firewall rules are in a separate, early-starting unit. The portal only
 # starts once those have been loaded.
-After=network.target hatarvedelem-firewall.service
+After=network.target dropjak-firewall.service
 Wants=network.target
-Requires=hatarvedelem-firewall.service
+Requires=dropjak-firewall.service
 
 [Service]
 Type=simple

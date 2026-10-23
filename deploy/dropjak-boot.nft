@@ -6,14 +6,14 @@
 # the container cannot load the final rules, so during this time window
 # unfiltered traffic could pass through, and SSH could also be open. This
 # narrow table is loaded on the host by an early systemd unit
-# (hatarvedelem-boot.service), and the container entrypoint deletes it
+# (dropjak-boot.service), and the container entrypoint deletes it
 # after loading the final rules.
 #
 # Besides the forward chain, it also drops input port 22: host SSH must
 # not be reachable before the portal starts. The portal takes over after
 # the final rules are loaded. The table can be reloaded IDEMPOTENTLY.
 #
-# Manual load:  nft -f /etc/nftables/hatarvedelem-boot.nft
+# Manual load:  nft -f /etc/nftables/dropjak-boot.nft
 # Removal:      nft delete table inet hatarvedelem_boot
 
 add table inet hatarvedelem_boot

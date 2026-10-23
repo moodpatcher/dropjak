@@ -243,7 +243,7 @@ class FirewallRangeTests(unittest.TestCase):
 
 class PackagingTests(unittest.TestCase):
     def test_interval_sets_and_migration_are_declared(self) -> None:
-        template = (ROOT / "deploy" / "hatarvedelem.nft").read_text(
+        template = (ROOT / "deploy" / "dropjak.nft").read_text(
             encoding="utf-8"
         )
         for set_name in (
@@ -268,7 +268,7 @@ class PackagingTests(unittest.TestCase):
         install = (ROOT / "install.sh").read_text(encoding="utf-8")
         self.assertIn("delete table inet hatarvedelem", install)
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
-        self.assertIn("deploy/hatarvedelem-boot.nft ./deploy", dockerfile)
+        self.assertIn("deploy/dropjak-boot.nft ./deploy", dockerfile)
 
     def test_migration_runs_before_validation(self) -> None:
         # With the old set flags `nft -c` would fail, so the migration
@@ -288,7 +288,7 @@ class PackagingTests(unittest.TestCase):
         install = (ROOT / "install.sh").read_text(encoding="utf-8")
         delete_at = install.index("delete table inet hatarvedelem")
         self.assertLess(
-            install.index("hatarvedelem-boot.nft"), delete_at
+            install.index("dropjak-boot.nft"), delete_at
         )
         # The migration decision is before the first validation, and the
         # (second) validation after the deletion comes after the deletion.
@@ -349,7 +349,7 @@ nft -j list set inet t s
             start = entrypoint.index(f"\n{name}() {{\n") + 1
             return entrypoint[start:entrypoint.index("\n}\n", start) + 3]
 
-        template = (ROOT / "deploy" / "hatarvedelem.nft").read_text(
+        template = (ROOT / "deploy" / "dropjak.nft").read_text(
             encoding="utf-8"
         )
         replacements = {
@@ -363,7 +363,7 @@ nft -j list set inet t s
             template = template.replace(token, value)
 
         with tempfile.TemporaryDirectory() as tmp:
-            rendered = Path(tmp) / "hatarvedelem.nft"
+            rendered = Path(tmp) / "dropjak.nft"
             rendered.write_text(template, encoding="utf-8")
             script = """
 set -eu
@@ -405,7 +405,7 @@ for s in allowed_tcp allowed_udp allowed_input_tcp allowed_input_udp \
 done
 echo MIGRATED_OK
 """.replace("@@PYTHON@@", sys.executable) \
-   .replace("@@BOOT@@", str(ROOT / "deploy" / "hatarvedelem-boot.nft")) \
+   .replace("@@BOOT@@", str(ROOT / "deploy" / "dropjak-boot.nft")) \
    .replace("@@RENDERED@@", str(rendered)) \
    .replace("@@ENSURE@@", function("ensure_boot_guard")) \
    .replace("@@MIGRATE@@", function("migrate_interval_sets"))

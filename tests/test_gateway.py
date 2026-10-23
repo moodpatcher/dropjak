@@ -14471,7 +14471,7 @@ class HostSshPolicyRemovedTests(unittest.TestCase):
         self.assertNotIn("def revoke_host_ssh(", source)
         self.assertNotIn('add_simple("host_ssh_v4", "host_ssh")', source)
 
-        nft = self._text("deploy/hatarvedelem.nft")
+        nft = self._text("deploy/dropjak.nft")
         self.assertNotIn("host_ssh_v4", nft)
         self.assertNotIn("add set inet hatarvedelem host_ssh_v4", nft)
         self.assertNotIn("\n        tcp dport 22 accept", nft)
@@ -14793,7 +14793,7 @@ class RulesetTemplateTests(unittest.TestCase):
         path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
             "deploy",
-            "hatarvedelem.nft",
+            "dropjak.nft",
         )
         with open(path, encoding="utf-8") as fh:
             cls.text = fh.read()

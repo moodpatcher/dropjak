@@ -4,7 +4,7 @@ set -euo pipefail
 
 APP=/root/hatarvedelem
 BACKUPS=/root/hatarvedelem-backups
-STATE_VOLUME=/var/lib/docker/volumes/hatarvedelem_hatarvedelem-state/_data
+STATE_VOLUME=/var/lib/docker/volumes/dropjak-state/_data
 
 cd "$APP"
 
@@ -45,7 +45,7 @@ portal_port() {
 }
 
 server_cli() {
-    docker compose exec -T --user hatarvedelem hatarvedelem \
+    docker compose exec -T --user hatarvedelem dropjak \
         python3 /opt/hatarvedelem/server.py "$@"
 }
 
@@ -98,7 +98,7 @@ case "${1:-}" in
             echo "Usage: hv add <name> [--no-must-change]" >&2
             exit 2
         fi
-        docker compose exec --user hatarvedelem hatarvedelem \
+        docker compose exec --user hatarvedelem dropjak \
             python3 /opt/hatarvedelem/server.py user add "$@"
         ;;
     passwd)
@@ -107,7 +107,7 @@ case "${1:-}" in
             echo "Usage: hv passwd <name> [--no-must-change]" >&2
             exit 2
         fi
-        docker compose exec --user hatarvedelem hatarvedelem \
+        docker compose exec --user hatarvedelem dropjak \
             python3 /opt/hatarvedelem/server.py user passwd "$@"
         ;;
     del)
@@ -124,8 +124,8 @@ case "${1:-}" in
         # and the rotated log files. .lock files may also be included; these
         # are harmless on restore.
         if [ -d "$STATE_VOLUME" ]; then
-            tar -czf "$BACKUPS/hatarvedelem-state-$ts.tar.gz" -C "$STATE_VOLUME" .
-            state_backup="$BACKUPS/hatarvedelem-state-$ts.tar.gz"
+            tar -czf "$BACKUPS/dropjak-state-$ts.tar.gz" -C "$STATE_VOLUME" .
+            state_backup="$BACKUPS/dropjak-state-$ts.tar.gz"
         else
             echo "WARNING: state volume not found: $STATE_VOLUME" >&2
             state_backup=""

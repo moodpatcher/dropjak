@@ -175,7 +175,7 @@ def login(gw, ip: str = IP):
 
 class TemplateCapacityTests(unittest.TestCase):
     def test_host_service_sets_hold_every_valid_port(self) -> None:
-        text = (ROOT / "deploy" / "hatarvedelem.nft").read_text(
+        text = (ROOT / "deploy" / "dropjak.nft").read_text(
             encoding="utf-8"
         )
         for set_name in ("host_service_tcp", "host_service_udp"):

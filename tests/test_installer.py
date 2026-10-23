@@ -15,7 +15,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 INSTALL_SH = REPO_ROOT / "install.sh"
-NFT_TEMPLATE = REPO_ROOT / "deploy" / "hatarvedelem.nft"
+NFT_TEMPLATE = REPO_ROOT / "deploy" / "dropjak.nft"
 
 # Every file the native unit imports or serves at runtime. ``server.py``
 # imports ``gateway``, ``fail2ban`` and ``settings_store``; ``gateway`` also
@@ -131,7 +131,7 @@ class InstallerStaticTests(unittest.TestCase):
         self.assertEqual(
             placeholders,
             EXPECTED_NFT_PLACEHOLDERS,
-            "deploy/hatarvedelem.nft placeholders changed; update "
+            "deploy/dropjak.nft placeholders changed; update "
             "install.sh and EXPECTED_NFT_PLACEHOLDERS together",
         )
         for placeholder in sorted(placeholders):

@@ -4,7 +4,7 @@
 # The container runs in the HOST network namespace (network_mode: host), so the
 # nftables rules loaded here apply to the VM's forward chain. The order:
 #
-#   1. fill in the deploy/hatarvedelem.nft template with the HV_* variables,
+#   1. fill in the deploy/dropjak.nft template with the HV_* variables,
 #   2. validate and load the rules (idempotent),
 #   3. remove the hatarvedelem_boot table providing early boot protection,
 #   4. start the portal as a restricted-privilege user.
@@ -14,8 +14,8 @@
 set -eu
 
 APP_DIR=${HV_APP_DIR:-/opt/hatarvedelem}
-TEMPLATE="$APP_DIR/deploy/hatarvedelem.nft"
-BOOT_NFT=${HV_BOOT_NFT:-$APP_DIR/deploy/hatarvedelem-boot.nft}
+TEMPLATE="$APP_DIR/deploy/dropjak.nft"
+BOOT_NFT=${HV_BOOT_NFT:-$APP_DIR/deploy/dropjak-boot.nft}
 STATE_DIR=${HV_STATE_DIR:-/var/lib/hatarvedelem}
 PYTHON=${HV_PYTHON:-python3}
 APP_USER=hatarvedelem
@@ -217,9 +217,9 @@ render_ruleset() {
 
     # If /run is not writable (e.g. read-only root without tmpfs), /tmp is
     # the fallback. The compose configuration provides both as tmpfs.
-    RENDERED=${HV_NFT_FILE:-/run/hatarvedelem.nft}
+    RENDERED=${HV_NFT_FILE:-/run/dropjak.nft}
     if ! ( : >"$RENDERED" ) 2>/dev/null; then
-        RENDERED=/tmp/hatarvedelem.nft
+        RENDERED=/tmp/dropjak.nft
     fi
 
     sed \
@@ -315,7 +315,7 @@ start_firewall_watchdog() {
                 *) forward="" ;;
             esac
             if [ -z "$forward" ] || ! printf '%s' "$forward" | grep -q '@client_mac'; then
-                log "WARNING: the hatarvedelem forward chain is incomplete; reloading"
+                log "WARNING: the Dropjak forward chain is incomplete; reloading"
                 if "$NFT_BIN" -c -f "$RENDERED" && "$NFT_BIN" -f "$RENDERED"; then
                     log "firewall reloaded"
                 else
@@ -400,7 +400,7 @@ migrate_interval_sets() {
         2>/dev/null | "$PYTHON" -c "$HOST_PORTS_JSON" 2>/dev/null || true)
     saved_udp=$("$NFT_BIN" -j list set inet hatarvedelem host_service_udp \
         2>/dev/null | "$PYTHON" -c "$HOST_PORTS_JSON" 2>/dev/null || true)
-    log "due to the old nft set flags, the hatarvedelem table is rebuilt"
+    log "due to the old nft set flags, the Dropjak table is rebuilt"
     "$NFT_BIN" delete table inet hatarvedelem \
         || die "deleting the old nft table failed; the early boot protection remained in effect"
 }
@@ -446,7 +446,7 @@ load_firewall() {
             || log "WARNING: restoring the old host_service_udp ports failed"
     fi
     "$NFT_BIN" list table inet hatarvedelem >/dev/null 2>&1 \
-        || die "the hatarvedelem table was not created"
+        || die "the Dropjak table was not created"
 
     # On restart, permissions left in the kernel must not remain in effect
     # after the boot protection is removed. The portal also clears the set, but
