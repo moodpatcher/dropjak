@@ -460,6 +460,10 @@ CADDY_ADMIN = os.environ.get(
     "HV_CADDY_ADMIN", "/run/caddy-admin/admin.sock"
 ).strip()
 COOKIE_NAME = "hv_session"
+# The name of the session cookie on responses that reach the browser over
+# HTTPS (the same condition that sets Secure): a __Host- cookie must be
+# Secure with Path=/ and no Domain, so a sibling host cannot toss one in.
+SECURE_COOKIE_NAME = "__Host-" + COOKIE_NAME
 COOKIE_SECURE = (
     os.environ.get("HV_COOKIE_SECURE", "0") == "1"
     or PORTAL_URL.startswith("https://")
@@ -1022,6 +1026,7 @@ AUDIT_SEVERITY = {
     "portal_host_redirect": "warn", "proxy_challenge_failed": "warn",
     "host_rejected": "warn", "account_locked": "alert",
     "https_required": "warn",
+    "proxy_bind_denied": "warn", "proxy_bind_failed": "warn",
     "step_up_failed": "warn",
     "cli_password_changed": "warn",
     "cli_user_deleted": "warn", "cli_totp_reset": "warn",
@@ -8146,19 +8151,33 @@ class SessionManager:
 
     def domain_user(self, ip: str, name: str) -> str | None:
         """The user of allows_domain()'s session (or None)."""
-        now = time.time()
         with self._lock:
-            return next(
-                (
-                    session.user for session in self._sessions.values()
-                    if session.ip == ip and session.authorized
-                    and session.expires > now
-                    and any(
-                        name in part.domains for part in session.selections()
-                    )
-                ),
-                None,
-            )
+            session = self._domain_session_locked(ip, name)
+            return session.user if session is not None else None
+
+    def domain_session(self, ip: str, name: str) -> str | None:
+        """The session id (sid) of allows_domain()'s session (or None).
+
+        The private proxy entry checks its bind cookie against this, so the
+        entry is tied to one portal session, not only to the source IP.
+        """
+        with self._lock:
+            session = self._domain_session_locked(ip, name)
+            return session.sid if session is not None else None
+
+    def _domain_session_locked(self, ip: str, name: str) -> Session | None:
+        now = time.time()
+        return next(
+            (
+                session for session in self._sessions.values()
+                if session.ip == ip and session.authorized
+                and session.expires > now
+                and any(
+                    name in part.domains for part in session.selections()
+                )
+            ),
+            None,
+        )
 
     def _active_authorized_ips_locked(self) -> set[str]:
         return {

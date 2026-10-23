@@ -260,13 +260,34 @@ if (CFG.mode === 'turnstile') {
 TURNSTILE_ORIGIN = "https://challenges.cloudflare.com"
 
 
-def content_security_policy() -> str:
-    """CSP of the HTML pages; the Turnstile origin only while Turnstile is on."""
+# The inline <script> blocks of a page we build ourselves (index.html from
+# disk, the challenge page from constants and admin settings, never from
+# request data). A browser hashes the element's text exactly as served.
+_INLINE_SCRIPT_RE = re.compile(rb"<script>(.*?)</script>", re.S)
+
+
+def inline_script_hashes(page: bytes) -> tuple[str, ...]:
+    """CSP hash sources ('sha256-...') of the page's inline scripts."""
+    return tuple(
+        "'sha256-"
+        + base64.b64encode(hashlib.sha256(match.group(1)).digest()).decode()
+        + "'"
+        for match in _INLINE_SCRIPT_RE.finditer(page)
+    )
+
+
+def content_security_policy(script_hashes: tuple[str, ...] = ()) -> str:
+    """CSP of the HTML pages; the Turnstile origin only while Turnstile is on.
+
+    There is no 'unsafe-inline' for scripts: an inline script runs only if
+    its hash is in ``script_hashes``, and inline event handlers never run.
+    """
     extra = f" {TURNSTILE_ORIGIN}" if gateway.TURNSTILE_ON else ""
     frames = TURNSTILE_ORIGIN if gateway.TURNSTILE_ON else "'none'"
+    hashes = "".join(f" {value}" for value in script_hashes)
     return (
         "default-src 'self'; "
-        f"script-src 'self' 'unsafe-inline'{extra}; "
+        f"script-src 'self'{hashes}{extra}; "
         f"frame-src {frames}; "
         "style-src 'self' 'unsafe-inline'; "
         "img-src 'self' data:; "
@@ -442,6 +463,128 @@ def _proxy_pass_issued(value: str, host: str, ip: str, now: float) -> float:
     return issued_at
 
 
+# Session binding of private proxy entries (DJ-05). The source IP alone is
+# not enough: another browser behind the same NAT would share the access.
+# The portal hop (/api/proxy/bind, on the portal's origin, with the session
+# cookie) issues a single-use ticket; the entry host's hop (/__dropjak/bind,
+# answered by /api/proxy/auth) trades it for a __Host- cookie on that host,
+# whose value is base64url(bind|sid|host|expires s).HMAC-SHA256 with the
+# pass key. Every request still needs the same session to be live and
+# authorized for the host, so logout, expiry and bans need no bookkeeping.
+PROXY_BIND_COOKIE = "__Host-dropjak_bind"
+PROXY_BIND_PATH = "/__dropjak/bind"
+PROXY_BIND_START = "/api/proxy/bind"
+PROXY_BIND_TICKET_TTL = 60
+PROXY_BIND_TICKET_LIMIT = 4096
+
+
+def _proxy_bind_value(sid: str, host: str, expires: int) -> str:
+    payload = f"bind|{sid}|{host}|{expires}".encode()
+    encoded = base64.urlsafe_b64encode(payload).rstrip(b"=").decode()
+    return f"{encoded}.{_proxy_pass_sign(payload).decode()}"
+
+
+def _proxy_bind_valid(value: str, sid: str, host: str, now: float) -> bool:
+    """Whether the bind cookie is genuine, unexpired and names this session
+    (``sid``) and host. The pass cookie's payload has another shape, so a
+    pass is never accepted as a bind cookie or the reverse."""
+    if not value or not sid:
+        return False
+    encoded, _, signature = value.partition(".")
+    try:
+        payload = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+        if not hmac.compare_digest(
+            _proxy_pass_sign(payload), signature.encode()
+        ):
+            return False
+        tag, bind_sid, bind_host, expires = payload.decode().split("|")
+        expires_at = int(expires)
+    except ValueError:
+        return False
+    return (
+        tag == "bind"
+        and hmac.compare_digest(bind_sid.encode(), sid.encode())
+        and bind_host == host
+        and now < expires_at
+    )
+
+
+def _proxy_bind_uri(uri: str) -> str:
+    """The return path of the bind hops: an origin-relative URI, else "/".
+
+    The answer is always https://<entry host><uri>, so a scheme-relative
+    ``//`` or a backslash must not get through, and the hop never returns
+    to itself.
+    """
+    if not (
+        uri.startswith("/") and not uri.startswith("//")
+        and len(uri) <= 2000 and uri.isascii() and uri.isprintable()
+        and " " not in uri and "\\" not in uri
+    ):
+        return "/"
+    if urllib.parse.urlsplit(uri).path == PROXY_BIND_PATH:
+        return "/"
+    return uri
+
+
+@dataclass
+class ProxyBindTicket:
+    sid: str
+    host: str
+    ip: str
+    expires_at: float
+
+
+class ProxyBindTicketStore:
+    """Short-lived, single-use tickets of the bind hop (in memory)."""
+
+    def __init__(
+        self,
+        ttl: int = PROXY_BIND_TICKET_TTL,
+        limit: int = PROXY_BIND_TICKET_LIMIT,
+        clock=None,
+    ) -> None:
+        self._ttl = int(ttl)
+        self._limit = int(limit)
+        self._clock = clock or time.time
+        self._lock = threading.Lock()
+        self._tickets: dict[str, ProxyBindTicket] = {}
+
+    def _purge_locked(self, now: float) -> None:
+        for token in [t for t, item in self._tickets.items()
+                      if item.expires_at <= now]:
+            del self._tickets[token]
+
+    def issue(self, sid: str, host: str, ip: str) -> str:
+        token = secrets.token_urlsafe(32)
+        with self._lock:
+            now = self._clock()
+            self._purge_locked(now)
+            # Oldest first: a full store drops the stalest tickets.
+            while len(self._tickets) >= self._limit:
+                self._tickets.pop(next(iter(self._tickets)))
+            self._tickets[token] = ProxyBindTicket(
+                sid, host, ip, now + self._ttl
+            )
+        return token
+
+    def consume(self, token: str) -> ProxyBindTicket | None:
+        """The ticket, removed in the same step; None if unknown or expired."""
+        if not token:
+            return None
+        with self._lock:
+            now = self._clock()
+            self._purge_locked(now)
+            return self._tickets.pop(token, None)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._tickets.clear()
+
+
+PROXY_BIND_TICKETS = ProxyBindTicketStore()
+
+
 # A session may select at most this many rules at once. The limit also keeps
 # the audit and response sizes in check.
 MAX_SESSION_RULES = 16
@@ -495,6 +638,9 @@ class LoginTicket:
     secret: str = ""
     attempts: int = 0
     expires_at: float = 0.0
+    # Code checks in flight (reserve()); attempts + reserved never exceeds
+    # the cap, so parallel requests cannot test more codes than allowed.
+    reserved: int = 0
 
 
 class LoginTicketStore:
@@ -655,6 +801,45 @@ class LoginTicketStore:
                 return None, "too_many_attempts"
             return ticket, ""
 
+    def reserve(self, token: str, ip: str) -> tuple[LoginTicket | None, str]:
+        """Reserve one code attempt before checking a code.
+
+        Like inspect(), but it also fails when the attempts already made plus
+        those in flight reach the cap, and on success it counts this request
+        as in flight. The caller settles the reservation exactly once: a wrong
+        code with fail_reserved(), success with consume(), any other outcome
+        with release().
+        """
+        if not token:
+            return None, "bad_request"
+        with self._lock:
+            now = self._clock()
+            self._purge_locked(now)
+            ticket = self._tickets.get(token)
+            if ticket is None:
+                return None, (
+                    self._tombstone_reason_locked(token, now) or "unknown"
+                )
+            if ticket.ip != ip:
+                return None, "ip_mismatch"
+            if ticket.attempts + ticket.reserved >= self._max_attempts:
+                return None, "too_many_attempts"
+            ticket.reserved += 1
+            return ticket, ""
+
+    def release(self, token: str, ip: str) -> None:
+        """Give back a reservation without counting an attempt."""
+        with self._lock:
+            ticket = self._tickets.get(token)
+            if ticket is not None and ticket.ip == ip and ticket.reserved:
+                ticket.reserved -= 1
+
+    def fail_reserved(
+        self, token: str, ip: str
+    ) -> tuple[int, bool, int, bool]:
+        """Turn a reservation into a failed attempt (fail_with_status())."""
+        return self.fail_with_status(token, ip, reserved=True)
+
     def consume(self, token: str, ip: str) -> LoginTicket | None:
         """Atomic check and delete: a ticket can be used only once."""
         with self._lock:
@@ -674,13 +859,15 @@ class LoginTicketStore:
             return ticket
 
     def fail_with_status(
-        self, token: str, ip: str
+        self, token: str, ip: str, reserved: bool = False
     ) -> tuple[int, bool, int, bool]:
         """Record a failed attempt with detailed status.
 
         Returns: ``(remaining, just_closed, attempts, existed)``.
         The old integer return value of ``fail()`` remains unchanged for
-        existing callers and tests.
+        existing callers and tests. ``reserved``: the attempt settles a
+        reserve() in the same step, so no other request can slip into the
+        gap between the two.
         """
         with self._lock:
             now = self._clock()
@@ -688,6 +875,8 @@ class LoginTicketStore:
             ticket = self._tickets.get(token)
             if ticket is None or ticket.ip != ip:
                 return 0, False, 0, False
+            if reserved and ticket.reserved:
+                ticket.reserved -= 1
             ticket.attempts += 1
             if ticket.attempts >= self._max_attempts:
                 del self._tickets[token]
@@ -1482,7 +1671,43 @@ class Handler(BaseHTTPRequestHandler):
         print(f"[{self._client_ip()}] {line}", flush=True)
 
     def _cookie_token(self) -> str:
-        return self._cookie(gateway.COOKIE_NAME)
+        # The __Host- name (HTTPS) wins; the plain name is still read, for
+        # plain-HTTP LAN logins and for cookies issued before the rename.
+        return (
+            self._cookie(gateway.SECURE_COOKIE_NAME)
+            or self._cookie(gateway.COOKIE_NAME)
+        )
+
+    def _session_cookies(self, token: str, max_age: int) -> list[str]:
+        """Set-Cookie values of the session cookie (an empty token clears it).
+
+        Over HTTPS (the condition of the Secure attribute) the cookie is
+        __Host-hv_session: Secure, Path=/, no Domain. On plain HTTP it stays
+        hv_session, which a browser would not store under the __Host- name.
+        Clearing always expires both names; issuing over HTTPS also expires
+        a plain-name cookie the browser still sends.
+        """
+        secure = self._cookie_secure()
+        attrs = f"Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}"
+        plain = f"{gateway.COOKIE_NAME}={token}; {attrs}"
+        if secure:
+            plain += "; Secure"
+        if not secure:
+            cookies = [plain]
+            if not token:
+                cookies.append(
+                    f"{gateway.SECURE_COOKIE_NAME}=; {attrs}; Secure"
+                )
+            return cookies
+        cookies = [f"{gateway.SECURE_COOKIE_NAME}={token}; {attrs}; Secure"]
+        if not token:
+            cookies.append(plain)
+        elif self._cookie(gateway.COOKIE_NAME):
+            cookies.append(
+                f"{gateway.COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; "
+                "Max-Age=0; Secure"
+            )
+        return cookies
 
     def _cookie(self, name: str) -> str:
         raw = self.headers.get("Cookie")
@@ -1522,8 +1747,9 @@ class Handler(BaseHTTPRequestHandler):
         code: int,
         body: bytes = b"",
         ctype: str = "application/json; charset=utf-8",
-        headers: dict[str, str] | None = None,
+        headers: dict[str, str | list[str]] | None = None,
         cache: str = "no-store",
+        csp: str = "",
     ) -> None:
         self.send_response(code)
         self.send_header("Content-Type", ctype)
@@ -1533,9 +1759,13 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Frame-Options", "DENY")
         if ctype.startswith("text/html"):
-            self.send_header("Content-Security-Policy", content_security_policy())
+            self.send_header(
+                "Content-Security-Policy", csp or content_security_policy()
+            )
         for name, value in (headers or {}).items():
-            self.send_header(name, value)
+            # A list sends the header once per value (several Set-Cookie).
+            for item in value if isinstance(value, list) else (value,):
+                self.send_header(name, item)
         self.end_headers()
         if self.command != "HEAD" and body:
             self.wfile.write(body)
@@ -1551,11 +1781,15 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             self._json(500, {"ok": False, "error": "the UI file is missing"})
             return
+        csp = ""
         if name == "index.html":
             body = body.replace(
                 b"__VERSION__", gateway.APP_VERSION.encode("ascii", "replace")
             )
-        self._send(200, body, ctype, cache=cache)
+            # The page's own inline scripts are allowed by hash, from the
+            # file on disk (it is read per request, so an update applies).
+            csp = content_security_policy(inline_script_hashes(body))
+        self._send(200, body, ctype, cache=cache, csp=csp)
 
     def _read_json(self, limit: int = 64 * 1024) -> dict | None:
         # State-changing endpoints accept only JSON. This also excludes browser
@@ -2306,6 +2540,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, bundle, "application/x-pem-file")
         if path == "/api/proxy/redirect":
             return self._proxy_redirect()
+        if path == PROXY_BIND_START:
+            return self._proxy_bind_start()
         if path != "/api/proxy/auth":
             return self._send(404, b"", "text/plain; charset=utf-8")
         host = (
@@ -2349,9 +2585,7 @@ class Handler(BaseHTTPRequestHandler):
                 path=page_path,
                 unknown_host=True,
             )
-            return self._send(
-                403, _proxy_challenge_page(), "text/html; charset=utf-8"
-            )
+            return self._send_challenge_page()
         login = f"https://{root}/"
         settings = self.gw.settings.snapshot()
         portal = settings.get("portal_domain", "")
@@ -2360,15 +2594,21 @@ class Handler(BaseHTTPRequestHandler):
         # The portal's own address gets the same loopback protection: Caddy
         # forwards to the portal, so the /api/proxy/ endpoints would otherwise
         # be reachable (the peer is loopback there too).
+        # The bind hop's portal side is the one exception: it is meant to be
+        # opened through Caddy and checks the session cookie itself.
         if isinstance(target, dict) and target.get("portal"):
             uri = self.headers.get("X-Forwarded-Uri") or "/"
-            if urllib.parse.urlsplit(uri).path.startswith("/api/proxy/"):
+            uri_path = urllib.parse.urlsplit(uri).path
+            if uri_path.startswith("/api/proxy/") \
+                    and uri_path != PROXY_BIND_START:
                 return self._send(404, b"", "text/plain; charset=utf-8")
         if target == "root":
             # The root domain is the portal itself. Through Caddy the proxy
             # endpoints are unreachable (the peer would be loopback there too).
             uri = self.headers.get("X-Forwarded-Uri") or "/"
-            if urllib.parse.urlsplit(uri).path.startswith("/api/proxy/"):
+            uri_path = urllib.parse.urlsplit(uri).path
+            if uri_path.startswith("/api/proxy/") \
+                    and uri_path != PROXY_BIND_START:
                 return self._send(404, b"", "text/plain; charset=utf-8")
             if portal:
                 # The UI moved to its own address; the root redirects there.
@@ -2392,10 +2632,23 @@ class Handler(BaseHTTPRequestHandler):
             and self.gw.fail2ban.banned(ip) is None
             and self.gw.fail2ban.proxy_banned(ip) is None
         ):
-            user = (
-                "" if target["visibility"] == "public"
-                else self.gw.sessions.domain_user(ip, host)
-            )
+            if target["visibility"] == "public":
+                user = ""
+            else:
+                # A private entry needs the IP's authorized session and this
+                # browser's bind cookie naming that same session (DJ-05).
+                sid = self.gw.sessions.domain_session(ip, host)
+                if sid is not None:
+                    raw_uri = self.headers.get("X-Forwarded-Uri") or "/"
+                    if urllib.parse.urlsplit(raw_uri).path == PROXY_BIND_PATH:
+                        return self._proxy_bind_finish(
+                            host, ip, sid, raw_uri, login
+                        )
+                    if not _proxy_bind_valid(
+                        self._cookie(PROXY_BIND_COOKIE), sid, host, time.time()
+                    ):
+                        return self._proxy_bind_required(host, raw_uri, login)
+                    user = self.gw.sessions.domain_user(ip, host)
         if user is not None:
             # forward_auth allows through only on 2xx, and then we always
             # provide the target: a client-sent header cannot direct it.
@@ -2419,9 +2672,7 @@ class Handler(BaseHTTPRequestHandler):
                     path=page_path,
                     triggers=",".join(fired),
                 )
-                return self._send(
-                    403, _proxy_challenge_page(), "text/html; charset=utf-8"
-                )
+                return self._send_challenge_page()
             if self._proxy_navigation():
                 self._audit(
                     "proxy_page_opened",
@@ -2447,6 +2698,9 @@ class Handler(BaseHTTPRequestHandler):
                     ip, exc, self.gw.audit, operation="record_proxy"
                 )
         self.gw.record_proxy_drop(ip, host, page_path)
+        return self._proxy_login_page(login)
+
+    def _proxy_login_page(self, login: str) -> None:
         page = _proxy_page(
             title="Dropjak",
             image="unauthorized.png",
@@ -2457,6 +2711,131 @@ class Handler(BaseHTTPRequestHandler):
             ),
         )
         return self._send(401, page, "text/html; charset=utf-8")
+
+    def _proxy_bind_required(self, host: str, raw_uri: str, login: str) -> None:
+        """The IP's session may open the private entry, but this browser has
+        no valid bind cookie: a page load goes to the portal hop, anything
+        else gets a bare 401.
+
+        Neither counts for fail2ban or the drop log: the IP holds a live
+        session, and counting would let a second client ban its owner.
+        """
+        if self._proxy_navigation():
+            query = urllib.parse.urlencode(
+                {"host": host, "r": _proxy_bind_uri(raw_uri)}
+            )
+            return self._send(
+                302, b"", "text/plain; charset=utf-8",
+                headers={"Location": f"{login}{PROXY_BIND_START[1:]}?{query}"},
+            )
+        return self._json(401, {
+            "ok": False, "code": "proxy_bind_required",
+            "error": "this browser is not signed in to the entry",
+        })
+
+    def _proxy_bind_finish(
+        self, host: str, ip: str, sid: str, raw_uri: str, login: str
+    ) -> None:
+        """The entry host's bind hop: trade the ticket for the bind cookie.
+
+        The ticket is spent on the first try, even when it does not match.
+        A mismatch gets the login page (not counted: the IP holds a live
+        session), not another redirect, so a broken hop cannot loop.
+        """
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(raw_uri).query)
+        ticket = PROXY_BIND_TICKETS.consume((query.get("t") or [""])[0])
+        uri = _proxy_bind_uri((query.get("r") or ["/"])[0])
+        user = self.gw.sessions.domain_user(ip, host) or ""
+        if ticket is None:
+            reason = "unknown_ticket"
+        elif ticket.host != host:
+            reason = "host_mismatch"
+        elif ticket.ip != ip:
+            reason = "ip_mismatch"
+        elif not hmac.compare_digest(ticket.sid.encode(), sid.encode()):
+            reason = "session_mismatch"
+        else:
+            reason = ""
+        if reason:
+            self._audit(
+                "proxy_bind_failed", ip=ip, user=user, host=host,
+                reason=reason,
+            )
+            return self._proxy_login_page(login)
+        lifetime = gateway.MAX_TTL
+        value = _proxy_bind_value(sid, host, int(time.time()) + lifetime)
+        self._audit(
+            "proxy_bind_completed", ip=ip, user=user, host=host, sid=sid
+        )
+        return self._send(
+            302, b"", "text/plain; charset=utf-8",
+            headers={
+                "Location": f"https://{host}{uri}",
+                "Set-Cookie": (
+                    f"{PROXY_BIND_COOKIE}={value}; Max-Age={lifetime}; "
+                    "Path=/; Secure; HttpOnly; SameSite=Lax"
+                ),
+            },
+        )
+
+    def _proxy_bind_start(self) -> None:
+        """The portal hop (GET /api/proxy/bind?host=&r=, through Caddy).
+
+        It needs the portal session cookie of a session that may open the
+        private entry ``host`` from this IP; then it sends the browser to the
+        entry host's hop with a single-use ticket. Anything else goes back to
+        the portal page, where the user can sign in and select the rule.
+        """
+        self._discard_body()
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        host = (query.get("host") or [""])[0].strip().lower()[:253]
+        uri = _proxy_bind_uri((query.get("r") or ["/"])[0])
+        ip = self._client_ip()
+        target, _ = self._proxy_target(host)
+        session = self.gw.sessions.validate(self._cookie_token(), ip)
+        if (
+            not isinstance(target, dict) or target.get("portal")
+            or target.get("visibility") != "private"
+        ):
+            reason = "not_private"
+        elif self.gw.fail2ban.banned(ip) is not None \
+                or self.gw.fail2ban.proxy_banned(ip) is not None:
+            reason = "banned"
+        elif session is None:
+            reason = "no_session"
+        elif not session.sid or self.gw.sessions.domain_session(
+            ip, host
+        ) != session.sid:
+            reason = "not_authorized"
+        else:
+            reason = ""
+        if reason:
+            self._audit(
+                "proxy_bind_denied", ip=ip,
+                user=session.user if session is not None else "",
+                host=host[:200], reason=reason,
+            )
+            return self._send(
+                302, b"", "text/plain; charset=utf-8",
+                headers={"Location": "/"},
+            )
+        ticket = PROXY_BIND_TICKETS.issue(session.sid, host, ip)
+        query_string = urllib.parse.urlencode({"t": ticket, "r": uri})
+        return self._send(
+            302, b"", "text/plain; charset=utf-8",
+            headers={
+                "Location": f"https://{host}{PROXY_BIND_PATH}?{query_string}"
+            },
+        )
+
+    def _send_challenge_page(self) -> None:
+        # 403 (not 401): neither fail2ban nor the drop log counts it. Its
+        # inline script runs by hash, like the portal page's.
+        page = _proxy_challenge_page()
+        return self._send(
+            403, page, "text/html; charset=utf-8",
+            csp=content_security_policy(inline_script_hashes(page)),
+        )
 
     def _proxy_challenge_triggers(
         self, target: dict, host: str, ip: str
@@ -5605,12 +5984,9 @@ class Handler(BaseHTTPRequestHandler):
             )
             return self._json(403, payload, headers=headers)
 
-        cookie = (
-            f"{gateway.COOKIE_NAME}={session.token}; Path=/; HttpOnly; "
-            f"SameSite=Lax; Max-Age={self.gw.sessions.pending_ttl}"
+        cookie = self._session_cookies(
+            session.token, self.gw.sessions.pending_ttl
         )
-        if self._cookie_secure():
-            cookie += "; Secure"
         audit_fields = {
             "user": record.name,
             "role": record.role,
@@ -5800,7 +6176,7 @@ class Handler(BaseHTTPRequestHandler):
     ) -> None:
         """Invalid 2FA code: ticket attempt, fail2ban and the appropriate error message."""
         remaining, locked, attempts, existed = (
-            LOGIN_TICKETS.fail_with_status(token, ip)
+            LOGIN_TICKETS.fail_reserved(token, ip)
         )
         ban = self._record_login_failure(ip, username)
         self._audit(
@@ -5884,13 +6260,15 @@ class Handler(BaseHTTPRequestHandler):
                 {"ok": False, "error": "bad request", "code": "bad_request"},
             )
         token, code = credentials
-        ticket = LOGIN_TICKETS.peek(token, ip)
+        # One attempt is reserved before the code check: parallel requests
+        # cannot test more codes than the ticket's cap (DJ-29).
+        ticket, reason = LOGIN_TICKETS.reserve(token, ip)
         if ticket is None:
-            _, reason = LOGIN_TICKETS.inspect(token, ip)
             return self._ticket_invalid(
                 token, reason=reason, purpose="verify"
             )
         if ticket.purpose != "verify":
+            LOGIN_TICKETS.release(token, ip)
             return self._ticket_invalid(
                 token,
                 reason="wrong_purpose",
@@ -5916,7 +6294,12 @@ class Handler(BaseHTTPRequestHandler):
                 purpose=ticket.purpose,
                 user=ticket.username,
             )
-        if not self.gw.users.verify_totp(ticket.username, code):
+        try:
+            valid = self.gw.users.verify_totp(ticket.username, code)
+        except Exception:
+            LOGIN_TICKETS.release(token, ip)
+            raise
+        if not valid:
             return self._totp_failure(
                 ip, token, ticket.username, purpose=ticket.purpose
             )
@@ -5954,13 +6337,15 @@ class Handler(BaseHTTPRequestHandler):
                 {"ok": False, "error": "bad request", "code": "bad_request"},
             )
         token, code = credentials
-        ticket = LOGIN_TICKETS.peek(token, ip)
+        # One attempt is reserved before the code check: parallel requests
+        # cannot test more codes than the ticket's cap (DJ-29).
+        ticket, reason = LOGIN_TICKETS.reserve(token, ip)
         if ticket is None:
-            _, reason = LOGIN_TICKETS.inspect(token, ip)
             return self._ticket_invalid(
                 token, reason=reason, purpose="enroll"
             )
         if ticket.purpose != "enroll":
+            LOGIN_TICKETS.release(token, ip)
             return self._ticket_invalid(
                 token,
                 reason="wrong_purpose",
@@ -5985,7 +6370,11 @@ class Handler(BaseHTTPRequestHandler):
                 purpose=ticket.purpose,
                 user=ticket.username,
             )
-        matched = gateway.totp_match(ticket.secret, code)
+        try:
+            matched = gateway.totp_match(ticket.secret, code)
+        except Exception:
+            LOGIN_TICKETS.release(token, ip)
+            raise
         if matched is None:
             return self._totp_failure(
                 ip, token, ticket.username, purpose=ticket.purpose
@@ -6076,13 +6465,15 @@ class Handler(BaseHTTPRequestHandler):
                 {"ok": False, "error": "bad request", "code": "bad_request"},
             )
         token, code = credentials
-        ticket = LOGIN_TICKETS.peek(token, ip)
+        # One attempt is reserved before the code check: parallel requests
+        # cannot test more codes than the ticket's cap (DJ-29).
+        ticket, reason = LOGIN_TICKETS.reserve(token, ip)
         if ticket is None:
-            _, reason = LOGIN_TICKETS.inspect(token, ip)
             return self._ticket_invalid(
                 token, reason=reason, purpose="verify"
             )
         if ticket.purpose != "verify":
+            LOGIN_TICKETS.release(token, ip)
             return self._ticket_invalid(
                 token,
                 reason="wrong_purpose",
@@ -6107,7 +6498,12 @@ class Handler(BaseHTTPRequestHandler):
                 purpose=ticket.purpose,
                 user=ticket.username,
             )
-        if not self.gw.users.verify_recovery(ticket.username, code):
+        try:
+            valid = self.gw.users.verify_recovery(ticket.username, code)
+        except Exception:
+            LOGIN_TICKETS.release(token, ip)
+            raise
+        if not valid:
             return self._totp_failure(
                 ip, token, ticket.username, recovery=True,
                 purpose=ticket.purpose,
@@ -6279,12 +6675,9 @@ class Handler(BaseHTTPRequestHandler):
                 },
             )
 
-        cookie = (
-            f"{gateway.COOKIE_NAME}={session.token}; Path=/; HttpOnly; "
-            f"SameSite=Lax; Max-Age={max(1, session.expires_in)}"
+        cookie = self._session_cookies(
+            session.token, max(1, session.expires_in)
         )
-        if self._cookie_secure():
-            cookie += "; Secure"
         selection = self._selection_payload(session)
         selected_ids = selection["selected_rules"]
         audit_fields = {
@@ -6374,11 +6767,7 @@ class Handler(BaseHTTPRequestHandler):
             )
         else:
             self._audit("logout_failed", reason="no_valid_session")
-        clear = (
-            f"{gateway.COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
-        )
-        if self._cookie_secure():
-            clear += "; Secure"
+        clear = self._session_cookies("", 0)
         print(f"[{ip}] logout", flush=True)
         self._json(
             200, {"ok": True, "message": "You have logged out. The network is blocked."},

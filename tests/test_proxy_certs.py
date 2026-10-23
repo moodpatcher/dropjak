@@ -323,9 +323,11 @@ class ProxyCertEndpointTests(unittest.TestCase):
         return self.get(f"/api/proxy/cert?server_name={name}", headers, source)
 
     def auth(self, name, ip, **headers):
+        bind = tp.bind_cookie(self.server.gateway.sessions, ip, name)
         return self.get("/api/proxy/auth", {
             "X-Forwarded-Host": name, "X-Forwarded-For": ip,
-            "X-Forwarded-Uri": "/chat/abc?token=titok", **headers,
+            "X-Forwarded-Uri": "/chat/abc?token=titok",
+            **({"Cookie": bind} if bind else {}), **headers,
         })
 
     def test_loopback_covered_name_gets_chain_and_key(self) -> None:

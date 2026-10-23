@@ -263,6 +263,7 @@ These are properties of the system that the code and the tests must protect. The
 9. **Pre-auth is intentionally public.** Every client can reach the pre-auth destinations without logging in; the list must be kept minimal. The `input`-direction pre-auth rule opens the specified ports of the portal machine **before** login, thereby bypassing the portal gate: it may only be used in justified cases, for the most necessary ports. It never opens 22, 53, 67, 2019 or the portal port. Its `scope` is `lan` by default (from `HV_LAN_IF`, or `HV_WAN_IF` in single-NIC mode); only an explicit `any` opens the port from the WAN. `block` and fail2ban override this too.
 10. **Breakglass is emergency-only.** The chain is not flushed on reload; the rule must be deleted immediately after use.
 11. **IPv6 is always dropped, in every case.** The raw prerouting `loopback_guard`, the forward chain (first rule) and the input chain (right after the loopback accept, before `breakglass`) drop every IPv6 packet; no rule accepts IPv6, and the boot table drops it too. Only loopback (`::1` on `lo`, which cannot come from the network) passes. `docker/setup-host.sh` and `install.sh` always set `net.ipv6.conf.<HV_LAN_IF>.disable_ipv6 = 1` in `/etc/sysctl.d/90-dropjak.conf` in two-NIC mode; single-NIC mode has no separate LAN interface, so that line is omitted (the firewall still drops IPv6). **Requirement (two-NIC):** the client LAN must have no other IPv6 router. The firewall cannot see traffic that never reaches the gateway: a router advertisement from another device would give the clients an IPv6 path around it. Use RA guard on the switch where the LAN is shared.
+12. **A private proxy entry is bound to the portal session, not only to the IP.** `/api/proxy/auth` lets a private entry (and a private domain-mode tunnel service) through only when the IP has a live session that selected the entry *and* the browser sends a `__Host-dropjak_bind` cookie naming that session (HMAC, host-bound). The cookie is set only by the two-hop bind flow (`/api/proxy/bind` on the portal, `/__dropjak/bind` on the entry) and Caddy strips it before the upstream. A second browser behind the same NAT cannot open the entry without its own login.
 
 #### 5.2. Revocation and consistency
 1. **Revocation is durable.** In case of a failed `nft` call, a pending-revocation entry remains, which is retried with backoff; partial revocation deletes only what is no longer needed.
@@ -281,14 +282,16 @@ These are properties of the system that the code and the tests must protect. The
 - Admin endpoints are protected by `_admin_guard`; POST requests are JSON-only and same-origin checked.
 - The server takes the client IP from the socket peer. The only exception is Caddy: from a loopback peer the last `X-Forwarded-For` element is used. The loopback peer must also send `HV_PROXY_KEY` (`X-Dropjak-Proxy-Key`, or `?key=` for `get_certificate`/`ask`). The key is mandatory with `HV_PROXY=1`: the Docker entrypoint refuses to start without at least 32 characters (the native install has no proxy). fail2ban therefore has no loopback exemption list any more: Caddy's requests are counted against the real client IP. Only `127.0.0.1` itself stays unbannable (`fail2ban.normalize_ip`; the input chain accepts loopback first, so such a ban could not take effect).
 - `HV_WAN_HTTPS_ONLY=1`: `/api/login*`, `/api/password` and `/api/admin/*` answer `403 {"code": "https_required"}` to a source outside `HV_LAN_NET` that did not come through Caddy. LAN clients and loopback-direct callers (healthcheck, CLI) are unaffected. Each refusal is audited as `https_required`, at most once per source IP per minute. The UI shows a translated "sign in over HTTPS" message.
-- The session cookie gets `Secure` with `HV_COOKIE_SECURE=1`, and on every response that goes out through Caddy even with `HV_COOKIE_SECURE=0`: Caddy serves the portal only in its `https://` site (its `http://` site only asks `/api/proxy/redirect` for a 3xx). Without a key only a proxy root domain counted. Plain-HTTP LAN logins keep working.
+- The session cookie gets `Secure` with `HV_COOKIE_SECURE=1`, and on every response that goes out through Caddy even with `HV_COOKIE_SECURE=0`: Caddy serves the portal only in its `https://` site (its `http://` site only asks `/api/proxy/redirect` for a 3xx). Without a key only a proxy root domain counted. Plain-HTTP LAN logins keep working. Whenever the cookie is `Secure`, its name is `__Host-hv_session` (`Path=/`, no `Domain`, so a sibling host cannot toss one in); on plain HTTP it stays `hv_session`. The server reads both names (the `__Host-` one wins) and logout expires both.
+- The HTML pages' CSP has no `'unsafe-inline'` in `script-src`: the inline scripts of `index.html` and of the proxy challenge page are allowed by their SHA-256 (`inline_script_hashes`, computed from the file as served), and the UI uses no inline event handlers.
 - `/api/*` answers only under an IP literal, the `HV_PORTAL_URL` host, `HV_PORTAL_HOSTS`, or (through Caddy) a root domain or the portal's own address; anything else is 421 (DNS rebinding).
 - Export, import and factory reset require the admin's password again (and the TOTP code when enrolled); a failure counts like a failed login.
 - Failed logins are also counted per login name across all WAN source IPs (`HV_ACCOUNT_LOCK_*`); LAN clients are never locked.
 - Protection of the last active admin: the last admin cannot be deleted/disabled.
 - Deleting a user also removes group membership.
 - The admin user update restores the previous password hash if the subsequent metadata or membership write fails.
-- TOTP tickets are in-memory, live for 300 seconds, are bound to an IP, single-use, and allow at most 5 attempts.
+- TOTP tickets are in-memory, live for 300 seconds, are bound to an IP, single-use, and allow at most 5 attempts. Each code check reserves an attempt first (`LoginTicketStore.reserve`), so parallel requests cannot test more codes than the cap.
+- The account-request approval list warns (and asks again on approve) when a pending name equals an admin's name after removing `.`, `_`, `-` and folding case.
 - The audit log redacts password, hash, secret, TOTP code, recovery code, cookie, token, ticket and `otpauth://` URI; email addresses are not logged.
 
 #### 5.4. Known limitations
@@ -570,6 +573,14 @@ Admin operations are logged (`admin_*` events), a denied request as `admin_denie
 | `/` | `index.html`. |
 | `/icon.png`, `/favicon.ico` | Icon. |
 | `/blocked.png` | Image of the ban screen. |
+
+#### 8.5. Proxy bind hops (private entries)
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/proxy/bind?host=<entry>&r=<uri>` | Portal hop, only through Caddy on the portal's own address or root domain. It needs the portal session cookie of a session that selected the private entry from this IP, then answers `302 https://<entry>/__dropjak/bind?t=<ticket>&r=<uri>`. The ticket is single-use, lives 60 s and is bound to the session id, host and IP. Otherwise `302 /` (the portal page) and a `proxy_bind_denied` audit. |
+| GET | `https://<entry>/__dropjak/bind?t=&r=` | Entry hop, answered by `/api/proxy/auth` (forward_auth): spends the ticket and answers `302 https://<entry><r>` with `Set-Cookie: __Host-dropjak_bind=…; Secure; HttpOnly; SameSite=Lax; Path=/` (`proxy_bind_completed`). A bad ticket gets the 401 login page (`proxy_bind_failed`, not counted by fail2ban). |
+
+Without a valid bind cookie, a page load of a private entry from an IP that holds a matching session gets `302` to the portal hop, any other request `401 {"code": "proxy_bind_required"}`; neither counts for fail2ban or the drop log. `r` must be an origin-relative path (no `//`, backslash or space). The bind cookie is valid as long as the session (checked on every request) and at most `HV_MAX_TTL`; the key is new per process, so after a restart the browser repeats the hop on the next page load.
 
 The portal's `server_version` value is `Dropjak/2`; this is not the same as the product version. The product version is given by the `VERSION` file and the `version` field of `/api/status`.
 
@@ -3500,7 +3511,10 @@ them, the separate directory separates their compose resources.
    `dropjak-agent-<id>.sh` file. It is self-extracting: the beginning is the
    installer, at the end the `compose.yml`, `agent.json` (0600; WireGuard
    private key and token — to be handled confidentially), and the agent source
-   (`agent.py`, `Dockerfile`, `check-containment.sh`).
+   (`agent.py`, `Dockerfile`, `check-containment.sh`). After the download the
+   agent card shows the file's SHA-256 (from `X-Dropjak-SHA256`) in
+   `sha256sum` format; compare it with `sha256sum dropjak-agent-<id>.sh` on
+   the target machine before running it.
 4. Copied to the other machine: `sudo sh dropjak-agent-<id>.sh`. The installer
    (all its output in English) installs into the current directory (`$PWD`, or
    `DROPJAK_DIR`). When started on a TTY, a small menu offers the operation:
@@ -5089,6 +5103,8 @@ with an existing proxy entry. While the own address is active, the parent
 root domain cannot be deleted. On the own address, the `/api/proxy/*`
 endpoints—like on the root domain—are not reachable through Caddy, because
 Caddy forwards to the portal and the socket peer there would be loopback.
+The one exception is `/api/proxy/bind`, the portal hop of the private-entry
+session binding (see 8.5), which checks the session cookie itself.
 
 ---
 
@@ -5249,9 +5265,9 @@ The running version is stored in [`VERSION`](VERSION).
 #### Security
 
 Fixes from the 2026-10-23 security review (finding IDs DJ-00 to DJ-36).
-Items marked as design steps in that review (DJ-05, DJ-24, mandatory
-admin TOTP, enrollment codes, agent-side key generation, encrypted export)
-are not part of this change; the owner's decisions on the other follow-ups
+Items marked as design steps in that review (DJ-24, mandatory admin TOTP,
+enrollment codes, agent-side key generation, encrypted export) are not part
+of this change; the owner's decisions on the other follow-ups
 are the last entries of this list.
 
 - **fail2ban (DJ-01, DJ-22).** Ban rules match only `ct direction original`,
@@ -5359,6 +5375,33 @@ are the last entries of this list.
   mode, which has no separate LAN interface); `setup-host.sh` no longer
   inserts an IPv6 SSH exception into the boot table. Requirement: no other
   IPv6 router on the client LAN.
+- **Private proxy entries bound to the session (DJ-05).** The source IP is
+  no longer enough: `/api/proxy/auth` also requires a `__Host-dropjak_bind`
+  cookie (HMAC over session id, host and expiry) naming the IP's live
+  session for that entry. It is set by a two-hop flow: the portal's
+  `GET /api/proxy/bind` (session cookie required) issues a single-use 60 s
+  ticket, and `/__dropjak/bind` on the entry trades it for the cookie.
+  Navigations without the cookie are redirected into the flow, other
+  requests get 401 (not counted by fail2ban). Private domain-mode tunnel
+  services go through the same check. Caddy strips both
+  `__Host-dropjak_(pass|bind)` cookies before the upstream. New audit events
+  `proxy_bind_completed`, `proxy_bind_denied` and `proxy_bind_failed`
+  (hu/en/de labels).
+- **No inline-script allowance in the CSP (DJ-28).** `script-src` no longer
+  has `'unsafe-inline'`; the inline scripts of `index.html` and of the
+  challenge page are allowed by SHA-256 hashes computed from the served
+  page.
+- **`__Host-hv_session` over HTTPS (DJ-28).** When the session cookie is
+  `Secure` (through Caddy, or `HV_COOKIE_SECURE=1`) it is issued as
+  `__Host-hv_session`; plain-HTTP LAN logins keep `hv_session`. Both names
+  are read, and logout clears both.
+- **TOTP ticket race (DJ-29).** Code checks reserve an attempt before
+  verifying (`reserve`/`fail_reserved`/`release`), so parallel wrong codes
+  cannot exceed the ticket's cap. The approval list warns about pending
+  names that resemble an admin name.
+- **Installer digest in the UI (DJ-08).** The agent card shows the
+  downloaded installer's `X-Dropjak-SHA256` value with a hint to compare it
+  with `sha256sum`.
 
 ### [3.24.0] - 2026-10-22
 
