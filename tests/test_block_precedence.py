@@ -31,6 +31,9 @@ def chain_rules(template: str, name: str) -> list[str]:
     Comment-only lines are skipped and backslash continuations are joined so
     ordering assertions cannot be confused by line wrapping.
     """
+    # The template marks LAN-only lines for the renderer. These tests parse
+    # the two-NIC variant, where the marker becomes an empty string.
+    template = template.replace("__LANONLY__", "")
     match = re.search(
         rf"^    chain {re.escape(name)} \{{\n(.*?)^    \}}\n",
         template,

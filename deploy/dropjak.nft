@@ -17,8 +17,14 @@
 #   - input:   the portal is reachable by everyone; host SSH (TCP 22)
 #     is opened exclusively through a host (input) rule created by an admin
 #     and assigned to the user (allowed_input_tcp, explicit 22), with an
-#     active, authorized portal session; DNS/DHCP from the LAN
+#     active, authorized portal session; DNS/DHCP from the LAN (two-NIC mode)
 #   - the HTTP of unauthorized clients is redirected to the login page
+#     (two-NIC mode; in single-NIC there is no redirect)
+#
+# Single-NIC mode (HV_SINGLE_NIC=1): the WAN interface is also the
+# client-facing interface and the portal is reached by source-IP matching.
+# Every line prefixed with __LANONLY__ is omitted: the renderer replaces the
+# marker with nothing in two-NIC mode and with "# " in single-NIC mode.
 #
 # iifname/oifname is used so that loading the rules does not depend on
 # when the given interface (VLAN, bridge, bond) is created during boot.
@@ -109,7 +115,8 @@ add set inet hatarvedelem allowed_icmp {
 # MAC address bound to the client. The source IP alone can be spoofed on the LAN
 # (by taking another client's allowed IP), so for the allowed IP the portal
 # also records the MAC address from the client's ARP entry.
-# The related drop rules are only valid on the LAN interface.
+# The related drop rules are only valid on the LAN interface, so they are
+# omitted in single-NIC mode (where grants are IP-based only).
 add set inet hatarvedelem client_mac {
     type ipv4_addr . ether_addr
     flags timeout
@@ -202,7 +209,8 @@ add chain inet hatarvedelem breakglass
 # reload neither opens nor closes the configured targets.
 #   preauth:    forward targets/ports reachable before login too
 #   preauth_input: host (input) ports reachable before login
-#   block:      always-dropped LAN traffic (before pre-auth)
+#   block:      always-dropped client traffic (before pre-auth); in single-NIC
+#               mode only forwarded traffic, never host (WAN) input
 #   preauth_nat: pre-auth TCP 80 bypasses the portal redirect
 #   block_nat:  drops blocked TCP 80 before the redirect
 add chain inet hatarvedelem preauth
@@ -300,19 +308,21 @@ table inet hatarvedelem {
         ct state invalid update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=ct-invalid " group __DROP_LOG_GROUP__
         ct state invalid drop
 
-        # Source-IP spoofing prevention. On the LAN interface only sources belonging
-        # to the LAN network may come in; from the WAN it is forbidden to take
-        # the LAN address. This rules out a client using the forward rules with
-        # another allowed client's IP (or with a LAN source from the WAN).
-        iifname "__LAN_IF__" ip saddr != __LAN_NET__ update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-lan " group __DROP_LOG_GROUP__
-        iifname "__LAN_IF__" ip saddr != __LAN_NET__ drop
-        iifname "__WAN_IF__" ip saddr __LAN_NET__ update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-wan " group __DROP_LOG_GROUP__
-        iifname "__WAN_IF__" ip saddr __LAN_NET__ drop
-        # A LAN source is only valid on the LAN interface. Without this, a
-        # process on any other interface (a Docker bridge, an extra NIC or VLAN)
-        # could use a LAN client's grants with that client's address.
-        iifname != "__LAN_IF__" ip saddr __LAN_NET__ update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-lan " group __DROP_LOG_GROUP__
-        iifname != "__LAN_IF__" ip saddr __LAN_NET__ drop
+        # Two-NIC mode only: source-IP spoofing prevention. On the LAN interface
+        # only sources belonging to the LAN network may come in; from the WAN it
+        # is forbidden to take the LAN address. This rules out a client using the
+        # forward rules with another allowed client's IP (or with a LAN source
+        # from the WAN).
+__LANONLY__        iifname "__LAN_IF__" ip saddr != __LAN_NET__ update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-lan " group __DROP_LOG_GROUP__
+__LANONLY__        iifname "__LAN_IF__" ip saddr != __LAN_NET__ drop
+__LANONLY__        iifname "__WAN_IF__" ip saddr __LAN_NET__ update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-wan " group __DROP_LOG_GROUP__
+__LANONLY__        iifname "__WAN_IF__" ip saddr __LAN_NET__ drop
+        # Two-NIC mode only: A LAN source is only valid on the LAN interface.
+        # Without this, a process on any other interface (a Docker bridge, an
+        # extra NIC or VLAN) could use a LAN client's grants with that client's
+        # address.
+__LANONLY__        iifname != "__LAN_IF__" ip saddr __LAN_NET__ update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-lan " group __DROP_LOG_GROUP__
+__LANONLY__        iifname != "__LAN_IF__" ip saddr __LAN_NET__ drop
 
         # fail2ban-banned source: logged dropping of forwarded traffic.
         # This rule runs before the permitting sets and the pre-auth chain,
@@ -327,22 +337,24 @@ table inet hatarvedelem {
         ip saddr @banned_v4 ct direction original update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=fail2ban " group __DROP_LOG_GROUP__
         ip saddr @banned_v4 ct direction original drop
 
-        # MAC binding: anyone using an allowed IP must send with the MAC address
-        # recorded during the session. This protects against an IP moving to another
-        # machine after DHCP expiry and against IP spoofing within the LAN.
+        # Two-NIC mode only: MAC binding. Anyone using an allowed IP must send
+        # with the MAC address recorded during the session. This protects against
+        # an IP moving to another machine after DHCP expiry and against IP
+        # spoofing within the LAN. Single-NIC mode has no MAC binding: grants
+        # are IP-based on the public interface (an accepted trade-off).
         # The portal records the MAC from the ARP table.
         # For port rules we only check the original direction (the client's packets):
         # the response of a LAN-side DNAT target (port proxy forward) also arrives
         # on the LAN interface, with the target's own IP/MAC pair, which
         # never appears in the client_mac set.
-        iifname "__LAN_IF__" ip saddr @allowed_v4 ip saddr . ether saddr != @client_mac update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
-        iifname "__LAN_IF__" ip saddr @allowed_v4 ip saddr . ether saddr != @client_mac drop
-        iifname "__LAN_IF__" meta l4proto tcp ct direction original ct original ip saddr . ct original proto-dst @allowed_tcp ip saddr . ether saddr != @client_mac update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
-        iifname "__LAN_IF__" meta l4proto tcp ct direction original ct original ip saddr . ct original proto-dst @allowed_tcp ip saddr . ether saddr != @client_mac drop
-        iifname "__LAN_IF__" meta l4proto udp ct direction original ct original ip saddr . ct original proto-dst @allowed_udp ip saddr . ether saddr != @client_mac update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
-        iifname "__LAN_IF__" meta l4proto udp ct direction original ct original ip saddr . ct original proto-dst @allowed_udp ip saddr . ether saddr != @client_mac drop
-        iifname "__LAN_IF__" ip saddr @allowed_icmp ip saddr . ether saddr != @client_mac update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
-        iifname "__LAN_IF__" ip saddr @allowed_icmp ip saddr . ether saddr != @client_mac drop
+__LANONLY__        iifname "__LAN_IF__" ip saddr @allowed_v4 ip saddr . ether saddr != @client_mac update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
+__LANONLY__        iifname "__LAN_IF__" ip saddr @allowed_v4 ip saddr . ether saddr != @client_mac drop
+__LANONLY__        iifname "__LAN_IF__" meta l4proto tcp ct direction original ct original ip saddr . ct original proto-dst @allowed_tcp ip saddr . ether saddr != @client_mac update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
+__LANONLY__        iifname "__LAN_IF__" meta l4proto tcp ct direction original ct original ip saddr . ct original proto-dst @allowed_tcp ip saddr . ether saddr != @client_mac drop
+__LANONLY__        iifname "__LAN_IF__" meta l4proto udp ct direction original ct original ip saddr . ct original proto-dst @allowed_udp ip saddr . ether saddr != @client_mac update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
+__LANONLY__        iifname "__LAN_IF__" meta l4proto udp ct direction original ct original ip saddr . ct original proto-dst @allowed_udp ip saddr . ether saddr != @client_mac drop
+__LANONLY__        iifname "__LAN_IF__" ip saddr @allowed_icmp ip saddr . ether saddr != @client_mac update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
+__LANONLY__        iifname "__LAN_IF__" ip saddr @allowed_icmp ip saddr . ether saddr != @client_mac drop
 
         # Block configured by the admin. We call it unconditionally: the block chain
         # matches the conntrack original tuple, so it also covers the response
@@ -363,10 +375,11 @@ table inet hatarvedelem {
 
         # Grants are not scoped by destination, so without these rules a grant
         # would also reach every container IP on the Docker bridges and, from
-        # the WAN side, the LAN. A new flow may enter a Docker bridge or the LAN
-        # from the WAN only if it was DNAT-ed (a published port or a port
-        # proxy entry). Only the original direction is checked: the replies of
-        # flows the container or the LAN host started are not affected.
+        # the WAN side, the LAN (the WAN→LAN pair below is two-NIC only). A new
+        # flow may enter a Docker bridge or the LAN from the WAN only if it was
+        # DNAT-ed (a published port or a port proxy entry). Only the original
+        # direction is checked: the replies of flows the container or the LAN
+        # host started are not affected.
         # Bridges with other names are covered by the docker_bridges set.
         oifname "docker*" ct direction original ct status != dnat update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=container-direct " group __DROP_LOG_GROUP__
         oifname "docker*" ct direction original ct status != dnat drop
@@ -374,22 +387,23 @@ table inet hatarvedelem {
         oifname "br-*" ct direction original ct status != dnat drop
         oifname @docker_bridges ct direction original ct status != dnat update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=container-direct " group __DROP_LOG_GROUP__
         oifname @docker_bridges ct direction original ct status != dnat drop
-        iifname "__WAN_IF__" oifname "__LAN_IF__" ct direction original ct status != dnat update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=wan-drop " group __DROP_LOG_GROUP__
-        iifname "__WAN_IF__" oifname "__LAN_IF__" ct direction original ct status != dnat drop
+__LANONLY__        iifname "__WAN_IF__" oifname "__LAN_IF__" ct direction original ct status != dnat update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=wan-drop " group __DROP_LOG_GROUP__
+__LANONLY__        iifname "__WAN_IF__" oifname "__LAN_IF__" ct direction original ct status != dnat drop
 
-        # A grant belongs to a client on the LAN or the WAN. The same source
-        # address arriving on any other interface (a Docker bridge, the
-        # tunnel, an extra NIC or VLAN) would otherwise inherit the grant
-        # (DJ-17). Only the original direction: replies to a client's flows
-        # come back from wherever the destination is.
-        ct direction original iifname != { "__LAN_IF__", "__WAN_IF__" } ip saddr @allowed_v4 update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=grant-iface " group __DROP_LOG_GROUP__
-        ct direction original iifname != { "__LAN_IF__", "__WAN_IF__" } ip saddr @allowed_v4 drop
-        ct direction original iifname != { "__LAN_IF__", "__WAN_IF__" } ip saddr @allowed_icmp ip protocol icmp update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=grant-iface " group __DROP_LOG_GROUP__
-        ct direction original iifname != { "__LAN_IF__", "__WAN_IF__" } ip saddr @allowed_icmp ip protocol icmp drop
-        ct direction original iifname != { "__LAN_IF__", "__WAN_IF__" } meta l4proto tcp ct original ip saddr . ct original proto-dst @allowed_tcp update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=grant-iface " group __DROP_LOG_GROUP__
-        ct direction original iifname != { "__LAN_IF__", "__WAN_IF__" } meta l4proto tcp ct original ip saddr . ct original proto-dst @allowed_tcp drop
-        ct direction original iifname != { "__LAN_IF__", "__WAN_IF__" } meta l4proto udp ct original ip saddr . ct original proto-dst @allowed_udp update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=grant-iface " group __DROP_LOG_GROUP__
-        ct direction original iifname != { "__LAN_IF__", "__WAN_IF__" } meta l4proto udp ct original ip saddr . ct original proto-dst @allowed_udp drop
+        # A grant belongs to a client on a client interface (the LAN and the
+        # WAN; in single-NIC mode the WAN only). The same source address
+        # arriving on any other interface (a Docker bridge, the tunnel, an
+        # extra NIC or VLAN) would otherwise inherit the grant (DJ-17). Only
+        # the original direction: replies to a client's flows come back from
+        # wherever the destination is.
+        ct direction original iifname != { __CLIENT_IFS__ } ip saddr @allowed_v4 update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=grant-iface " group __DROP_LOG_GROUP__
+        ct direction original iifname != { __CLIENT_IFS__ } ip saddr @allowed_v4 drop
+        ct direction original iifname != { __CLIENT_IFS__ } ip saddr @allowed_icmp ip protocol icmp update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=grant-iface " group __DROP_LOG_GROUP__
+        ct direction original iifname != { __CLIENT_IFS__ } ip saddr @allowed_icmp ip protocol icmp drop
+        ct direction original iifname != { __CLIENT_IFS__ } meta l4proto tcp ct original ip saddr . ct original proto-dst @allowed_tcp update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=grant-iface " group __DROP_LOG_GROUP__
+        ct direction original iifname != { __CLIENT_IFS__ } meta l4proto tcp ct original ip saddr . ct original proto-dst @allowed_tcp drop
+        ct direction original iifname != { __CLIENT_IFS__ } meta l4proto udp ct original ip saddr . ct original proto-dst @allowed_udp update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=grant-iface " group __DROP_LOG_GROUP__
+        ct direction original iifname != { __CLIENT_IFS__ } meta l4proto udp ct original ip saddr . ct original proto-dst @allowed_udp drop
 
         # Port-restricted access. The ct original proto-dst means the destination port
         # BEFORE DNAT, so for container ports published by Docker the
@@ -419,9 +433,10 @@ table inet hatarvedelem {
 
         # Container egress exceptions configured on the portal (DJ-32): each
         # entry lets one container address reach the given outbound ports,
-        # only from its own bridge, never with a new flow into the LAN, and
-        # passes the replies of the flows the container started. The source
-        # address on any other interface is dropped (container-spoof).
+        # only from its own bridge, never with a new flow into the LAN (two-NIC
+        # mode), and passes the replies of the flows the container started.
+        # The source address on any other interface is dropped
+        # (container-spoof).
         jump container_egress
 
         # Pre-login permissions. The pre-auth chain also covers the response
@@ -433,7 +448,7 @@ table inet hatarvedelem {
         # The rule-wide limit is higher here than elsewhere: every source
         # also has its own budget (log_src_v4), so several scanners at once
         # still show up.
-        iifname "__LAN_IF__" update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 120/minute burst 240 packets log prefix "dropjak-drop reason=no-grant " group __DROP_LOG_GROUP__
+__LANONLY__        iifname "__LAN_IF__" update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 120/minute burst 240 packets log prefix "dropjak-drop reason=no-grant " group __DROP_LOG_GROUP__
         iifname "__WAN_IF__" update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 120/minute burst 240 packets log prefix "dropjak-drop reason=wan-drop " group __DROP_LOG_GROUP__
         drop
     }
@@ -460,39 +475,45 @@ table inet hatarvedelem {
         # The DHCP request arrives with a 0.0.0.0 source before address assignment, so
         # we let it through before the source check. Only from the standard
         # client port (68) to the server port (67), and only with a 0.0.0.0 source.
-        iifname "__LAN_IF__" ip saddr 0.0.0.0 udp sport 68 udp dport 67 accept
+        # Two-NIC mode only: single-NIC hosts do not run a DHCP server.
+__LANONLY__        iifname "__LAN_IF__" ip saddr 0.0.0.0 udp sport 68 udp dport 67 accept
 
-        # Source-IP spoofing prevention toward the host as well. From the WAN it is
-        # forbidden to take the LAN address; from the LAN only the LAN network may come.
-        iifname "__LAN_IF__" ip saddr != __LAN_NET__ update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-lan " group __DROP_LOG_GROUP__
-        iifname "__LAN_IF__" ip saddr != __LAN_NET__ drop
-        iifname "__WAN_IF__" ip saddr __LAN_NET__ update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-wan " group __DROP_LOG_GROUP__
-        iifname "__WAN_IF__" ip saddr __LAN_NET__ drop
-        # A LAN source is only valid on the LAN interface (loopback was
-        # accepted above).
-        iifname != "__LAN_IF__" ip saddr __LAN_NET__ update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-lan " group __DROP_LOG_GROUP__
-        iifname != "__LAN_IF__" ip saddr __LAN_NET__ drop
+        # Two-NIC mode only: source-IP spoofing prevention toward the host as
+        # well. From the WAN it is forbidden to take the LAN address; from the
+        # LAN only the LAN network may come.
+__LANONLY__        iifname "__LAN_IF__" ip saddr != __LAN_NET__ update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-lan " group __DROP_LOG_GROUP__
+__LANONLY__        iifname "__LAN_IF__" ip saddr != __LAN_NET__ drop
+__LANONLY__        iifname "__WAN_IF__" ip saddr __LAN_NET__ update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-wan " group __DROP_LOG_GROUP__
+__LANONLY__        iifname "__WAN_IF__" ip saddr __LAN_NET__ drop
+        # Two-NIC mode only: a LAN source is only valid on the LAN interface
+        # (loopback was accepted above).
+__LANONLY__        iifname != "__LAN_IF__" ip saddr __LAN_NET__ update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-lan " group __DROP_LOG_GROUP__
+__LANONLY__        iifname != "__LAN_IF__" ip saddr __LAN_NET__ drop
 
-        # fail2ban-banned source toward the host. The portal and DHCP are exceptions:
-        # a banned client can still reach the login page (where it sees the reason for
-        # the ban), and its DHCP address is not lost either. Every other host
+        # fail2ban-banned source toward the host. The portal (and, in two-NIC
+        # mode, DHCP) are exceptions: a banned client can still reach the login
+        # page (where it sees the reason for the ban), and in two-NIC mode its
+        # DHCP address is not lost either. Every other host
         # service (SSH, DNS, ICMP) and forward traffic is dropped,
         # even if a pre-auth rule would allow it. The portal records the fact of the ban
         # as a single drop-log event; packets logged with sampling during the ban are
         # assigned to this event. As in forward, replies to the gateway's own
         # connections (DNS upstream, NTP, ACME) are not dropped.
-        iifname "__LAN_IF__" udp sport 68 udp dport 67 accept
+__LANONLY__        iifname "__LAN_IF__" udp sport 68 udp dport 67 accept
         # At most 32 open portal connections per source (DJ-13); a new one
         # beyond that is dropped before the portal accepts below. The portal
         # itself also caps its threads per source (HV_MAX_CONNECTIONS_PER_IP).
         tcp dport __PORT__ ct state new add @portal_conn_v4 { ip saddr ct count over 32 } update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=portal-connlimit " group __DROP_LOG_GROUP__
         tcp dport __PORT__ ct state new add @portal_conn_v4 { ip saddr ct count over 32 } drop
-        iifname "__LAN_IF__" tcp dport __PORT__ accept
+__LANONLY__        iifname "__LAN_IF__" tcp dport __PORT__ accept
         ip saddr __PORTAL_NET__ tcp dport __PORT__ accept
         ip saddr @banned_v4 ct direction original update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=fail2ban " group __DROP_LOG_GROUP__
         ip saddr @banned_v4 ct direction original drop
 
-        # The admin-configured block also applies to LAN traffic toward the host.
+        # The admin-configured block also applies to LAN traffic toward the host
+        # in two-NIC mode. In single-NIC mode the input jump is omitted: the
+        # block chain stays forward-only there, so it cannot cut WAN input to
+        # the host (Caddy, tunnels, port proxies).
         # Host permissions and existing host connections cannot bypass it. The
         # earlier acceptance of loopback, breakglass, DHCP and the portal remains
         # untouched, so a block entry cannot lock out the portal or emergency
@@ -506,48 +527,51 @@ table inet hatarvedelem {
         # clients, so a destination-less entry (for example TCP 443) must not
         # stop inbound WAN traffic to the host (Caddy, tunnels, port proxies).
         # The forward jump above stays unconditional.
-        iifname "__LAN_IF__" ct direction original jump block
+__LANONLY__        iifname "__LAN_IF__" ct direction original jump block
 
         # Pre-login host (input) permissions. The block has already run,
         # so the block overrides this too; it stands before the portal and SSH rules
         # so that the given host port is reachable before login.
         jump preauth_input
 
-        # Authorized traffic toward the host (SSH, DNS, ICMP) can also come from the
-        # LAN only with the MAC recorded during the session. This does not affect the
-        # portal's traffic, because the portal's IP is not in the dynamic sets.
-        iifname "__LAN_IF__" ip saddr @allowed_v4 ip saddr . ether saddr != @client_mac update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
-        iifname "__LAN_IF__" ip saddr @allowed_v4 ip saddr . ether saddr != @client_mac drop
-        iifname "__LAN_IF__" ip saddr @allowed_icmp ip saddr . ether saddr != @client_mac update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
-        iifname "__LAN_IF__" ip saddr @allowed_icmp ip saddr . ether saddr != @client_mac drop
-        iifname "__LAN_IF__" udp dport 53 ip saddr . ether saddr != @client_mac update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
-        iifname "__LAN_IF__" udp dport 53 ip saddr . ether saddr != @client_mac drop
-        iifname "__LAN_IF__" tcp dport 53 ip saddr . ether saddr != @client_mac update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
-        iifname "__LAN_IF__" tcp dport 53 ip saddr . ether saddr != @client_mac drop
+        # Two-NIC mode only: authorized traffic toward the host (SSH, DNS, ICMP)
+        # can also come from the LAN only with the MAC recorded during the
+        # session. This does not affect the portal's traffic, because the
+        # portal's IP is not in the dynamic sets.
+__LANONLY__        iifname "__LAN_IF__" ip saddr @allowed_v4 ip saddr . ether saddr != @client_mac update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
+__LANONLY__        iifname "__LAN_IF__" ip saddr @allowed_v4 ip saddr . ether saddr != @client_mac drop
+__LANONLY__        iifname "__LAN_IF__" ip saddr @allowed_icmp ip saddr . ether saddr != @client_mac update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
+__LANONLY__        iifname "__LAN_IF__" ip saddr @allowed_icmp ip saddr . ether saddr != @client_mac drop
+__LANONLY__        iifname "__LAN_IF__" udp dport 53 ip saddr . ether saddr != @client_mac update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
+__LANONLY__        iifname "__LAN_IF__" udp dport 53 ip saddr . ether saddr != @client_mac drop
+__LANONLY__        iifname "__LAN_IF__" tcp dport 53 ip saddr . ether saddr != @client_mac update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
+__LANONLY__        iifname "__LAN_IF__" tcp dport 53 ip saddr . ether saddr != @client_mac drop
         # Ports of host (input) rules are also reachable from the LAN only with the
         # recorded MAC, just like the forward permissions.
-        iifname "__LAN_IF__" ip saddr . tcp dport @allowed_input_tcp ip saddr . ether saddr != @client_mac update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
-        iifname "__LAN_IF__" ip saddr . tcp dport @allowed_input_tcp ip saddr . ether saddr != @client_mac drop
-        iifname "__LAN_IF__" ip saddr . udp dport @allowed_input_udp ip saddr . ether saddr != @client_mac update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
-        iifname "__LAN_IF__" ip saddr . udp dport @allowed_input_udp ip saddr . ether saddr != @client_mac drop
-        # A host grant belongs to a client on the LAN or the WAN; the same
+__LANONLY__        iifname "__LAN_IF__" ip saddr . tcp dport @allowed_input_tcp ip saddr . ether saddr != @client_mac update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
+__LANONLY__        iifname "__LAN_IF__" ip saddr . tcp dport @allowed_input_tcp ip saddr . ether saddr != @client_mac drop
+__LANONLY__        iifname "__LAN_IF__" ip saddr . udp dport @allowed_input_udp ip saddr . ether saddr != @client_mac update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
+__LANONLY__        iifname "__LAN_IF__" ip saddr . udp dport @allowed_input_udp ip saddr . ether saddr != @client_mac drop
+        # A host grant belongs to a client on a client interface; the same
         # source on any other interface does not inherit it (DJ-17).
         # Loopback was accepted at the top of the chain.
-        ct direction original iifname != { "__LAN_IF__", "__WAN_IF__" } ip saddr . tcp dport @allowed_input_tcp update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=grant-iface " group __DROP_LOG_GROUP__
-        ct direction original iifname != { "__LAN_IF__", "__WAN_IF__" } ip saddr . tcp dport @allowed_input_tcp drop
-        ct direction original iifname != { "__LAN_IF__", "__WAN_IF__" } ip saddr . udp dport @allowed_input_udp update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=grant-iface " group __DROP_LOG_GROUP__
-        ct direction original iifname != { "__LAN_IF__", "__WAN_IF__" } ip saddr . udp dport @allowed_input_udp drop
+        ct direction original iifname != { __CLIENT_IFS__ } ip saddr . tcp dport @allowed_input_tcp update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=grant-iface " group __DROP_LOG_GROUP__
+        ct direction original iifname != { __CLIENT_IFS__ } ip saddr . tcp dport @allowed_input_tcp drop
+        ct direction original iifname != { __CLIENT_IFS__ } ip saddr . udp dport @allowed_input_udp update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=grant-iface " group __DROP_LOG_GROUP__
+        ct direction original iifname != { __CLIENT_IFS__ } ip saddr . udp dport @allowed_input_udp drop
 
         # Caddy subdomain proxy (only with HV_PROXY=1; otherwise the entrypoint
         # comments it out). Deliberately AFTER the fail2ban drop, the block and the
         # MAC check: a banned source cannot reach the proxy either. Caddy asks the
         # portal for authorization per request, so the port is public; from the LAN
-        # (hairpin) only with a fixed IP+MAC pair. It is placed before the host guards
+        # (hairpin, two-NIC only) only with a fixed IP+MAC pair. It is placed before
+        # the host guards
         # so that a stale host rule's 80/443 guard entry does not cut the proxy
-        # connections. The TCP 80 of an unauthorized LAN client is still redirected
-        # to the portal by prerouting; that of an authorized one is not, so port 80 is
-        # also needed on the LAN. The 80/443 of a proxy-banned source is dropped before
-        # the proxy acceptance, regardless of HV_PROXY (harmless with the proxy disabled).
+        # connections. In two-NIC mode the TCP 80 of an unauthorized LAN client is
+        # still redirected to the portal by prerouting; that of an authorized one is
+        # not, so port 80 is also needed on the LAN. The 80/443 of a proxy-banned
+        # source is dropped before the proxy acceptance, regardless of HV_PROXY
+        # (harmless with the proxy disabled).
         # It is state-independent, so it cuts existing connections too.
         ip saddr @proxy_banned_v4 tcp dport { 80, 443 } update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=proxy-ban " group __DROP_LOG_GROUP__
         ip saddr @proxy_banned_v4 tcp dport { 80, 443 } drop
@@ -566,28 +590,29 @@ table inet hatarvedelem {
         # have already run, so they apply here too.
         jump tunnel_input
         __PROXY__iifname "__WAN_IF__" tcp dport { 80, 443 } accept
-        __PROXY__iifname "__LAN_IF__" tcp dport { 80, 443 } ip saddr . ether saddr @client_mac accept
+__LANONLY__        __PROXY__iifname "__LAN_IF__" tcp dport { 80, 443 } ip saddr . ether saddr @client_mac accept
 
-        # An existing TCP DNS connection must not stay alive after the permission
-        # expires either. UDP gets the same guard: a client that keeps one source
-        # port keeps its conntrack entry established, and without the guard its
-        # queries would fall through to the general established accept after
-        # revocation (a DNS tunnel). We exclude the allowed host (input)
+        # An existing TCP DNS connection (two-NIC mode only) must not stay alive
+        # after the permission expires either. UDP gets the same guard: a client
+        # that keeps one source port keeps its conntrack entry established, and
+        # without the guard its queries would fall through to the general
+        # established accept after revocation (a DNS tunnel). We exclude the
+        # allowed host (input)
         # TCP/UDP 53 rule: the host connection's actual permission is checked by the
         # host_service_* guard below, so the DNS guard does not break it during the
         # rule's lifetime.
-        iifname "__LAN_IF__" tcp dport 53 ct state established,related \
-            ip saddr != @allowed_v4 ip saddr . tcp dport != @allowed_tcp \
-            ip saddr . tcp dport != @allowed_input_tcp update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=dns-revoked " group __DROP_LOG_GROUP__
-        iifname "__LAN_IF__" tcp dport 53 ct state established,related \
-            ip saddr != @allowed_v4 ip saddr . tcp dport != @allowed_tcp \
-            ip saddr . tcp dport != @allowed_input_tcp drop
-        iifname "__LAN_IF__" udp dport 53 ct state established,related \
-            ip saddr != @allowed_v4 ip saddr . udp dport != @allowed_udp \
-            ip saddr . udp dport != @allowed_input_udp update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=dns-revoked " group __DROP_LOG_GROUP__
-        iifname "__LAN_IF__" udp dport 53 ct state established,related \
-            ip saddr != @allowed_v4 ip saddr . udp dport != @allowed_udp \
-            ip saddr . udp dport != @allowed_input_udp drop
+__LANONLY__        iifname "__LAN_IF__" tcp dport 53 ct state established,related \
+__LANONLY__            ip saddr != @allowed_v4 ip saddr . tcp dport != @allowed_tcp \
+__LANONLY__            ip saddr . tcp dport != @allowed_input_tcp update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=dns-revoked " group __DROP_LOG_GROUP__
+__LANONLY__        iifname "__LAN_IF__" tcp dport 53 ct state established,related \
+__LANONLY__            ip saddr != @allowed_v4 ip saddr . tcp dport != @allowed_tcp \
+__LANONLY__            ip saddr . tcp dport != @allowed_input_tcp drop
+__LANONLY__        iifname "__LAN_IF__" udp dport 53 ct state established,related \
+__LANONLY__            ip saddr != @allowed_v4 ip saddr . udp dport != @allowed_udp \
+__LANONLY__            ip saddr . udp dport != @allowed_input_udp update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=dns-revoked " group __DROP_LOG_GROUP__
+__LANONLY__        iifname "__LAN_IF__" udp dport 53 ct state established,related \
+__LANONLY__            ip saddr != @allowed_v4 ip saddr . udp dport != @allowed_udp \
+__LANONLY__            ip saddr . udp dport != @allowed_input_udp drop
 
         # An existing SSH connection stays alive only while the (IP, 22) pair is in
         # the allowed_input_tcp set, i.e. while the host rule assigned to the user
@@ -597,23 +622,25 @@ table inet hatarvedelem {
         tcp dport 22 ct state established,related ip saddr . tcp dport != @allowed_input_tcp update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=ssh-revoked " group __DROP_LOG_GROUP__
         tcp dport 22 ct state established,related ip saddr . tcp dport != @allowed_input_tcp drop
 
-        # The host DNS service (53) is reachable by a client with forward permission
-        # even in the established state, under the same conditions as the later LAN
-        # accept rules. This narrow exception applies only to DNS/53, so it does not
-        # open a path toward the host services. DHCP (needed even before login to
-        # keep the address) passes before the host guard in the same way, so a stale
-        # host_service_udp 67 entry does not break renewal.
-        iifname "__LAN_IF__" tcp dport 53 ct state established,related ip saddr @allowed_v4 accept
-        iifname "__LAN_IF__" tcp dport 53 ct state established,related ip saddr . tcp dport @allowed_tcp accept
-        iifname "__LAN_IF__" udp dport 53 ct state established,related ip saddr @allowed_v4 accept
-        iifname "__LAN_IF__" udp dport 53 ct state established,related ip saddr . udp dport @allowed_udp accept
-        iifname "__LAN_IF__" udp sport 68 udp dport 67 accept
+        # Two-NIC mode only: the host DNS service (53) is reachable by a client
+        # with forward permission even in the established state, under the same
+        # conditions as the later LAN accept rules. This narrow exception applies
+        # only to DNS/53, so it does not open a path toward the host services.
+        # DHCP (needed even before login to keep the address) passes before the
+        # host guard in the same way, so a stale host_service_udp 67 entry does
+        # not break renewal.
+__LANONLY__        iifname "__LAN_IF__" tcp dport 53 ct state established,related ip saddr @allowed_v4 accept
+__LANONLY__        iifname "__LAN_IF__" tcp dport 53 ct state established,related ip saddr . tcp dport @allowed_tcp accept
+__LANONLY__        iifname "__LAN_IF__" udp dport 53 ct state established,related ip saddr @allowed_v4 accept
+__LANONLY__        iifname "__LAN_IF__" udp dport 53 ct state established,related ip saddr . udp dport @allowed_udp accept
+__LANONLY__        iifname "__LAN_IF__" udp sport 68 udp dport 67 accept
 
         # An existing host (input) connection must not stay alive either if the IP
         # was removed from the allowed_input_tcp/allowed_input_udp set. The input chain
         # sees only client→host packets toward the host services; the destination port
         # of portal-redirected packets is already the portal port at that point, so the
-        # packet-level tcp/udp dport is the correct key. The DNS/53 and DHCP accept rules are above;
+        # packet-level tcp/udp dport is the correct key. The DNS/53 and DHCP accept
+        # rules (two-NIC only) are above;
         # for every other host port the host_service_* sets (add-only) close the flow
         # when the permission disappears. Thus it closes even when the conntrack flush
         # is omitted and when nf_conntrack_tcp_loose revives the flow.
@@ -637,21 +664,23 @@ table inet hatarvedelem {
 
         ct state established,related accept
 
-        # ICMP toward the host only for an allowed client, and only ping.
-        # Related ICMP errors pass through the established,related rule above;
-        # pre-login ping is not an access path.
-        iifname "__LAN_IF__" ip saddr @allowed_v4 icmp type echo-request accept
-        iifname "__LAN_IF__" ip saddr @allowed_icmp icmp type echo-request accept
+        # Two-NIC mode only: ICMP toward the host only for an allowed client,
+        # and only ping. In single-NIC mode there is no LAN ICMP path; ICMP is
+        # a forwarded grant there. Related ICMP errors pass through the
+        # established,related rule above; pre-login ping is not an access path.
+__LANONLY__        iifname "__LAN_IF__" ip saddr @allowed_v4 icmp type echo-request accept
+__LANONLY__        iifname "__LAN_IF__" ip saddr @allowed_icmp icmp type echo-request accept
 
-        # The login page is reachable by everyone. From the LAN always;
-        # __PORTAL_NET__ is the portal source network, with 0.0.0.0/0
-        # it is public too.
-        iifname "__LAN_IF__" tcp dport __PORT__ accept
+        # The login page is reachable by everyone. In two-NIC mode always from
+        # the LAN; __PORTAL_NET__ is the portal source network, with 0.0.0.0/0
+        # it is public too (single-NIC mode uses only this source-IP rule).
+__LANONLY__        iifname "__LAN_IF__" tcp dport __PORT__ accept
         ip saddr __PORTAL_NET__ tcp dport __PORT__ accept
 
         # Host (input) rule: the portal machine's own service for the logged-in
-        # client's IP. There is no iifname condition, so it works from both LAN and
-        # WAN; the fail2ban and MAC drop rules run first.
+        # client's IP. There is no iifname condition, so it works from the client
+        # interface (LAN in two-NIC mode, WAN in single-NIC mode); the fail2ban
+        # drops (and, in two-NIC mode, the MAC drops) run first.
         # This is also the only SSH acceptance path: TCP 22 opens only if a host
         # rule created by an admin and assigned to the user explicitly includes it,
         # and the session is active. The portal adds the IP after the rule and TTL
@@ -663,49 +692,53 @@ table inet hatarvedelem {
         ip saddr . tcp dport @allowed_input_tcp tcp dport != __PORT__ accept
         ip saddr . udp dport @allowed_input_udp udp dport != __PORT__ accept
 
-        # The host DNS service (dnsmasq) is reachable only based on the selected rule.
-        # Without this, a DNS tunnel through the host would be open even before the
-        # portal, bypassing the forward rules.
-        iifname "__LAN_IF__" ip saddr @allowed_v4 udp dport 53 accept
-        iifname "__LAN_IF__" ip saddr . udp dport @allowed_udp udp dport 53 accept
-        iifname "__LAN_IF__" ip saddr @allowed_v4 tcp dport 53 accept
-        iifname "__LAN_IF__" ip saddr . tcp dport @allowed_tcp tcp dport 53 accept
+        # Two-NIC mode only: the host DNS service (dnsmasq) is reachable only
+        # based on the selected rule. Without this, a DNS tunnel through the
+        # host would be open even before the portal, bypassing the forward rules.
+__LANONLY__        iifname "__LAN_IF__" ip saddr @allowed_v4 udp dport 53 accept
+__LANONLY__        iifname "__LAN_IF__" ip saddr . udp dport @allowed_udp udp dport 53 accept
+__LANONLY__        iifname "__LAN_IF__" ip saddr @allowed_v4 tcp dport 53 accept
+__LANONLY__        iifname "__LAN_IF__" ip saddr . tcp dport @allowed_tcp tcp dport 53 accept
 
         # Logging of incoming traffic not authorized for the portal. The chain's
-        # policy is drop; the limit only restricts logging. As in forward,
-        # every source also has its own budget (log_src_v4).
-        iifname "__LAN_IF__" update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 120/minute burst 240 packets log prefix "dropjak-drop reason=input-lan " group __DROP_LOG_GROUP__
+        # policy is drop; the limit only restricts logging.
+        # The LAN log line is two-NIC only; the WAN line remains in both modes.
+        # As in forward, every source also has its own budget (log_src_v4).
+__LANONLY__        iifname "__LAN_IF__" update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 120/minute burst 240 packets log prefix "dropjak-drop reason=input-lan " group __DROP_LOG_GROUP__
         iifname "__WAN_IF__" update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 120/minute burst 240 packets log prefix "dropjak-drop reason=input-wan " group __DROP_LOG_GROUP__
     }
 
     chain prerouting {
-        # We drop the configured blocked TCP 80 before the portal redirect;
-        # and pre-auth TCP 80 gets a conntrack mark so that it can bypass
-        # the redirect below with a return.
-        iifname "__LAN_IF__" jump block_nat
-        iifname "__LAN_IF__" jump preauth_nat
-        iifname "__LAN_IF__" ct mark 0x50524541 return
+        # Two-NIC mode only: the HTTP captive redirect. We drop the configured
+        # blocked TCP 80 before the portal redirect; and pre-auth TCP 80 gets a
+        # conntrack mark so that it can bypass the redirect below with a return.
+        # Single-NIC mode has no redirect and no block_nat/preauth_nat jumps.
+__LANONLY__        iifname "__LAN_IF__" jump block_nat
+__LANONLY__        iifname "__LAN_IF__" jump preauth_nat
+__LANONLY__        iifname "__LAN_IF__" ct mark 0x50524541 return
 
         # Those not yet authorized are sent to the login page over HTTP (80).
         # Full access and port-restricted access also bypass the redirect,
         # otherwise traffic would be directed to the portal despite the TCP 80 permission.
-        iifname "__LAN_IF__" ip saddr @allowed_v4 return
+__LANONLY__        iifname "__LAN_IF__" ip saddr @allowed_v4 return
         # Docker's DNAT may run in the same prerouting section, so here too the
         # port before DNAT must be examined, otherwise the published container port's
         # traffic would be wrongly directed to the portal. The meta l4proto prefix
         # is needed here too for the concat type.
-        iifname "__LAN_IF__" meta l4proto tcp ip saddr . ct original proto-dst @allowed_tcp return
-        iifname "__LAN_IF__" meta l4proto udp ip saddr . ct original proto-dst @allowed_udp return
+__LANONLY__        iifname "__LAN_IF__" meta l4proto tcp ip saddr . ct original proto-dst @allowed_tcp return
+__LANONLY__        iifname "__LAN_IF__" meta l4proto udp ip saddr . ct original proto-dst @allowed_udp return
         # TCP 80 opened by the host rule (the portal machine's own service) also
         # bypasses the portal redirect; there is no redirect for UDP.
-        iifname "__LAN_IF__" meta l4proto tcp ip saddr . ct original proto-dst @allowed_input_tcp return
-        iifname "__LAN_IF__" meta l4proto tcp ct original proto-dst 80 redirect to :__PORT__
+__LANONLY__        iifname "__LAN_IF__" meta l4proto tcp ip saddr . ct original proto-dst @allowed_input_tcp return
+__LANONLY__        iifname "__LAN_IF__" meta l4proto tcp ct original proto-dst 80 redirect to :__PORT__
     }
 
     chain postrouting {
-        # The requested SNAT of the forward port proxy before the general masquerade.
+        # The requested SNAT of the forward port proxy before the general
+        # masquerade. The general masquerade is two-NIC only: in single-NIC mode
+        # there is no client LAN to masquerade behind the public interface.
         jump portproxy_snat
-        oifname "__WAN_IF__" ip saddr __LAN_NET__ masquerade
+__LANONLY__        oifname "__WAN_IF__" ip saddr __LAN_NET__ masquerade
     }
 
     chain portproxy_prerouting {

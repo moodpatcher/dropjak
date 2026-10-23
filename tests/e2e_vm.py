@@ -93,7 +93,24 @@ CLEANUP_RULES = (
     "e2e-full-coll",
     "host-e2e",
     "e2e-rev-fwd", "e2e-rev-full", "e2e-rev-host",
+    # Created by the scenarios themselves: a fresh installation has no
+    # default rules (services.json ships an empty scenarios list).
+    "browse", "full",
 )
+# The two rules the login and access scenarios use. They mirror what the
+# old services.json scenarios used to seed.
+BASIC_RULE_PAYLOADS = {
+    "browse": {
+        "label": "Browsing", "description": "Web and DNS",
+        "tcp": [80, 443, 53, 853], "udp": [443, 53, 853],
+        "default_ttl": 3600, "max_ttl": 2592000,
+    },
+    "full": {
+        "label": "Full", "description": "Unrestricted internet",
+        "tcp": [], "udp": [], "full": True,
+        "default_ttl": 3600, "max_ttl": 2592000,
+    },
+}
 SCENARIO_GROUPS = ("e2e-rev-grp",)
 SCENARIO_USERS = (
     "e2e-rev-user", "e2e-rev-del", "e2e-exp-user",
@@ -486,6 +503,12 @@ def cmd_admin_seed() -> int:
     """Create the host SSH and mixed collection rules, then assign them to the test user."""
     portal = Portal()
     results = []
+    # A fresh installation seeds no rules at all, so the scenarios create
+    # the two they log in with (cleanup removes them again).
+    for rule_id, payload in BASIC_RULE_PAYLOADS.items():
+        ok, detail = ensure_rule(rule_id, payload)
+        results.append({"rule": rule_id, "code": 200 if ok else 0,
+                        "ok": ok, "error": detail})
     for payload in (
         {
             "action": "create", "id": "host-e2e",
@@ -1329,6 +1352,12 @@ def ensure_scenario_resources() -> dict[str, str] | None:
     """
     passwords = {name: secrets.token_urlsafe(18) for name in SCENARIO_USERS}
     problems: list[str] = []
+    # The login and access scenarios use these two rules; a fresh
+    # installation no longer seeds them.
+    for rule_id, payload in BASIC_RULE_PAYLOADS.items():
+        ok, detail = ensure_rule(rule_id, payload)
+        if not ok:
+            problems.append(f"rule {rule_id}: {detail}")
     for rule_id, payload in (
         ("e2e-rev-fwd", REV_FWD_PAYLOAD),
         ("e2e-rev-full", REV_FULL_PAYLOAD),

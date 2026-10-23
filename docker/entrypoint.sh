@@ -233,11 +233,14 @@ check_proxy_key() {
 render_ruleset() {
     [ -r "$TEMPLATE" ] || die "missing template: $TEMPLATE"
 
+    HV_SINGLE_NIC=$(env_bool HV_SINGLE_NIC 0)
     HV_LAN_IF=${HV_LAN_IF:-}
     HV_WAN_IF=${HV_WAN_IF:-}
     HV_LAN_NET=${HV_LAN_NET:-}
-    HV_MGMT_NET=${HV_MGMT_NET:-}
-    HV_PORTAL_NET=${HV_PORTAL_NET:-$HV_MGMT_NET}
+    # The portal is public by default: the admin account, the proof-of-work
+    # captcha and fail2ban guard the login. HV_MGMT_NET does not narrow it;
+    # set HV_PORTAL_NET to a CIDR to keep the portal off the WAN.
+    HV_PORTAL_NET=${HV_PORTAL_NET:-0.0.0.0/0}
     # A plain assignment does not export a variable that was absent from the
     # environment, and require_env reads the environment (printenv).
     export HV_PORTAL_NET
@@ -245,15 +248,34 @@ render_ruleset() {
     HV_FWD_MARK=${HV_FWD_MARK:-0x44524a4b}
     HV_DROP_LOG_GROUP=${HV_DROP_LOG_GROUP:-5}
 
-    require_env HV_LAN_IF
     require_env HV_WAN_IF
-    require_env HV_LAN_NET
     require_env HV_PORTAL_NET
 
-    valid_ifname "$HV_LAN_IF" || die "invalid HV_LAN_IF: $HV_LAN_IF"
     valid_ifname "$HV_WAN_IF" || die "invalid HV_WAN_IF: $HV_WAN_IF"
-    valid_network 4 "$HV_LAN_NET" \
-        || die "invalid HV_LAN_NET (a network address is required, e.g. 192.168.10.0/24): $HV_LAN_NET"
+
+    if [ "$HV_SINGLE_NIC" = "1" ]; then
+        # One interface does both jobs: the WAN interface is also the client
+        # side, and the portal is reached by source-IP matching. Every
+        # __LANONLY__ template line becomes a comment.
+        LAN_PREFIX="# "
+        # The interfaces grants may arrive on (DJ-17): the WAN only.
+        CLIENT_IFS="\"$HV_WAN_IF\""
+        if [ -n "$HV_LAN_IF" ] || [ -n "$HV_LAN_NET" ]; then
+            log "single-NIC mode: HV_LAN_IF/HV_LAN_NET are set but ignored ($HV_LAN_IF / $HV_LAN_NET)"
+        fi
+        log "single-NIC mode (HV_SINGLE_NIC=1): DHCP server, LAN DNS, HTTP captive redirect, masquerade, MAC binding and the LAN input block are disabled"
+    else
+        LAN_PREFIX=""
+        CLIENT_IFS="\"$HV_LAN_IF\", \"$HV_WAN_IF\""
+        [ -n "$HV_LAN_IF" ] || die "missing environment variable: HV_LAN_IF (set HV_SINGLE_NIC=1 for a host with a single NIC)"
+        [ -n "$HV_LAN_NET" ] || die "missing environment variable: HV_LAN_NET (set HV_SINGLE_NIC=1 for a host with a single NIC)"
+        valid_ifname "$HV_LAN_IF" || die "invalid HV_LAN_IF: $HV_LAN_IF"
+        valid_network 4 "$HV_LAN_NET" \
+            || die "invalid HV_LAN_NET (a network address is required, e.g. 192.168.10.0/24; set HV_SINGLE_NIC=1 for a host with a single NIC): $HV_LAN_NET"
+        [ "$HV_LAN_IF" != "$HV_WAN_IF" ] \
+            || die "HV_LAN_IF and HV_WAN_IF cannot be the same"
+    fi
+
     valid_network 4 "$HV_PORTAL_NET" \
         || die "invalid HV_PORTAL_NET (an IPv4 CIDR is required, e.g. 0.0.0.0/0): $HV_PORTAL_NET"
     valid_port "$PORT" || die "invalid PORT: $PORT"
@@ -265,8 +287,6 @@ render_ruleset() {
     esac
     [ "${#HV_FWD_MARK}" -le 10 ] \
         || die "invalid HV_FWD_MARK (must be a 32-bit hex number): $HV_FWD_MARK"
-    [ "$HV_LAN_IF" != "$HV_WAN_IF" ] \
-        || die "HV_LAN_IF and HV_WAN_IF cannot be the same"
 
     # The portal and the drop-log listener read the same value.
     export HV_FWD_MARK HV_DROP_LOG_GROUP
@@ -309,7 +329,12 @@ render_ruleset() {
         RENDERED=/tmp/dropjak.nft
     fi
 
+    # __LANONLY__ must be substituted first: it selects whether the marked
+    # lines become comments. The other substitutions also run on commented
+    # lines, so no placeholder may remain in either mode.
     sed \
+        -e "s|__LANONLY__|$LAN_PREFIX|g" \
+        -e "s|__CLIENT_IFS__|$CLIENT_IFS|g" \
         -e "s|__LAN_IF__|$HV_LAN_IF|g" \
         -e "s|__WAN_IF__|$HV_WAN_IF|g" \
         -e "s|__LAN_NET__|$HV_LAN_NET|g" \
@@ -481,7 +506,9 @@ start_firewall_watchdog() {
                 *"policy drop"*) ;;
                 *) forward="" ;;
             esac
-            if [ -z "$forward" ] || ! printf '%s' "$forward" | grep -q '@client_mac'; then
+            # @allowed_tcp exists in both modes; @client_mac does not in
+            # single-NIC mode (its rules are comments there).
+            if [ -z "$forward" ] || ! printf '%s' "$forward" | grep -q '@allowed_tcp'; then
                 log "WARNING: the Dropjak forward chain is incomplete; reloading"
                 if "$NFT_BIN" -c -f "$RENDERED" && "$NFT_BIN" -f "$RENDERED"; then
                     # The reload restores only the template. The portal

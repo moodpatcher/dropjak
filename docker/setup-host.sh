@@ -12,8 +12,12 @@
 #     rp_filter = 1 on HV_LAN_IF and HV_WAN_IF, route_localnet = 1 only on
 #     the HV_ROUTE_LOCALNET_IFS interfaces (input port proxies with a
 #     127.0.0.1 target; the loopback_guard chain drops 127/8 packets on
-#     every non-loopback interface), disable_ipv6 = 1 on HV_LAN_IF, always;
-#     the values come from the environment or their .env lines)
+#     every non-loopback interface), disable_ipv6 = 1 on HV_LAN_IF in
+#     two-NIC mode; the values come from the environment or their .env
+#     lines)
+#
+# With HV_SINGLE_NIC=1 there is no separate client LAN interface: HV_LAN_IF is
+# not required and the IPv6 setting for it is omitted.
 #
 # After loading its own rules, the container deletes the boot table, so the
 # final rules take over.
@@ -96,29 +100,45 @@ fi
 
 # --------------------------------------------------------------- sysctl
 
-# IPv6 is always dropped by the firewall, and the client LAN must have no
-# other IPv6 router: a rogue router advertisement would give the clients an
-# IPv6 path that bypasses the gateway. IPv6 is therefore switched off on the
-# LAN interface, always (there is no opt-out). The interface comes from the
-# environment or from the HV_LAN_IF line of .env (only that line is read;
-# the file also holds secrets).
+# IPv6 is always dropped by the firewall. In two-NIC mode the client LAN must
+# have no other IPv6 router: a rogue router advertisement would give the
+# clients an IPv6 path that bypasses the gateway. IPv6 is therefore switched
+# off on the LAN interface (there is no opt-out). In single-NIC mode there is
+# no separate LAN interface, so only ip_forward and route_localnet are set.
+# The interface and the mode come from the environment or from the matching
+# lines of .env (only those lines are read; the file also holds secrets).
 LAN_IF=${HV_LAN_IF:-}
+SINGLE_NIC=${HV_SINGLE_NIC:-}
+if [ -z "$SINGLE_NIC" ] && [ -r "$REPO_DIR/.env" ]; then
+    SINGLE_NIC=$(sed -n 's/^[[:space:]]*HV_SINGLE_NIC[[:space:]]*=[[:space:]]*//p' "$REPO_DIR/.env" \
+        | tail -n 1 | sed 's/[[:space:]]*$//; s/^["'\'']//; s/["'\'']$//')
+fi
+case "$SINGLE_NIC" in
+    ''|0) SINGLE_NIC=0 ;;
+    1) SINGLE_NIC=1 ;;
+    *) die "invalid HV_SINGLE_NIC: $SINGLE_NIC (expected 0 or 1)" ;;
+esac
 if [ -z "$LAN_IF" ] && [ -r "$REPO_DIR/.env" ]; then
     LAN_IF=$(sed -n 's/^[[:space:]]*HV_LAN_IF[[:space:]]*=[[:space:]]*//p' "$REPO_DIR/.env" \
         | tail -n 1 | sed 's/[[:space:]]*$//; s/^["'\'']//; s/["'\'']$//')
 fi
-[ -n "$LAN_IF" ] \
-    || die "HV_LAN_IF is not set: create .env (cp .env.example .env) and set HV_LAN_IF first"
-case "$LAN_IF" in
-    *[!A-Za-z0-9_.:@+-]*) die "invalid HV_LAN_IF: $LAN_IF" ;;
-esac
-[ "${#LAN_IF}" -le 15 ] || die "invalid HV_LAN_IF (longer than 15 characters): $LAN_IF"
-# A dot in the name (VLAN) would split the dotted key; the slash form works
-# for every name.
-if [ "${LAN_IF#*.}" != "$LAN_IF" ]; then
-    LAN_IPV6_KEY="net/ipv6/conf/$LAN_IF/disable_ipv6"
+if [ "$SINGLE_NIC" = "1" ]; then
+    [ -n "$LAN_IF" ] && info "single-NIC mode: HV_LAN_IF ($LAN_IF) is ignored"
+    LAN_IF=""
 else
-    LAN_IPV6_KEY="net.ipv6.conf.${LAN_IF}.disable_ipv6"
+    [ -n "$LAN_IF" ] \
+        || die "HV_LAN_IF is not set: create .env (cp .env.example .env) and set HV_LAN_IF first (or set HV_SINGLE_NIC=1 for a single-NIC host)"
+    case "$LAN_IF" in
+        *[!A-Za-z0-9_.:@+-]*) die "invalid HV_LAN_IF: $LAN_IF" ;;
+    esac
+    [ "${#LAN_IF}" -le 15 ] || die "invalid HV_LAN_IF (longer than 15 characters): $LAN_IF"
+    # A dot in the name (VLAN) would split the dotted key; the slash form works
+    # for every name.
+    if [ "${LAN_IF#*.}" != "$LAN_IF" ]; then
+        LAN_IPV6_KEY="net/ipv6/conf/$LAN_IF/disable_ipv6"
+    else
+        LAN_IPV6_KEY="net.ipv6.conf.${LAN_IF}.disable_ipv6"
+    fi
 fi
 
 # One setting from the environment, or else from its line in .env (only that
@@ -147,14 +167,16 @@ ipv4_conf_key() {
     fi
 }
 
-# Strict reverse-path filtering on the LAN and WAN interfaces (DJ-17): a
-# packet whose source would not be routed back out of the interface it came
-# in on is dropped by the kernel, before nftables sees it.
+# Strict reverse-path filtering on the client-facing interfaces (DJ-17; in
+# single-NIC mode the WAN only): a packet whose source would not be routed
+# back out of the interface it came in on is dropped by the kernel, before
+# nftables sees it.
 WAN_IF=$(env_setting HV_WAN_IF)
 if [ -n "$WAN_IF" ] && ! valid_iface "$WAN_IF"; then
     die "invalid HV_WAN_IF: $WAN_IF"
 fi
 RP_FILTER_IFS="$LAN_IF${WAN_IF:+ $WAN_IF}"
+RP_FILTER_IFS=${RP_FILTER_IFS# }
 
 # route_localnet only on the interfaces of input port proxies with a
 # 127.0.0.1 target (HV_ROUTE_LOCALNET_IFS), never on "all" (DJ-04): on every
@@ -177,7 +199,7 @@ fi
 # Dropjak: the VM forwards the clients' traffic as a gateway.
 # The actual permission is granted by the nftables allowed_v4 set.
 net.ipv4.ip_forward = 1
-# Strict reverse-path filtering on the LAN and WAN interfaces.
+# Strict reverse-path filtering on the client-facing interfaces.
 EOF
     for _if in $RP_FILTER_IFS; do
         printf '%s = 1\n' "$(ipv4_conf_key "$_if" rp_filter)"
@@ -193,10 +215,17 @@ EOF
             printf '%s = 1\n' "$(ipv4_conf_key "$_if" route_localnet)"
         done
     fi
-    cat <<EOF
+    if [ "$SINGLE_NIC" = "0" ]; then
+        cat <<EOF
 # IPv6 is always dropped; no IPv6 on the client LAN interface (no opt-out).
 $LAN_IPV6_KEY = 1
 EOF
+    else
+        cat <<EOF
+# Single-NIC mode: there is no separate client LAN interface to disable IPv6
+# on; the firewall drops IPv6.
+EOF
+    fi
 } >"$SYSCTL_FILE"
 chmod 0644 "$SYSCTL_FILE"
 
@@ -221,11 +250,14 @@ if [ "$OLD_ALL_LOCALNET" = "1" ]; then
 fi
 # Directly through /proc: it takes any interface name. A missing interface
 # (VLAN or bridge created later) gets it from systemd-sysctl when it appears.
-if [ -w "/proc/sys/net/ipv6/conf/$LAN_IF/disable_ipv6" ]; then
-    echo 1 >"/proc/sys/net/ipv6/conf/$LAN_IF/disable_ipv6" 2>/dev/null \
-        || info "WARNING: cannot disable IPv6 on $LAN_IF right now; it will be after a reboot."
-else
-    info "WARNING: $LAN_IF has no IPv6 settings right now (missing interface or IPv6 off); the sysctl file applies when it appears."
+# Single-NIC mode has no separate client LAN interface.
+if [ "$SINGLE_NIC" = "0" ]; then
+    if [ -w "/proc/sys/net/ipv6/conf/$LAN_IF/disable_ipv6" ]; then
+        echo 1 >"/proc/sys/net/ipv6/conf/$LAN_IF/disable_ipv6" 2>/dev/null \
+            || info "WARNING: cannot disable IPv6 on $LAN_IF right now; it will be after a reboot."
+    else
+        info "WARNING: $LAN_IF has no IPv6 settings right now (missing interface or IPv6 off); the sysctl file applies when it appears."
+    fi
 fi
 if [ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo 0)" != "1" ]; then
     info "WARNING: net.ipv4.ip_forward cannot be enabled right now; it will be after a reboot."

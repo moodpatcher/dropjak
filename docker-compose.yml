@@ -1,8 +1,12 @@
 # Dropjak — Docker Compose
 #
 # The .env file must be created from .env.example. The required values
-# (HV_LAN_IF, HV_WAN_IF, HV_LAN_NET, HV_PORTAL_NET) are checked by the
-# entrypoint; the container does not start if a setting is missing.
+# depend on the mode: HV_WAN_IF is always required; HV_LAN_IF and
+# HV_LAN_NET are required only in the default two-NIC mode. With
+# HV_SINGLE_NIC=1 (one interface, the WAN is also the client side) they are
+# ignored and may be empty. The entrypoint checks the values; the container
+# does not start if a required setting is missing. HV_PORTAL_NET defaults
+# to 0.0.0.0/0 (public portal).
 #
 # Important: the container runs in network_mode: host because it must manage
 # the VM's forward chain. Therefore there is no ports: mapping, and the portal
@@ -48,14 +52,19 @@ services:
     # docker/setup-host.sh permanently records it in /etc/sysctl.d/90-dropjak.conf.
 
     environment:
+      # 1: single-NIC host. HV_WAN_IF is also the client-facing interface;
+      # HV_LAN_IF/HV_LAN_NET are ignored. DHCP, LAN DNS, the HTTP redirect,
+      # masquerade, MAC binding and the LAN input block are omitted.
+      HV_SINGLE_NIC: ${HV_SINGLE_NIC:-0}
       HV_LAN_IF: ${HV_LAN_IF:-}
       HV_WAN_IF: ${HV_WAN_IF:-}
       HV_LAN_NET: ${HV_LAN_NET:-}
-      # Backward-compatible base value for HV_PORTAL_NET only; SSH is not
-      # enabled by it alone (that needs a host rule opening TCP 22).
+      # Management network: fail2ban exemptions and other management
+      # defaults. It does not control portal access and does not allow SSH.
       HV_MGMT_NET: ${HV_MGMT_NET:-}
-      # The portal source network. When empty, the value of HV_MGMT_NET is used.
-      # For a public portal: HV_PORTAL_NET=0.0.0.0/0.
+      # The portal source network. Empty: 0.0.0.0/0, the portal is public
+      # (guarded by the admin account, proof-of-work and fail2ban). Set a
+      # CIDR to keep it off the WAN.
       HV_PORTAL_NET: ${HV_PORTAL_NET:-}
       # Startup admin account. With HV_ADMIN_ENABLED=1 the container
       # creates the user, or updates it to the given password.
@@ -82,6 +91,11 @@ services:
       # PORT + 1.
       HV_TUNNEL_SYNC_PORT: ${HV_TUNNEL_SYNC_PORT:-}
       HV_PORTAL_URL: ${HV_PORTAL_URL:-}
+      # First-start seed for Admin -> Settings -> Proxy, filled by
+      # configure.sh's HTTPS mode. Applied only while no settings file
+      # exists; the admin UI is authoritative afterwards.
+      HV_PROXY_DOMAINS: ${HV_PROXY_DOMAINS:-}
+      HV_PORTAL_DOMAIN: ${HV_PORTAL_DOMAIN:-}
       # Further DNS names of the portal (comma separated); the /api/
       # endpoints answer only under these, an IP address, the HV_PORTAL_URL
       # host and the Caddy root domains (DNS rebinding protection).

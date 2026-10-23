@@ -280,16 +280,16 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(dns.udp, (53, 853))
         self.assertTrue(CATALOG.service("all").full)
         self.assertTrue(CATALOG.service("icmp").icmp)
-        self.assertIsNotNone(CATALOG.default_scenario)
-        self.assertIn(CATALOG.default_scenario, CATALOG.scenario_order)
+        # No default rules are shipped: the scenarios list is empty.
+        self.assertIsNone(CATALOG.default_scenario)
+        self.assertEqual(CATALOG.scenario_order, ())
 
         public = CATALOG.public()
         self.assertEqual(
             [svc["id"] for svc in public["services"]],
             list(CATALOG.service_order),
         )
-        self.assertTrue(public["scenarios"])
-        self.assertIn("default_ttl", public["scenarios"][0])
+        self.assertEqual(public["scenarios"], [])
 
     def test_resolve(self) -> None:
         self.assertEqual(
@@ -1433,7 +1433,7 @@ class TransportWarningTests(unittest.TestCase):
             "PORTAL_HOSTS": frozenset(),
         }
         values.update(patches)
-        clean = {"HV_PORTAL_NET": "", "HV_MGMT_NET": ""}
+        clean = {"HV_PORTAL_NET": "192.168.10.0/24", "HV_MGMT_NET": ""}
         clean.update(env)
         with mock.patch.dict(os.environ, clean), \
                 mock.patch.multiple(gateway, **values):
@@ -1444,8 +1444,8 @@ class TransportWarningTests(unittest.TestCase):
         self.assertEqual(len(out), 1, out)
         self.assertIn("plain HTTP", out[0])
         self.assertIn("HV_COOKIE_SECURE=1", out[0])
-        # Via the old base value too.
-        self.assertTrue(self.warnings({"HV_MGMT_NET": "0.0.0.0/0"}))
+        # An empty HV_PORTAL_NET means the public default.
+        self.assertTrue(self.warnings({"HV_PORTAL_NET": ""}))
 
     def test_narrow_or_secure_portal_does_not_warn(self) -> None:
         self.assertEqual(self.warnings({"HV_PORTAL_NET": "192.168.10.0/24"}), [])
@@ -1566,7 +1566,12 @@ class UserStoreAccountRequestTests(unittest.TestCase):
 
     def test_effective_rules_are_empty_for_pending_without_rules_key(self) -> None:
         # Control case: an active (legacy) user without a rules field still
-        # receives the forward rules, so the old branch is alive.
+        # receives the forward rules, so the old branch is alive. A fresh
+        # rules file is empty, so create the rule first.
+        self.rules.create("browse", {
+            "label": "Browsing", "tcp": [80, 443], "udp": [443],
+            "default_ttl": 60, "max_ttl": 120,
+        })
         self.store.add("legacy", "hosszu-jelszo-1")
         self.store.add(
             "pending", "hosszu-jelszo-1", pending=True, email="p@e.co"
@@ -6144,9 +6149,9 @@ class RuleGroupStoreTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_seeded_rules_and_crud(self) -> None:
+        # A new rules file starts empty: there are no built-in default rules.
         ids = [rule.id for rule in self.rules.persisted_rules()]
-        for scenario in ("browse", "work", "admin", "full"):
-            self.assertIn(scenario, ids)
+        self.assertEqual(ids, [])
         rule = self.rules.create("web-only", {
             "label": "Csak web", "description": "teszt",
             "tcp": [80, 443], "udp": [443],
@@ -6493,6 +6498,12 @@ class RuleGroupStoreTests(unittest.TestCase):
         self.users.add("root", "hosszu-jelszo-1", role=gateway.ROLE_ADMIN)
         self.rules.create("dns-only", {
             "label": "Csak DNS", "tcp": [53, 853], "udp": [53, 853],
+            "default_ttl": 60, "max_ttl": 120,
+        })
+        # A fresh rules file has no built-in rules; the legacy user's
+        # "all rules" branch needs one to show.
+        self.rules.create("browse", {
+            "label": "Browsing", "tcp": [80, 443], "udp": [443],
             "default_ttl": 60, "max_ttl": 120,
         })
         group = self.groups.create("staff", {

@@ -353,11 +353,13 @@ nft -j list set inet t s
             encoding="utf-8"
         )
         replacements = {
+            "__LANONLY__": "",
             "__LAN_IF__": "eth0", "__WAN_IF__": "eth1",
             "__LAN_NET__": "192.168.10.0/24",
             "__PORTAL_NET__": "0.0.0.0/0", "__PORT__": "8100",
             "__FWD_MARK__": "0x44524a4b", "__DROP_LOG_GROUP__": "5",
             "__PROXY__": "# ", "__NO_FORWARD_NETS__": "",
+            "__CLIENT_IFS__": '"eth0", "eth1"',
         }
         for token, value in replacements.items():
             template = template.replace(token, value)

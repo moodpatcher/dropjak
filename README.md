@@ -41,14 +41,20 @@ Compose v2, one LAN-facing and one WAN-facing interface, and
    ```
 
 2. **Configure first — this is the last step that does not touch the
-   firewall.** Fill in the required values and create the first admin. Without
-   an admin account the portal is unusable, and once the firewall loads there
+   firewall.** Create the network settings and the first admin. Without an
+   admin account the portal is unusable, and once the firewall loads there
    is no way back in over SSH.
 
    ```bash
-   cp .env.example .env
-   chmod 600 .env
+   ./configure.sh
    ```
+
+   It lists the interfaces, asks which one is the LAN and which one is the
+   WAN, then the networks, the portal port and the admin account (leave the
+   password empty to generate one), and writes `.env` with mode 0600.
+   Re-running it keeps the current values as defaults. The portal is
+   **public by default** (`HV_PORTAL_NET=0.0.0.0/0`); give a management CIDR
+   if it should not be reachable from the internet.
 
    ```ini
    HV_LAN_IF=eth1            # clients

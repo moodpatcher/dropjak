@@ -656,7 +656,11 @@ def _container_egress_entry(item) -> dict:
             "container egress: the address must be a private IPv4 address "
             "of a container on a Docker bridge (10/8, 172.16/12, 192.168/16)"
         )
-    lan_net = _env_network("HV_LAN_NET")
+    # Single-NIC mode ignores HV_LAN_NET (there is no client LAN).
+    single_nic = os.environ.get("HV_SINGLE_NIC", "").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+    lan_net = None if single_nic else _env_network("HV_LAN_NET")
     if address in TUNNEL_SUBNET or (lan_net is not None and address in lan_net):
         raise SettingsError(
             "container egress: the address cannot be in the LAN or the "
@@ -2136,6 +2140,24 @@ class SettingsStore:
         data["portal_domain"] = domain
         if not domain.strip():
             data["portal_challenge"] = None
+        return self.commit(data)
+
+    def seed_proxy(self, domains, portal_domain="") -> dict:
+        """One-time initial proxy configuration from the environment.
+
+        Only for the first start, while the settings file does not exist
+        yet: ``configure.sh``'s HTTPS mode passes the root domain(s) in
+        ``HV_PROXY_DOMAINS`` and the Dropjak subdomain in
+        ``HV_PORTAL_DOMAIN``. Once the file exists the admin interface
+        (Admin → Settings → Proxy) is authoritative; a later start must not
+        overwrite it. The values go through the same normalizers as
+        :meth:`set_proxy` and the whole state is committed atomically.
+        """
+        domains = _proxy_domains(list(domains or []))
+        with self._lock:
+            data = self._copy_locked()
+        data["proxy_domains"] = domains
+        data["portal_domain"] = portal_domain
         return self.commit(data)
 
     def set_proxy(self, domains, routes, referenced=(), portal_challenge=UNSET) -> dict:

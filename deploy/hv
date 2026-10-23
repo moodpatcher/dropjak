@@ -2,8 +2,8 @@
 # Dropjak — local management command on the VM.
 set -euo pipefail
 
-APP=/root/hatarvedelem
-BACKUPS=/root/hatarvedelem-backups
+APP=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+BACKUPS=${HV_BACKUPS:-/root/hatarvedelem-backups}
 STATE_VOLUME=/var/lib/docker/volumes/dropjak-state/_data
 
 cd "$APP"

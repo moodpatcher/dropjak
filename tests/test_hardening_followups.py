@@ -77,7 +77,7 @@ class TemplateTests(unittest.TestCase):
                 self.assertLess(index_of(rules, "nfproto ipv6 drop"), drop)
 
     def test_grants_are_bound_to_the_lan_and_wan_interfaces(self) -> None:
-        other = 'ct direction original iifname != { "__LAN_IF__", "__WAN_IF__" }'
+        other = 'ct direction original iifname != { __CLIENT_IFS__ }'
         drops = [i for i, r in enumerate(self.forward)
                  if r.startswith(other) and r.endswith(" drop")]
         self.assertEqual(len(drops), 4)
@@ -139,6 +139,67 @@ class TemplateTests(unittest.TestCase):
         self.assertIn(
             "{ 169.254.0.0/16__NO_FORWARD_NETS__ }", NFT
         )
+
+
+class SingleNicRenderTests(unittest.TestCase):
+    """The follow-up rules in both modes (HV_SINGLE_NIC)."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        import test_single_nic as tsn  # noqa: PLC0415
+        env = {"HV_NO_FORWARD_NETS": "10.0.0.0/8"}
+        cls.single = tsn.active_lines(tsn.render({**tsn.SINGLE, **env}))
+        cls.two = tsn.active_lines(tsn.render({**tsn.TWO, **env}))
+
+    def test_grant_interface_check_uses_the_client_interfaces(self) -> None:
+        for lines, ifs in ((self.single, '{ "eth0" }'),
+                           (self.two, '{ "eth1", "eth0" }')):
+            hits = [l for l in lines
+                    if l.startswith(f"ct direction original iifname != {ifs}")]
+            self.assertEqual(len(hits), 12, ifs)  # 4 forward + 2 input pairs
+
+    def test_mode_independent_rules_stay_active(self) -> None:
+        for lines in (self.single, self.two):
+            text = "\n".join(lines)
+            self.assertEqual(text.count("ct state invalid drop"), 2)
+            self.assertIn("add @portal_conn_v4 { ip saddr ct count over 32 } drop", text)
+            self.assertIn("jump container_egress", text)
+            self.assertIn(
+                "add element inet hatarvedelem no_forward_v4 "
+                "{ 169.254.0.0/16, 10.0.0.0/8 }", text)
+            for line in lines:
+                if " log prefix " in line and "nfproto ipv6" not in line:
+                    self.assertIn(LOG_BUDGET, line)
+        # The LAN catch-all log rules exist only with two NICs.
+        self.assertFalse([l for l in self.single if "reason=no-grant" in l])
+        self.assertTrue([l for l in self.two if "reason=no-grant" in l])
+
+    def test_container_egress_without_a_lan(self) -> None:
+        fw = gateway.Firewall(dry_run=True, logger=lambda *_: None,
+                              lan_if="", wan_if="eth0", lan_network=None,
+                              single_nic=True)
+        rules = fw._container_egress_rules([egress()])
+        self.assertFalse([r for r in rules if "container-pivot" in r
+                          or "ct state new drop" in r])
+        self.assertTrue([r for r in rules if r.endswith(" accept")])
+
+    def test_input_chain_check_uses_the_wan_in_single_nic_mode(self) -> None:
+        fw = gateway.Firewall(binary="/bin/true", logger=lambda *_: None,
+                              lan_if="eth1", wan_if="eth0", single_nic=True)
+        listing = ('iifname "eth0" tcp dport 22 drop\n'
+                   "ip saddr . tcp dport @allowed_input_tcp tcp dport != 8100 accept\n")
+        fw._run = lambda args, check=True: subprocess.CompletedProcess(
+            args, 0, listing.encode(), b"")
+        self.assertEqual(fw.input_chain_consistent(8100), (True, "ok"))
+
+    def test_setup_host_rp_filter_on_the_wan_only(self) -> None:
+        result = HostSysctlTests.run_setup_snippet(
+            None, "HV_SINGLE_NIC=1\nHV_WAN_IF=eth0\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("net.ipv4.conf.eth0.rp_filter = 1", result.stdout)
+        self.assertNotIn("disable_ipv6", result.stdout)
+        self.assertNotIn("route_localnet", result.stdout)
+        self.assertIn('RP_FILTER_IFS=("$WAN_IF")', INSTALL)
 
 
 # ------------------------------------------------------- HV_NO_FORWARD_NETS
@@ -269,8 +330,8 @@ class HostSysctlTests(unittest.TestCase):
         self.assertIn(
             "printf '0\\n' > /proc/sys/net/ipv4/conf/all/route_localnet", INSTALL
         )
-        self.assertIn('ipv4_conf_key "$LAN_IF" rp_filter', INSTALL)
-        self.assertIn('ipv4_conf_key "$WAN_IF" rp_filter', INSTALL)
+        self.assertIn('RP_FILTER_IFS=("$LAN_IF" "$WAN_IF")', INSTALL)
+        self.assertIn('ipv4_conf_key "$iface" rp_filter', INSTALL)
 
     def test_native_check_timer_is_installed(self) -> None:
         service = (ROOT / "deploy" / "dropjak-firewall-check.service").read_text(

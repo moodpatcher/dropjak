@@ -306,6 +306,10 @@ class Ipv6DropTests(unittest.TestCase):
                 if script is INSTALL:
                     block = script[re.search(r'cat ?> ?"\$SYSCTL_FILE"', script).start():]
                     block = block[:block.index("EOF\n", block.index("\n") + 1)]
+                    # install.sh builds the mode-dependent IPv6 lines first.
+                    self.assertIn("${IPV6_LINES}", block)
+                    start = script.index('  IPV6_LINES="')
+                    block = script[start:script.index("\nelse\n", start)]
                 else:
                     # setup-host.sh writes the file from a { ... } group.
                     end = script.index('} >"$SYSCTL_FILE"')
@@ -939,8 +943,9 @@ class EntrypointTests(unittest.TestCase):
         self.assertIn("nftables firewall backend", result.stdout)
         self.assertIn("continued", result.stdout)
 
-    def test_portal_net_fallback_is_exported(self) -> None:
-        """Run render_ruleset with HV_PORTAL_NET absent and HV_MGMT_NET set."""
+    def test_portal_net_defaults_to_public(self) -> None:
+        """HV_PORTAL_NET absent: the portal is public (0.0.0.0/0), even when
+        HV_MGMT_NET is set; the management network no longer narrows it."""
         functions = ENTRYPOINT.split("# ------------------------------------------------------------------------ main")[0]
         with tempfile.TemporaryDirectory() as tmp:
             rendered = os.path.join(tmp, "dropjak.nft")
@@ -960,7 +965,8 @@ class EntrypointTests(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             text = Path(rendered).read_text(encoding="utf-8")
-        self.assertIn("ip saddr 10.9.0.0/16 tcp dport 8100 accept", text)
+        self.assertIn("ip saddr 0.0.0.0/0 tcp dport 8100 accept", text)
+        self.assertNotIn("10.9.0.0/16", text)
         self.assertNotRegex(text, r"__[A-Z0-9_]+__")
 
     def run_proxy_key_check(self, **extra: str) -> subprocess.CompletedProcess:

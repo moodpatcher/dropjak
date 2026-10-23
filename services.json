@@ -46,35 +46,5 @@
       "all": true
     }
   ],
-  "scenarios": [
-    {
-      "id": "browse",
-      "label": "Browsing",
-      "description": "Web and DNS",
-      "services": ["web", "dns"],
-      "default_ttl": 3600,
-      "default": true
-    },
-    {
-      "id": "work",
-      "label": "Work",
-      "description": "Web, DNS and email",
-      "services": ["web", "dns", "mail"],
-      "default_ttl": 28800
-    },
-    {
-      "id": "admin",
-      "label": "Administrator",
-      "description": "Web, DNS, SSH and ping",
-      "services": ["web", "dns", "ssh", "icmp"],
-      "default_ttl": 7200
-    },
-    {
-      "id": "full",
-      "label": "Full",
-      "description": "Unrestricted internet",
-      "services": ["all"],
-      "default_ttl": 3600
-    }
-  ]
+  "scenarios": []
 }

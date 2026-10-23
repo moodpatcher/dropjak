@@ -39,6 +39,7 @@ REQUIRED_RUNTIME_FILES = {
 }
 
 EXPECTED_NFT_PLACEHOLDERS = {
+    "__LANONLY__",
     "__LAN_IF__",
     "__WAN_IF__",
     "__LAN_NET__",
@@ -48,6 +49,7 @@ EXPECTED_NFT_PLACEHOLDERS = {
     "__DROP_LOG_GROUP__",
     "__PROXY__",
     "__NO_FORWARD_NETS__",
+    "__CLIENT_IFS__",
 }
 
 # Pre-3.0.0 SSH plumbing that must not be described as current behaviour.
