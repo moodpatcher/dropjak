@@ -2467,8 +2467,9 @@ class TunnelHttpTests(unittest.TestCase):
         self.assertEqual(config["wireguard"]["endpoint"],
                          "cloud.example.com:51820")
         self.assertEqual(config["wireguard"]["address"], "10.77.0.2/24")
-        self.assertEqual(config["sync"]["url"],
-                         "http://10.77.0.1:8100/api/tunnel/config")
+        self.assertEqual(
+            config["sync"]["url"],
+            f"http://10.77.0.1:{settings_store.TUNNEL_SYNC_PORT}/api/tunnel/config")
         # Enrollment goes to the portal's own address, not to the tunnel.
         self.assertEqual(config["enroll"], {
             "url": f"http://127.0.0.1:{self.port}/api/tunnel/enroll",
