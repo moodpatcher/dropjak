@@ -5402,10 +5402,12 @@ The running version is stored in [`VERSION`](VERSION).
 #### Security
 
 Fixes from the 2026-10-23 security review (finding IDs DJ-00 to DJ-36).
-Items marked as design steps in that review (DJ-24, mandatory admin TOTP,
-TOTP enrollment codes, encrypted export) are not part of this change
-(agent-side key generation is, see the last entries); the owner's decisions on the other follow-ups
-are the last entries of this list.
+The owner's decisions on the follow-ups and the review's design steps are
+the later entries of this list. Declined by the owner, so not implemented:
+mandatory admin TOTP (the built-in admin is a temporary bootstrap account),
+admin-issued TOTP enrollment codes, extra admin step-up or idle cap, and
+encrypted export. DJ-24 cleaned the current tree only; the git history
+still holds the old operational details.
 
 - **fail2ban (DJ-01, DJ-22).** Ban rules match only `ct direction original`,
   so a ban no longer drops replies to LAN clients. Drop-signal bans skip an
