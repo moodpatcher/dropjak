@@ -33,6 +33,8 @@ SERVICE_USER="hatarvedelem"
 NFT_FILE="/etc/nftables/dropjak.nft"
 SYSTEMD_DIR="/etc/systemd/system"
 SYSTEMD_UNIT="${SYSTEMD_DIR}/${SERVICE}.service"
+HELPER_SERVICE="${SERVICE}-helper"
+HELPER_UNIT="${SYSTEMD_DIR}/${HELPER_SERVICE}.service"
 FIREWALL_UNIT="${SYSTEMD_DIR}/${FIREWALL_SERVICE}.service"
 CHECK_UNIT="${SYSTEMD_DIR}/${FIREWALL_SERVICE}-check.service"
 CHECK_TIMER="${SYSTEMD_DIR}/${FIREWALL_SERVICE}-check.timer"
@@ -149,9 +151,9 @@ done
 
 [[ $EUID -eq 0 ]] || die "run as root: sudo $0"
 command -v systemctl >/dev/null 2>&1 || die "systemd is missing"
-for f in server.py gateway.py settings_store.py fail2ban.py droplog.py tunnel.py \
+for f in server.py gateway.py privhelper.py settings_store.py fail2ban.py droplog.py tunnel.py \
          index.html icon.png blocked.png unauthorized.png sus.png ok.png services.json VERSION \
-         deploy/dropjak.nft deploy/dropjak.service \
+         deploy/dropjak.nft deploy/dropjak.service deploy/dropjak-helper.service \
          deploy/dropjak-firewall.service \
          deploy/dropjak-firewall-check.service \
          deploy/dropjak-firewall-check.timer \
@@ -654,6 +656,7 @@ disable_conflicting_firewalls
 note "Installing the program"
 install -d -m 0755 "$APP_DIR"
 install -m 0644 "$SRC_DIR/server.py" "$SRC_DIR/gateway.py" \
+  "$SRC_DIR/privhelper.py" \
   "$SRC_DIR/settings_store.py" "$SRC_DIR/fail2ban.py" "$SRC_DIR/droplog.py" \
   "$SRC_DIR/tunnel.py" \
   "$SRC_DIR/index.html" "$SRC_DIR/icon.png" "$SRC_DIR/blocked.png" \
@@ -892,16 +895,39 @@ sed -e "s|__NFT_BIN__|$NFT_BIN|g" \
 install -m 0644 "$TMP_FW" "$CHECK_UNIT"
 install -m 0644 "$SRC_DIR/deploy/dropjak-firewall-check.timer" "$CHECK_TIMER"
 
+# The portal holds no network capability (DJ-20); it keeps
+# CAP_NET_BIND_SERVICE only when it binds a port below 1024: PORT or the
+# tunnel sync listener (HV_TUNNEL_SYNC_PORT, by default PORT + 1).
+SYNC_PORT="${HV_TUNNEL_SYNC_PORT:-}"
+if ! [[ "$SYNC_PORT" =~ ^[0-9]+$ ]] || (( SYNC_PORT < 1 || SYNC_PORT > 65535 )) \
+    || [[ "$SYNC_PORT" == "$PORT" ]]; then
+  if (( PORT < 65535 )); then SYNC_PORT=$((PORT + 1)); else SYNC_PORT=$((PORT - 1)); fi
+fi
+BIND_CAPS=""
+if (( PORT < 1024 || SYNC_PORT < 1024 )); then
+  BIND_CAPS="CAP_NET_BIND_SERVICE"
+fi
+
 TMP_UNIT="$(mktemp)"
 sed \
   -e "s|__PYTHON__|$PYTHON|g" \
   -e "s|__NFT_BIN__|$NFT_BIN|g" \
   -e "s|__PORT__|$PORT|g" \
   -e "s|__PORTAL_URL__|$PORTAL_URL|g" \
+  -e "s|__BIND_CAPS__|$BIND_CAPS|g" \
   "$SRC_DIR/deploy/dropjak.service" > "$TMP_UNIT"
 install -m 0644 "$TMP_UNIT" "$SYSTEMD_UNIT"
 
-if grep -qE '__[A-Z0-9_]+__' "$SYSTEMD_UNIT" "$FIREWALL_UNIT" "$CHECK_UNIT"; then
+# The privileged helper: the only long-running process with CAP_NET_ADMIN;
+# the portal reaches it over /run/dropjak/helper.sock.
+sed \
+  -e "s|__PYTHON__|$PYTHON|g" \
+  -e "s|__NFT_BIN__|$NFT_BIN|g" \
+  -e "s|__PORT__|$PORT|g" \
+  "$SRC_DIR/deploy/dropjak-helper.service" > "$TMP_UNIT"
+install -m 0644 "$TMP_UNIT" "$HELPER_UNIT"
+
+if grep -qE '__[A-Z0-9_]+__' "$SYSTEMD_UNIT" "$HELPER_UNIT" "$FIREWALL_UNIT" "$CHECK_UNIT"; then
   die "an unfilled placeholder remained in the systemd units"
 fi
 
@@ -911,9 +937,12 @@ fi
 # Without HV_LAN_IF/HV_LAN_NET (two-NIC) the portal records no client MAC,
 # while the rules drop every LAN grant without one. In single-NIC mode the
 # empty LAN values are expected and the portal uses IP-based grants only.
-ENV_DROPIN_DIR="${SYSTEMD_DIR}/${SERVICE}.service.d"
-install -d -m 0755 "$ENV_DROPIN_DIR"
-cat > "$ENV_DROPIN_DIR/10-dropjak-env.conf" <<EOF
+# The helper executes the grants (MAC binding, interfaces), so it gets the
+# same drop-in.
+for unit_name in "$SERVICE" "$HELPER_SERVICE"; do
+  ENV_DROPIN_DIR="${SYSTEMD_DIR}/${unit_name}.service.d"
+  install -d -m 0755 "$ENV_DROPIN_DIR"
+  cat > "$ENV_DROPIN_DIR/10-dropjak-env.conf" <<EOF
 [Service]
 Environment=HV_SINGLE_NIC=$SINGLE_NIC
 Environment=HV_FWD_MARK=$FWD_MARK
@@ -923,10 +952,12 @@ Environment=HV_WAN_IF=$WAN_IF
 Environment=HV_LAN_NET=$LAN_NET
 Environment=HV_PORTAL_NET=$PORTAL_NET
 EOF
-chmod 0644 "$ENV_DROPIN_DIR/10-dropjak-env.conf"
+  chmod 0644 "$ENV_DROPIN_DIR/10-dropjak-env.conf"
+done
 
 systemctl daemon-reload
 systemctl enable "$FIREWALL_SERVICE" >/dev/null
+systemctl enable "$HELPER_SERVICE" >/dev/null
 systemctl enable "$SERVICE" >/dev/null
 
 if ! systemctl restart "$FIREWALL_SERVICE"; then
@@ -940,6 +971,13 @@ for hv_set in allowed_v4 allowed_tcp allowed_udp allowed_icmp; do
 done
 systemctl enable --now "${FIREWALL_SERVICE}-check.timer" >/dev/null \
   || warn "the firewall check timer could not be enabled"
+
+# The helper starts before the portal (the portal waits for its socket).
+if ! systemctl restart "$HELPER_SERVICE"; then
+  warn "the privileged helper did not start; log:"
+  journalctl -u "$HELPER_SERVICE" -n 30 --no-pager || true
+  die "installation failed"
+fi
 
 if ! systemctl restart "$SERVICE"; then
   warn "the service did not start; log:"
@@ -983,7 +1021,7 @@ fi
 
 if command -v restorecon >/dev/null 2>&1; then
   restorecon -R "$APP_DIR" "$STATE_DIR" >/dev/null 2>&1 || true
-  restorecon "$NFT_FILE" "$SYSTEMD_UNIT" "$FIREWALL_UNIT" \
+  restorecon "$NFT_FILE" "$SYSTEMD_UNIT" "$HELPER_UNIT" "$FIREWALL_UNIT" \
     "$CHECK_UNIT" "$CHECK_TIMER" \
     >/dev/null 2>&1 || true
 fi
@@ -999,6 +1037,7 @@ cat <<EOF
   Portal:            $PORTAL_URL
   Firewall status:   systemctl status $FIREWALL_SERVICE
   Portal status:     systemctl status $SERVICE
+  Helper status:     systemctl status $HELPER_SERVICE
   Log:               journalctl -u $SERVICE -f
   Firewall log:      journalctl -u $FIREWALL_SERVICE -f
   Permissions:       $NFT_BIN list set inet hatarvedelem allowed_v4

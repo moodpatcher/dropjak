@@ -2,7 +2,10 @@
 """WireGuard tunnel (dropjak0) management on the cloud side.
 
 The portal container runs in the host network namespace, so the WireGuard
-interface is created on the host. Private keys never appear on the command
+interface is created on the host. The interface and peer operations run in
+the privileged helper (privhelper.py, DJ-20); the portal itself only
+generates keys and asks the helper (gateway.RemoteTunnelManager). Private
+keys never appear on the command
 line: ``wg`` always reads them from a 0600 temporary file under /run (tmpfs),
 which is deleted immediately after the operation.
 

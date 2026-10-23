@@ -9619,7 +9619,7 @@ def _fail2ban_cli(argv: list[str]) -> int:
 
     args = parser.parse_args(argv)
     audit = gateway.AuditLog()
-    manager = fail2ban_mod.Fail2ban(gateway.Firewall(), audit=audit)
+    manager = fail2ban_mod.Fail2ban(gateway.make_firewall(), audit=audit)
     try:
         if args.action == "list":
             snapshot = manager.snapshot()
@@ -9994,7 +9994,7 @@ def main(argv: list[str]) -> int:
     if argv[0] == "fail2ban":
         return _fail2ban_cli(argv[1:])
     if argv[0] == "check-firewall":
-        ok, why = gateway.Firewall().healthy()
+        ok, why = gateway.make_firewall().healthy()
         print("OK" if ok else f"error: {why}")
         return 0 if ok else 1
     print(

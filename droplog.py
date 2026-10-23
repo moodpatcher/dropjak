@@ -766,11 +766,17 @@ class DropLogListener:
         group: int = DROP_LOG_GROUP,
         enabled: bool = DROP_LOG_ENABLED,
         logger=_default_log,
+        socket_opener=None,
     ) -> None:
         self.store = store
         self.group = max(1, min(65535, int(group)))
         self.enabled = bool(enabled)
         self.log = logger
+        # Binding the NFLOG group needs CAP_NET_ADMIN. The portal has none
+        # (DJ-20): socket_opener returns the socket the privileged helper
+        # bound and configured (OSError on failure); reading it needs no
+        # capability.
+        self.socket_opener = socket_opener
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._sock: socket.socket | None = None
@@ -870,6 +876,14 @@ class DropLogListener:
 
     def _open_socket(self) -> socket.socket:
         """Open, bind and configure the NFLOG socket (raises OSError)."""
+        if self.socket_opener is not None:
+            sock = self.socket_opener()
+            try:
+                sock.settimeout(1.0)
+            except OSError:
+                sock.close()
+                raise
+            return sock
         sock = socket.socket(
             socket.AF_NETLINK, socket.SOCK_RAW, NETLINK_NETFILTER
         )
@@ -1073,13 +1087,15 @@ class DropLogService:
         group: int = DROP_LOG_GROUP,
         enabled: bool = DROP_LOG_ENABLED,
         logger=_default_log,
+        socket_opener=None,
     ) -> None:
         self.log = logger
         self.store = DropLog(
             path=path, max_bytes=max_bytes, keep=keep, logger=logger
         )
         self.listener = DropLogListener(
-            self.store, group=group, enabled=enabled, logger=logger
+            self.store, group=group, enabled=enabled, logger=logger,
+            socket_opener=socket_opener,
         )
 
     def set_on_drop(self, callback) -> None:

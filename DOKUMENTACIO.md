@@ -126,13 +126,16 @@ Browser (client)
                                      | nft / conntrack / ARP
                                      v
 +---------------------------- Docker container (host network) ----------------------+
-|  docker/entrypoint.sh                                                             |
+|  docker/entrypoint.sh (root)                                                      |
 |    - rendering and loading the template                                            |
 |    - flushing dynamic sets at startup                                              |
 |    - deleting the boot table, Docker DOCKER-USER guard, watchdog                   |
-|    - setpriv → hatarvedelem user                                                   |
-|  server.py  ── HTTP API, portal, admin, auth, session cookie                      |
-|  gateway.py ── rules, sessions, nft calls, revocation, TTL                         |
+|    - privileged helper restart loop, then setpriv → hatarvedelem user              |
+|  privhelper.py (root, CAP_NET_ADMIN only) ── nft, conntrack, wg/ip, NFLOG bind     |
+|        ^  /run/dropjak/helper.sock (0660 root:hatarvedelem, SO_PEERCRED)           |
+|        |  fixed JSON command set                                                    |
+|  server.py  ── HTTP API, portal, admin, auth, session cookie (no capability)      |
+|  gateway.py ── rules, sessions, rendering, revocation, TTL; helper client          |
 |  fail2ban.py ── login- and drop-based banning, persistence                        |
 |  droplog.py ── reading NFLOG group 5, drops.jsonl, rotation                        |
 |  settings_store.py ── validation of pre-auth/block/site settings, atomic write     |
@@ -145,11 +148,12 @@ The container does not operate in its own network namespace: it must reach the h
 | Component | Responsibility |
 |---|---|
 | `server.py` | HTTP server, routes, JSON validation, origin checking, auth, admin operations, static `index.html`, `icon.png`, `blocked.png`. |
-| `gateway.py` | `Rule`, `RuleSelection`, `Ports`, `Session`, `SessionManager`; writing the nft sets, conntrack deletion, revocation, expiry, startup reconciliation. |
+| `gateway.py` | `Rule`, `RuleSelection`, `Ports`, `Session`, `SessionManager`; rendering the nft rules, revocation, expiry, startup reconciliation; `RemoteFirewall`/`RemoteTunnelManager`, the client of the privileged helper. |
+| `privhelper.py` | The privileged helper (DJ-20): the only long-running process with `CAP_NET_ADMIN`. Runs every nft, conntrack, WireGuard (`ip`, `wg`) and NFLOG-bind operation for the portal, through a fixed JSON command set on `/run/dropjak/helper.sock`. |
 | `fail2ban.py` | Counting failed logins and drop events; writing `banned_v4`; persisted `fail2ban.json`; runtime configuration. |
 | `droplog.py` | Reading the NFLOG netlink group, writing drop records to JSONL, rotation, filtering, merging fail2ban events. |
 | `settings_store.py` | Validation and atomic, fault-tolerant writing of `firewall-settings.json`; pre-auth/block/site fields. |
-| `docker/entrypoint.sh` | First start order, env validation, nft loading, flushing dynamic sets, Docker guard, watchdog, privilege dropping. |
+| `docker/entrypoint.sh` | First start order, env validation, nft loading, flushing dynamic sets, Docker guard, watchdog, the helper's restart loop, privilege dropping. |
 | `install.sh` | Native, systemd-based installation; copying files, filling placeholders, units and drop-in. |
 | `configure.sh` | Interactive `.env` generator for the Docker installation (interfaces, networks, portal exposure, first admin account). |
 | `deploy/hv` | Docker operational helper (status, logs, restart, rebuild, backup, test, e2e). |
@@ -163,8 +167,10 @@ The container does not operate in its own network namespace: it must reach the h
 5. It deletes the former `host_ssh_v4` set if it still exists; it can no longer grant access.
 6. It deletes the early boot table.
 7. It fills the `docker_bridges` set with the host's bridge interfaces (`ip -o link show type bridge`, without `HV_LAN_IF` and `HV_WAN_IF`), then checks and, if necessary, installs the Docker `DOCKER-USER` guard. If no guard can be installed (no `DOCKER-USER` chain, or Docker's nftables firewall backend), it logs an `ERROR` line and keeps starting: stopping would leave the host in a crash loop behind the boot table.
-8. It starts the watchdog (every 5 s: reloads a lost or incomplete table, refreshes `docker_bridges`, reinstalls a missing guard, and repeats the guard `ERROR` at most once a minute), then switches to the `hatarvedelem` user with `setpriv` and runs `server.py`.
-9. On startup `server.py` loads the rules, users, groups, settings, fail2ban state, and if needed reconciles the kernel sets to the empty session table.
+8. It starts the watchdog (every 5 s: reloads a lost or incomplete table, refreshes `docker_bridges`, reinstalls a missing guard, and repeats the guard `ERROR` at most once a minute). The watchdog stays in the root entrypoint, never in the portal.
+9. It starts the privileged helper (`privhelper.py`: root, the portal's group, bounding set `CAP_NET_ADMIN` only, without the admin password, proxy key and Turnstile secret in its environment) in a background restart loop (1 s back-off doubling to 30 s) and waits up to `HV_PRIV_HELPER_WAIT` (20) seconds for its socket. A helper that does not come up is logged, never fatal.
+10. It switches to the `hatarvedelem` user with `setpriv` and an empty bounding set (only `NET_BIND_SERVICE` when `PORT` or the tunnel sync port is below 1024) and runs `server.py`.
+11. On startup `server.py` waits until the helper answers a ping, then loads the rules, users, groups, settings, fail2ban state, and if needed reconciles the kernel sets to the empty session table.
 
 `HV_SKIP_FIREWALL=1` skips nft loading, the Docker guard and the watchdog. This is **not secure**, only a developer or emergency opt-in.
 
@@ -288,6 +294,18 @@ These are not open bugs, but deliberately documented residual risks:
 | Runtime assumptions | nft/conntrack/NFLOG behavior is modeled by the documentation and tests, but not verified in every live combination. |
 | Another IPv6 router on the client LAN | The gateway drops all IPv6 it sees, but a foreign router advertisement gives clients an IPv6 path that never reaches it. Deployment requirement: no other IPv6 router on the LAN (RA guard on a shared switch). |
 | Docker without `DOCKER-USER` | With Docker's nftables backend no guard can be installed; the portal runs and logs an `ERROR` every minute. |
+| The helper trusts the portal's policy | The privileged helper narrows *how* the kernel can be changed, not *which* grants are issued: a compromised portal process can still grant, ban and fill the custom chains of the `inet hatarvedelem` table within the command set. It can no longer touch other tables, interfaces, routes or arbitrary nft statements. |
+
+#### 5.5. Privilege separation (DJ-20)
+The web-facing portal holds no network capability. Every privileged call it used to make itself runs in the privileged helper, `privhelper.py`:
+
+- **Who runs what.** The helper is root with a bounding set of `CAP_NET_ADMIN` only (Docker: started by the entrypoint with `setpriv`; native: `dropjak-helper.service`). It runs nft (grants, revocation, bans, host guards, the custom chains, state token, health and input-chain checks, set listings), conntrack deletions, the `dropjak0` WireGuard interface and peers (`ip`, `wg`, the 0600 key files in `/run/dropjak`) and binds the NFLOG drop-log group. WireGuard key generation needs no privilege and stays in the portal. The firewall watchdog and the `docker_bridges` refresh stay in the root entrypoint (native: `dropjak-firewall-check.timer`).
+- **The socket.** `/run/dropjak/helper.sock`, directory 0750 `root:hatarvedelem`, socket 0660. Every connection's peer is checked with `SO_PEERCRED`: only the portal user and root (`HV_RUN_AS_ROOT=1`, `docker compose exec` as root) are served. One newline-terminated JSON request per connection, at most 1 MiB, read within 5 s; at most 16 concurrent connections.
+- **The command set.** `grant_all`, `revoke`, `deny`, `revoke_all`, `revoke_exact`, `ban`, `unban`, `sync_bans` (the ban sets only), `sync_host_ports`, `prune_host_service_ports`, `flush`, `replace_custom`, `docker_published_ports`, `snapshot`, `ruleset`, `state_token`, `healthy`, `input_chain_consistent`, `conntrack_flush`, `conntrack_flush_removed`, `conntrack_flush_port`, `tunnel_reconcile`, `tunnel_remove_all`, `tunnel_status`, `nflog_open` and `ping`. There is no verb that runs a command or an nft script. Each verb takes exactly its arguments, checked with the portal's own validators (IPv4 addresses, TTL bounds, port intervals, grant directions, WireGuard keys, tunnel addresses); the helper then calls the same `Firewall`/`TunnelManager` method the portal used to, so the executed nft commands are unchanged.
+- **Custom chains.** The portal renders the pre-auth, block, port proxy, tunnel and container egress rules; `replace_custom` re-checks every line: printable ASCII on one line, it must start with `add rule inet hatarvedelem <chain> ` for one of the chains that replacement recreates (with `keep_block` the block chains are excluded), and it may not contain `;`, `#`, a backslash, a backtick, `include` or `ruleset`.
+- **Drop log.** Binding the NFLOG group needs `CAP_NET_ADMIN`, reading the bound socket does not: `nflog_open` passes the configured netlink socket to the portal (`SCM_RIGHTS`). The kernel checks the sender's capability for every further netlink request, so the portal can only read it. Parsing, the JSONL log and the fail2ban drop metrics stay in the portal; a listener error asks the helper for a new socket with the usual back-off.
+- **Fail-closed, no lockout.** While the helper does not answer, `state_token` fails, so the DJ-04 path refuses every new grant (`firewall_error` with `operation=helper`, audited once); the table and the existing sessions are untouched, and grants resume as soon as the restarted helper answers. A WireGuard reconcile that could not reach the helper is retried by the 5 s firewall watch loop. At startup the portal waits for the helper before its startup flush instead of exiting, so a slow helper never crash-loops the container (the host input chain is policy drop). The entrypoint restarts a dead helper; systemd does the same with `Restart=always`.
+- **Port 80.** The portal keeps `NET_BIND_SERVICE` (bounding and ambient set) only when `PORT` or the tunnel sync port is below 1024; `net.ipv4.ip_unprivileged_port_start` is host-wide and stays untouched.
 
 ### 6. Data model
 #### 6.1. State files
@@ -777,14 +795,15 @@ The installer's supported systems: RHEL/AlmaLinux/Rocky/Oracle Linux 8+, Fedora,
 | `/opt/hatarvedelem` | Python modules, `index.html`, icons, `services.json`, `VERSION`. |
 | `/var/lib/hatarvedelem` | State files (systemd `StateDirectory`). |
 | `/etc/nftables/dropjak.nft` | Rendered rules, `0600`. |
-| `/etc/systemd/system/dropjak.service` | Portal unit. |
+| `/etc/systemd/system/dropjak.service` | Portal unit (no `CAP_NET_ADMIN`; `CAP_NET_BIND_SERVICE` only for a port below 1024). |
+| `/etc/systemd/system/dropjak-helper.service` | Privileged helper unit (root, `CAP_NET_ADMIN` only, `/run/dropjak/helper.sock`). |
 | `/etc/systemd/system/dropjak-firewall.service` | Early firewall unit. |
 | `/etc/systemd/system/dropjak-boot.service` | Docker early boot protection (installed by `setup-host.sh`). |
 | `/etc/sysctl.d/90-dropjak.conf` | `net.ipv4.ip_forward=1`; `net.ipv6.conf.<LAN_IF>.disable_ipv6=1` in two-NIC mode only. |
 
 The native install does not support the Caddy proxy (`__PROXY__` is always rendered commented out), so it needs no `HV_PROXY_KEY`. The `docker_bridges` set stays empty there; only the `docker*`/`br-*` patterns apply.
 
-The `dropjak-firewall.service` has `DefaultDependencies=no`, `Before=network-pre.target`, and intentionally no `ExecStop`: stopping the service does not open the network. The portal unit depends on the firewall unit with `Requires=`, and uses `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`, `RestrictAddressFamilies` and similar hardening.
+The `dropjak-firewall.service` has `DefaultDependencies=no`, `Before=network-pre.target`, and intentionally no `ExecStop`: stopping the service does not open the network. The portal unit depends on the firewall unit with `Requires=`, and uses `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`, `RestrictAddressFamilies` and similar hardening. It starts after `dropjak-helper.service` with `Wants=` (not `Requires=`: restarting the helper never stops the portal). The helper unit owns `/run/dropjak` (`RuntimeDirectory`, 0750, preserved across restarts), restarts with `Restart=always`, and gets the same `10-dropjak-env.conf` drop-in as the portal, since it executes the grants (MAC binding, interfaces).
 
 The `deploy/hv` helper is **not** installed by `install.sh`; it is made for Docker Compose and operates on the checkout it lives in (it changes into its parent directory). Run it as `./deploy/hv <command>` from the checkout.
 
@@ -922,6 +941,33 @@ sudo ./install.sh <the original arguments>
 The native `install.sh` copies the script next to the other installed files
 with mode 0755.
 
+#### 10.9. Pinned image digests
+Every base image is pinned by digest, with the tag kept for readability
+(DJ-20): `Dockerfile` (`python:3.12-slim-bookworm`),
+`deploy/tunnel-agent/Dockerfile` (`python:3.12-alpine`), the `caddy` service
+in `docker-compose.yml` (`caddy:2.10.2-alpine`) and the example web service
+in `deploy/tunnel-agent/compose.example.yml` (`nginx:alpine`). A rebuild
+therefore never pulls a changed base silently. Update them on purpose, with
+each release:
+
+```bash
+# On a trusted machine: the multi-arch index digest of each tag
+docker buildx imagetools inspect python:3.12-slim-bookworm | grep -m1 Digest
+docker buildx imagetools inspect python:3.12-alpine | grep -m1 Digest
+docker buildx imagetools inspect caddy:2.10.2-alpine | grep -m1 Digest
+docker buildx imagetools inspect nginx:alpine | grep -m1 Digest
+```
+
+Without buildx, the registry API gives the same value: fetch a pull token
+from `https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/<name>:pull`,
+then `HEAD https://registry-1.docker.io/v2/library/<name>/manifests/<tag>`
+with that bearer token and
+`Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json`;
+the `Docker-Content-Digest` response header is the digest. Write it as
+`<image>:<tag>@sha256:<digest>`, rebuild (`deploy/hv rebuild`), run the
+tests, and note the new digests in the changelog. `tests/test_privhelper.py`
+fails if any of these references loses its digest.
+
 ### 11. Testing
 #### 11.1. Local unit and API tests
 The full suite in the 3.24.0 local working directory is **985 tests**, all OK. Running it in the repository's usual way:
@@ -1050,7 +1096,8 @@ The complete, detailed entries are in the [7. Changelog](#valtozasnaplo) section
 | `VERSION`, `DOKUMENTACIO.md` ([7.](#valtozasnaplo)) | Version and version history. |
 | `README.md`, `DOKUMENTACIO.md` ([1.](#projekt-allapot)) | User and project status documentation. |
 | `server.py` | HTTP API, portal, admin, auth. |
-| `gateway.py` | Rules, sessions, nft calls, revocation. |
+| `gateway.py` | Rules, sessions, nft rendering, revocation, the helper client. |
+| `privhelper.py` | Privileged helper (root, `CAP_NET_ADMIN` only): nft, conntrack, WireGuard, NFLOG bind (DJ-20). |
 | `fail2ban.py`, `droplog.py` | Banning and NFLOG-based drop log. |
 | `settings_store.py` | Settings validation, atomic write. |
 | `index.html`, `icon.png`, `blocked.png` | Portal/admin UI and assets. |
@@ -1058,10 +1105,10 @@ The complete, detailed entries are in the [7. Changelog](#valtozasnaplo) section
 | `docker-compose.yml`, `Dockerfile` | Docker host network, state volume, healthcheck, image. |
 | `install.sh`, `.env.example`, `.dockerignore`, `.gitignore` | Native installer, configuration sample, Docker and git exclusions. |
 | `configure.sh` | Interactive `.env` generator (installation mode, interfaces, networks, portal source, access mode, admin account). |
-| `docker/entrypoint.sh` | Env validation, rendering, nft, set flush, boot table, Docker guard, watchdog, setpriv. |
+| `docker/entrypoint.sh` | Env validation, rendering, nft, set flush, boot table, Docker guard, watchdog, helper restart loop, setpriv. |
 | `docker/setup-host.sh` | Boot nft/unit and `ip_forward` on the host. |
 | `deploy/dropjak.nft` | Complete nftables template with seven placeholders. |
-| `deploy/dropjak.service`, `deploy/dropjak-firewall.service`, `deploy/dropjak-boot.service`, `deploy/dropjak-boot.nft` | Systemd units and the early boot table. |
+| `deploy/dropjak.service`, `deploy/dropjak-helper.service`, `deploy/dropjak-firewall.service`, `deploy/dropjak-boot.service`, `deploy/dropjak-boot.nft` | Systemd units and the early boot table. |
 | `deploy/hv`, `DOKUMENTACIO.md` ([2.](#telepites)) | Docker operational helper and local guide. |
 | `DOKUMENTACIO.md` ([3.6](#audit-naplo), [3.3](#host-szabalyok)) | Audit and host/SSH rules. |
 | `DOKUMENTACIO.md` ([3.5](#propagacios-matrix), [3.4](#gyujtoszabalyok)) | Invariants/mutation matrix and collection semantics. |
@@ -1071,6 +1118,7 @@ The complete, detailed entries are in the [7. Changelog](#valtozasnaplo) section
 | `tests/test_host_service_guard.py`, `tests/test_block_*.py` | Host guard and block/pre-auth. |
 | `tests/test_fail2ban_*.py`, `tests/test_audit_*.py` | fail2ban and audit. |
 | `tests/test_propagation_multi.py`, `tests/test_installer.py`, `tests/e2e_vm.py` | Multiple selection, installer, live E2E. |
+| `tests/test_privhelper.py`, `tests/privhelper_netns.py` | Privileged helper: command set, client, restarts, entrypoint, units, digests; real nft in a user namespace. |
 
 The list of open tasks lives not in the repo but in the developer's home
 `todo.txt` file (outside the repository).
@@ -5597,6 +5645,71 @@ are the last entries of this list.
   mode-independent.
 - **Tests.** New `tests/test_hardening_followups.py` (49 tests, both
   modes); pinned log-rule text updated in five test files.
+- **Privileged helper; the portal holds no CAP_NET_ADMIN (DJ-20 step 3).**
+  New `privhelper.py`: root with a bounding set of `CAP_NET_ADMIN` only,
+  started by the entrypoint (`setpriv`, the portal's group, the admin
+  password, proxy key and Turnstile secret removed from its environment) or
+  by the new native `dropjak-helper.service`. It runs every nft, conntrack,
+  WireGuard (`ip`, `wg`) and NFLOG-bind operation the portal used to run,
+  on `/run/dropjak/helper.sock` (directory 0750 `root:hatarvedelem`, socket
+  0660, `SO_PEERCRED`: the portal user and root only; one JSON request per
+  connection, at most 1 MiB, read within 5 s, 16 connections at a time).
+  The command set is fixed (`grant_all`, `revoke_all`, `ban`, `sync_bans`,
+  `replace_custom`, `state_token`, `conntrack_flush`, `tunnel_reconcile`,
+  `nflog_open` and the others listed in 5.5); there is no verb that runs a
+  command or a script, and every argument is checked with the portal's own
+  validators. The portal still renders the custom chains; `replace_custom`
+  re-checks every line (`add rule inet hatarvedelem <replaced chain> `
+  prefix, one printable ASCII line, no `;`, `#`, backslash, backtick,
+  `include` or `ruleset`). The helper calls the same `Firewall` and
+  `TunnelManager` methods, so the executed nft commands are unchanged
+  (`RemoteFirewall`, `RemoteTunnelManager`; `HV_PRIV_HELPER` selects the
+  helper, without it a process executes directly as before). The drop log
+  receives the bound NFLOG socket over `SCM_RIGHTS` and can only read it.
+  The portal runs with `--bounding-set=-all` and no ambient capability;
+  `NET_BIND_SERVICE` stays only when `PORT` or the tunnel sync port is below
+  1024 (native: `__BIND_CAPS__` in `dropjak.service`, rendered by
+  `install.sh`). This supersedes the `NET_ADMIN`/`NET_BIND_SERVICE` bounding
+  set above. The `fail2ban` and `check-firewall` CLI commands use the helper
+  too.
+- **Helper outage is fail-closed, never a lockout (DJ-20 step 4).** The
+  entrypoint runs the helper in a background restart loop (1 s back-off
+  doubling to 30 s) after loading the rules and before the portal, and waits
+  up to `HV_PRIV_HELPER_WAIT` (20) seconds for its socket; a helper that does
+  not come up is logged, never fatal. The portal waits for the helper before
+  its startup flush instead of exiting. While the helper does not answer,
+  new grants are refused through the DJ-04 out-of-sync path
+  (`firewall_error`, `operation=helper`, audited once); sessions and the
+  table stay untouched and grants resume when the helper answers again. A
+  missed WireGuard reconcile is retried by the 5 s watch loop. The firewall
+  watchdog and the `docker_bridges` refresh stay root-side in the
+  entrypoint. Native: `dropjak-helper.service` (`Restart=always`, owns
+  `/run/dropjak`); the portal unit lost `CAP_NET_ADMIN` and its
+  `RuntimeDirectory`, and starts after the helper with `Wants=`.
+  `uninstall.sh` removes the new unit and its drop-in.
+- **Images pinned by digest (DJ-20 step 5).** `python:3.12-slim-bookworm@sha256:6a0e06f5ba0b373d051aabd3fffb9b873f27f9a2a3a14bcbe37dee6f0e3bbc70`
+  (`Dockerfile`), `python:3.12-alpine@sha256:b658b05ce9c4eb97ec6fc19424818a1f31993659c2b505a532f470e83807815d`
+  (agent `Dockerfile`), `caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d`
+  (`docker-compose.yml`) and `nginx:alpine@sha256:a3554c0d0b48177b1413c26e01f695334428020d9df01243fbae3e11cfd17417`
+  (`compose.example.yml`), looked up on 2026-10-24 with the registry API
+  (multi-arch index digests). The update procedure is in 10.9.
+- **Tests (DJ-20).** New `tests/test_privhelper.py` (56 tests: refused
+  verbs, malformed, oversized and wrong-uid requests, custom-line
+  injection, argument validation, identical nft commands through the helper,
+  the client and the NFLOG descriptor, grant refusal and recovery around a
+  helper restart, the startup wait, the entrypoint restart loop and
+  ordering, the native units, the digests) and `tests/privhelper_netns.py`
+  (real nft in a user+net namespace: replace_custom, grants, revocation,
+  bans, host guards, state token, refused injections, a killed and
+  restarted helper). `EntrypointTests.test_setpriv_limits_bounding_set`
+  now expects the portal without `net_admin`. The measured suite is
+  **1301 tests OK**. A rootless podman run of the built image (own network
+  namespace, the compose capabilities, read-only root) showed the portal
+  with `CapEff`/`CapBnd`/`CapAmb` all 0 (`0x400` with `PORT=80`), the
+  helper with `0x1000`, the socket `srw-rw---- root hatarvedelem`, the drop
+  log listening through the passed socket, a CLI ban through the helper,
+  and a killed helper restarted within a second while the portal refused
+  grants and then resumed. Still to check under real Docker on the host.
 
 ### [3.24.0] - 2026-10-22
 

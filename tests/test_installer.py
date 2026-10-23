@@ -24,6 +24,7 @@ NFT_TEMPLATE = REPO_ROOT / "deploy" / "dropjak.nft"
 REQUIRED_RUNTIME_FILES = {
     "server.py",
     "gateway.py",
+    "privhelper.py",
     "settings_store.py",
     "fail2ban.py",
     "droplog.py",

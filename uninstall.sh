@@ -33,6 +33,7 @@ NFT_TABLES=("hatarvedelem" "hatarvedelem_boot")
 SYSTEMD_DIR="/etc/systemd/system"
 SYSTEMD_UNITS=(
   "dropjak.service"
+  "dropjak-helper.service"
   "dropjak-firewall.service"
   "dropjak-boot.service"
   "hatarvedelem.service"
@@ -195,7 +196,8 @@ cat <<EOF
   Installation directory: $INSTALL_DIR  (and this script)
   Docker Compose stack:    dropjak, dropjak-caddy
   Docker volumes:          dropjak-state, project scoped caddy-data/config/admin
-  systemd units:           dropjak.service, dropjak-firewall.service,
+  systemd units:           dropjak.service, dropjak-helper.service,
+                           dropjak-firewall.service,
                            dropjak-boot.service (and the legacy
                            hatarvedelem.service names)
   nftables tables:         inet hatarvedelem, inet hatarvedelem_boot
@@ -325,13 +327,15 @@ for unit in "${SYSTEMD_UNITS[@]}"; do
   fi
 done
 
-DROPIN_DIR="$SYSTEMD_DIR/dropjak.service.d"
-if [[ -d "$DROPIN_DIR" ]]; then
-  info "removing the systemd drop-in directory $DROPIN_DIR"
-  run rm -rf -- "$DROPIN_DIR"
-else
-  info "$DROPIN_DIR not found, skipped"
-fi
+for DROPIN_DIR in "$SYSTEMD_DIR/dropjak.service.d" \
+    "$SYSTEMD_DIR/dropjak-helper.service.d"; do
+  if [[ -d "$DROPIN_DIR" ]]; then
+    info "removing the systemd drop-in directory $DROPIN_DIR"
+    run rm -rf -- "$DROPIN_DIR"
+  else
+    info "$DROPIN_DIR not found, skipped"
+  fi
+done
 
 if [[ $HAS_SYSTEMCTL -eq 1 ]]; then
   info "reloading the systemd manager configuration"

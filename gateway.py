@@ -13,6 +13,7 @@ If the firewall cannot be updated, there is no grant.
 
 from __future__ import annotations
 
+import array
 import base64
 import fcntl
 import hashlib
@@ -23,6 +24,7 @@ import os
 import re
 import secrets
 import shutil
+import socket
 import struct
 import subprocess
 import sys
@@ -4663,10 +4665,27 @@ class Firewall:
             + tunnel_rules + self._tunnel_nat_rules(tunnels) + proxy_rules
             + self._container_egress_rules(container_egress)
         )
-        chains = (
+        self._replace_custom_rules(rules, keep_block)
+        self.portproxy_applied = proxy_rules
+
+    @staticmethod
+    def replaced_chains(keep_block: bool = False) -> tuple[str, ...]:
+        """The chains :meth:`replace_custom` recreates and flushes."""
+        return (
             ("preauth", "preauth_input", "preauth_nat")
             if keep_block else CUSTOM_CHAINS
         ) + PORTPROXY_CHAINS + (TUNNEL_CHAIN, CONTAINER_EGRESS_CHAIN)
+
+    def _replace_custom_rules(
+        self, rules: list[str], keep_block: bool = False
+    ) -> None:
+        """Execute already rendered custom rules in one nft transaction.
+
+        The portal renders, the privileged helper executes (DJ-20): the
+        helper re-checks every line against :meth:`replaced_chains` and
+        then calls this same method.
+        """
+        chains = self.replaced_chains(keep_block)
         lines = [
             f"add chain inet {self.table} {chain}" for chain in chains
         ]
@@ -4675,7 +4694,6 @@ class Firewall:
         )
         lines.extend(rules)
         self._run_script("\n".join(lines) + "\n")
-        self.portproxy_applied = proxy_rules
 
     def _delete_quiet(self, set_name: str, element: str) -> None:
         """Deleting a nonexistent element is not an error (the kernel may have expired it)."""
@@ -6243,6 +6261,11 @@ def conntrack_flush(ip: str, audit=None) -> bool:
     independently of this. On a real error an optional audit log entry is
     also written (it never blocks).
     """
+    client = priv_helper_client()
+    if client is not None and is_ipv4(ip):
+        return client.conntrack(
+            "conntrack_flush", {"ip": normalize_ip(ip)}, audit
+        )
     if DRY_RUN or not CONNTRACK_BIN or not is_ipv4(ip):
         return False
     try:
@@ -6309,6 +6332,19 @@ def conntrack_flush_removed(
     optional audit entry.
     """
 
+    client = priv_helper_client()
+    if client is not None and is_ipv4(ip):
+        return client.conntrack(
+            "conntrack_flush_removed",
+            {
+                "ip": normalize_ip(ip),
+                "removed": [ports_to_wire(part) for part in removed or ()],
+                "remaining": [
+                    ports_to_wire(part) for part in remaining or ()
+                ],
+            },
+            audit,
+        )
     if DRY_RUN or not CONNTRACK_BIN or not is_ipv4(ip):
         return False
     address = normalize_ip(ip)
@@ -6448,6 +6484,11 @@ def port_proxy_changes(old_entries, new_entries) -> list[tuple[str, int]]:
 
 def conntrack_flush_port(proto: str, port: int, audit=None) -> bool:
     """Delete the connections with the given original destination port (pre-DNAT)."""
+    client = priv_helper_client()
+    if client is not None:
+        return client.conntrack(
+            "conntrack_flush_port", {"proto": proto, "port": port}, audit
+        )
     if DRY_RUN or not CONNTRACK_BIN:
         return False
     target = f"{proto}/{port}"
@@ -6477,6 +6518,619 @@ def conntrack_flush_port(proto: str, port: int, audit=None) -> bool:
             )
         return False
     return True
+
+
+# ------------------------------------------------------- privileged helper
+
+# DJ-20: the web-facing portal holds no CAP_NET_ADMIN. Every nft, conntrack,
+# WireGuard and NFLOG operation runs in the privileged helper
+# (privhelper.py): a small root process with only CAP_NET_ADMIN, listening
+# on a Unix socket. The portal still renders the rules; the helper checks
+# each request against a fixed command set and executes it with the same
+# Firewall/TunnelManager code. HV_PRIV_HELPER names the socket; without it
+# (tests, the native CLI run as root) the process executes directly.
+PRIV_HELPER_SOCKET = os.environ.get("HV_PRIV_HELPER", "").strip()
+PRIV_HELPER_DEFAULT_SOCKET = "/run/dropjak/helper.sock"
+# A request is a single newline-terminated JSON object; so is the answer,
+# which may carry a full set listing (Admin -> Firewall view).
+PRIV_HELPER_MAX_REQUEST = 1024 * 1024
+PRIV_HELPER_MAX_RESPONSE = 16 * 1024 * 1024
+# One operation runs a few nft calls of at most 10 s each.
+PRIV_HELPER_TIMEOUT = 60.0
+# How long one readiness wait lasts (prepare() repeats it).
+PRIV_HELPER_READY_TIMEOUT = 30.0
+# Audit events the helper may hand back for the portal's audit log.
+PRIV_HELPER_AUDIT_EVENTS = frozenset({"conntrack_failed", "firewall_error"})
+
+
+class HelperUnavailable(FirewallError):
+    """The privileged helper cannot be reached; the request was not sent."""
+
+
+def ports_to_wire(ports: Ports) -> dict:
+    """A grant as JSON for the helper; the ports as merged intervals."""
+    return {
+        "tcp": [list(pair) for pair in merge_port_intervals(ports.tcp)],
+        "udp": [list(pair) for pair in merge_port_intervals(ports.udp)],
+        "icmp": bool(ports.icmp),
+        "full": bool(ports.full),
+        "direction": ports.direction,
+    }
+
+
+def ports_from_wire(value) -> Ports:
+    """Strict inverse of :func:`ports_to_wire`; ValueError on any deviation."""
+    if not isinstance(value, dict) or set(value) != {
+        "tcp", "udp", "icmp", "full", "direction",
+    }:
+        raise ValueError("invalid grant")
+    if value["direction"] not in ("forward", "input"):
+        raise ValueError("invalid grant direction")
+    for key in ("icmp", "full"):
+        if not isinstance(value[key], bool):
+            raise ValueError(f"invalid grant field: {key}")
+    expanded: dict[str, tuple[int, ...]] = {}
+    for key in ("tcp", "udp"):
+        intervals = value[key]
+        if not isinstance(intervals, list) or len(intervals) > 65535:
+            raise ValueError(f"invalid {key} port list")
+        ports: set[int] = set()
+        for pair in intervals:
+            if (
+                not isinstance(pair, list) or len(pair) != 2
+                or any(
+                    isinstance(port, bool) or not isinstance(port, int)
+                    or not 1 <= port <= 65535 for port in pair
+                )
+                or pair[0] > pair[1]
+            ):
+                raise ValueError(f"invalid {key} port interval")
+            ports.update(range(pair[0], pair[1] + 1))
+        expanded[key] = tuple(sorted(ports))
+    return Ports(
+        tcp=expanded["tcp"], udp=expanded["udp"], icmp=value["icmp"],
+        full=value["full"], direction=value["direction"],
+    )
+
+
+class PrivHelperClient:
+    """Client of the privileged helper socket; one request per connection."""
+
+    def __init__(
+        self, path: str, timeout: float = PRIV_HELPER_TIMEOUT
+    ) -> None:
+        self.path = path
+        self.timeout = timeout
+
+    @staticmethod
+    def _close_fds(fds) -> None:
+        for fd in fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    def _receive(self, sock, want_fd: bool) -> tuple[bytes, list[int]]:
+        chunks: list[bytes] = []
+        total = 0
+        fds: list[int] = []
+        try:
+            while True:
+                if want_fd:
+                    data, ancdata, _flags, _addr = sock.recvmsg(
+                        65536, socket.CMSG_SPACE(4 * array.array("i").itemsize)
+                    )
+                    for level, kind, raw in ancdata:
+                        if level == socket.SOL_SOCKET \
+                                and kind == socket.SCM_RIGHTS:
+                            received = array.array("i")
+                            usable = len(raw) - len(raw) % received.itemsize
+                            received.frombytes(raw[:usable])
+                            fds.extend(received)
+                else:
+                    data = sock.recv(65536)
+                if not data:
+                    break
+                chunks.append(data)
+                total += len(data)
+                if total > PRIV_HELPER_MAX_RESPONSE:
+                    raise FirewallError(
+                        "the privileged helper answer is too large"
+                    )
+                if b"\n" in data:
+                    break
+        except BaseException:
+            self._close_fds(fds)
+            raise
+        return b"".join(chunks), fds
+
+    def request(
+        self, op: str, args: dict | None = None, *, want_fd: bool = False
+    ) -> tuple[dict, list[int]]:
+        """Send one request; returns the answer and any passed descriptors.
+
+        HelperUnavailable: the connection failed, nothing was sent. Any
+        other failure (refusal, timeout, broken answer) is a FirewallError.
+        """
+        payload = (
+            json.dumps(
+                {"op": op, "args": args or {}}, separators=(",", ":")
+            ) + "\n"
+        ).encode("utf-8")
+        if len(payload) > PRIV_HELPER_MAX_REQUEST:
+            raise FirewallError(f"privileged helper request too large: {op}")
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sock.settimeout(self.timeout)
+            try:
+                sock.connect(self.path)
+            except OSError as exc:
+                raise HelperUnavailable(
+                    f"the privileged helper is unavailable ({self.path}): "
+                    f"{exc.strerror or exc}"
+                ) from exc
+            try:
+                sock.sendall(payload)
+                data, fds = self._receive(sock, want_fd)
+            except OSError as exc:
+                raise FirewallError(
+                    f"the privileged helper did not answer ({op}): {exc}"
+                ) from exc
+        finally:
+            sock.close()
+        try:
+            response = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            response = None
+        if not isinstance(response, dict):
+            self._close_fds(fds)
+            raise FirewallError(
+                f"invalid answer from the privileged helper ({op})"
+            )
+        if response.get("ok") is not True:
+            self._close_fds(fds)
+            raise FirewallError(
+                str(response.get("error") or "")[:500]
+                or f"the privileged helper refused the request ({op})"
+            )
+        return response, fds
+
+    def call(self, op: str, args: dict | None = None):
+        response, fds = self.request(op, args)
+        self._close_fds(fds)
+        return response.get("result")
+
+    def wait_ready(self, timeout: float = PRIV_HELPER_READY_TIMEOUT) -> bool:
+        """Wait until the helper answers a ping (the socket may not exist yet)."""
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                return self.call("ping") == "pong"
+            except HelperUnavailable:
+                if time.monotonic() >= deadline:
+                    return False
+                time.sleep(0.2)
+            except FirewallError:
+                return False
+
+    @staticmethod
+    def replay_audit(response: dict, audit) -> None:
+        """Write the audit events the helper collected into the portal's log."""
+        if audit is None:
+            return
+        for item in response.get("audit") or []:
+            if not isinstance(item, dict):
+                continue
+            event, fields = item.get("event"), item.get("fields")
+            if event not in PRIV_HELPER_AUDIT_EVENTS \
+                    or not isinstance(fields, dict):
+                continue
+            try:
+                audit.write(event, **{str(k): v for k, v in fields.items()})
+            except Exception as exc:  # logging should never block
+                log(f"[audit] writing {event} failed: {exc}")
+
+    def conntrack(self, op: str, args: dict, audit=None) -> bool:
+        """A conntrack deletion in the helper; never raises (like the local one)."""
+        try:
+            response, fds = self.request(op, args)
+        except FirewallError as exc:
+            target = args.get("ip") or f"{args.get('proto')}/{args.get('port')}"
+            log(f"[firewall] conntrack deletion failed ({target}): {exc}")
+            _audit_conntrack_failure(
+                audit, str(target), -1, str(exc),
+                operation="flush_port" if op == "conntrack_flush_port"
+                else "flush",
+            )
+            return False
+        self._close_fds(fds)
+        self.replay_audit(response, audit)
+        return response.get("result") is True
+
+    def nflog_socket(self) -> socket.socket:
+        """The bound NFLOG socket, opened by the helper (OSError on failure).
+
+        Binding the group needs CAP_NET_ADMIN; receiving on the bound socket
+        does not, and the kernel checks the capability of the sender of
+        every further netlink request, so the portal can only read it.
+        """
+        try:
+            _response, fds = self.request("nflog_open", want_fd=True)
+        except FirewallError as exc:
+            raise OSError(str(exc)) from exc
+        if len(fds) != 1:
+            self._close_fds(fds)
+            raise OSError(
+                "the privileged helper did not pass the NFLOG socket"
+            )
+        return socket.socket(fileno=fds[0])
+
+
+_PRIV_HELPER_CLIENT: PrivHelperClient | None = None
+
+
+def priv_helper_client() -> PrivHelperClient | None:
+    """The helper client if HV_PRIV_HELPER is set, otherwise None."""
+    global _PRIV_HELPER_CLIENT
+    path = PRIV_HELPER_SOCKET
+    if not path:
+        return None
+    client = _PRIV_HELPER_CLIENT
+    if client is None or client.path != path:
+        client = _PRIV_HELPER_CLIENT = PrivHelperClient(path)
+    return client
+
+
+class RemoteFirewall(Firewall):
+    """The portal's Firewall when the privileged helper executes (DJ-20).
+
+    Rendering, parsing and the checks that need no privilege stay here
+    (inherited); every operation that touches the kernel is one request to
+    the helper, which validates it and runs the same Firewall method. The
+    low-level _run/_run_script refuse: a path missed here fails closed
+    instead of trying nft without the capability.
+    """
+
+    def __init__(self, client: PrivHelperClient, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.client = client
+
+    def _run(self, args, check: bool = True):
+        raise FirewallError(
+            "nft runs only in the privileged helper (internal error)"
+        )
+
+    def _run_script(self, script: str) -> None:
+        raise FirewallError(
+            "nft runs only in the privileged helper (internal error)"
+        )
+
+    def _call(self, op: str, **args):
+        return self.client.call(op, args)
+
+    def wait_ready(self, timeout: float = PRIV_HELPER_READY_TIMEOUT) -> bool:
+        return self.client.wait_ready(timeout)
+
+    def _wire_grants(self, address: str, grants) -> list[dict]:
+        """Grants as JSON; the local _elements() keeps the same errors."""
+        grants = tuple(grants)
+        for ports in grants:
+            self._elements(address, ports)
+        return [ports_to_wire(ports) for ports in grants]
+
+    def grant_all(self, ip: str, grants, ttl: int) -> None:
+        if not is_ipv4(ip):
+            raise FirewallError("only an IPv4 address can be allowed")
+        address = normalize_ip(ip)
+        grants = tuple(grants)
+        if not any(self._elements(address, ports) for ports in grants):
+            return
+        self._call(
+            "grant_all", ip=address,
+            grants=self._wire_grants(address, grants), ttl=max(1, int(ttl)),
+        )
+
+    def revoke(self, ip: str, ports: Ports) -> None:
+        if not is_ipv4(ip):
+            return
+        address = normalize_ip(ip)
+        self._call(
+            "revoke", ip=address, ports=self._wire_grants(address, (ports,))[0]
+        )
+
+    def deny(self, ip: str, ports: Ports | None = None) -> None:
+        if not is_ipv4(ip):
+            return
+        address = normalize_ip(ip)
+        self._call(
+            "deny", ip=address,
+            ports=None if ports is None
+            else self._wire_grants(address, (ports,))[0],
+        )
+
+    def revoke_all(
+        self, ip: str, grants=(), discover: bool = False,
+        only_grants: bool = False,
+    ) -> None:
+        if not is_ipv4(ip):
+            return
+        address = normalize_ip(ip)
+        self._call(
+            "revoke_all", ip=address,
+            grants=self._wire_grants(address, grants),
+            discover=bool(discover), only_grants=bool(only_grants),
+        )
+
+    def revoke_exact(self, ip: str, grants) -> None:
+        if not is_ipv4(ip):
+            return
+        address = normalize_ip(ip)
+        grants = tuple(grants)
+        if not any(self._elements(address, ports) for ports in grants):
+            return
+        self._call(
+            "revoke_exact", ip=address,
+            grants=self._wire_grants(address, grants),
+        )
+
+    def ban(self, ip: str, ttl: int, set_name: str = "") -> None:
+        if not is_ipv4(ip):
+            raise FirewallError("only an IPv4 address can be banned")
+        self._call(
+            "ban", ip=normalize_ip(ip), ttl=max(1, int(ttl)),
+            set=set_name or self.ban_set,
+        )
+
+    def unban(self, ip: str, set_name: str = "") -> None:
+        if not is_ipv4(ip):
+            return
+        self._call("unban", ip=normalize_ip(ip), set=set_name or self.ban_set)
+
+    def sync_bans(self, elements, set_name: str = "") -> None:
+        self._call(
+            "sync_bans",
+            elements=[
+                [normalize_ip(ip), max(1, int(ttl))]
+                for ip, ttl in elements if is_ipv4(ip)
+            ],
+            set=set_name or self.ban_set,
+        )
+
+    @staticmethod
+    def _clean_ports(values) -> list[int]:
+        return sorted({
+            value for value in values or ()
+            if not isinstance(value, bool) and isinstance(value, int)
+            and 1 <= value <= 65535
+        })
+
+    def sync_host_ports(self, tcp_ports, udp_ports) -> None:
+        tcp = self._clean_ports(tcp_ports)
+        udp = self._clean_ports(udp_ports)
+        if not tcp and not udp:
+            return
+        self._call("sync_host_ports", tcp=tcp, udp=udp)
+
+    def prune_host_service_ports(
+        self, referenced_tcp, referenced_udp, audit=None
+    ) -> dict:
+        try:
+            response, fds = self.client.request(
+                "prune_host_service_ports",
+                {
+                    "tcp": self._clean_ports(
+                        int(port) for port in referenced_tcp or ()
+                    ),
+                    "udp": self._clean_ports(
+                        int(port) for port in referenced_udp or ()
+                    ),
+                },
+            )
+        except FirewallError as exc:
+            # A cleanup failure must never block granting (as locally).
+            reason = f"host port cleanup skipped: {exc}"
+            self.log(f"[firewall] {reason}")
+            self._audit_prune(audit, reason)
+            return {
+                "dry_run": bool(self.dry_run), "removed_tcp": [],
+                "removed_udp": [], "live_kept": [], "errors": [reason],
+                "skipped": "helper",
+            }
+        self.client._close_fds(fds)
+        self.client.replay_audit(response, audit)
+        result = response.get("result")
+        return result if isinstance(result, dict) else {}
+
+    def flush(self) -> None:
+        self._call("flush")
+        self._macs.clear()
+
+    def _replace_custom_rules(
+        self, rules: list[str], keep_block: bool = False
+    ) -> None:
+        self._call(
+            "replace_custom", rules=list(rules), keep_block=bool(keep_block)
+        )
+
+    def docker_published_ports(self) -> set[tuple[str, int]]:
+        try:
+            pairs = self._call("docker_published_ports")
+        except FirewallError:
+            return set()
+        return {
+            (proto, port) for proto, port in pairs or []
+            if proto in ("tcp", "udp") and isinstance(port, int)
+        }
+
+    def snapshot(self) -> dict:
+        result = self._call("snapshot")
+        if not isinstance(result, dict):
+            raise FirewallError("invalid snapshot from the privileged helper")
+        return result
+
+    def ruleset(self) -> dict:
+        result = self._call("ruleset")
+        if not isinstance(result, dict):
+            raise FirewallError("invalid ruleset from the privileged helper")
+        return result
+
+    def state_token(self) -> int | None:
+        token = self._call("state_token")
+        if isinstance(token, bool) or not isinstance(token, int):
+            return None
+        return token
+
+    @staticmethod
+    def _verdict(result) -> tuple[bool, str]:
+        if isinstance(result, list) and len(result) == 2 \
+                and isinstance(result[0], bool):
+            return result[0], str(result[1])
+        return False, "invalid answer from the privileged helper"
+
+    def healthy(self) -> tuple[bool, str]:
+        try:
+            return self._verdict(self._call("healthy"))
+        except FirewallError as exc:
+            return False, str(exc)
+
+    def input_chain_consistent(self, port: int = PORT) -> tuple[bool, str]:
+        try:
+            return self._verdict(
+                self._call("input_chain_consistent", port=int(port))
+            )
+        except FirewallError as exc:
+            return False, str(exc)
+
+
+class RemoteTunnelManager(tunnel_mod.TunnelManager):
+    """WireGuard through the privileged helper (DJ-20).
+
+    Key generation needs no privilege and stays local; the interface and
+    peer operations run in the helper's TunnelManager. Only the fields the
+    kernel configuration needs leave the portal. A reconcile that could not
+    reach the helper is retried by the firewall watch loop.
+    """
+
+    def __init__(self, client: PrivHelperClient, logger=None) -> None:
+        super().__init__(logger=logger)
+        self.client = client
+        self._pending: dict | None = None
+
+    @staticmethod
+    def wire(tunnels: dict) -> dict:
+        if not isinstance(tunnels, dict):
+            tunnels = {}
+        return {
+            "port": tunnels.get("port"),
+            "server_private_key": tunnels.get("server_private_key") or "",
+            "agents": [
+                {
+                    "id": agent.get("id"),
+                    "address": agent.get("address"),
+                    "public_key": agent.get("public_key") or "",
+                    "preshared_key": agent.get("preshared_key") or "",
+                    "enabled": bool(agent.get("enabled")),
+                }
+                for agent in tunnels.get("agents", [])
+                if isinstance(agent, dict)
+            ],
+        }
+
+    def reconcile(self, tunnels: dict) -> bool:
+        with self._lock:
+            try:
+                result = self.client.call(
+                    "tunnel_reconcile", {"tunnels": self.wire(tunnels)}
+                )
+            except HelperUnavailable as exc:
+                self._pending = tunnels
+                self.error = str(exc)
+                self.log(f"[tunnel] WireGuard configuration postponed: {exc}")
+                return False
+            except FirewallError as exc:
+                self._pending = None
+                self.error = str(exc)
+                self.log(f"[tunnel] WireGuard configuration failed: {exc}")
+                return False
+            self._pending = None
+            result = result if isinstance(result, dict) else {}
+            self.error = str(result.get("error") or "")
+            return result.get("applied") is True
+
+    def retry_pending(self) -> bool:
+        """Re-send a reconcile the helper missed while it was down."""
+        pending = self._pending
+        return pending is not None and self.reconcile(pending)
+
+    def remove_all(self) -> None:
+        with self._lock:
+            self._pending = None
+            try:
+                self.client.call("tunnel_remove_all")
+                self.error = ""
+            except FirewallError as exc:
+                self.error = str(exc)
+                self.log(f"[tunnel] failed to remove peers: {exc}")
+
+    def status(self, tunnels: dict, now: float | None = None) -> dict:
+        agents = [
+            agent for agent in (
+                tunnels.get("agents", []) if isinstance(tunnels, dict) else []
+            )
+            if isinstance(agent, dict)
+        ]
+        request = {
+            "configured": bool(
+                isinstance(tunnels, dict) and tunnels.get("server_private_key")
+            ),
+            "agents": [
+                {
+                    "id": agent.get("id"),
+                    "public_key": agent.get("public_key") or "",
+                    "enabled": bool(agent.get("enabled")),
+                }
+                for agent in agents
+            ],
+        }
+        if now is not None:
+            request["now"] = float(now)
+        try:
+            result = self.client.call("tunnel_status", {"tunnels": request})
+            error = "invalid answer from the privileged helper"
+        except FirewallError as exc:
+            result, error = None, str(exc)
+        if isinstance(result, dict):
+            return result
+        return {
+            "error": error,
+            "agents": [
+                {
+                    "id": agent.get("id"), "online": False,
+                    "last_handshake": 0, "rx_bytes": 0, "tx_bytes": 0,
+                }
+                for agent in agents
+            ],
+        }
+
+
+def make_firewall() -> Firewall:
+    """The Firewall of this process: through the helper if one is configured."""
+    client = priv_helper_client()
+    return RemoteFirewall(client) if client is not None else Firewall()
+
+
+def make_tunnel_manager() -> tunnel_mod.TunnelManager:
+    client = priv_helper_client()
+    if client is not None:
+        return RemoteTunnelManager(client, logger=log)
+    return tunnel_mod.TunnelManager(logger=log)
+
+
+def make_drop_log_service() -> droplog.DropLogService:
+    client = priv_helper_client()
+    return droplog.DropLogService(
+        socket_opener=client.nflog_socket if client is not None else None
+    )
 
 
 def _proc_sockets(proc_dir: str = "/proc/net"):
@@ -9886,7 +10540,7 @@ class Gateway:
             rules if rules is not None else RuleStore(catalog=self.catalog)
         )
         self.groups = groups if groups is not None else GroupStore()
-        self.firewall = firewall if firewall is not None else Firewall()
+        self.firewall = firewall if firewall is not None else make_firewall()
         # First-start proxy seed from the environment (configure.sh's HTTPS
         # mode). It is applied only when no settings file exists yet, so the
         # values saved later in Admin → Settings → Proxy always win. An
@@ -9926,7 +10580,8 @@ class Gateway:
         )
         # The WireGuard tunnel (dropjak0) runs in the host network namespace;
         # after a settings change it is left alone if the signature matches.
-        self.tunnels = tunnel_mod.TunnelManager(logger=log)
+        # With the privileged helper (DJ-20) the helper configures it.
+        self.tunnels = make_tunnel_manager()
         # The minimum per-agent interval of the agent sync
         # (GET /api/tunnel/config); the token never gets here or into the log.
         self.tunnel_sync_times: dict[str, float] = {}
@@ -9946,7 +10601,7 @@ class Gateway:
         # index; thus a service rule can also grant domain access.
         self.rules.service_domains = self._service_domains_for
         self.drops = (
-            drops if drops is not None else droplog.DropLogService()
+            drops if drops is not None else make_drop_log_service()
         )
         # The state of the host (input) port guard set. Conservatively false
         # until the first successful sync_host_ports() sets it: thus host
@@ -9965,6 +10620,8 @@ class Gateway:
         # value means the table was lost and reloaded bare.
         self._fw_token: int | None = None
         self._fw_lost_logged = False
+        # The privileged helper stopped answering (DJ-20); logged once.
+        self._helper_down_logged = False
         self.sessions = (
             sessions
             if sessions is not None
@@ -10156,9 +10813,32 @@ class Gateway:
         ``firewall_reset`` (fail-closed) and those clients log in again.
         """
         if self._fw_token is None or self._firewall_in_sync():
+            if getattr(self, "_helper_down_logged", False):
+                self._helper_down_logged = False
+                log(
+                    "[firewall] the privileged helper answers again; "
+                    "grants are issued again"
+                )
             return False
         with Gateway._custom_lock:
-            token = self.firewall.state_token()
+            try:
+                token = self.firewall.state_token()
+            except HelperUnavailable as exc:
+                # DJ-20: the table itself is untouched, but nothing can be
+                # granted or revoked; _firewall_in_sync() keeps refusing
+                # grants until the helper (restarted by the entrypoint or
+                # systemd) answers again.
+                if not getattr(self, "_helper_down_logged", False):
+                    self._helper_down_logged = True
+                    log(
+                        f"[firewall] ERROR: {exc}; new grants are refused "
+                        "until it answers again"
+                    )
+                    self._write_audit(
+                        "firewall_error", operation="helper",
+                        reason=str(exc),
+                    )
+                return False
             if token == self._fw_token:
                 return False
             self._host_ports_ok = False
@@ -10227,6 +10907,13 @@ class Gateway:
                 self.check_firewall_state()
             except Exception as exc:  # the thread must never die
                 log(f"[firewall] state check error: {exc}")
+            # A WireGuard reconcile the privileged helper missed (DJ-20).
+            retry = getattr(self.tunnels, "retry_pending", None)
+            if retry is not None:
+                try:
+                    retry()
+                except Exception as exc:  # the thread must never die
+                    log(f"[tunnel] WireGuard retry error: {exc}")
 
     def _host_ports_healthy(self) -> bool:
         """The state of the host-port guard set; retries once after a failure.
@@ -10597,8 +11284,28 @@ class Gateway:
         else:
             log("[firewall] earlier grants deleted (clean start)")
 
+    def _wait_for_helper(self) -> None:
+        """Block until the privileged helper answers (DJ-20).
+
+        The entrypoint/systemd start the helper before the portal, but it
+        may still be binding its socket. Waiting instead of failing keeps
+        the startup flush fail-closed without a crash loop: a portal that
+        exits restarts the container, and the host input chain is policy
+        drop. Without a helper (direct execution) it returns at once.
+        """
+        wait = getattr(self.firewall, "wait_ready", None)
+        if wait is None:
+            return
+        while not wait():
+            log(
+                "[firewall] WARNING: the privileged helper does not answer "
+                f"({getattr(self.firewall.client, 'path', '?')}); "
+                "the portal waits for it before touching the firewall"
+            )
+
     def prepare(self) -> None:
         """Startup firewall check and deletion of old grants."""
+        self._wait_for_helper()
         self.rules.all_rules()
         log(
             f"[catalog] {len(self.catalog.service_order)} services, "

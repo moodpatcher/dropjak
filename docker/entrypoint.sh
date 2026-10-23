@@ -7,10 +7,14 @@
 #   1. fill in the deploy/dropjak.nft template with the HV_* variables,
 #   2. validate and load the rules (idempotent),
 #   3. remove the hatarvedelem_boot table providing early boot protection,
-#   4. start the portal as a restricted-privilege user.
+#   4. start the privileged helper (privhelper.py, root with only
+#      CAP_NET_ADMIN) and its restart loop, and wait for its socket,
+#   5. start the portal as the hatarvedelem user without CAP_NET_ADMIN.
 #
-# The script runs as root because nft touches the host network. The portal is
-# already started as the hatarvedelem user, with only the necessary capabilities.
+# The script runs as root because nft touches the host network; the firewall
+# watchdog stays here, root-side. The portal holds no network privilege
+# (DJ-20): every nft, conntrack, WireGuard and NFLOG operation goes through
+# the helper's Unix socket.
 set -eu
 
 APP_DIR=${HV_APP_DIR:-/opt/hatarvedelem}
@@ -150,15 +154,18 @@ ensure_state_dir() {
 }
 
 ensure_tunnel_run_dir() {
-    # The 0600 temporary WireGuard key files go here; the portal does not
-    # run as root, so we create the directory here with its privileges.
-    _dir=${HV_TUNNEL_RUN_DIR:-/run/dropjak}
+    # The privileged helper's socket and its 0600 temporary WireGuard key
+    # files go here, and the staged admin password file. Root owns the
+    # directory; the portal's group may enter it to reach the socket
+    # (0660 root:hatarvedelem) and its own password file, nobody else.
+    # $1: the directory (default: the tunnel key directory).
+    _dir=${1:-${HV_TUNNEL_RUN_DIR:-/run/dropjak}}
     if [ "$(id -u)" -eq 0 ]; then
         mkdir -p "$_dir" \
-            || die "cannot create the tunnel key directory: $_dir"
-        chown "$APP_USER:$APP_USER" "$_dir" \
-            || die "cannot set the owner of the tunnel key directory: $_dir"
-        chmod 0700 "$_dir" || true
+            || die "cannot create the helper directory: $_dir"
+        chown "0:$APP_USER" "$_dir" \
+            || die "cannot set the owner of the helper directory: $_dir"
+        chmod 0750 "$_dir" || true
     fi
 }
 
@@ -196,6 +203,24 @@ stage_admin_secret() {
     fi
 }
 
+needs_low_port() {
+    # True if the portal binds a port below 1024: PORT, or the tunnel sync
+    # listener (HV_TUNNEL_SYNC_PORT, by default PORT + 1). Only then does
+    # the portal keep NET_BIND_SERVICE; the host-wide
+    # net.ipv4.ip_unprivileged_port_start is deliberately left alone.
+    _port=${PORT:-8100}
+    _sync=${HV_TUNNEL_SYNC_PORT:-}
+    valid_port "$_port" || _port=8100
+    if ! valid_port "$_sync" || [ "$_sync" = "$_port" ]; then
+        if [ "$_port" -lt 65535 ]; then
+            _sync=$((_port + 1))
+        else
+            _sync=$((_port - 1))
+        fi
+    fi
+    [ "$_port" -lt 1024 ] || [ "$_sync" -lt 1024 ]
+}
+
 run_as_app() {
     # The boolean switches are interpreted by env_bool() (1/true/yes/on).
     if [ "$(id -u)" -ne 0 ] || [ "$(env_bool HV_RUN_AS_ROOT 0)" = "1" ]; then
@@ -203,17 +228,94 @@ run_as_app() {
     fi
     command -v setpriv >/dev/null 2>&1 \
         || die "setpriv not found (util-linux package required)"
-    # setpriv passes NET_ADMIN with ambient capabilities, because a non-root
-    # user cannot get capabilities by default in the container. The bounding
-    # set is cut to the same two: CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID
-    # and SETPCAP are needed only by this script, never by the portal.
-    # Dropping from the bounding set needs SETPCAP (docker-compose.yml).
+    # The portal holds no network privilege (DJ-20): the privileged helper
+    # runs every nft, conntrack, WireGuard and NFLOG operation. The bounding
+    # set is emptied; only a portal port below 1024 keeps NET_BIND_SERVICE
+    # (as an ambient capability: a non-root user gets none by default).
+    # CHOWN, DAC_OVERRIDE, FOWNER, SETUID, SETGID and SETPCAP are needed
+    # only by this script. Dropping from the bounding set needs SETPCAP
+    # (docker-compose.yml).
+    if needs_low_port; then
+        exec setpriv \
+            --reuid="$APP_USER" --regid="$APP_USER" --init-groups \
+            --bounding-set=-all,+net_bind_service \
+            --inh-caps=-all,+net_bind_service \
+            --ambient-caps=-all,+net_bind_service \
+            -- "$@"
+    fi
     exec setpriv \
         --reuid="$APP_USER" --regid="$APP_USER" --init-groups \
-        --bounding-set=-all,+net_admin,+net_bind_service \
-        --inh-caps=+net_admin,+net_bind_service \
-        --ambient-caps=+net_admin,+net_bind_service \
+        --bounding-set=-all \
+        --inh-caps=-all \
         -- "$@"
+}
+
+# ------------------------------------------------------------ privileged helper
+
+HELPER_SOCKET=${HV_PRIV_HELPER:-/run/dropjak/helper.sock}
+# Seconds the entrypoint waits for the helper socket before it starts the
+# portal anyway (the portal then waits itself and refuses grants).
+HELPER_WAIT=${HV_PRIV_HELPER_WAIT:-20}
+
+run_priv_helper() {
+    # One helper process: root (it owns the socket and the WireGuard key
+    # files in the root-owned directory), the portal's group (the socket
+    # inherits it), and a bounding set of CAP_NET_ADMIN only. The portal's
+    # secrets stay out of its environment.
+    if [ "$(id -u)" -ne 0 ]; then
+        "$PYTHON" "$APP_DIR/privhelper.py" --socket "$HELPER_SOCKET"
+        return
+    fi
+    env -u HV_ADMIN_PASSWORD -u HV_ADMIN_PASSWORD_FILE -u HV_PROXY_KEY \
+            -u TURNSTILE_SECRET \
+        setpriv --regid="$APP_USER" --clear-groups \
+            --bounding-set=-all,+net_admin \
+            --inh-caps=-all \
+            -- "$PYTHON" "$APP_DIR/privhelper.py" --socket "$HELPER_SOCKET"
+}
+
+start_priv_helper() {
+    # The helper runs in a restart loop in the background, like the
+    # firewall watchdog. Its exit never stops the container: the portal
+    # refuses grants while the socket does not answer (fail-closed), and a
+    # crash loop of the whole container would leave the host behind a
+    # policy-drop input chain. The back-off grows to 30 seconds and resets
+    # after a minute of uptime.
+    command -v setpriv >/dev/null 2>&1 || [ "$(id -u)" -ne 0 ] \
+        || die "setpriv not found (util-linux package required)"
+    ensure_tunnel_run_dir "$(dirname "$HELPER_SOCKET")"
+    HV_PRIV_HELPER=$HELPER_SOCKET
+    export HV_PRIV_HELPER
+    (
+        delay=1
+        while :; do
+            started=$(date +%s)
+            status=0
+            run_priv_helper || status=$?
+            if [ $(($(date +%s) - started)) -ge 60 ]; then
+                delay=1
+            fi
+            log "ERROR: the privileged helper exited (status $status); restarting in $delay s"
+            sleep "$delay"
+            delay=$((delay * 2))
+            [ "$delay" -le 30 ] || delay=30
+        done
+    ) &
+    log "privileged helper started ($HELPER_SOCKET)"
+    wait_priv_helper
+}
+
+wait_priv_helper() {
+    # The helper must be up before the portal's prepare(); the portal also
+    # waits for it, so a slow start is logged, never fatal.
+    _tries=$((HELPER_WAIT * 5))
+    while [ "$_tries" -gt 0 ]; do
+        [ -S "$HELPER_SOCKET" ] && return 0
+        sleep 0.2
+        _tries=$((_tries - 1))
+    done
+    log "WARNING: the privileged helper socket is not ready after $HELPER_WAIT s ($HELPER_SOCKET); the portal waits for it and refuses grants until it answers"
+    return 0
 }
 
 check_proxy_key() {
@@ -737,8 +839,10 @@ ensure_caddy_admin_dir
 stage_admin_secret
 export HV_STATE_DIR="$STATE_DIR"
 
-# Custom command (e.g. user management): we do not touch the firewall.
+# Custom command (e.g. user management): we do not touch the firewall. The
+# helper still starts: a fail2ban ban/unban from the CLI needs it.
 if [ "$#" -gt 0 ]; then
+    start_priv_helper
     run_as_app "$@"
 fi
 
@@ -757,6 +861,10 @@ if [ -z "${HV_CONNTRACK_BIN:-}" ]; then
     CONNTRACK=$(command -v conntrack 2>/dev/null || true)
     [ -n "$CONNTRACK" ] && export HV_CONNTRACK_BIN="$CONNTRACK"
 fi
+
+# The helper comes after the firewall (the table is in place) and before
+# the portal, whose prepare() needs it (DJ-20).
+start_priv_helper
 
 log "starting portal on port ${PORT:-8100}"
 run_as_app "$PYTHON" "$APP_DIR/server.py"

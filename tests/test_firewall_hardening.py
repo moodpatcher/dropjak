@@ -11,7 +11,7 @@ DJ-16  established UDP 53 flows are cut after revocation
 DJ-17  a LAN source is accepted only on the LAN interface
 DJ-18  native install passes the interface env; the portal port is rendered
 DJ-19  the boot table drops host input
-DJ-20  the portal's bounding set holds only NET_ADMIN and NET_BIND_SERVICE
+DJ-20  the portal holds no NET_ADMIN (privileged helper); see test_privhelper
 DJ-21  the admin password file is wired in; the variable leaves the env
 DJ-33  the input block jump spares replies to the host's own connections
 DJ-34  the host_service guard checks only the original direction
@@ -840,9 +840,14 @@ class StateTokenTests(unittest.TestCase):
 
 class EntrypointTests(unittest.TestCase):
     def test_setpriv_limits_bounding_set(self) -> None:
-        self.assertIn(
-            "--bounding-set=-all,+net_admin,+net_bind_service", ENTRYPOINT
-        )
+        # DJ-20 steps 3-5: the portal keeps no NET_ADMIN (the privileged
+        # helper has it); NET_BIND_SERVICE only for a port below 1024.
+        start = ENTRYPOINT.index("\nrun_as_app() {\n")
+        run_as_app = ENTRYPOINT[start:ENTRYPOINT.index("\n}\n", start)]
+        self.assertNotIn("net_admin", run_as_app)
+        self.assertIn("--bounding-set=-all \\", run_as_app)
+        self.assertIn("--bounding-set=-all,+net_bind_service", run_as_app)
+        self.assertIn("--bounding-set=-all,+net_admin", ENTRYPOINT)
         cap_add = re.search(r"cap_add:\n((?:\s+- \w+\n)+)", COMPOSE).group(1)
         self.assertIn("- SETPCAP", cap_add)
 

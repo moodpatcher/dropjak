@@ -29,12 +29,15 @@ services:
     # so docker stop shuts down the process cleanly.
     read_only: true
 
-    # The container only gets the necessary capabilities. CHOWN/DAC_OVERRIDE/
-    # FOWNER/SETUID/SETGID/SETPCAP are needed exclusively by the entrypoint: to
-    # fix the volume permissions and to switch user with setpriv (SETPCAP lets
-    # setpriv cut the portal's bounding set). The portal process itself only
-    # runs with NET_ADMIN and NET_BIND_SERVICE, and its bounding set holds
-    # nothing else.
+    # The container only gets the necessary capabilities. NET_ADMIN is for
+    # the root-side processes only: the entrypoint (rules, watchdog) and the
+    # privileged helper (privhelper.py, bounding set NET_ADMIN alone), which
+    # runs every nft, conntrack, WireGuard and NFLOG operation for the
+    # portal. CHOWN/DAC_OVERRIDE/FOWNER/SETUID/SETGID/SETPCAP are needed
+    # exclusively by the entrypoint: to fix the volume permissions and to
+    # switch user with setpriv (SETPCAP lets setpriv cut the bounding sets).
+    # The portal process holds no capability; NET_BIND_SERVICE stays in its
+    # bounding set only when PORT (or the tunnel sync port) is below 1024.
     cap_drop:
       - ALL
     cap_add:
@@ -175,7 +178,8 @@ services:
       HV_FWD_MARK: ${HV_FWD_MARK:-0x44524a4b}
       HV_COOKIE_SECURE: ${HV_COOKIE_SECURE:-0}
       HV_DRY_RUN: ${HV_DRY_RUN:-0}
-      # Enable/disable the firewall watchdog (0: disabled).
+      # Enable/disable the firewall watchdog (0: disabled). It runs
+      # root-side in the entrypoint, never in the portal.
       HV_FIREWALL_WATCHDOG: ${HV_FIREWALL_WATCHDOG:-1}
       # 1: the firewall opens TCP 80/443 for the caddy proxy service
       # (together with COMPOSE_PROFILES=proxy). See the .env.example file.
@@ -239,7 +243,9 @@ services:
   # portal requests the stop through it, which restart: unless-stopped restarts.
   caddy:
     container_name: dropjak-caddy
-    image: caddy:2.10.2-alpine
+    # Pinned by digest (DJ-20); the tag is kept for readability. Update both
+    # on purpose with each release.
+    image: caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
     profiles: ["proxy"]
     restart: unless-stopped
     network_mode: host
