@@ -20,22 +20,36 @@ Usage (the image entrypoint is ``python3 /agent.py``)::
 ``DROJAK_AGENT_CONFIG`` overrides the config path
 (default ``/etc/dropjak/agent.json``). The config is mounted read-only::
 
-    {"format": "dropjak-agent", "version": 1,
+    {"format": "dropjak-agent", "version": 2,
      "agent": {"id": "home-1", "label": "Home", "address": "10.77.0.2"},
      "wireguard": {
-       "private_key": "...", "address": "10.77.0.2/24",
-       "peer_public_key": "...", "preshared_key": "...",
+       "address": "10.77.0.2/24", "peer_public_key": "...",
        "endpoint": "203.0.113.7:51820",
        "allowed_ips": ["10.77.0.1/32"], "persistent_keepalive": 25,
        "interface": "wg0", "listen_port": 0},
      "sync": {"url": "http://10.77.0.1:8100/api/tunnel/config",
-              "token": "...", "interval_seconds": 30},
+              "interval_seconds": 30},
+     "enroll": {"url": "https://portal.example.com/api/tunnel/enroll",
+                "token": "..."},
      "services": [{"id": "mc", "label": "Minecraft", "proto": "tcp|udp|both",
                    "tunnel_port": 41001, "target": "mc:25565",
                    "enabled": true}]}
 
-``interface`` and ``listen_port`` are optional (``wg0`` / ``0``). The agent
-applies the nftables ruleset *before* the tunnel is created, then loops:
+``interface`` and ``listen_port`` are optional (``wg0`` / ``0``).
+
+Enrollment (version 2): the config holds no key. On first start the agent
+runs ``wg genkey``/``wg pubkey``/``wg genpsk``, keeps the keys in
+``/var/lib/dropjak-agent/identity.json`` (mode 0600, the state volume), and
+POSTs ``{agent_id, public_key, preshared_key}`` to ``enroll.url`` (the
+portal's public address, never the tunnel) with ``Authorization: Bearer
+<enrollment token>``. The one-time token is exchanged for a long-lived sync
+token, which is stored in the identity file too. A new bundle (re-enroll)
+carries a new token, so the agent generates new keys and enrolls again.
+Version 1 (legacy) configs still carry ``wireguard.private_key``,
+``wireguard.preshared_key`` and ``sync.token`` and need no enrollment.
+
+The agent applies the nftables ruleset *before* the tunnel is created, then
+loops:
 GET the sync URL with ``Authorization: Bearer <token>``, re-resolve every
 target (container restarts change IPs), render and apply the complete
 ruleset atomically. Any failure keeps the previous rules and is logged.
@@ -49,6 +63,7 @@ down. Logs are one compact JSON object per line on stderr (never secrets).
 from __future__ import annotations
 
 import base64
+import hashlib
 import ipaddress
 import json
 import os
@@ -60,6 +75,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Iterable
@@ -69,6 +85,12 @@ CONFIG_PATH = "/etc/dropjak/agent.json"
 STATE_DIR = "/var/lib/dropjak-agent"
 STATE_FILE = "last-config.json"
 STATE_FORMAT = "dropjak-agent-state"
+IDENTITY_FILE = "identity.json"
+IDENTITY_FORMAT = "dropjak-agent-identity"
+ENROLL_TIMEOUT = 15
+# Back-off of the enrollment retries (unreachable portal, 429, 5xx).
+ENROLL_RETRY_FIRST = 5
+ENROLL_RETRY_MAX = 300
 TABLE = "inet dropjak_agent"
 WG_MTU = 1420
 SYNC_TIMEOUT = 5
@@ -97,6 +119,24 @@ class ApplyError(RuntimeError):
 
 class CommandError(RuntimeError):
     """A helper command exited non-zero."""
+
+
+class EnrollRefused(RuntimeError):
+    """The portal refused the enrollment; retrying cannot help."""
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect is an error: the bearer token stays with the given host."""
+
+    def redirect_request(self, *args, **kwargs):  # noqa: D401
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def open_url(request, timeout=None):
+    return _OPENER.open(request, timeout=timeout)
 
 
 def log(level: str, event: str, **fields: object) -> None:
@@ -255,13 +295,23 @@ def validate_services(value: object, *, strict: bool = True) -> list[dict]:
 
 
 def validate_config(raw: object) -> dict:
-    """Validate and normalise the whole agent config."""
+    """Validate and normalise the whole agent config.
+
+    Version 1 carries the keys and the sync token; version 2 carries none
+    and an ``enroll`` section instead (the keys are filled in by
+    ``Agent.ensure_identity``).
+    """
+    if not isinstance(raw, dict):
+        raise ConfigError("config: object expected")
+    version = raw.get("version")
+    if type(version) is not int or version not in (1, 2):
+        raise ConfigError("version: 1 or 2 expected")
+    enrolling = version == 2
     cfg = _obj(raw, "config", {"format", "version", "agent", "wireguard",
-                               "sync", "services"})
+                               "sync", "services"}
+               | ({"enroll"} if enrolling else set()))
     if cfg.get("format") != "dropjak-agent":
         raise ConfigError("format: dropjak-agent expected")
-    if cfg.get("version") != 1 or type(cfg["version"]) is not int:
-        raise ConfigError("version: 1 expected")
 
     agent = _obj(cfg.get("agent"), "agent", {"id", "label", "address"})
     agent_id = _text(agent.get("id"), "agent.id", pattern=ID_RE, max_len=64)
@@ -270,13 +320,15 @@ def validate_config(raw: object) -> dict:
     if agent_addr not in TUNNEL_NET or agent_addr == SERVER_IP:
         raise ConfigError("agent.address: must be a client address in 10.77.0.0/24")
 
+    wg_keys = set() if enrolling else {"private_key", "preshared_key"}
     wg = _obj(cfg.get("wireguard"), "wireguard",
-              {"private_key", "address", "peer_public_key", "preshared_key",
-               "endpoint", "allowed_ips", "persistent_keepalive", "interface",
-               "listen_port"})
-    private_key = _wg_key(wg.get("private_key"), "wireguard.private_key")
+              {"address", "peer_public_key", "endpoint", "allowed_ips",
+               "persistent_keepalive", "interface", "listen_port"} | wg_keys)
+    private_key = psk = None
+    if not enrolling:
+        private_key = _wg_key(wg.get("private_key"), "wireguard.private_key")
+        psk = _wg_key(wg.get("preshared_key"), "wireguard.preshared_key")
     peer_key = _wg_key(wg.get("peer_public_key"), "wireguard.peer_public_key")
-    psk = _wg_key(wg.get("preshared_key"), "wireguard.preshared_key")
     address = wg.get("address")
     if not isinstance(address, str):
         raise ConfigError("wireguard.address: CIDR expected")
@@ -315,10 +367,29 @@ def validate_config(raw: object) -> dict:
                            "wireguard.listen_port", 0, 65535)
 
     sync = _obj(cfg.get("sync"), "sync",
-                {"url", "token", "interval_seconds"})
+                {"url", "interval_seconds"}
+                | (set() if enrolling else {"token"}))
     sync_url, _, _ = _url(sync.get("url"), "sync.url")
-    token = _text(sync.get("token"), "sync.token", pattern=TOKEN_RE,
-                  max_len=4096)
+    token = None
+    if not enrolling:
+        token = _text(sync.get("token"), "sync.token", pattern=TOKEN_RE,
+                      max_len=4096)
+    enroll = None
+    if enrolling:
+        section = _obj(cfg.get("enroll"), "enroll", {"url", "token"})
+        enroll_url, enroll_host, _ = _url(section.get("url"), "enroll.url")
+        # Enrollment happens before the tunnel exists, so it must go to the
+        # portal's public address, never to the tunnel network.
+        try:
+            in_tunnel = ipaddress.ip_address(enroll_host) in TUNNEL_NET
+        except ValueError:
+            in_tunnel = False
+        if in_tunnel:
+            raise ConfigError("enroll.url: must be the portal's public "
+                              "address, not the tunnel")
+        enroll = {"url": enroll_url,
+                  "token": _text(section.get("token"), "enroll.token",
+                                 pattern=TOKEN_RE, max_len=4096)}
     interval = _integer(sync.get("interval_seconds"), "sync.interval_seconds",
                         5, 86400)
 
@@ -326,7 +397,7 @@ def validate_config(raw: object) -> dict:
 
     return {
         "format": "dropjak-agent",
-        "version": 1,
+        "version": version,
         "agent": {"id": agent_id, "label": agent_label,
                   "address": str(agent_addr)},
         "wireguard": {
@@ -344,6 +415,7 @@ def validate_config(raw: object) -> dict:
         },
         "sync": {"url": sync_url, "token": token,
                  "interval_seconds": interval},
+        "enroll": enroll,
         "services": services,
     }
 
@@ -511,7 +583,7 @@ class Agent:
 
     def __init__(self, config: dict, *, state_dir: str | os.PathLike = STATE_DIR,
                  runner=run_command, getaddrinfo=socket.getaddrinfo,
-                 urlopen=urllib.request.urlopen, logger=log) -> None:
+                 urlopen=open_url, logger=log) -> None:
         self.config = config
         self.state_dir = Path(state_dir)
         self.run = runner
@@ -779,25 +851,164 @@ class Agent:
         except ConfigError:
             return None
 
-    def save_state(self, services: list[dict]) -> None:
+    def _write_private(self, name: str, payload: dict) -> None:
+        """Atomically write a 0600 JSON file in the 0700 state directory."""
         os.makedirs(self.state_dir, mode=0o700, exist_ok=True)
         os.chmod(self.state_dir, 0o700)
-        payload = {"format": STATE_FORMAT, "version": 1,
-                   "saved_at": int(time.time()), "services": services}
-        fd, tmp = tempfile.mkstemp(dir=self.state_dir, prefix=".last-config-")
+        fd, tmp = tempfile.mkstemp(dir=self.state_dir, prefix=f".{name}-")
         try:
             os.fchmod(fd, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, sort_keys=True)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(tmp, self.state_dir / STATE_FILE)
+            os.replace(tmp, self.state_dir / name)
         except BaseException:
             try:
                 os.unlink(tmp)
             except OSError:
                 pass
             raise
+
+    def save_state(self, services: list[dict]) -> None:
+        self._write_private(STATE_FILE, {
+            "format": STATE_FORMAT, "version": 1,
+            "saved_at": int(time.time()), "services": services})
+
+    # -- enrollment -------------------------------------------------------
+
+    def load_identity(self) -> dict | None:
+        """The stored key pair, PSK and sync token, or None if unusable."""
+        path = self.state_dir / IDENTITY_FILE
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if (not isinstance(raw, dict) or raw.get("format") != IDENTITY_FORMAT
+                or raw.get("version") != 1):
+            return None
+        try:
+            identity = {
+                "agent_id": _text(raw.get("agent_id"), "identity.agent_id",
+                                  pattern=ID_RE, max_len=64),
+                "enroll_token_sha256": _text(
+                    raw.get("enroll_token_sha256"),
+                    "identity.enroll_token_sha256", max_len=64),
+                "private_key": _wg_key(raw.get("private_key"),
+                                       "identity.private_key"),
+                "public_key": _wg_key(raw.get("public_key"),
+                                      "identity.public_key"),
+                "preshared_key": _wg_key(raw.get("preshared_key"),
+                                         "identity.preshared_key"),
+                "sync_token": None,
+            }
+            if raw.get("sync_token") is not None:
+                identity["sync_token"] = _text(
+                    raw.get("sync_token"), "identity.sync_token",
+                    pattern=TOKEN_RE, max_len=4096)
+        except ConfigError:
+            return None
+        return identity
+
+    def save_identity(self, identity: dict) -> None:
+        self._write_private(IDENTITY_FILE, {
+            "format": IDENTITY_FORMAT, "version": 1,
+            "saved_at": int(time.time()), **identity})
+
+    def generate_keys(self) -> dict:
+        """A new key pair and PSK; the private key goes over stdin only."""
+        private_key = self.run(["wg", "genkey"]).stdout.strip()
+        public_key = self.run(["wg", "pubkey"],
+                              stdin=private_key + "\n").stdout.strip()
+        preshared_key = self.run(["wg", "genpsk"]).stdout.strip()
+        return {
+            "private_key": _wg_key(private_key, "wg genkey"),
+            "public_key": _wg_key(public_key, "wg pubkey"),
+            "preshared_key": _wg_key(preshared_key, "wg genpsk"),
+        }
+
+    def enroll(self, identity: dict) -> str:
+        """POST the public key and PSK; return the sync token.
+
+        EnrollRefused for an answer that retrying cannot change (a 4xx
+        other than 429, a redirect, a malformed reply); any other
+        exception is worth a retry.
+        """
+        enroll = self.config["enroll"]
+        body = json.dumps({
+            "agent_id": self.config["agent"]["id"],
+            "public_key": identity["public_key"],
+            "preshared_key": identity["preshared_key"],
+        }).encode("utf-8")
+        request = urllib.request.Request(
+            enroll["url"], data=body, method="POST",
+            headers={"Authorization": f"Bearer {enroll['token']}",
+                     "Content-Type": "application/json",
+                     "Accept": "application/json"})
+        try:
+            with self.urlopen(request, timeout=ENROLL_TIMEOUT) as response:
+                status = getattr(response, "status", None) \
+                    or response.getcode()
+                payload = response.read(MAX_RESPONSE + 1)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 429 or exc.code >= 500:
+                raise
+            raise EnrollRefused(f"enrollment refused (HTTP {exc.code})") \
+                from None
+        if status != 200 or len(payload) > MAX_RESPONSE:
+            raise EnrollRefused(f"unexpected enrollment reply (HTTP {status})")
+        try:
+            data = json.loads(payload.decode("utf-8"))
+            return _text(data.get("sync_token"), "sync_token",
+                         pattern=TOKEN_RE, max_len=4096)
+        except (UnicodeDecodeError, ValueError, AttributeError) as exc:
+            raise EnrollRefused("malformed enrollment reply") from exc
+
+    def ensure_identity(self) -> str:
+        """Fill in the keys and the sync token of a version 2 config.
+
+        The identity belongs to one enrollment token: a re-enrolled bundle
+        (new token) gets new keys. The keys are saved before the enroll
+        call, so a lost reply does not leave keys only in memory; the
+        token is single-use, so such an agent needs a re-enroll anyway.
+        Returns where the identity came from (config/state/enrolled).
+        """
+        enroll = self.config.get("enroll")
+        if not enroll:
+            return "config"
+        agent_id = self.config["agent"]["id"]
+        token_sha = hashlib.sha256(enroll["token"].encode()).hexdigest()
+        identity = self.load_identity()
+        if (identity is None or identity["agent_id"] != agent_id
+                or identity["enroll_token_sha256"] != token_sha):
+            identity = {"agent_id": agent_id,
+                        "enroll_token_sha256": token_sha,
+                        **self.generate_keys(), "sync_token": None}
+            self.save_identity(identity)
+        source = "state"
+        if not identity["sync_token"]:
+            delay = ENROLL_RETRY_FIRST
+            while True:
+                try:
+                    identity["sync_token"] = self.enroll(identity)
+                    break
+                except EnrollRefused:
+                    raise
+                except Exception as exc:
+                    self.log("warning", "enroll_failed",
+                             error=type(exc).__name__,
+                             detail=str(exc)[:300], retry_in=delay)
+                    if self._stop.wait(delay):
+                        raise ApplyError("stopped before enrollment") \
+                            from None
+                    delay = min(delay * 2, ENROLL_RETRY_MAX)
+            self.save_identity(identity)
+            self.log("info", "enrolled", agent=agent_id)
+            source = "enrolled"
+        self.wireguard["private_key"] = identity["private_key"]
+        self.wireguard["preshared_key"] = identity["preshared_key"]
+        self.config["sync"]["token"] = identity["sync_token"]
+        return source
 
     # -- sync -------------------------------------------------------------
 
@@ -844,6 +1055,9 @@ class Agent:
             return False
 
     def startup(self) -> None:
+        # Enrollment talks to the portal's public address, so it runs before
+        # the ruleset (whose output chain allows only the tunnel endpoint).
+        identity = self.ensure_identity()
         self._set_ip_forward()
         self._endpoint_ips = self._resolve_endpoint()
         self._sync_ips = self._resolve_sync()
@@ -854,7 +1068,7 @@ class Agent:
             source = "config"
         self.apply_services(services)
         self.bring_up_tunnel()
-        self.log("info", "startup", source=source,
+        self.log("info", "startup", source=source, identity=identity,
                  services=len(self._services),
                  internal_ifaces=self._internal_ifaces,
                  endpoint=f"{self.wireguard['endpoint_host']}:"
@@ -899,6 +1113,15 @@ def main() -> int:
     signal.signal(signal.SIGINT, on_signal)
     try:
         agent.startup()
+    except EnrollRefused as exc:
+        # Restarting cannot help: the token was used, has expired or was
+        # replaced. Nothing is set up yet (enrollment runs first). Wait a
+        # little so a restart policy does not hammer the portal, then exit.
+        log("error", "enroll_refused", detail=str(exc)[:300],
+            hint="re-enroll the agent in the Dropjak admin and run the new "
+                 "installer")
+        agent._stop.wait(300)
+        return 3
     except Exception as exc:  # startup must never leave half-configured state
         log("error", "startup_failed", error=type(exc).__name__,
             detail=str(exc)[:300])

@@ -3158,9 +3158,44 @@ installer never connects to all networks.
 - **Settings:** `tunnels` section in the settings file: `port` (WireGuard
   UDP, default 51820), `endpoint` (the cloud's public address; when empty the
   portal derives it from the request's address), server key pair, agent list.
-- **Agent:** the UI generates a key pair, a PSK, a `10.77.0.x` address and a
-  token. The address comes from the `10.77.0.2`–`10.77.0.254` range; the server
-  is `10.77.0.1`.
+- **Agent:** the UI allocates a `10.77.0.x` address and a one-time
+  enrollment token; the agent generates its own keys (see "Enrollment"
+  below). The address comes from the `10.77.0.2`–`10.77.0.254` range; the
+  server is `10.77.0.1`.
+- **Enrollment (DJ-08, DJ-25):** "New agent" stores the record with
+  `public_key: null`, `enroll_token_hash` (SHA-256 of the token) and
+  `enroll_expires` (now + 30 minutes). The plaintext token is in the
+  add/re-enroll response only: the UI shows it once, keeps it in page memory
+  and sends it as `X-Dropjak-Enroll-Token` when it downloads the installer
+  or the JSON config (409 `enroll_token_required` / `enroll_expired` /
+  `agent_enrolled` otherwise). The bundle (`agent.json` version 2) carries
+  the server public key, the endpoint, the agent address, the sync URL and
+  `enroll: {url, token}`; no private key, no PSK, no sync token. On first
+  start the agent runs `wg genkey`/`wg pubkey`/`wg genpsk`, keeps the keys in
+  `identity.json` (0600) in its `agent-state` volume and calls
+  `POST /api/tunnel/enroll` on the portal's public address (an https
+  `HV_PORTAL_URL`, the Caddy name the admin used, the proxy's portal
+  domain or first root, then plain HTTP; never the tunnel) with
+  `{agent_id, public_key, preshared_key}` and `Authorization: Bearer
+  <enrollment token>`. The portal checks the hash in constant time, the
+  expiry and single use (the hash is cleared), stores the public key and the
+  PSK, configures the peer and returns a long-lived sync token once; only
+  `sync_token_hash` is stored. The endpoint is rate-limited (10 per 5
+  minutes per source IP), refuses tunnel peers (404), is part of
+  `HV_WAN_HTTPS_ONLY`, answers every token problem with the same 403
+  `enrollment refused`, and is audited (`tunnel_agent_enrolled`,
+  `tunnel_enroll_failed` with a reason). Until it enrolls the agent has no
+  peer; the card shows "waiting for enrollment" (or "enrollment expired").
+- **Re-enroll and migration:** agents created before enrollment keep their
+  gateway-generated `private_key`, `preshared_key` and plaintext `token`
+  (the "legacy" shape) and keep working, and their installer can still be
+  downloaded. **Re-enroll** (`tunnel_agent_reenroll`, in-page confirmation)
+  deletes the stored private key, PSK, plaintext token, public key and sync
+  token hash and issues a new enrollment token; the running agent
+  disconnects until the new installer enrolls it. An enrolled agent's
+  installer cannot be re-downloaded (its keys exist only on the agent);
+  re-enroll instead. The settings validation accepts both shapes, never a
+  mix.
 - **Service:** per agent `{id, label, target_host, enabled,
   public, domain, mappings}`; the elements of the `mappings` list are
   `{proto, listen, target}`. `public` (by default `false`) denotes access
@@ -3245,7 +3280,9 @@ installer never connects to all networks.
   the target container.
 - **Sync:** `GET /api/tunnel/config`, `Authorization: Bearer <token>`.
   Only an enabled agent whose peer IP according to the raw socket matches
-  exactly receives a response; the token comparison is constant-time. A
+  exactly receives a response; the token comparison is constant-time
+  (`hmac.compare_digest` of `sha256(bearer)` with `sync_token_hash`; a legacy
+  agent's plaintext token until it is re-enrolled). A
   5-second rate limit per agent. The response contains only the given agent's
   service list (without key and token).
 - **Status:** `wg show` handshake and traffic data; online if the handshake is
@@ -3278,8 +3315,17 @@ with an English error.
 In the `deploy/tunnel-agent/` directory:
 
 - `agent.py` — Python stdlib only. It reads `agent.json` (by default
-  `/etc/dropjak/agent.json`, a read-only mount in the compose), sets
-  `ip_forward`, then installs the `inet dropjak_agent` nft table **before**
+  `/etc/dropjak/agent.json`, a read-only mount in the compose). A version 2
+  config first enrolls: it generates the keys (the private key reaches
+  `wg pubkey` only on stdin), saves them to
+  `/var/lib/dropjak-agent/identity.json` (0600) before the call, POSTs to
+  `enroll.url` (redirects are not followed, an `enroll.url` inside
+  `10.77.0.0/24` is rejected) and stores the sync token there. Transient
+  failures (network, 429, 5xx) are retried with back-off up to 5 minutes; a
+  refusal is final (exit 3 after a 5-minute pause). A restart with the same
+  bundle reuses the identity offline; a bundle with a new token (re-enroll)
+  gets new keys. A version 1 (legacy) config carries its keys and skips this.
+  Then it sets `ip_forward`, then installs the `inet dropjak_agent` nft table **before**
   creating `wg0`. The rules are valid in its own network namespace:
   - `input`: drop by default; established/related and loopback.
   - `forward`: drop by default; every service to its own target interface
@@ -3394,12 +3440,14 @@ them, the separate directory separates their compose resources.
 #### Setup
 
 1. Admin → Tunnels: save the endpoint and the WireGuard port.
-2. New agent; the UI generates the keys and the token, then immediately
-   downloads the installer.
-3. The "Telepítő letöltése" (Download installer) button gives a single
+2. New agent; the UI shows the one-time enrollment token, then immediately
+   downloads the installer. Run it within 30 minutes; otherwise re-enroll.
+3. The "Telepítő letöltése" (Download installer) button (offered while the
+   page holds a valid token, or for a legacy agent) gives a single
    `dropjak-agent-<id>.sh` file. It is self-extracting: the beginning is the
-   installer, at the end the `compose.yml`, `agent.json` (0600; WireGuard
-   private key and token — to be handled confidentially), and the agent source
+   installer, at the end the `compose.yml`, `agent.json` (0600; the
+   single-use enrollment token, or for a legacy agent its private key and
+   token — to be handled confidentially), and the agent source
    (`agent.py`, `Dockerfile`, `check-containment.sh`).
 4. Copied to the other machine: `sudo sh dropjak-agent-<id>.sh`. The installer
    (all its output in English) installs into the current directory (`$PWD`, or
@@ -3489,7 +3537,9 @@ them, the separate directory separates their compose resources.
   WireGuard keys reach `wg` via the tmpfs, through a 0600 temporary file, not
   on the command line.
 - **Configuration export:** the format-2 package also carries the `tunnels`
-  section (agent keys, PSKs, tokens), therefore the package is confidential. A
+  section: the server key pair, agent public keys, PSKs and token hashes
+  (legacy agents: also their private keys and tokens until re-enrolled),
+  therefore the package is confidential. A
   factory reset also deletes the tunnels, and removes the peers.
 
 <a id="domain-proxy"></a>
@@ -5054,8 +5104,8 @@ The running version is stored in [`VERSION`](VERSION).
 
 Fixes from the 2026-10-23 security review (finding IDs DJ-00 to DJ-36).
 Items marked as design steps in that review (DJ-05, DJ-24, mandatory
-admin TOTP, enrollment codes, agent-side key generation, encrypted export)
-are not part of this change; the owner's decisions on the other follow-ups
+admin TOTP, encrypted export) are not part of this change (agent-side key
+generation is, see the last entries); the owner's decisions on the other follow-ups
 are the last entries of this list.
 
 - **fail2ban (DJ-01, DJ-22).** Ban rules match only `ct direction original`,
@@ -5161,6 +5211,27 @@ are the last entries of this list.
   `/etc/sysctl.d/90-dropjak.conf`; `setup-host.sh` no longer inserts an
   IPv6 SSH exception into the boot table. Requirement: no other IPv6 router
   on the client LAN.
+- **Agent-side WireGuard keys (DJ-08 step 7, DJ-25 agent-key half).** "New
+  agent" stores `public_key: null`, the SHA-256 of a one-time enrollment
+  token and a 30-minute expiry; the token is shown once. The installer
+  bundle (`agent.json` version 2) carries no private key, PSK or sync token,
+  only the enrollment token; downloading it needs the token
+  (`X-Dropjak-Enroll-Token`). The agent generates its key pair and PSK,
+  keeps them 0600 in its state volume and enrolls over the portal's public
+  address (HTTPS when available) at the new `POST /api/tunnel/enroll`:
+  constant-time hash check, expiry, single use, 10 attempts per 5 minutes
+  per IP, `HV_WAN_HTTPS_ONLY`, audited as `tunnel_agent_enrolled` /
+  `tunnel_enroll_failed` (hu/en/de labels). The portal stores the public key
+  and PSK and returns a sync token once, keeping only `sync_token_hash`;
+  `_tunnel_config_sync` compares `sha256(bearer)` with `hmac.compare_digest`.
+  No peer exists until enrollment ("waiting for enrollment" in the UI).
+- **Migration of existing agents.** Agents with stored `private_key`/`token`
+  keep working unchanged. The new **Re-enroll** button deletes the stored
+  private key, PSK and plaintext token, issues a new enrollment token and
+  downloads a new installer; run it on the agent host (the agent replaces
+  its identity automatically). Settings validation and export/import accept
+  both shapes; an enrolled agent's export holds only its public key, PSK and
+  token hashes.
 
 ### [3.24.0] - 2026-10-22
 

@@ -485,6 +485,72 @@ class TunnelUiStaticTests(unittest.TestCase):
                 self.assertIn(f"'{text}':", en, f"missing English translation: {text}")
                 self.assertIn(f"'{text}':", de, f"missing German translation: {text}")
 
+    def test_enrollment_wiring_and_translations(self) -> None:
+        # The one-time token stays in memory, goes to the download as a
+        # header, and the card offers re-enrollment and the status.
+        for token in (
+            "let tunnelEnrollTokens = new Map();",
+            "'X-Dropjak-Enroll-Token': token.token",
+            "action: 'tunnel_agent_reenroll', id: agent.id",
+            "tunnelRememberEnrollToken(data.agent_id, data)",
+            "tunnelRememberEnrollToken(agent.id, data)",
+            "tunnelEnrollTokenBox(agent)",
+            "tunnelEnrollmentNote(agent)",
+            "tunnelCanDownload(agent)",
+            "tunnel_agent_enrolled: ['Alagút-ügynök beléptetve', "
+            "'Tunnel agent enrolled', 'Tunnel-Agent registriert']",
+            "tunnel_enroll_failed: ['Alagút-ügynök beléptetése sikertelen', "
+            "'Tunnel agent enrollment failed', "
+            "'Tunnel-Agent-Registrierung fehlgeschlagen']",
+        ):
+            self.assertIn(token, self.source, token)
+        self.assertNotIn("localStorage.setItem('tunnel", self.source)
+        card = _js_function("tunnelAgentCard", self.source)
+        self.assertIn("tr('Újrabeléptetés')", card)
+        self.assertNotIn("confirm(", card)
+        en, de = _i18n_sections(self.source)
+        for text in (
+            "Újrabeléptetés",
+            "Az újrabeléptetés nem sikerült.",
+            "beléptetésre vár",
+            "beléptetés lejárt",
+            "Beléptető kód (csak most látható, egyszer használható):",
+            "A kód a vágólapra került.",
+            "Beléptetésre vár: futtasd a letöltött telepítőt.",
+            "Beléptetésre vár. A kód már nem látható; új telepítőhöz "
+            "léptesd be újra.",
+            "A beléptető kód lejárt; léptesd be újra az ügynököt.",
+            "Régi, a portálon előállított kulcsok. Újrabeléptetés javasolt: "
+            "utána a portál csak a nyilvános kulcsot tárolja.",
+            "A telepítő letöltése nem sikerült.",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(f"'{text}':", en)
+                self.assertIn(f"'{text}':", de)
+        pen, pde = _pattern_sections(self.source)
+        for section in (pen, pde):
+            self.assertIn("Újrabeléptetés: (.+)", section)
+            self.assertIn("az ügynök maga állítja elő a kulcsait", section)
+
+    @unittest.skipUnless(shutil.which("node"), "node is not available")
+    def test_enrollment_download_rule(self) -> None:
+        can = _js_function("tunnelCanDownload", self.source)
+        script = (
+            "const assert = require('assert');\n"
+            "const tunnelEnrollTokens = new Map([['a', {token: 't'}]]);\n"
+            + can + "\n"
+            + "assert.strictEqual(tunnelCanDownload({id: 'x', enrollment: 'legacy'}), true);\n"
+            + "assert.strictEqual(tunnelCanDownload({id: 'a', enrollment: 'pending'}), true);\n"
+            + "assert.strictEqual(tunnelCanDownload({id: 'b', enrollment: 'pending'}), false);\n"
+            + "assert.strictEqual(tunnelCanDownload({id: 'a', enrollment: 'enrolled'}), false);\n"
+            + "assert.strictEqual(tunnelCanDownload({id: 'a', enrollment: 'expired'}), false);\n"
+        )
+        result = subprocess.run(
+            ["node", "-e", script], capture_output=True, text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_confirmation_patterns_and_audit_label(self) -> None:
         en, de = _pattern_sections(self.source)
         for section in (en, de):

@@ -346,7 +346,8 @@ delete_agent() {
 }
 
 # --- Integrity, staging and the install directory -------------------------
-# This file holds the agent's private key. Print its SHA-256 first, so the
+# This file holds the agent's one-time enrollment token (a legacy bundle:
+# its private key). Print its SHA-256 first, so the
 # admin can match it against the value the Dropjak admin page showed for this
 # download (verify with sha256sum before running, too).
 INSTALLER_SHA256=$(sha256sum "$0" 2>/dev/null | cut -d' ' -f1 || true)
@@ -835,9 +836,20 @@ printf 'To check the container and the network:  sudo DROPJAK_CONTAINER=%s sh "%
     "$CONTAINER_NAME" "$DIR"
 printf 'To delete the agent container (%s):  sudo sh "%s" delete\n' \
     "$CONTAINER_NAME" "$SCRIPT_PATH"
+# A legacy bundle carries the agent's private key; a current one only a
+# one-time enrollment token (the agent generates its own keys).
+if grep -q '"private_key"' "$DIR/agent.json" 2>/dev/null; then
+    printf '%s\n' \
+        "This installer file contains the agent's private key. Delete it once you" \
+        "no longer need it:  shred -u \"$SCRIPT_PATH\""
+else
+    printf '%s\n' \
+        "The agent generates its own WireGuard keys and enrolls with the one-time" \
+        "token in this installer file (valid for 30 minutes from its creation," \
+        "single use). Delete the file once the agent is online:" \
+        "  shred -u \"$SCRIPT_PATH\""
+fi
 printf '%s\n' \
-    "This installer file contains the agent's private key. Delete it once you" \
-    "no longer need it:  shred -u \"$SCRIPT_PATH\"" \
     "Without it the agent is removed with:  sudo docker compose -f \"$DIR/compose.yml\" down"
 
 exit 0
