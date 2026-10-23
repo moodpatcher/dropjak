@@ -108,7 +108,7 @@ class ProxyRedirectTests(unittest.TestCase):
             (tp.host("gone", tp.SECOND_DOMAIN), (302, SECOND)),
             # Foreign name and raw IP: the first root.
             ("evil.example.com", (302, FIRST)),
-            ("88.198.151.195", (302, FIRST)),
+            ("203.0.113.10", (302, FIRST)),
             ("[2001:db8::1]", (302, FIRST)),
             ("localhost", (302, FIRST)),
         ):
@@ -125,7 +125,7 @@ class ProxyRedirectTests(unittest.TestCase):
                     self.redirect(name)[:2],
                     (308, f"https://{tp.host('owui')}/a/b?c=1"),
                 )
-        self.assertEqual(self.redirect("88.198.151.195:80")[:2], (302, FIRST))
+        self.assertEqual(self.redirect("203.0.113.10:80")[:2], (302, FIRST))
         # Host header when there is no X-Forwarded-Host.
         status, _, locations = self.raw(f"Host: {tp.host('owui')}:80\r\n".encode())
         self.assertEqual(status, 308)
@@ -183,7 +183,7 @@ class ProxyRedirectTests(unittest.TestCase):
         self.settings.set_proxy([], [])
         for name, want in (
             ("asd.example.com:80", (308, "https://asd.example.com/a/b?c=1")),
-            ("88.198.151.195", (308, "https://88.198.151.195/a/b?c=1")),
+            ("203.0.113.10", (308, "https://203.0.113.10/a/b?c=1")),
             ("[2001:DB8::1]:80", (308, "https://[2001:db8::1]/a/b?c=1")),
             ("evil.com@x", (400, None)),
             ("a b", (400, None)),

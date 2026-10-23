@@ -33,8 +33,7 @@ _Source: `PROJEKT-ALLAPOT.md` (original title: "Dropjak / hatarvedelem — proje
 
 **Document date:** 2026-10-22
 **Live version:** 3.24.0 · **Local working directory:** 3.24.0
-**Live test environment:** 88.198.151.195, portal: <http://88.198.151.195:8100/>
-**Project root on the VM:** `/root/hatarvedelem`
+**Live test environment:** see the private operations notes (not in this repository).
 **This document:** a local, contiguous state snapshot; not an installation guide and not a commit.
 
 ### How to read this document
@@ -42,12 +41,12 @@ This description distinguishes three kinds of status and marks them in the text:
 
 | Marker | Meaning |
 |---|---|
-| **LIVE** | On the 88.198.151.195 test VM the 3.24.0 image runs, and the given behavior is available according to the specified snapshot. |
-| **LOCAL CODE** | It is described by the source in the `/home/moodpatcher/hatarvedelem` working directory; its appearance on the running VM is not necessarily separately verified. |
+| **LIVE** | On the test VM the 3.24.0 image runs, and the given behavior is available according to the specified snapshot. |
+| **LOCAL CODE** | It is described by the source in the local working directory; its appearance on the running VM is not necessarily separately verified. |
 | **PLAN / DEFERRED** | An intention, document or `todo.txt` item; not implemented or not live. |
 | **NOT VERIFIED** | Cannot be unambiguously determined from the available files; I do not state it as certain fact. |
 
-The document does not contain or quote secrets: there is no `.env` content, password, password hash, TOTP secret or code, token, cookie, recovery code or personal IP address. The VM's public address and the project paths are included because they are necessary for operations.
+The document does not contain or quote secrets: there is no `.env` content, password, password hash, TOTP secret or code, token, cookie, recovery code or personal IP address. Operational details (addresses, paths, backup names, image digests) are kept out of this public document.
 
 Where the text refers to a file or behavior, the source is the local repository. Where it describes live status, that is a fact of the 2026-10-21 snapshot. Where the two may differ, I indicate it separately.
 
@@ -79,35 +78,17 @@ _This section records the live snapshot of 2026-10-21; the document header and t
 #### 2.1. Environment
 | Property | Value | Status |
 |---|---|---|
-| Host | `88.198.151.195` | LIVE |
 | Operating system | Debian 13 | LIVE (snapshot) |
 | Docker Engine | 26.1.5 | LIVE (snapshot) |
-| Project path | `/root/hatarvedelem` | LIVE |
 | State | Docker volume (`dropjak-state`) | LIVE |
-| Portal | `http://88.198.151.195:8100/` | LIVE, HTTP 200 |
+| Portal | `http://<test-vm>:8100/` | LIVE, HTTP 200 |
 | API | `/api/status` → `ok: true`, `version: 3.3.0` | LIVE |
-| Running image | `sha256:55b1b218d361c7a2451d4d0c0b90a7199dfd189591fff401a65d2ba7be90bc97` | LIVE (snapshot) |
-| Previous image | `sha256:f8f1b20a4cfcafb672c7bcbbf9befe0dc8a55294518c8b30cd997efd5f131547` (3.2.0) | Historical |
 | Container uptime / container ID | not present in the snapshot | NOT VERIFIED |
 
 The portal runs in the host's network (`network_mode: host`), so port `8100` listens on the host and there is no Docker `ports:` mapping. The container's root filesystem is read-only; state is in the separate volume.
 
 #### 2.2. Installation and restorability
-Backups made before the 3.3.0 installation:
-
-```text
-/root/hatarvedelem-backups/hatarvedelem-20261021-153034.tar.gz
-/root/hatarvedelem-backups/hatarvedelem-state-20261021-153034.tar.gz
-```
-
-The earlier backups belonging to 3.2.0 are historical data:
-
-```text
-/root/hatarvedelem-backups/hatarvedelem-20261021-143300.tar.gz
-/root/hatarvedelem-backups/hatarvedelem-state-20261021-143300.tar.gz
-/root/hatarvedelem-backups/deploy-3.2.0-20261021-144246.sh
-/root/hatarvedelem-backups/deploy-3.2.0-20261021-144246.log
-```
+Backups exist on the VM; their names and paths are in the private operations notes.
 
 The deploy script and the log serve the reproducibility of the installation process. The contents of the backups were not unpacked at file level in this session: it is **NOT VERIFIED** exactly which state files the two archives contain and from what point in time.
 
@@ -993,7 +974,7 @@ The complete, detailed entries are in the [7. Changelog](#valtozasnaplo) section
 
 ### 13. Progress and open points
 #### 13.1. Done and live
-- The 3.3.0 image runs on the VM; `/api/status` `ok: true`, version `3.3.0`; the running image digest is `sha256:55b1b218d361c7a2451d4d0c0b90a7199dfd189591fff401a65d2ba7be90bc97`.
+- The 3.3.0 image runs on the VM; `/api/status` `ok: true`, version `3.3.0`; the running image digest is (digest in private notes).
 - The 3.3.0 live:
   1. the three fail2ban signals (failed login, dropped packets, distinct destination ports) work with a fully independent switch;
   2. the 0 threshold is gone: `drop_max`/`drop_ports` are at least 1, and a saved 0 is migrated;
@@ -1053,7 +1034,7 @@ The complete, detailed entries are in the [7. Changelog](#valtozasnaplo) section
 | `tests/test_propagation_multi.py`, `tests/test_installer.py`, `tests/e2e_vm.py` | Multiple selection, installer, live E2E. |
 
 The list of open tasks lives not in the repo but in the developer's home
-`todo.txt` file (`/home/moodpatcher/todo.txt`).
+`todo.txt` file (outside the repository).
 
 ### 15. Quick commands and troubleshooting
 #### 15.1. Status and logs
@@ -4125,7 +4106,7 @@ Sub-goals:
 - **Caddyfile injection:** rejection of `{`, `}`, newline, `#`, `;` characters placed in the hostname and upstream; an unknown Host gets no route.
 - **Ban precedence:** a banned IP cannot reach 80/443, but can reach the portal and DHCP; after the ban is lifted, the proxy is reachable again.
 - **Fail-closed:** no `proxy-settings.json` → empty `proxy_wan`; Caddy unreachable → no state commit; portal restart → reapply the persisted state.
-- **Integration check:** on the 88.198.151.195 test VM only in a later, separately approved phase; the current plan includes no installation.
+- **Integration check:** on the <test-vm> test VM only in a later, separately approved phase; the current plan includes no installation.
 
 ---
 
@@ -4169,16 +4150,16 @@ Sub-goals:
 
 | File | Relevant parts |
 |---|---|
-| `/home/moodpatcher/hatarvedelem/README.md` | 21-23 (fail-closed), 31-34 (host SSH), 35-39 (Docker), 40-49 (fail2ban), 50-53 (host network), 246-266 (settings), 268-282 (backup), 293-296 (TLS), 302-320 (security) |
-| `/home/moodpatcher/hatarvedelem/docker-compose.yml` | 16 (host network), 21 (read_only), 27-36 (caps), 43-119 (env), 121-122 (state volume), 133-138 (healthcheck) |
-| `/home/moodpatcher/hatarvedelem/deploy/dropjak.nft` | 109-112 (custom chains), 114-116 (input policy), 133-137 (forward policy), 147-148 (IPv6 forward), 168-169 (ban forward), 198-200 (pre-DNAT matching), 256-257 (IPv6 input), 279-282 (portal accept + ban drop), 313 (established), 324-325 (portal accept), 334 (host SSH), 342-345 (DNS), 349-350 (final logs), 372 (LAN redirect), 375-377 (masquerade) |
-| `/home/moodpatcher/hatarvedelem/gateway.py` | 160-170 (`RULESET_CHAINS`), 1823-1837 (`clear_custom`), 1839-1954 (`apply_custom`), 1861-1864 (preauth ban drop), 4228-4272 (`apply_settings`), 4274-4279 (`start`) |
-| `/home/moodpatcher/hatarvedelem/settings_store.py` | 126-162 (validation), 148-154 (TCP 80 block), 165-196 (`validate_state`), 199-366 (store) |
-| `/home/moodpatcher/hatarvedelem/server.py` | 72-76 (`_client_ip`), 93-105 (`_origin_ok`), 143-163 (`_read_json`), 234-254 (`_admin_state`), 320-327 (`_portal_host_matches`), 675-743 (settings action), 846-869 (POST routes), 1852-1930 (`_serve`) |
-| `/home/moodpatcher/hatarvedelem/index.html` | 934-942 (admin nav), 4773-5004 (settings UI), 5596-5599 (chain labels), 6314-6321 (tab dispatch) |
-| `/home/moodpatcher/hatarvedelem/docker/entrypoint.sh` | 98-158 (ruleset render), 160-222 (DOCKER-USER guard), 252-280 (firewall load) |
-| `/home/moodpatcher/hatarvedelem/deploy/dropjak-boot.nft` | boot guard; input policy is accept until the main table is loaded |
-| `/home/moodpatcher/hatarvedelem/tests/test_gateway.py` | 2819-2930 (settings API), 3532-3696 (settings store), 3690-3829 (nft exact-string) |
+| `README.md` | 21-23 (fail-closed), 31-34 (host SSH), 35-39 (Docker), 40-49 (fail2ban), 50-53 (host network), 246-266 (settings), 268-282 (backup), 293-296 (TLS), 302-320 (security) |
+| `docker-compose.yml` | 16 (host network), 21 (read_only), 27-36 (caps), 43-119 (env), 121-122 (state volume), 133-138 (healthcheck) |
+| `deploy/dropjak.nft` | 109-112 (custom chains), 114-116 (input policy), 133-137 (forward policy), 147-148 (IPv6 forward), 168-169 (ban forward), 198-200 (pre-DNAT matching), 256-257 (IPv6 input), 279-282 (portal accept + ban drop), 313 (established), 324-325 (portal accept), 334 (host SSH), 342-345 (DNS), 349-350 (final logs), 372 (LAN redirect), 375-377 (masquerade) |
+| `gateway.py` | 160-170 (`RULESET_CHAINS`), 1823-1837 (`clear_custom`), 1839-1954 (`apply_custom`), 1861-1864 (preauth ban drop), 4228-4272 (`apply_settings`), 4274-4279 (`start`) |
+| `settings_store.py` | 126-162 (validation), 148-154 (TCP 80 block), 165-196 (`validate_state`), 199-366 (store) |
+| `server.py` | 72-76 (`_client_ip`), 93-105 (`_origin_ok`), 143-163 (`_read_json`), 234-254 (`_admin_state`), 320-327 (`_portal_host_matches`), 675-743 (settings action), 846-869 (POST routes), 1852-1930 (`_serve`) |
+| `index.html` | 934-942 (admin nav), 4773-5004 (settings UI), 5596-5599 (chain labels), 6314-6321 (tab dispatch) |
+| `docker/entrypoint.sh` | 98-158 (ruleset render), 160-222 (DOCKER-USER guard), 252-280 (firewall load) |
+| `deploy/dropjak-boot.nft` | boot guard; input policy is accept until the main table is loaded |
+| `tests/test_gateway.py` | 2819-2930 (settings API), 3532-3696 (settings store), 3690-3829 (nft exact-string) |
 
 ---
 
@@ -4191,7 +4172,7 @@ Sub-goals:
 _Source: `docs/domain-proxy-naplo.md` (original title: "Domain proxy – development and deployment log")._
 
 **Last update:** 2026-10-22 01:10
-**Test VM:** 88.198.151.195 (Debian 13, Docker)
+**Test VM:** <test-vm> (Debian 13, Docker)
 **Live version:** 3.9.1 (deployed: 2026-10-22).
 **Last commit:** `62cdabc` (3.6.0, uploaded to GitHub). Changes between 3.7.0 and 3.9.1 are not committed.
 **In progress:** 3.10.0 (fix for disabled automatic certificate, being deployed) and 3.11.0 (Proxy tab, TCP/UDP port proxy; done locally, not deployed).
@@ -4200,7 +4181,7 @@ _Source: `docs/domain-proxy-naplo.md` (original title: "Domain proxy – develop
 
 #### Overview
 
-Dropjak received a built-in, Caddy-based reverse proxy. It forwards subdomains under the root domain (for example `teszt1.z2.moodpatcher.com`) to services behind the firewall, with an automatic or uploaded HTTPS certificate. Dropjak decides on access: based on login, domain-type rules, visibility, challenge and fail2ban.
+Dropjak received a built-in, Caddy-based reverse proxy. It forwards subdomains under the root domain (for example `teszt1.<test-domain>`) to services behind the firewall, with an automatic or uploaded HTTPS certificate. Dropjak decides on access: based on login, domain-type rules, visibility, challenge and fail2ban.
 
 ##### Architecture
 
@@ -4219,9 +4200,9 @@ Dropjak received a built-in, Caddy-based reverse proxy. It forwards subdomains u
 
 ##### DNS (prerequisite)
 
-- Two `A` records are needed: `z2.moodpatcher.com` and `*.z2.moodpatcher.com` → 88.198.151.195.
+- Two `A` records are needed: `<test-domain>` and `*.<test-domain>` → <test-vm>.
 - On Cloudflare, "DNS only" (gray cloud), without AAAA record.
-- `z1.moodpatcher.com` is Cloudflare-proxied, so it cannot be used. `z2` is in use.
+- `<other-domain>` is Cloudflare-proxied, so it cannot be used. `z2` is in use.
 
 ---
 
@@ -4255,8 +4236,8 @@ Dropjak received a built-in, Caddy-based reverse proxy. It forwards subdomains u
 - **Migration:**
   - The old `proxy_domain` becomes a list.
   - Short names of domain rules become full hostnames, with a backup.
-  - Verified on the VM: `teszt-access` → `teszt1/2/3.z2.moodpatcher.com`.
-- **The Dropjak portal over HTTPS, on every root domain:** `https://z2.moodpatcher.com`, with a Let's Encrypt certificate.
+  - Verified on the VM: `teszt-access` → `teszt1/2/3.<test-domain>`.
+- **The Dropjak portal over HTTPS, on every root domain:** `https://<test-domain>`, with a Let's Encrypt certificate.
   - It accepts the `X-Forwarded-For` header only from loopback.
   - The session cookie gets the `Secure` flag.
   - `/api/proxy/*` is not reachable from outside, even through the proxy.
@@ -4308,7 +4289,7 @@ Dropjak received a built-in, Caddy-based reverse proxy. It forwards subdomains u
 
 ##### 3.8.0 further parts (deployed, 673 tests, all passed)
 
-- **Unknown subdomain** (for example `ezbiztosnemletezik.z2…`): a challenge always comes, after success a redirect to `https://z2.moodpatcher.com/`.
+- **Unknown subdomain** (for example `ezbiztosnemletezik.z2…`): a challenge always comes, after success a redirect to `https://<test-domain>/`.
   - It works only with an uploaded wildcard certificate. For an unknown name the system never requests an ACME certificate (Let's Encrypt rate limit).
   - **There is no wildcard certificate in production** (there is no `certs/` directory on the VM), so `https://asd.z2…` gives a TLS error (`SSL_ERROR_INTERNAL_ERROR_ALERT`). There was a misunderstanding: the user had not uploaded a certificate.
   - The `*.z2…` wildcard is not valid for two-level names of the form `a.b.z2…`.
@@ -4409,11 +4390,11 @@ Dropjak received a built-in, Caddy-based reverse proxy. It forwards subdomains u
 
 ##### 3.11.1 – Input port proxy to a target listening only on 127.0.0.1 (fix)
 
-- **Bug report:** the `z2.moodpatcher.com:8084` → 8081 (Input, TCP, WAN) entry did not work. On 8081 runs the `teszt1` nginx, which Docker publishes ONLY on `127.0.0.1:8081`.
+- **Bug report:** the `<test-domain>:8084` → 8081 (Input, TCP, WAN) entry did not work. On 8081 runs the `teszt1` nginx, which Docker publishes ONLY on `127.0.0.1:8081`.
 - **Live diagnosis (on the VM, read-only):**
   - The entry was stored correctly, the nft rule was `iifname "eth0" fib daddr type local tcp dport 8084 redirect to :8081`.
-  - The user's IP (`188.157.208.108`) had authorization: `allowed_input_tcp` contained the `188.157.208.108 . 8084` pair. Authorization was therefore fine.
-  - `nft monitor trace` with a temporary, narrow (tcp dport 8084) trace table: the SYN was rewritten by `portproxy_nat`, accepted by `portproxy_input`, and the host sent `RST|ACK` from `88.198.151.195:8081`. The conntrack reply tuple: `src=88.198.151.195 sport=8081`.
+  - The user's IP (`<client IP>`) had authorization: `allowed_input_tcp` contained the `<client IP> . 8084` pair. Authorization was therefore fine.
+  - `nft monitor trace` with a temporary, narrow (tcp dport 8084) trace table: the SYN was rewritten by `portproxy_nat`, accepted by `portproxy_input`, and the host sent `RST|ACK` from `<test-vm>:8081`. The conntrack reply tuple: `src=<test-vm> sport=8081`.
   - `redirect` rewrites to the primary address of the incoming interface (WAN IP). Nothing listens there: docker-proxy only on `127.0.0.1:8081`, and Docker's DNAT also matches only `ip daddr 127.0.0.1` (after the -101 NAT binding Docker's -100 NAT does not run anyway). Hence "Connection refused".
   - Earlier tests did not catch this: in the local packet trial the target listened on every address.
 - **Fix:**
@@ -4446,7 +4427,7 @@ Dropjak received a built-in, Caddy-based reverse proxy. It forwards subdomains u
   | teszt2 | 8082 | green page |
   | teszt3 | 8083 | orange page |
 
-- Live entries: `teszt1`, `teszt2` and `teszt3` under `z2.moodpatcher.com`.
+- Live entries: `teszt1`, `teszt2` and `teszt3` under `<test-domain>`.
 - Domain rule: `teszt-access`, which is also a member of the `mpwerks` collection rule.
 
 #### Backups and restore (VM, `/root/hatarvedelem-backups/`)
@@ -6213,7 +6194,7 @@ are the last entries of this list.
   incoming interface's address (the WAN or LAN IP). A service bound only to
   127.0.0.1 (for example a Docker port published as `127.0.0.1:8081`) does
   not listen there, so the kernel answered every SYN with a RST (live trace:
-  `z2.moodpatcher.com:8084` -> RST|ACK from `88.198.151.195:8081`, although
+  `<test-domain>:8084` -> RST|ACK from `<test-vm>:8081`, although
   the client had the `(ip . 8084)` input grant). When every socket on the
   target port is bound to 127.0.0.0/8, the rule is now
   `dnat ip to 127.0.0.1:<target>`, for TCP and UDP. Wildcard listeners keep
