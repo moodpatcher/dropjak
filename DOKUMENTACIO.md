@@ -994,10 +994,10 @@ The complete, detailed entries are in the [7. Changelog](#valtozasnaplo) section
 | `fail2ban.py`, `droplog.py` | Banning and NFLOG-based drop log. |
 | `settings_store.py` | Settings validation, atomic write. |
 | `index.html`, `icon.png`, `blocked.png` | Portal/admin UI and assets. |
-| `services.json` | Initial service and scenario catalog. |
+| `services.json` | Service catalog (empty `scenarios` list: no initial rules). |
 | `docker-compose.yml`, `Dockerfile` | Docker host network, state volume, healthcheck, image. |
 | `install.sh`, `.env.example`, `.dockerignore`, `.gitignore` | Native installer, configuration sample, Docker and git exclusions. |
-| `configure.sh` | Interactive `.env` generator (LAN/WAN interfaces, networks, portal source, admin account). |
+| `configure.sh` | Interactive `.env` generator (installation mode, interfaces, networks, portal source, access mode, admin account). |
 | `docker/entrypoint.sh` | Env validation, rendering, nft, set flush, boot table, Docker guard, watchdog, setpriv. |
 | `docker/setup-host.sh` | Boot nft/unit and `ip_forward` on the host. |
 | `deploy/dropjak.nft` | Complete nftables template with seven placeholders. |
@@ -1118,7 +1118,7 @@ The project is here: `/root/hatarvedelem`. Most of the time you need to touch **
 hv status      # is the container running, is the portal up, what is in the nft sets
 hv logs        # logs live (Ctrl+C to exit)
 hv restart     # restart so the new .env values take effect
-hv rebuild     # rebuild if the code or services.json providing the initial rules changed
+hv rebuild     # rebuild if the code or services.json changed
 hv where       # this page
 ```
 
@@ -1221,11 +1221,10 @@ hv services    # edit; afterwards: hv rebuild
 ```
 
 Rules are now **port-based**: on the admin interface you specify TCP/UDP ports,
-ICMP or full access, and a rule can contain several ports. `services.json` serves only two things: the `scenarios`
-creates the initial rules **at first start** (when there is still no
-`rules.json`), and the `services` list is needed for automatic port conversion of the earlier, service-based
-`rules.json`. Later rules must be managed on the
-**Admin → Rules** page. The Dockerfile copies the file
+ICMP or full access, and a rule can contain several ports. `services.json` holds the `services` catalog used for
+automatic port conversion of the earlier, service-based `rules.json`. Its
+`scenarios` list is **empty**: a new installation starts with **no rules at all**
+and the admin creates them on the **Admin → Rules** page. Later rules must be managed there too. The Dockerfile copies the file
 into the container, which is why `hv rebuild` is needed afterwards.
 
 ### Users, groups, rules
@@ -1299,7 +1298,7 @@ temporarily creates a `claudetest` user, which it deletes at the end.
 | Path | What is there |
 |---|---|
 | `/root/hatarvedelem/.env` | the live settings (must not be world-readable) |
-| `/root/hatarvedelem/services.json` | scenario descriptions providing the initial rules and the catalog used for port conversion of old rules |
+| `/root/hatarvedelem/services.json` | service catalog used for port conversion of old rules (no initial rules: the scenarios list is empty) |
 | `/root/hatarvedelem/README.md` | detailed description, operations, troubleshooting |
 | `/root/hatarvedelem/deploy/dropjak.nft` | the nftables template |
 | `/root/hatarvedelem-backups/` | backups |
@@ -1311,7 +1310,7 @@ temporarily creates a `claudetest` user, which it deletes at the end.
 1. `hv status` — is the container running, is the portal responding.
 2. `hv logs` — the log of the portal and nft loading.
 3. `hv restart` — re-reading `.env`.
-4. If the code or the `services.json` providing the initial rules changed: `hv rebuild`.
+4. If the code or `services.json` changed: `hv rebuild`.
 5. Restore: unpack the selected archive from `hv backup`, then `hv restart`.
 
 <a id="funkciok"></a>
@@ -5082,6 +5081,16 @@ The running version is stored in [`VERSION`](VERSION).
 
 #### Added
 
+- **No default rules on a fresh installation.** The shipped
+  `services.json` has an empty `scenarios` list, so a new installation's
+  rules file starts empty instead of being seeded with the four old
+  scenarios (Browsing, Work, Administrator, Full). The admin creates the
+  rules on **Admin → Rules**. Existing installations are untouched: their
+  `rules.json` already holds the earlier rules, and the rule store still
+  seeds scenarios if a custom `services.json` defines them. The
+  rules-editor catalog and the service-based port conversion are unchanged.
+  `tests/e2e_vm.py` now creates the `browse`/`full` rules it logs in with
+  and removes them in cleanup.
 - **Access mode in `configure.sh`; first-start proxy seed.** The optional
   “Portal DNS name” question is replaced by a choice between
   `http://<host-ip>:PORT` (plain HTTP, default, no proxy variables) and
