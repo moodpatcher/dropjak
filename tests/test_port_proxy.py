@@ -197,11 +197,15 @@ class RuleGenerationTests(unittest.TestCase):
         self.assertEqual(self.fw._portproxy_rules([input_entry()]), [
             f'add rule {T} portproxy_nat iifname "eth1" fib daddr type local '
             "udp dport 24455 redirect to :24454",
-            f"add rule {T} portproxy_input {mac} limit rate 30/minute burst 60 "
+            f"add rule {T} portproxy_input {mac} "
+            "update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } "
+            "limit rate 30/minute burst 60 "
             'packets log prefix "dropjak-drop reason=mac " group 5',
             f"add rule {T} portproxy_input {mac} drop",
             f"add rule {T} portproxy_input {match} {grant} accept",
-            f"add rule {T} portproxy_input {match} limit rate 30/minute "
+            f"add rule {T} portproxy_input {match} "
+            "update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } "
+            "limit rate 30/minute "
             'burst 60 packets log prefix "dropjak-drop reason=portproxy " group 5',
             f"add rule {T} portproxy_input {match} drop",
         ])
@@ -512,7 +516,9 @@ class TemplateOrderTests(unittest.TestCase):
         for rule in guard:
             self.assertIn(rule, boot)
         setup = (ROOT / "docker" / "setup-host.sh").read_text()
-        self.assertIn("net.ipv4.conf.all.route_localnet = 1", setup)
+        # route_localnet only per interface, never on "all" (DJ-04).
+        self.assertNotIn("net.ipv4.conf.all.route_localnet = 1", setup)
+        self.assertIn("route_localnet", setup)
 
 
 class ApplyRollbackTests(unittest.TestCase):

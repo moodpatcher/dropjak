@@ -91,6 +91,13 @@ MAX_ORPHAN_UNBANS = 256
 # Addresses in these networks are never banned on drop signals alone; the
 # admin list holds at most this many entries.
 MAX_DROP_EXEMPT = 64
+# Drop-signal bans escalate (DJ-01): the first one lasts at most
+# DROP_FIRST_BAN seconds, and each repeat within DROP_STRIKE_MEMORY doubles
+# it, up to the configured ban length. A forged scan thus costs a victim
+# only a short ban, while a real scanner that keeps coming back gets the full
+# one. The strike memory is in-process only and bounded by MAX_TRACKED_IPS.
+DROP_FIRST_BAN = 300
+DROP_STRIKE_MEMORY = 24 * 60 * 60
 
 
 def _env_int(name: str, default: int, minimum: int = 0) -> int:
@@ -500,6 +507,9 @@ class Fail2ban:
         # not persisted, like login attempts.
         self._drop_events: dict[str, dict] = {}
         self._drop_event_count = 0
+        # IP -> (drop-signal bans so far, time of the last one); see
+        # DROP_FIRST_BAN. Not persisted.
+        self._drop_strikes: dict[str, tuple[int, float]] = {}
         # IP -> ban record; persisted.
         self._bans: dict[str, dict] = {}
         # IP -> timestamps of 401 proxy responses; not persisted.
@@ -1053,7 +1063,7 @@ class Fail2ban:
                 return None
             record = self._ban_locked(
                 address,
-                self._config["ban_seconds"],
+                self._drop_ban_seconds_locked(address, now),
                 manual=False,
                 user="",
                 attempts=len(events),
@@ -1064,6 +1074,27 @@ class Fail2ban:
             view = _ban_view(record, time.time())
         self._notify(view)
         return view
+
+    def _drop_ban_seconds_locked(self, address: str, now: float) -> int:
+        """Length of the next drop-signal ban of ``address`` (escalating)."""
+        full = self._config["ban_seconds"]
+        strikes, last = self._drop_strikes.get(address, (0, 0.0))
+        if now - last > DROP_STRIKE_MEMORY:
+            strikes = 0
+        strikes += 1
+        if address not in self._drop_strikes \
+                and len(self._drop_strikes) >= MAX_TRACKED_IPS:
+            cutoff = now - DROP_STRIKE_MEMORY
+            for ip in [ip for ip, (_, ts) in self._drop_strikes.items()
+                       if ts < cutoff]:
+                del self._drop_strikes[ip]
+            if len(self._drop_strikes) >= MAX_TRACKED_IPS:
+                oldest = min(self._drop_strikes,
+                             key=lambda ip: self._drop_strikes[ip][1])
+                del self._drop_strikes[oldest]
+        self._drop_strikes[address] = (strikes, now)
+        first = min(full, DROP_FIRST_BAN)
+        return min(full, first * 2 ** min(strikes - 1, 16))
 
     def record_proxy_unauthorized(self, ip: str) -> dict | None:
         """Record an unauthorized (401) domain-proxy response.
@@ -1459,6 +1490,7 @@ class Fail2ban:
             self._proxy_bans.clear()
             self._attempts.clear()
             self._drop_events.clear()
+            self._drop_strikes.clear()
             self._proxy_hits.clear()
             self._orphan_unbans.clear()
             try:

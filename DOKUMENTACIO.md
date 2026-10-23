@@ -228,12 +228,12 @@ The approximate order of the forward chain:
 
 1. IPv6 drop (closed despite IPv4 forwarding; the raw prerouting `loopback_guard` already dropped it).
 2. Source IP spoofing prevention: on the LAN interface only `HV_LAN_NET`, from the WAN a LAN source is forbidden.
-3. `banned_v4` drop, logged; this runs before every authorization and pre-auth.
+3. `banned_v4` drop, logged; this runs before every authorization and pre-auth. (Before the spoof checks, packets with `ct state invalid` are dropped, reason `ct-invalid`.)
 4. MAC check for authorized IPs on the LAN.
-5. `block` chain; the block precedes every grant. Then the link-local (`no_forward_v4`) drop, and the DNAT requirement: a new flow into `docker*`, `br-*` or a `docker_bridges` interface, or from the WAN into the LAN, is dropped unless it was DNAT-ed (published port, port proxy).
-6. Full access (`allowed_v4`) and port authorizations (`allowed_tcp`, `allowed_udp`, `allowed_icmp`), with `meta mark set 0x44524a4b`.
+5. `block` chain; the block precedes every grant. Then the `no_forward_v4` drop (`169.254.0.0/16` plus `HV_NO_FORWARD_NETS`), and the DNAT requirement: a new flow into `docker*`, `br-*` or a `docker_bridges` interface, or from the WAN into the LAN, is dropped unless it was DNAT-ed (published port, port proxy).
+6. A granted source on an interface other than LAN/WAN is dropped (`grant-iface`). Full access (`allowed_v4`) and port authorizations (`allowed_tcp`, `allowed_udp`, `allowed_icmp`), with `meta mark set 0x44524a4b`.
 7. The response direction of full access and ICMP with the mark; the response of port authorizations is covered by matching according to `ct original`.
-8. Docker container exceptions (in the template `172.30.0.2`): anti-spoof and LAN-pivot blocking, DNS and 53/80/443 egress, and responses to connections initiated by the container.
+8. `jump container_egress`: the container egress entries of the settings (Admin → Settings), each bound to its bridge: anti-spoof and LAN-pivot blocking, the configured outbound ports, and responses to connections initiated by the container. (Until 2026-10-23 the template hard-coded `172.30.0.2`; settings files without the key migrate to that entry.)
 9. `preauth` chain; pre-auth means bypassing the portal, and it also covers the response direction.
 10. Everything else drop.
 
@@ -3243,7 +3243,7 @@ installer never connects to all networks.
   backward compatible. The domain service also appears in the agent's sync
   with the allocated internal port, so that the agent can DNAT from `wg0` to
   the target container.
-- **Sync:** `GET /api/tunnel/config`, `Authorization: Bearer <token>`.
+- **Sync:** `GET /api/tunnel/config` on the separate listener `10.77.0.1:<HV_TUNNEL_SYNC_PORT>` (default `PORT + 1`; the firewall opens only this port from the tunnel, and redirects older agents' `10.77.0.1:<PORT>` there), `Authorization: Bearer <token>`.
   Only an enabled agent whose peer IP according to the raw socket matches
   exactly receives a response; the token comparison is constant-time. A
   5-second rate limit per agent. The response contains only the given agent's
@@ -4254,7 +4254,7 @@ Dropjak received a built-in, Caddy-based reverse proxy. It forwards subdomains u
   - Earlier tests did not catch this: in the local packet trial the target listened on every address.
 - **Fix:**
   - If ALL sockets on the target port are bound to 127.0.0.0/8, the rule is `dnat ip to 127.0.0.1:<target port>`. This applies to both TCP and UDP; the decision is made based on `/proc/net/{tcp,udp}{,6}`. For a wildcard listener, `redirect` remains: the "naive" wildcard UDP server (Java/Simple Voice Chat, docker-proxy) chooses the response source from the route, which would not match conntrack with 127.0.0.1 DNAT.
-  - For a 127.0.0.1 target, `net.ipv4.conf.all.route_localnet = 1` is needed on the host. In the portal container `/proc/sys` is read-only (Docker ReadonlyPaths), so `docker/setup-host.sh` sets it in `/etc/sysctl.d/90-dropjak.conf`. If it is not enabled, the proxy remains `redirect`, and saving warns.
+  - For a 127.0.0.1 target, `net.ipv4.conf.<interface>.route_localnet = 1` is needed on the proxy's interfaces (never on `all`, since 2026-10-23). In the portal container `/proc/sys` is read-only (Docker ReadonlyPaths; natively `ProtectKernelTunables=yes`), so the portal cannot set it: list the interfaces in `HV_ROUTE_LOCALNET_IFS` in `.env` and re-run `docker/setup-host.sh` (natively `install.sh --route-localnet-ifs`), which writes them into `/etc/sysctl.d/90-dropjak.conf`. If it is not enabled, the proxy remains `redirect`, and saving warns.
   - **Security:** a new `loopback_guard` chain (prerouting, raw priority, before NAT) in both the main and boot tables: every packet with a 127/8 destination or source arriving on a non-loopback interface is dropped. The loopback service is thus reachable only through the authorized proxy DNAT. As a side effect, Docker's 127.0.0.1 publications cannot be targeted directly from the LAN either (the equivalent of Docker 28+ raw rules; Docker 26 runs on the VM).
   - **Refresher:** the portal recalculates the decision every 10 seconds. If it changed (for example, after a restart Docker publishes later, or route_localnet was enabled), it atomically swaps the chains and deletes the conntrack entries of the affected listening ports. Settings save and the refresher use the same lock.
   - **Client IP:** it is preserved for a native service bound to loopback. For a Docker container, through the 127.0.0.1 publication the container sees the docker-proxy address. If the client IP is needed, use a Forward entry to the container IP.
@@ -5161,6 +5161,83 @@ are the last entries of this list.
   `/etc/sysctl.d/90-dropjak.conf`; `setup-host.sh` no longer inserts an
   IPv6 SSH exception into the boot table. Requirement: no other IPv6 router
   on the client LAN.
+- **Unverified drop signals (DJ-01 follow-ups).** Forward and input drop
+  `ct state invalid` first (log reason `ct-invalid`), so such packets never
+  slip past the direction-aware ban rule. LAN `no-grant`/`input-lan` drops
+  feed fail2ban only when the logged source MAC equals the address's ARP
+  entry on `HV_LAN_IF` or its active dnsmasq lease. Drop-signal bans
+  escalate: 300 s first, doubled on each repeat within 24 hours, capped at
+  the configured ban length (login and manual bans are unchanged). A
+  drop-signal ban no longer ends the address's portal sessions
+  (`sessions_revoked=0`); the ban rule already drops its new traffic.
+- **Configurable no-forward networks (DJ-02).** New `HV_NO_FORWARD_NETS`
+  (comma separated IPv4 network addresses, strict): added to the
+  `no_forward_v4` set next to `169.254.0.0/16` through the new
+  `__NO_FORWARD_NETS__` placeholder. The set is flushed and refilled in the
+  same load, overlapping entries are merged, and a supernet of the
+  link-local range is split around it. The entrypoint skips an invalid entry
+  with an `ERROR` line (no crash loop); `install.sh --no-forward-nets`
+  refuses it. The `no-forward` drop reason has en/de labels. No RFC 1918
+  drop on the WAN was added.
+- **Native table watchdog and route_localnet (DJ-04).** `install.sh`
+  installs `dropjak-firewall-check.timer` (every 10 s) and its oneshot
+  service, which reloads `dropjak-firewall.service` when the forward chain
+  (with its `@client_mac` rules) is missing. `route_localnet` is never set
+  on `all` any more: `docker/setup-host.sh` (`HV_ROUTE_LOCALNET_IFS` from
+  the environment or `.env`) and `install.sh --route-localnet-ifs` write it
+  per interface; an old `all` line is dropped from
+  `/etc/sysctl.d/90-dropjak.conf` and the live `all` value is reset to 0.
+  The portal cannot set it itself: `/proc/sys` is read-only in the
+  container (Docker ReadonlyPaths) and under `ProtectKernelTunables=yes`;
+  the port proxy warning names the variable instead.
+- **Per-source log budget and drop-log start (DJ-07).** Every IPv4 log rule
+  (template and portal-rendered) first updates the dynamic
+  `log_src_v4` set: 30 lines a minute (burst 60) per source across all
+  rules, which still lets one source reach the default drop threshold (120
+  in 180 s). The four catch-all rules (`no-grant`, `wan-drop`, `input-lan`,
+  `input-wan`) have a rule-wide limit of 120/minute (burst 240). When NFLOG
+  is unavailable at start, the listener keeps retrying in the background
+  with the 1 s → 60 s back-off.
+- **Portal connection limit and request deadlines (DJ-13).** A new portal
+  connection is dropped when the source already holds 32
+  (`portal_conn_v4`, `ct count over 32`, reason `portal-connlimit`). The
+  HTTP server enforces whole-request deadlines: 10 s for the request line
+  and headers, 30 s for the body and the handler, 5 s idle on a keep-alive
+  connection.
+- **Separate tunnel sync listener (DJ-15).** `GET /api/tunnel/config` is
+  served by its own listener on `10.77.0.1:<HV_TUNNEL_SYNC_PORT>` (default
+  `PORT + 1`, bound with `IP_FREEBIND`; a bind failure is logged, never
+  fatal), which answers only tunnel peers and only that path.
+  `tunnel_input` opens just that port toward `10.77.0.1`; the portal port is
+  no longer reachable from the tunnel. Agent bundles name the new port;
+  agents installed earlier keep working through a `redirect` from
+  `10.77.0.1:<PORT>` to the sync port in `portproxy_nat`.
+- **Grants bound to LAN and WAN (DJ-17).** In forward (all four grant sets)
+  and input (`allowed_input_*`), an original-direction packet from a
+  granted source on any other interface is dropped (reason `grant-iface`).
+  `setup-host.sh` and `install.sh` set `rp_filter = 1` on the LAN and WAN
+  interfaces.
+- **Input chain consistency (DJ-18).** At startup and after a resync the
+  portal lists `chain inet hatarvedelem input` and checks
+  `tcp dport != <PORT>` and `iifname "<HV_LAN_IF>"`; on a mismatch it logs
+  an error, audits `firewall_error` (`operation=input_chain`) and refuses
+  host grants (forward grants keep working).
+- **Container egress settings (DJ-32).** The hard-coded `172.30.0.2`
+  exception left the template. New `container_egress` settings list
+  (`{id, label, address, bridge, tcp, udp, enabled}`, at most 16, private
+  IPv4 outside the LAN and tunnel networks, a bridge name or a `*`-ended
+  prefix that cannot match the LAN/WAN interface) rendered into the new
+  portal-filled `container_egress` chain: accepts only `iifname "<bridge>"`,
+  the address elsewhere is dropped (`container-spoof`), no new flow into the
+  LAN (`container-pivot`), replies only of the container's own flows. A
+  settings file (or bundle) without the key migrates to the former
+  exception as entry `minecraft` (`br-*`, TCP 53/80/443, UDP 53); a fresh
+  install has none. Editable under Admin → Settings → Container egress
+  (hu/en/de), audited as `admin_settings_changed`
+  (`action=container_egress`), part of export/import. An invalid settings
+  file empties the chain, like pre-auth.
+- **Tests.** New `tests/test_hardening_followups.py` (44 tests); pinned
+  log-rule text updated in five test files.
 
 ### [3.24.0] - 2026-10-22
 

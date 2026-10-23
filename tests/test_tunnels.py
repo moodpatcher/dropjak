@@ -769,14 +769,27 @@ class TunnelFirewallTests(unittest.TestCase):
                 f'add rule {T} tunnel_input iifname "eth0" '
                 "udp dport 51999 accept",
                 f'add rule {T} tunnel_input iifname "dropjak0" '
-                f"ip saddr 10.77.0.0/24 tcp dport "
-                f"{settings_store.PORTAL_PORT} accept",
+                f"ip saddr 10.77.0.0/24 ip daddr 10.77.0.1 tcp dport "
+                f"{settings_store.TUNNEL_SYNC_PORT} accept",
             ],
+        )
+        # Only the sync listener's port, never the portal port (DJ-15).
+        self.assertNotEqual(
+            settings_store.TUNNEL_SYNC_PORT, settings_store.PORTAL_PORT
         )
         self.fw.replace_custom(
             (), (), tunnels=tunnels(agents=[agent()])
         )
         script = self.scripts[-1]
+        # Agents installed earlier still call the portal port: redirected
+        # to the sync listener.
+        self.assertIn(
+            f'add rule {T} portproxy_nat iifname "dropjak0" '
+            "ip saddr 10.77.0.0/24 ip daddr 10.77.0.1 tcp dport "
+            f"{settings_store.PORTAL_PORT} redirect to "
+            f":{settings_store.TUNNEL_SYNC_PORT}",
+            script,
+        )
         self.assertIn(f"add chain {T} tunnel_input", script)
         self.assertIn(f"flush chain {T} tunnel_input", script)
         self.assertIn(
@@ -1970,7 +1983,8 @@ class TunnelHttpTests(unittest.TestCase):
         self.assertEqual(config["sync"]["token"], TOKEN)
         self.assertEqual(
             config["sync"]["url"],
-            "http://10.77.0.1:8100/api/tunnel/config",
+            "http://10.77.0.1:"
+            f"{settings_store.TUNNEL_SYNC_PORT}/api/tunnel/config",
         )
         self.assertEqual(config["sync"]["interval_seconds"], 30)
         self.assertEqual(config["services"], [{

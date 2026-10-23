@@ -74,6 +74,13 @@ services:
       # The entrypoint hands a private copy to the portal user.
       HV_ADMIN_PASSWORD_FILE: ${HV_ADMIN_PASSWORD_FILE:-/run/secrets/dropjak_admin_password}
       PORT: ${PORT:-8100}
+      # Extra IPv4 networks the gateway never forwards to (comma
+      # separated, network addresses), besides the always blocked
+      # 169.254.0.0/16: the WAN subnet, the provider's private networks.
+      HV_NO_FORWARD_NETS: ${HV_NO_FORWARD_NETS:-}
+      # The tunnel agents' sync listener, bound to 10.77.0.1 only; empty:
+      # PORT + 1.
+      HV_TUNNEL_SYNC_PORT: ${HV_TUNNEL_SYNC_PORT:-}
       HV_PORTAL_URL: ${HV_PORTAL_URL:-}
       # Further DNS names of the portal (comma separated); the /api/
       # endpoints answer only under these, an IP address, the HV_PORTAL_URL

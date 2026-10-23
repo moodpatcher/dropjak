@@ -1071,6 +1071,7 @@ def _config_counts(bundle: dict) -> dict:
         "proxy_domains": len(settings["proxy_domains"]),
         "proxy_routes": len(settings["proxy_routes"]),
         "port_proxies": len(settings["port_proxies"]),
+        "container_egress": len(settings.get("container_egress", [])),
         "tunnel_agents": len(settings["tunnels"]["agents"]),
         "tunnel_services": sum(
             len(agent["services"]) for agent in settings["tunnels"]["agents"]
@@ -1257,6 +1258,7 @@ def _config_state_nonempty(gw) -> bool:
     if any(snapshot.get(key) for key in (
         "site_name", "motd_text", "motd_expires_at",
         "proxy_domains", "proxy_routes", "port_proxies", "preauth", "block",
+        "container_egress",
     )):
         return True
     return bool(
@@ -1322,6 +1324,50 @@ def _request_service_restart(delay: float = 0.5) -> None:
 
 # -------------------------------------------------------------------- HTTP layer
 
+# Whole-request deadlines (DJ-13). A per-read socket timeout alone lets a
+# client that sends one byte every few seconds hold a thread for ever; these
+# bound the request line plus headers, the body (with the handler's work),
+# and the idle wait for the next request on a keep-alive connection.
+REQUEST_HEADER_SECONDS = 10.0
+REQUEST_BODY_SECONDS = 30.0
+KEEPALIVE_IDLE_SECONDS = 5.0
+
+
+class _DeadlineReader(io.RawIOBase):
+    """Socket reader that enforces the handler's current read deadline.
+
+    Every read waits at most until ``handler._read_deadline`` (monotonic);
+    past it the read raises ``TimeoutError``, which BaseHTTPRequestHandler
+    and the body readers already treat as a dead connection. The socket's
+    own timeout is restored after each read, so writing the response is not
+    limited by the remaining read time.
+    """
+
+    def __init__(self, sock, handler) -> None:
+        super().__init__()
+        self._sock = sock
+        self._handler = handler
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer) -> int:
+        deadline = getattr(self._handler, "_read_deadline", None)
+        default = self._sock.gettimeout()
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("request deadline exceeded")
+            self._sock.settimeout(
+                remaining if default is None else min(remaining, default)
+            )
+        try:
+            return self._sock.recv_into(buffer)
+        finally:
+            if deadline is not None:
+                self._sock.settimeout(default)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "Dropjak/2"
     sys_version = ""
@@ -1331,6 +1377,47 @@ class Handler(BaseHTTPRequestHandler):
     # Set per request; prevents a later error branch from consuming the
     # already read body again from the keep-alive connection.
     _body_read = False
+    # Monotonic time by which the current read phase must finish (None: no
+    # deadline, only the socket timeout).
+    _read_deadline: float | None = None
+
+    def setup(self) -> None:
+        super().setup()
+        # The buffered reader on top of the deadline-aware raw reader
+        # replaces the plain socket file (closed, so the socket's file
+        # reference count stays exact).
+        plain = self.rfile
+        self.rfile = io.BufferedReader(_DeadlineReader(self.connection, self))
+        plain.close()
+        self._served = 0
+
+    def handle_one_request(self) -> None:
+        """One request under the DJ-13 deadlines.
+
+        A keep-alive connection may stay idle for KEEPALIVE_IDLE_SECONDS;
+        from the first byte the request line and the headers must arrive
+        within REQUEST_HEADER_SECONDS (parse_request then moves the deadline
+        to the body phase).
+        """
+        if self._served:
+            self._read_deadline = time.monotonic() + KEEPALIVE_IDLE_SECONDS
+            try:
+                if not self.rfile.peek(1):
+                    self.close_connection = True
+                    return
+            except OSError:
+                self.close_connection = True
+                return
+        self._read_deadline = time.monotonic() + REQUEST_HEADER_SECONDS
+        self._served += 1
+        super().handle_one_request()
+
+    def parse_request(self) -> bool:
+        ok = super().parse_request()
+        # The headers are in: the body and the handler's work get their own
+        # deadline.
+        self._read_deadline = time.monotonic() + REQUEST_BODY_SECONDS
+        return ok
 
     # -- helpers ---------------------------------------------------------------
 
@@ -1375,13 +1462,17 @@ class Handler(BaseHTTPRequestHandler):
         admin) gets a detail-free 404, even when HV_PORTAL_NET is narrow.
         Returns True when the response has already been sent.
         """
+        # The separate sync listener on 10.77.0.1 (TunnelSyncServer) serves
+        # the sync endpoint to tunnel peers and nothing else to anyone.
+        tunnel_only = bool(getattr(self.server, "tunnel_only", False))
         try:
             peer = ipaddress.ip_address(self._peer_ip())
         except ValueError:
+            peer = None
+        in_tunnel = peer is not None and peer in settings_store.TUNNEL_SUBNET
+        if not in_tunnel and not tunnel_only:
             return False
-        if peer not in settings_store.TUNNEL_SUBNET:
-            return False
-        if self.command == "GET" and path == _TUNNEL_SYNC_PATH:
+        if in_tunnel and self.command == "GET" and path == _TUNNEL_SYNC_PATH:
             return False
         self._discard_body()
         self._json(404, {"ok": False, "error": "unknown endpoint"})
@@ -3266,7 +3357,7 @@ class Handler(BaseHTTPRequestHandler):
             "sync": {
                 "url": (
                     f"http://{settings_store.TUNNEL_SERVER_ADDRESS}:"
-                    f"{settings_store.PORTAL_PORT}{_TUNNEL_SYNC_PATH}"
+                    f"{settings_store.TUNNEL_SYNC_PORT}{_TUNNEL_SYNC_PATH}"
                 ),
                 "token": agent["token"],
                 "interval_seconds": 30,
@@ -4095,6 +4186,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if action == "port_proxies":
             return self._admin_port_proxies(session, data)
+        if action == "container_egress":
+            return self._admin_container_egress(session, data)
         if action in _TUNNEL_ACTIONS:
             return self._admin_tunnels(session, data, action)
         kind = str(data.get("kind", "")).strip().lower()
@@ -4154,6 +4247,56 @@ class Handler(BaseHTTPRequestHandler):
             )
         payload = self._admin_state()
         payload["message"] = "Firewall settings saved."
+        self._json(200, payload)
+
+    def _admin_container_egress(self, session, data: dict) -> None:
+        """Replace the container egress list: nft apply -> save (DJ-32)."""
+        with self.gw.admin_lock:
+            try:
+                new_data = self.gw.settings.prepare_container_egress(
+                    data.get("container_egress")
+                )
+            except (settings_store.SettingsError, ValueError) as exc:
+                self._admin_request_rejected(
+                    "invalid_container_egress", user=session.user
+                )
+                self._json(400, {"ok": False, "error": str(exc)})
+                return
+            try:
+                self.gw.apply_settings(new_data)
+            except (gateway.FirewallError, settings_store.SettingsError,
+                    OSError) as exc:
+                self._admin_action_error(
+                    "settings_container_egress", exc,
+                    target="container_egress",
+                )
+                self._json(
+                    503,
+                    {
+                        "ok": False,
+                        "error": "failed to apply the firewall settings: "
+                                 f"{exc}",
+                    },
+                )
+                return
+            entries = new_data["container_egress"]
+            self._audit(
+                "admin_settings_changed",
+                user=session.user,
+                action="container_egress",
+                target="container_egress",
+                container_egress=", ".join(
+                    f"{entry['label']}: {entry['address']}@{entry['bridge']}"
+                    + (" tcp " + ",".join(map(str, entry["tcp"]))
+                       if entry["tcp"] else "")
+                    + (" udp " + ",".join(map(str, entry["udp"]))
+                       if entry["udp"] else "")
+                    + ("" if entry["enabled"] else " (off)")
+                    for entry in entries
+                ),
+            )
+        payload = self._admin_state()
+        payload["message"] = "Container egress settings saved."
         self._json(200, payload)
 
     def _admin_port_proxies(self, session, data: dict) -> None:
@@ -7367,6 +7510,50 @@ class AppServer(ThreadingHTTPServer):
             self._conn_release(str(client_address[0]))
 
 
+class TunnelSyncServer(AppServer):
+    """The agent sync listener, bound to the tunnel address only (DJ-15).
+
+    Tunnel peers reach only ``GET /api/tunnel/config`` here; the firewall
+    opens just this port from the tunnel, so the portal port is never
+    reachable from it. IP_FREEBIND lets it bind before the WireGuard
+    interface (and with it 10.77.0.1) exists.
+    """
+
+    tunnel_only = True
+
+    def server_bind(self) -> None:
+        freebind = getattr(socket, "IP_FREEBIND", 15)
+        try:
+            self.socket.setsockopt(socket.IPPROTO_IP, freebind, 1)
+        except OSError:
+            pass
+        super().server_bind()
+
+
+def _start_tunnel_sync_server(gw) -> "TunnelSyncServer | None":
+    """Start the sync listener; a failure is logged and never fatal."""
+    address = (settings_store.TUNNEL_SERVER_ADDRESS,
+               settings_store.TUNNEL_SYNC_PORT)
+    try:
+        sync_server = TunnelSyncServer(address, gw)
+    except OSError as exc:
+        print(
+            f"[tunnel] ERROR: the agent sync listener cannot bind "
+            f"{address[0]}:{address[1]} ({exc}); agents cannot refresh "
+            "their service list. Set HV_TUNNEL_SYNC_PORT to a free port.",
+            file=sys.stderr, flush=True,
+        )
+        return None
+    threading.Thread(
+        target=sync_server.serve_forever, name="hv-tunnel-sync", daemon=True
+    ).start()
+    print(
+        f"[tunnel] agent sync listener on {address[0]}:{address[1]}",
+        flush=True,
+    )
+    return sync_server
+
+
 # ------------------------------------------------- local control channel
 #
 # Until now, command-line operations modified files and the kernel in a
@@ -9052,6 +9239,7 @@ def _serve() -> int:
     # does not start, the CLI falls back to local mode.
     control = _start_control_server(gw)
     server = AppServer(("0.0.0.0", gateway.PORT), gw)
+    tunnel_sync = _start_tunnel_sync_server(gw)
     # The PID file is created after the control channel but still before
     # serving. The CLI learns from it that the daemon is alive, so it must not
     # modify locally if the socket is temporarily unavailable.
@@ -9102,6 +9290,9 @@ def _serve() -> int:
                     flush=True,
                 )
         server.server_close()
+        if tunnel_sync is not None:
+            tunnel_sync.shutdown()
+            tunnel_sync.server_close()
         LOGIN_TICKETS.revoke_all(reason="service_stop")
         try:
             gw.stop()

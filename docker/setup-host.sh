@@ -9,10 +9,11 @@
 #   - /etc/nftables/dropjak-boot.nft  (policy drop on the forward chain)
 #   - /etc/systemd/system/dropjak-boot.service
 #   - /etc/sysctl.d/90-dropjak.conf   (net.ipv4.ip_forward = 1,
-#     net.ipv4.conf.all.route_localnet = 1 for the input port proxy's
-#     127.0.0.1 destination; the loopback_guard chain drops 127/8 packets
-#     on every non-loopback interface; disable_ipv6 = 1 on HV_LAN_IF, read
-#     from .env, always)
+#     rp_filter = 1 on HV_LAN_IF and HV_WAN_IF, route_localnet = 1 only on
+#     the HV_ROUTE_LOCALNET_IFS interfaces (input port proxies with a
+#     127.0.0.1 target; the loopback_guard chain drops 127/8 packets on
+#     every non-loopback interface), disable_ipv6 = 1 on HV_LAN_IF, always;
+#     the values come from the environment or their .env lines)
 #
 # After loading its own rules, the container deletes the boot table, so the
 # final rules take over.
@@ -120,26 +121,103 @@ else
     LAN_IPV6_KEY="net.ipv6.conf.${LAN_IF}.disable_ipv6"
 fi
 
-cat >"$SYSCTL_FILE" <<EOF
+# One setting from the environment, or else from its line in .env (only that
+# line is read).
+env_setting() {
+    _value=$(printenv "$1" 2>/dev/null || true)
+    if [ -z "$_value" ] && [ -r "$REPO_DIR/.env" ]; then
+        _value=$(sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$REPO_DIR/.env" \
+            | tail -n 1 | sed 's/[[:space:]]*$//; s/^["'\'']//; s/["'\'']$//')
+    fi
+    printf '%s' "$_value"
+}
+valid_iface() {
+    case "$1" in
+        "" | *[!A-Za-z0-9_.:@+-]*) return 1 ;;
+    esac
+    [ "${#1}" -le 15 ]
+}
+# The sysctl key of an IPv4 interface setting; the slash form for names with
+# a dot (VLAN), which would split the dotted key.
+ipv4_conf_key() {
+    if [ "${1#*.}" != "$1" ]; then
+        printf 'net/ipv4/conf/%s/%s' "$1" "$2"
+    else
+        printf 'net.ipv4.conf.%s.%s' "$1" "$2"
+    fi
+}
+
+# Strict reverse-path filtering on the LAN and WAN interfaces (DJ-17): a
+# packet whose source would not be routed back out of the interface it came
+# in on is dropped by the kernel, before nftables sees it.
+WAN_IF=$(env_setting HV_WAN_IF)
+if [ -n "$WAN_IF" ] && ! valid_iface "$WAN_IF"; then
+    die "invalid HV_WAN_IF: $WAN_IF"
+fi
+RP_FILTER_IFS="$LAN_IF${WAN_IF:+ $WAN_IF}"
+
+# route_localnet only on the interfaces of input port proxies with a
+# 127.0.0.1 target (HV_ROUTE_LOCALNET_IFS), never on "all" (DJ-04): on every
+# other interface the kernel keeps dropping 127/8 packets as martians.
+ROUTE_LOCALNET_IFS=""
+for _if in $(env_setting HV_ROUTE_LOCALNET_IFS | tr ',' ' '); do
+    valid_iface "$_if" || die "invalid HV_ROUTE_LOCALNET_IFS entry: $_if"
+    ROUTE_LOCALNET_IFS="$ROUTE_LOCALNET_IFS $_if"
+done
+
+# Migration: earlier versions set route_localnet on "all". The rewritten
+# file no longer has that line; the live value is reset further below.
+OLD_ALL_LOCALNET=0
+if [ -r "$SYSCTL_FILE" ] && grep -Eq '^[[:space:]]*net[./]ipv4[./]conf[./]all[./]route_localnet[[:space:]]*=[[:space:]]*1' "$SYSCTL_FILE"; then
+    OLD_ALL_LOCALNET=1
+fi
+
+{
+    cat <<EOF
 # Dropjak: the VM forwards the clients' traffic as a gateway.
 # The actual permission is granted by the nftables allowed_v4 set.
 net.ipv4.ip_forward = 1
-# The input port proxy DNATs to 127.0.0.1 for targets listening only there
-# (for example a Docker port published on 127.0.0.1). Packets arriving from
-# outside with a 127/8 destination/source are dropped by the nft loopback_guard
-# chain.
-net.ipv4.conf.all.route_localnet = 1
+# Strict reverse-path filtering on the LAN and WAN interfaces.
+EOF
+    for _if in $RP_FILTER_IFS; do
+        printf '%s = 1\n' "$(ipv4_conf_key "$_if" rp_filter)"
+    done
+    if [ -n "$ROUTE_LOCALNET_IFS" ]; then
+        cat <<EOF
+# Input port proxies DNAT to 127.0.0.1 for targets listening only there (for
+# example a Docker port published on 127.0.0.1); only these interfaces carry
+# such a proxy (HV_ROUTE_LOCALNET_IFS). Packets arriving from outside with a
+# 127/8 destination/source are dropped by the nft loopback_guard chain.
+EOF
+        for _if in $ROUTE_LOCALNET_IFS; do
+            printf '%s = 1\n' "$(ipv4_conf_key "$_if" route_localnet)"
+        done
+    fi
+    cat <<EOF
 # IPv6 is always dropped; no IPv6 on the client LAN interface (no opt-out).
 $LAN_IPV6_KEY = 1
 EOF
+} >"$SYSCTL_FILE"
 chmod 0644 "$SYSCTL_FILE"
 
 if command -v sysctl >/dev/null 2>&1; then
     sysctl -q -w net.ipv4.ip_forward=1 >/dev/null 2>&1 || true
-    sysctl -q -w net.ipv4.conf.all.route_localnet=1 >/dev/null 2>&1 || true
 else
     echo 1 >/proc/sys/net/ipv4/ip_forward 2>/dev/null || true
-    echo 1 >/proc/sys/net/ipv4/conf/all/route_localnet 2>/dev/null || true
+fi
+# Per interface directly through /proc (any interface name); a missing
+# interface gets its values from systemd-sysctl when it appears.
+for _if in $RP_FILTER_IFS; do
+    echo 1 >"/proc/sys/net/ipv4/conf/$_if/rp_filter" 2>/dev/null \
+        || info "WARNING: cannot set rp_filter on $_if right now; it applies when the interface appears."
+done
+for _if in $ROUTE_LOCALNET_IFS; do
+    echo 1 >"/proc/sys/net/ipv4/conf/$_if/route_localnet" 2>/dev/null \
+        || info "WARNING: cannot set route_localnet on $_if right now; it applies when the interface appears."
+done
+if [ "$OLD_ALL_LOCALNET" = "1" ]; then
+    echo 0 >/proc/sys/net/ipv4/conf/all/route_localnet 2>/dev/null || true
+    info "route_localnet is no longer set on \"all\"; input port proxies with a 127.0.0.1 target need their interfaces in HV_ROUTE_LOCALNET_IFS${ROUTE_LOCALNET_IFS:+ (now:$ROUTE_LOCALNET_IFS)}."
 fi
 # Directly through /proc: it takes any interface name. A missing interface
 # (VLAN or bridge created later) gets it from systemd-sysctl when it appears.

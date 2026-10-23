@@ -15074,7 +15074,7 @@ class HostSshPolicyRemovedTests(unittest.TestCase):
         # coming from the ordinary host rule.
         self.assertEqual(nft.count(ssh_guard), 2)
         self.assertEqual(nft.count(ssh_guard + " drop"), 1)
-        self.assertIn(ssh_guard + " limit rate 30/minute", nft)
+        self.assertIn(ssh_guard + " update @log_src_v4 { ip saddr limit rate 30/minute", nft)
 
 
 class FirewallCustomTests(unittest.TestCase):
@@ -15122,6 +15122,7 @@ class FirewallCustomTests(unittest.TestCase):
             "ip saddr @banned_v4 ct direction original drop",
         )
         log = (
+            'update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } '
             'limit rate 30/minute burst 60 packets log prefix '
             '"dropjak-drop reason=block " group 5'
         )
@@ -15746,13 +15747,13 @@ class RulesetTemplateTests(unittest.TestCase):
         # further attempts; the portal associates these with the single event of
         # the ban.
         self.assertIn('reason=fail2ban ', self.text)
-        self.assertIn("ip saddr @banned_v4 ct direction original limit rate", self.forward)
+        self.assertIn("ip saddr @banned_v4 ct direction original update @log_src_v4", self.forward)
         self.assertLess(
-            self.forward.index("ip saddr @banned_v4 ct direction original limit rate"),
+            self.forward.index("ip saddr @banned_v4 ct direction original update @log_src_v4"),
             self.forward.index("ip saddr @banned_v4 ct direction original drop"),
         )
         self.assertIn(
-            "ip saddr @banned_v4 ct direction original limit rate", self.text.split(
+            "ip saddr @banned_v4 ct direction original update @log_src_v4", self.text.split(
                 "chain input {", 1)[1]
         )
 
@@ -16215,6 +16216,8 @@ class DropBanWiringTests(unittest.TestCase):
 
     def test_scanner_reasons_are_forwarded(self) -> None:
         gw = self.make_gateway()
+        # LAN reasons need a verified source MAC (see the tests below).
+        gw._lan_source_verified = lambda ip, mac: True
         for reason in ("no-grant", "wan-drop", "input-wan", "input-lan"):
             gw._on_drop(self.record(reason=reason, dport=1000 + len(reason)))
         self.assertEqual(len(gw.fail2ban.calls), 4)
@@ -16228,6 +16231,67 @@ class DropBanWiringTests(unittest.TestCase):
         self.assertTrue(gw.fail2ban.calls[1][1]["count_total"])  # wan-drop
         self.assertTrue(gw.fail2ban.calls[2][1]["count_total"])  # input-wan
         self.assertFalse(gw.fail2ban.calls[3][1]["count_total"])  # input-lan
+
+    def test_lan_drops_count_only_with_the_sources_own_mac(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            arp = os.path.join(tmp, "arp")
+            Path(arp).write_text(
+                "IP address HW type Flags HW address Mask Device\n"
+                "192.0.2.80 0x1 0x2 aa:bb:cc:dd:ee:01 * eth1\n",
+                encoding="utf-8",
+            )
+            leases = os.path.join(tmp, "leases")
+            Path(leases).write_text(
+                f"{int(time.time()) + 600} aa:bb:cc:dd:ee:02 192.0.2.81 h *\n"
+                "1 aa:bb:cc:dd:ee:03 192.0.2.82 old *\n",
+                encoding="utf-8",
+            )
+            gw = self.make_gateway()
+            gw.firewall = mock.Mock(lan_if="eth1", arp_path=arp)
+            with mock.patch.object(gateway, "DHCP_LEASE_PATHS", (leases,)), \
+                    mock.patch.object(
+                        gateway.dhcp_lease_mac, "__defaults__", ((leases,),)
+                    ):
+                for reason in ("no-grant", "input-lan"):
+                    # Matches the ARP entry: counted.
+                    gw._on_drop(self.record(reason=reason, dport=1001,
+                                            mac="AA:BB:CC:DD:EE:01"))
+                    # A forged neighbour address (another MAC): ignored.
+                    gw._on_drop(self.record(reason=reason, dport=1002,
+                                            mac="aa:bb:cc:dd:ee:99"))
+                    # No MAC logged: ignored.
+                    gw._on_drop(self.record(reason=reason, dport=1003))
+                    # Matches an active DHCP lease: counted.
+                    gw._on_drop(self.record(src="192.0.2.81", reason=reason,
+                                            dport=1004, mac="aa:bb:cc:dd:ee:02"))
+                    # An expired lease does not verify.
+                    gw._on_drop(self.record(src="192.0.2.82", reason=reason,
+                                            dport=1005, mac="aa:bb:cc:dd:ee:03"))
+                # WAN reasons are not MAC-checked.
+                gw._on_drop(self.record(reason="input-wan", dport=1006))
+        self.assertEqual(
+            [(ip, kw["dport"]) for ip, kw in gw.fail2ban.calls],
+            [("192.0.2.80", 1001), ("192.0.2.81", 1004),
+             ("192.0.2.80", 1001), ("192.0.2.81", 1004),
+             ("192.0.2.80", 1006)],
+        )
+
+    def test_drop_ban_keeps_the_portal_sessions(self) -> None:
+        gw = object.__new__(gateway.Gateway)
+        gw.sessions = mock.Mock()
+        gw.sessions.revoke_ip.return_value = 1
+        gw.audit = mock.Mock()
+        gw.drops = mock.Mock()
+        record = {"ip": "192.0.2.80", "attempts": 12, "until": 1, "detail": "x"}
+        gw._on_fail2ban_ban(dict(record, source="drop"))
+        gw.sessions.revoke_ip.assert_not_called()
+        self.assertEqual(
+            gw.audit.write.call_args.kwargs["sessions_revoked"], 0
+        )
+        gw._on_fail2ban_ban(dict(record, source="login"))
+        gw.sessions.revoke_ip.assert_called_once_with(
+            "192.0.2.80", reason="fail2ban"
+        )
 
     def test_non_scanning_events_are_ignored(self) -> None:
         gw = self.make_gateway()

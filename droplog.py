@@ -904,8 +904,18 @@ class DropLogListener:
                 self._running = False
                 self._error = str(exc)
             self.log(
-                "[drop log] WARNING: the NFLOG listener did not start: " f"{exc}"
+                "[drop log] WARNING: the NFLOG listener did not start: "
+                f"{exc}; retrying in the background"
             )
+            # NFLOG may become available later (module loaded after boot,
+            # the group released by another process): keep retrying with
+            # the same back-off as after a socket error (DJ-07).
+            thread = threading.Thread(
+                target=self._retry_start, args=(exc,),
+                name="dropjak-droplog", daemon=True,
+            )
+            self._thread = thread
+            thread.start()
             return False
         with self._lock:
             self._sock = sock
@@ -922,6 +932,17 @@ class DropLogListener:
         )
         return True
 
+    def _retry_start(self, exc: OSError) -> None:
+        """Open the socket with back-off after a failed start, then listen."""
+        sock = self._reopen(exc, first=True)
+        if sock is None:
+            return
+        self.log(
+            f"[drop log] listening on NFLOG group {self.group} started "
+            f"({self.store.path})"
+        )
+        self._loop()
+
     def _sync_store(self, force: bool = False) -> None:
         now = time.monotonic()
         if force or now - self._last_sync >= DROP_LOG_SYNC_INTERVAL:
@@ -931,10 +952,12 @@ class DropLogListener:
             except Exception as exc:  # syncing must not stop the listener
                 self.log(f"[drop log] sync failed: {exc}")
 
-    def _reopen(self, exc: OSError) -> socket.socket | None:
+    def _reopen(self, exc: OSError, first: bool = False) -> socket.socket | None:
         """Replace a failed socket, retrying with exponential back-off.
 
         Returns the new socket, or None if stop() was called meanwhile.
+        With ``first`` the listener never ran (start() failed): the success
+        is not counted as a restart.
         """
         with self._lock:
             old = self._sock
@@ -946,7 +969,8 @@ class DropLogListener:
                 old.close()
             except OSError:
                 pass
-        self.log(f"[drop log] listener error: {exc}; restarting")
+        if not first:
+            self.log(f"[drop log] listener error: {exc}; restarting")
         delay = DROP_LOG_RESTART_MIN_DELAY
         while not self._stop.wait(delay):
             try:
@@ -962,9 +986,11 @@ class DropLogListener:
                     return None
                 self._sock = sock
                 self._running = True
-                self._restarts += 1
+                if not first:
+                    self._restarts += 1
                 self._error = ""
-            self.log("[drop log] listener restarted")
+            if not first:
+                self.log("[drop log] listener restarted")
             return sock
         return None
 

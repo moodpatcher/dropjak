@@ -138,13 +138,41 @@ add set inet hatarvedelem proxy_banned_v4 {
 # Destinations the gateway never forwards to, whatever grant or pre-auth
 # entry a client has (DJ-02). 169.254.0.0/16 is link-local: on cloud VMs the
 # provider's metadata service (169.254.169.254) lives there, and masquerade
-# would present the client's request as the VM's own. The elements below are
-# re-added on every load; extra provider networks can be added the same way.
+# would present the client's request as the VM's own. HV_NO_FORWARD_NETS
+# adds further networks (the WAN subnet, the provider's private networks);
+# the renderer drops entries that overlap. The set is refilled on every load
+# in the same transaction, so a network removed from HV_NO_FORWARD_NETS
+# leaves it and there is no moment without the link-local element.
 add set inet hatarvedelem no_forward_v4 {
     type ipv4_addr
     flags interval
 }
-add element inet hatarvedelem no_forward_v4 { 169.254.0.0/16 }
+flush set inet hatarvedelem no_forward_v4
+add element inet hatarvedelem no_forward_v4 { 169.254.0.0/16__NO_FORWARD_NETS__ }
+
+# Per-source log budget (DJ-07). Every log rule first updates the source's
+# element here: one source gets at most 30 log lines a minute (burst 60)
+# across all rules, so a single noisy or forged source cannot use up the
+# rule-wide limit behind it and hide everyone else's drops. The budget still
+# lets one source reach the default drop-based fail2ban threshold (120
+# packets in 180 s). Only logging is limited; the drops apply to every
+# packet. When the set is full, new sources are not logged until elements
+# expire.
+add set inet hatarvedelem log_src_v4 {
+    type ipv4_addr
+    size 8192
+    flags dynamic,timeout
+    timeout 2m
+}
+
+# Open portal connections per source (DJ-13): a new connection to the portal
+# port is dropped while the source already holds 32. The element tracks the
+# conntrack entries of its connections and disappears with them.
+add set inet hatarvedelem portal_conn_v4 {
+    type ipv4_addr
+    size 65535
+    flags dynamic
+}
 # Container bridges whose name does not match docker*/br-* (a Docker network
 # with a custom com.docker.network.bridge.name, other bridges on the host).
 # The Docker entrypoint fills it from `ip -o link show type bridge` (without
@@ -197,6 +225,12 @@ add chain inet hatarvedelem portproxy_snat
 # template does not clear it, so a reload does not close the existing tunnel.
 add chain inet hatarvedelem tunnel_input
 
+# Outbound exceptions of containers on Docker bridges (Admin -> Settings ->
+# Container egress, DJ-32). The portal fills it; every accept is bound to the
+# container's bridge, and a container never opens a new flow into the LAN.
+# Empty without an entry; the template does not clear it.
+add chain inet hatarvedelem container_egress
+
 add chain inet hatarvedelem input {
     type filter hook input priority filter; policy drop;
 }
@@ -222,11 +256,13 @@ add chain inet hatarvedelem postrouting {
 # Loopback and IPv6 guard before NAT and conntrack (raw priority), when the address is still
 # the original address as it arrived on the wire. The input port proxy DNATs to
 # 127.0.0.1 for a target that only listens on 127.0.0.1, which requires
-# net.ipv4.conf.all.route_localnet=1 on the host; with that, the kernel would
-# not drop packets with a 127/8 destination (and source) arriving from outside
-# as martians either. This chain drops them on every non-loopback interface, so
-# the loopback services are reachable only through the proxy (authorized DNAT).
-# It is harmless without route_localnet too: these packets are martians anyway.
+# net.ipv4.conf.<interface>.route_localnet=1 on the proxy's interfaces
+# (HV_ROUTE_LOCALNET_IFS, set on the host; never on "all"); with that, the
+# kernel would not drop packets with a 127/8 destination (and source) arriving
+# there as martians either. This chain drops them on every non-loopback
+# interface, so the loopback services are reachable only through the proxy
+# (authorized DNAT). It is harmless without route_localnet too: these packets
+# are martians anyway.
 # It also drops every IPv6 packet that did not arrive on loopback.
 add chain inet hatarvedelem loopback_guard {
     type filter hook prerouting priority raw; policy accept;
@@ -257,18 +293,25 @@ table inet hatarvedelem {
         meta nfproto ipv6 limit rate 10/minute burst 20 packets log prefix "dropjak-drop reason=ipv6 " group __DROP_LOG_GROUP__
         meta nfproto ipv6 drop
 
+        # Packets conntrack cannot place (no matching connection, broken
+        # state) have no direction, so the direction-aware rules below (the
+        # fail2ban ban, the bridge and WAN->LAN checks) would not match them.
+        # Nothing legitimate needs them; drop them first (DJ-01).
+        ct state invalid update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=ct-invalid " group __DROP_LOG_GROUP__
+        ct state invalid drop
+
         # Source-IP spoofing prevention. On the LAN interface only sources belonging
         # to the LAN network may come in; from the WAN it is forbidden to take
         # the LAN address. This rules out a client using the forward rules with
         # another allowed client's IP (or with a LAN source from the WAN).
-        iifname "__LAN_IF__" ip saddr != __LAN_NET__ limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-lan " group __DROP_LOG_GROUP__
+        iifname "__LAN_IF__" ip saddr != __LAN_NET__ update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-lan " group __DROP_LOG_GROUP__
         iifname "__LAN_IF__" ip saddr != __LAN_NET__ drop
-        iifname "__WAN_IF__" ip saddr __LAN_NET__ limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-wan " group __DROP_LOG_GROUP__
+        iifname "__WAN_IF__" ip saddr __LAN_NET__ update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-wan " group __DROP_LOG_GROUP__
         iifname "__WAN_IF__" ip saddr __LAN_NET__ drop
         # A LAN source is only valid on the LAN interface. Without this, a
         # process on any other interface (a Docker bridge, an extra NIC or VLAN)
         # could use a LAN client's grants with that client's address.
-        iifname != "__LAN_IF__" ip saddr __LAN_NET__ limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-lan " group __DROP_LOG_GROUP__
+        iifname != "__LAN_IF__" ip saddr __LAN_NET__ update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-lan " group __DROP_LOG_GROUP__
         iifname != "__LAN_IF__" ip saddr __LAN_NET__ drop
 
         # fail2ban-banned source: logged dropping of forwarded traffic.
@@ -281,7 +324,7 @@ table inet hatarvedelem {
         # is dropped: replies to connections that a LAN client opened toward
         # a banned address still pass, so banning a remote host does not
         # cut it off for every client.
-        ip saddr @banned_v4 ct direction original limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=fail2ban " group __DROP_LOG_GROUP__
+        ip saddr @banned_v4 ct direction original update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=fail2ban " group __DROP_LOG_GROUP__
         ip saddr @banned_v4 ct direction original drop
 
         # MAC binding: anyone using an allowed IP must send with the MAC address
@@ -292,13 +335,13 @@ table inet hatarvedelem {
         # the response of a LAN-side DNAT target (port proxy forward) also arrives
         # on the LAN interface, with the target's own IP/MAC pair, which
         # never appears in the client_mac set.
-        iifname "__LAN_IF__" ip saddr @allowed_v4 ip saddr . ether saddr != @client_mac limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
+        iifname "__LAN_IF__" ip saddr @allowed_v4 ip saddr . ether saddr != @client_mac update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
         iifname "__LAN_IF__" ip saddr @allowed_v4 ip saddr . ether saddr != @client_mac drop
-        iifname "__LAN_IF__" meta l4proto tcp ct direction original ct original ip saddr . ct original proto-dst @allowed_tcp ip saddr . ether saddr != @client_mac limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
+        iifname "__LAN_IF__" meta l4proto tcp ct direction original ct original ip saddr . ct original proto-dst @allowed_tcp ip saddr . ether saddr != @client_mac update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
         iifname "__LAN_IF__" meta l4proto tcp ct direction original ct original ip saddr . ct original proto-dst @allowed_tcp ip saddr . ether saddr != @client_mac drop
-        iifname "__LAN_IF__" meta l4proto udp ct direction original ct original ip saddr . ct original proto-dst @allowed_udp ip saddr . ether saddr != @client_mac limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
+        iifname "__LAN_IF__" meta l4proto udp ct direction original ct original ip saddr . ct original proto-dst @allowed_udp ip saddr . ether saddr != @client_mac update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
         iifname "__LAN_IF__" meta l4proto udp ct direction original ct original ip saddr . ct original proto-dst @allowed_udp ip saddr . ether saddr != @client_mac drop
-        iifname "__LAN_IF__" ip saddr @allowed_icmp ip saddr . ether saddr != @client_mac limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
+        iifname "__LAN_IF__" ip saddr @allowed_icmp ip saddr . ether saddr != @client_mac update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
         iifname "__LAN_IF__" ip saddr @allowed_icmp ip saddr . ether saddr != @client_mac drop
 
         # Block configured by the admin. We call it unconditionally: the block chain
@@ -315,7 +358,7 @@ table inet hatarvedelem {
         # see the no_forward_v4 set). It runs before every accept, so neither a
         # full-access session, a port grant, a pre-auth entry nor the container
         # exception can reach them.
-        ip daddr @no_forward_v4 limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=no-forward " group __DROP_LOG_GROUP__
+        ip daddr @no_forward_v4 update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=no-forward " group __DROP_LOG_GROUP__
         ip daddr @no_forward_v4 drop
 
         # Grants are not scoped by destination, so without these rules a grant
@@ -325,14 +368,28 @@ table inet hatarvedelem {
         # proxy entry). Only the original direction is checked: the replies of
         # flows the container or the LAN host started are not affected.
         # Bridges with other names are covered by the docker_bridges set.
-        oifname "docker*" ct direction original ct status != dnat limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=container-direct " group __DROP_LOG_GROUP__
+        oifname "docker*" ct direction original ct status != dnat update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=container-direct " group __DROP_LOG_GROUP__
         oifname "docker*" ct direction original ct status != dnat drop
-        oifname "br-*" ct direction original ct status != dnat limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=container-direct " group __DROP_LOG_GROUP__
+        oifname "br-*" ct direction original ct status != dnat update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=container-direct " group __DROP_LOG_GROUP__
         oifname "br-*" ct direction original ct status != dnat drop
-        oifname @docker_bridges ct direction original ct status != dnat limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=container-direct " group __DROP_LOG_GROUP__
+        oifname @docker_bridges ct direction original ct status != dnat update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=container-direct " group __DROP_LOG_GROUP__
         oifname @docker_bridges ct direction original ct status != dnat drop
-        iifname "__WAN_IF__" oifname "__LAN_IF__" ct direction original ct status != dnat limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=wan-drop " group __DROP_LOG_GROUP__
+        iifname "__WAN_IF__" oifname "__LAN_IF__" ct direction original ct status != dnat update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=wan-drop " group __DROP_LOG_GROUP__
         iifname "__WAN_IF__" oifname "__LAN_IF__" ct direction original ct status != dnat drop
+
+        # A grant belongs to a client on the LAN or the WAN. The same source
+        # address arriving on any other interface (a Docker bridge, the
+        # tunnel, an extra NIC or VLAN) would otherwise inherit the grant
+        # (DJ-17). Only the original direction: replies to a client's flows
+        # come back from wherever the destination is.
+        ct direction original iifname != { "__LAN_IF__", "__WAN_IF__" } ip saddr @allowed_v4 update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=grant-iface " group __DROP_LOG_GROUP__
+        ct direction original iifname != { "__LAN_IF__", "__WAN_IF__" } ip saddr @allowed_v4 drop
+        ct direction original iifname != { "__LAN_IF__", "__WAN_IF__" } ip saddr @allowed_icmp ip protocol icmp update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=grant-iface " group __DROP_LOG_GROUP__
+        ct direction original iifname != { "__LAN_IF__", "__WAN_IF__" } ip saddr @allowed_icmp ip protocol icmp drop
+        ct direction original iifname != { "__LAN_IF__", "__WAN_IF__" } meta l4proto tcp ct original ip saddr . ct original proto-dst @allowed_tcp update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=grant-iface " group __DROP_LOG_GROUP__
+        ct direction original iifname != { "__LAN_IF__", "__WAN_IF__" } meta l4proto tcp ct original ip saddr . ct original proto-dst @allowed_tcp drop
+        ct direction original iifname != { "__LAN_IF__", "__WAN_IF__" } meta l4proto udp ct original ip saddr . ct original proto-dst @allowed_udp update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=grant-iface " group __DROP_LOG_GROUP__
+        ct direction original iifname != { "__LAN_IF__", "__WAN_IF__" } meta l4proto udp ct original ip saddr . ct original proto-dst @allowed_udp drop
 
         # Port-restricted access. The ct original proto-dst means the destination port
         # BEFORE DNAT, so for container ports published by Docker the
@@ -360,30 +417,12 @@ table inet hatarvedelem {
         ct state established,related ip daddr @allowed_icmp ip protocol icmp meta mark set __FWD_MARK__ accept
         ct state established,related ip daddr @allowed_v4 meta mark set __FWD_MARK__ accept
 
-        # It must not be possible to send packets from the WAN with the container's
-        # source: the container's outbound permissions are only valid from the Docker bridge.
-        iifname "__WAN_IF__" ip saddr 172.30.0.2 limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=container-spoof " group __DROP_LOG_GROUP__
-        iifname "__WAN_IF__" ip saddr 172.30.0.2 drop
-
-        # The container must not be able to initiate new connections to the internal
-        # LAN. The responses of client -> container connections are in the established
-        # state, so this rule does not affect them.
-        ip saddr 172.30.0.2 ip daddr __LAN_NET__ ct state new limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=container-pivot " group __DROP_LOG_GROUP__
-        ip saddr 172.30.0.2 ip daddr __LAN_NET__ ct state new drop
-
-        # The Minecraft container's outbound traffic. The container runs on its own
-        # dedicated Docker network (172.30.0.0/24, static address 172.30.0.2),
-        # and needs DNS, HTTP and HTTPS for Mojang download/login.
-        # The responses arrive in the established/related state.
-        # This does not open client traffic: from the LAN only the ports allowed by
-        # the portal rule still pass.
-        ip saddr 172.30.0.2 udp dport 53 meta mark set __FWD_MARK__ accept
-        ip saddr 172.30.0.2 tcp dport { 53, 80, 443 } meta mark set __FWD_MARK__ accept
-        # Responses of connections INITIATED BY the container only. The earlier rule
-        # passed all established traffic belonging to the container, so the
-        # client->container connection stayed alive even after the port permission
-        # expired (without deleting conntrack).
-        ip daddr 172.30.0.2 ct state established,related ct original ip saddr 172.30.0.2 meta mark set __FWD_MARK__ accept
+        # Container egress exceptions configured on the portal (DJ-32): each
+        # entry lets one container address reach the given outbound ports,
+        # only from its own bridge, never with a new flow into the LAN, and
+        # passes the replies of the flows the container started. The source
+        # address on any other interface is dropped (container-spoof).
+        jump container_egress
 
         # Pre-login permissions. The pre-auth chain also covers the response
         # direction, so we call it unconditionally.
@@ -391,8 +430,11 @@ table inet hatarvedelem {
 
         # Logged dropping of the remaining, unauthorized traffic.
         # The limit only restricts logging; the drop applies to every packet.
-        iifname "__LAN_IF__" limit rate 60/minute burst 120 packets log prefix "dropjak-drop reason=no-grant " group __DROP_LOG_GROUP__
-        iifname "__WAN_IF__" limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=wan-drop " group __DROP_LOG_GROUP__
+        # The rule-wide limit is higher here than elsewhere: every source
+        # also has its own budget (log_src_v4), so several scanners at once
+        # still show up.
+        iifname "__LAN_IF__" update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 120/minute burst 240 packets log prefix "dropjak-drop reason=no-grant " group __DROP_LOG_GROUP__
+        iifname "__WAN_IF__" update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 120/minute burst 240 packets log prefix "dropjak-drop reason=wan-drop " group __DROP_LOG_GROUP__
         drop
     }
 
@@ -410,6 +452,11 @@ table inet hatarvedelem {
         # survives reloading the template. Empty by default.
         jump breakglass
 
+        # Packets without a valid conntrack state: the direction-aware ban
+        # and block rules below cannot judge them (DJ-01).
+        ct state invalid update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=ct-invalid " group __DROP_LOG_GROUP__
+        ct state invalid drop
+
         # The DHCP request arrives with a 0.0.0.0 source before address assignment, so
         # we let it through before the source check. Only from the standard
         # client port (68) to the server port (67), and only with a 0.0.0.0 source.
@@ -417,13 +464,13 @@ table inet hatarvedelem {
 
         # Source-IP spoofing prevention toward the host as well. From the WAN it is
         # forbidden to take the LAN address; from the LAN only the LAN network may come.
-        iifname "__LAN_IF__" ip saddr != __LAN_NET__ limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-lan " group __DROP_LOG_GROUP__
+        iifname "__LAN_IF__" ip saddr != __LAN_NET__ update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-lan " group __DROP_LOG_GROUP__
         iifname "__LAN_IF__" ip saddr != __LAN_NET__ drop
-        iifname "__WAN_IF__" ip saddr __LAN_NET__ limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-wan " group __DROP_LOG_GROUP__
+        iifname "__WAN_IF__" ip saddr __LAN_NET__ update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-wan " group __DROP_LOG_GROUP__
         iifname "__WAN_IF__" ip saddr __LAN_NET__ drop
         # A LAN source is only valid on the LAN interface (loopback was
         # accepted above).
-        iifname != "__LAN_IF__" ip saddr __LAN_NET__ limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-lan " group __DROP_LOG_GROUP__
+        iifname != "__LAN_IF__" ip saddr __LAN_NET__ update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=spoof-lan " group __DROP_LOG_GROUP__
         iifname != "__LAN_IF__" ip saddr __LAN_NET__ drop
 
         # fail2ban-banned source toward the host. The portal and DHCP are exceptions:
@@ -435,9 +482,14 @@ table inet hatarvedelem {
         # assigned to this event. As in forward, replies to the gateway's own
         # connections (DNS upstream, NTP, ACME) are not dropped.
         iifname "__LAN_IF__" udp sport 68 udp dport 67 accept
+        # At most 32 open portal connections per source (DJ-13); a new one
+        # beyond that is dropped before the portal accepts below. The portal
+        # itself also caps its threads per source (HV_MAX_CONNECTIONS_PER_IP).
+        tcp dport __PORT__ ct state new add @portal_conn_v4 { ip saddr ct count over 32 } update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=portal-connlimit " group __DROP_LOG_GROUP__
+        tcp dport __PORT__ ct state new add @portal_conn_v4 { ip saddr ct count over 32 } drop
         iifname "__LAN_IF__" tcp dport __PORT__ accept
         ip saddr __PORTAL_NET__ tcp dport __PORT__ accept
-        ip saddr @banned_v4 ct direction original limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=fail2ban " group __DROP_LOG_GROUP__
+        ip saddr @banned_v4 ct direction original update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=fail2ban " group __DROP_LOG_GROUP__
         ip saddr @banned_v4 ct direction original drop
 
         # The admin-configured block also applies to LAN traffic toward the host.
@@ -464,20 +516,27 @@ table inet hatarvedelem {
         # Authorized traffic toward the host (SSH, DNS, ICMP) can also come from the
         # LAN only with the MAC recorded during the session. This does not affect the
         # portal's traffic, because the portal's IP is not in the dynamic sets.
-        iifname "__LAN_IF__" ip saddr @allowed_v4 ip saddr . ether saddr != @client_mac limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
+        iifname "__LAN_IF__" ip saddr @allowed_v4 ip saddr . ether saddr != @client_mac update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
         iifname "__LAN_IF__" ip saddr @allowed_v4 ip saddr . ether saddr != @client_mac drop
-        iifname "__LAN_IF__" ip saddr @allowed_icmp ip saddr . ether saddr != @client_mac limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
+        iifname "__LAN_IF__" ip saddr @allowed_icmp ip saddr . ether saddr != @client_mac update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
         iifname "__LAN_IF__" ip saddr @allowed_icmp ip saddr . ether saddr != @client_mac drop
-        iifname "__LAN_IF__" udp dport 53 ip saddr . ether saddr != @client_mac limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
+        iifname "__LAN_IF__" udp dport 53 ip saddr . ether saddr != @client_mac update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
         iifname "__LAN_IF__" udp dport 53 ip saddr . ether saddr != @client_mac drop
-        iifname "__LAN_IF__" tcp dport 53 ip saddr . ether saddr != @client_mac limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
+        iifname "__LAN_IF__" tcp dport 53 ip saddr . ether saddr != @client_mac update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
         iifname "__LAN_IF__" tcp dport 53 ip saddr . ether saddr != @client_mac drop
         # Ports of host (input) rules are also reachable from the LAN only with the
         # recorded MAC, just like the forward permissions.
-        iifname "__LAN_IF__" ip saddr . tcp dport @allowed_input_tcp ip saddr . ether saddr != @client_mac limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
+        iifname "__LAN_IF__" ip saddr . tcp dport @allowed_input_tcp ip saddr . ether saddr != @client_mac update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
         iifname "__LAN_IF__" ip saddr . tcp dport @allowed_input_tcp ip saddr . ether saddr != @client_mac drop
-        iifname "__LAN_IF__" ip saddr . udp dport @allowed_input_udp ip saddr . ether saddr != @client_mac limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
+        iifname "__LAN_IF__" ip saddr . udp dport @allowed_input_udp ip saddr . ether saddr != @client_mac update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=mac " group __DROP_LOG_GROUP__
         iifname "__LAN_IF__" ip saddr . udp dport @allowed_input_udp ip saddr . ether saddr != @client_mac drop
+        # A host grant belongs to a client on the LAN or the WAN; the same
+        # source on any other interface does not inherit it (DJ-17).
+        # Loopback was accepted at the top of the chain.
+        ct direction original iifname != { "__LAN_IF__", "__WAN_IF__" } ip saddr . tcp dport @allowed_input_tcp update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=grant-iface " group __DROP_LOG_GROUP__
+        ct direction original iifname != { "__LAN_IF__", "__WAN_IF__" } ip saddr . tcp dport @allowed_input_tcp drop
+        ct direction original iifname != { "__LAN_IF__", "__WAN_IF__" } ip saddr . udp dport @allowed_input_udp update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=grant-iface " group __DROP_LOG_GROUP__
+        ct direction original iifname != { "__LAN_IF__", "__WAN_IF__" } ip saddr . udp dport @allowed_input_udp drop
 
         # Caddy subdomain proxy (only with HV_PROXY=1; otherwise the entrypoint
         # comments it out). Deliberately AFTER the fail2ban drop, the block and the
@@ -490,7 +549,7 @@ table inet hatarvedelem {
         # also needed on the LAN. The 80/443 of a proxy-banned source is dropped before
         # the proxy acceptance, regardless of HV_PROXY (harmless with the proxy disabled).
         # It is state-independent, so it cuts existing connections too.
-        ip saddr @proxy_banned_v4 tcp dport { 80, 443 } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=proxy-ban " group __DROP_LOG_GROUP__
+        ip saddr @proxy_banned_v4 tcp dport { 80, 443 } update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=proxy-ban " group __DROP_LOG_GROUP__
         ip saddr @proxy_banned_v4 tcp dport { 80, 443 } drop
         # Port proxy (input): the redirected flow passes only if the
         # (client IP, ORIGINAL listening port) pair is in the allowed_input_* set;
@@ -519,13 +578,13 @@ table inet hatarvedelem {
         # rule's lifetime.
         iifname "__LAN_IF__" tcp dport 53 ct state established,related \
             ip saddr != @allowed_v4 ip saddr . tcp dport != @allowed_tcp \
-            ip saddr . tcp dport != @allowed_input_tcp limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=dns-revoked " group __DROP_LOG_GROUP__
+            ip saddr . tcp dport != @allowed_input_tcp update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=dns-revoked " group __DROP_LOG_GROUP__
         iifname "__LAN_IF__" tcp dport 53 ct state established,related \
             ip saddr != @allowed_v4 ip saddr . tcp dport != @allowed_tcp \
             ip saddr . tcp dport != @allowed_input_tcp drop
         iifname "__LAN_IF__" udp dport 53 ct state established,related \
             ip saddr != @allowed_v4 ip saddr . udp dport != @allowed_udp \
-            ip saddr . udp dport != @allowed_input_udp limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=dns-revoked " group __DROP_LOG_GROUP__
+            ip saddr . udp dport != @allowed_input_udp update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=dns-revoked " group __DROP_LOG_GROUP__
         iifname "__LAN_IF__" udp dport 53 ct state established,related \
             ip saddr != @allowed_v4 ip saddr . udp dport != @allowed_udp \
             ip saddr . udp dport != @allowed_input_udp drop
@@ -535,7 +594,7 @@ table inet hatarvedelem {
         # that allows TCP 22 is active. If the permission disappears (after expiry,
         # logout, or even a crash), the connection closes. This rule is placed before
         # the general established-accept below, otherwise the revoked SSH would survive.
-        tcp dport 22 ct state established,related ip saddr . tcp dport != @allowed_input_tcp limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=ssh-revoked " group __DROP_LOG_GROUP__
+        tcp dport 22 ct state established,related ip saddr . tcp dport != @allowed_input_tcp update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=ssh-revoked " group __DROP_LOG_GROUP__
         tcp dport 22 ct state established,related ip saddr . tcp dport != @allowed_input_tcp drop
 
         # The host DNS service (53) is reachable by a client with forward permission
@@ -567,12 +626,12 @@ table inet hatarvedelem {
         # host rule range may cover.
         tcp dport @host_service_tcp tcp dport != 22 ct state established,related ct direction original \
             ip saddr . tcp dport != @allowed_input_tcp \
-            limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=host-revoked " group __DROP_LOG_GROUP__
+            update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=host-revoked " group __DROP_LOG_GROUP__
         tcp dport @host_service_tcp tcp dport != 22 ct state established,related ct direction original \
             ip saddr . tcp dport != @allowed_input_tcp drop
         udp dport @host_service_udp ct state established,related ct direction original \
             ip saddr . udp dport != @allowed_input_udp \
-            limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=host-revoked " group __DROP_LOG_GROUP__
+            update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=host-revoked " group __DROP_LOG_GROUP__
         udp dport @host_service_udp ct state established,related ct direction original \
             ip saddr . udp dport != @allowed_input_udp drop
 
@@ -613,9 +672,10 @@ table inet hatarvedelem {
         iifname "__LAN_IF__" ip saddr . tcp dport @allowed_tcp tcp dport 53 accept
 
         # Logging of incoming traffic not authorized for the portal. The chain's
-        # policy is drop; the limit only restricts logging.
-        iifname "__LAN_IF__" limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=input-lan " group __DROP_LOG_GROUP__
-        iifname "__WAN_IF__" limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=input-wan " group __DROP_LOG_GROUP__
+        # policy is drop; the limit only restricts logging. As in forward,
+        # every source also has its own budget (log_src_v4).
+        iifname "__LAN_IF__" update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 120/minute burst 240 packets log prefix "dropjak-drop reason=input-lan " group __DROP_LOG_GROUP__
+        iifname "__WAN_IF__" update @log_src_v4 { ip saddr limit rate 30/minute burst 60 packets } limit rate 120/minute burst 240 packets log prefix "dropjak-drop reason=input-wan " group __DROP_LOG_GROUP__
     }
 
     chain prerouting {

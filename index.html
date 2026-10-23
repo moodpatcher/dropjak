@@ -2535,7 +2535,7 @@ const I18N = {
     'Proxy': 'Port proxy',
     'Kernelszintű TCP/UDP port proxy (nftables DNAT)': 'Kernel-level TCP/UDP port proxy (nftables DNAT)',
     'ezt a portot a Docker is publikálja; a beállított interfészeken a proxy megelőzi.': 'Docker also publishes this port; on the configured interfaces the proxy takes precedence.',
-    'a cél csak a 127.0.0.1-en figyel, de a hoston ki van kapcsolva a net.ipv4.conf.all.route_localnet; futtasd a docker/setup-host.sh-t.': 'the target listens only on 127.0.0.1, but net.ipv4.conf.all.route_localnet is off on the host; run docker/setup-host.sh.',
+    'a cél csak a 127.0.0.1-en figyel, de a proxy interfészein ki van kapcsolva a route_localnet; a hoston add meg az interfészeket a HV_ROUTE_LOCALNET_IFS változóban (.env), és futtasd újra a docker/setup-host.sh-t.': 'the target listens only on 127.0.0.1, but route_localnet is off on the proxy interfaces; list them in HV_ROUTE_LOCALNET_IFS (.env) on the host and run docker/setup-host.sh again.',
     'Input: a csak 127.0.0.1-en figyelő szolgáltatást (például a Docker 127.0.0.1-re publikált portját) a proxy közvetlenül a 127.0.0.1-re irányítja. Docker-konténernél ekkor a konténer a docker-proxy címét látja; ha a kliens IP-je kell, Forward bejegyzést használj a konténer IP-jére.': 'Input: a service listening only on 127.0.0.1 (for example a Docker port published on 127.0.0.1) is reached by DNAT to 127.0.0.1. For a Docker container, the container then sees the docker-proxy address; if it needs the client IP, use a Forward entry to the container IP.',
     'ezen a porton már figyel egy helyi szolgáltatás; a beállított interfészeken a proxy megelőzi.': 'a local service already listens on this port; on the configured interfaces the proxy takes precedence.',
     'A host hallgató portjára érkező forgalmat a kernel továbbítja a hostra (Input) vagy egy magánhálózati gépre (Forward); a kliens IP-címe megmarad. A hallgató portot engedélyező szabály kell: Forward proxyhoz forward, Input proxyhoz host (input) irányú szabály, amely a hallgató portot tartalmazza, és a kliens aktív munkamenete. A többiek csomagjai eldobódnak.': 'The kernel forwards traffic arriving on the host\'s listen port to the host itself (Input) or to a private-network machine (Forward); the client IP address is preserved. A rule that allows the listen port is required: a forward rule for a Forward proxy, a host (input) rule for an Input proxy, containing the listen port, plus an active session of the client. Packets from everyone else are dropped.',
@@ -3071,6 +3071,17 @@ const I18N = {
     'proxy-unauthorized': 'unauthorized proxy page (401)',
     'container-spoof': 'container spoofing',
     'container-pivot': 'container → LAN pivot',
+    'no-forward': 'destination never forwarded (link-local / provider network)',
+    'ct-invalid': 'invalid connection state',
+    'grant-iface': 'grant used on a foreign interface',
+    'portal-connlimit': 'too many portal connections',
+    'container-direct': 'direct container access without DNAT',
+    'Konténer-kimenet': 'Container egress',
+    'Új konténer-kimenet': 'New container egress',
+    'Konténer IP-cím': 'Container IP address',
+    'Bridge': 'Bridge',
+    'Egy Docker-hálózaton futó konténer kimenő kapcsolatai (például DNS, HTTP, HTTPS letöltéshez). A szabály csak a megadott bridge felől érvényes, a konténer nem nyithat új kapcsolatot a LAN felé, és a 169.254.0.0/16 tartomány sem érhető el.': 'Outbound connections of a container on a Docker network (for example DNS, HTTP, HTTPS for downloads). The entry applies only from the given bridge, the container cannot open new connections into the LAN, and 169.254.0.0/16 stays unreachable.',
+    'A bridge a Docker-hálózat interfésze (ip -br link). Ha a hálózat újralétrehozáskor új br-… nevet kap, adj neki állandó nevet (com.docker.network.bridge.name), vagy használj *-gal végződő mintát (például br-*).': 'The bridge is the interface of the Docker network (ip -br link). If the network gets a new br-… name when it is re-created, give it a fixed name (com.docker.network.bridge.name), or use a pattern ending in * (for example br-*).',
     'ipv6': 'IPv6',
     'unknown': 'unknown',
     'automatikus frissítés kikapcsolva': 'auto-refresh is off',
@@ -3561,7 +3572,7 @@ const I18N = {
     'Proxy': 'Port-Proxy',
     'Kernelszintű TCP/UDP port proxy (nftables DNAT)': 'TCP/UDP-Port-Proxy auf Kernelebene (nftables-DNAT)',
     'ezt a portot a Docker is publikálja; a beállított interfészeken a proxy megelőzi.': 'Docker veröffentlicht diesen Port ebenfalls; auf den eingestellten Schnittstellen hat der Proxy Vorrang.',
-    'a cél csak a 127.0.0.1-en figyel, de a hoston ki van kapcsolva a net.ipv4.conf.all.route_localnet; futtasd a docker/setup-host.sh-t.': 'das Ziel lauscht nur auf 127.0.0.1, aber net.ipv4.conf.all.route_localnet ist auf dem Host deaktiviert; führe docker/setup-host.sh aus.',
+    'a cél csak a 127.0.0.1-en figyel, de a proxy interfészein ki van kapcsolva a route_localnet; a hoston add meg az interfészeket a HV_ROUTE_LOCALNET_IFS változóban (.env), és futtasd újra a docker/setup-host.sh-t.': 'das Ziel lauscht nur auf 127.0.0.1, aber route_localnet ist auf den Schnittstellen des Proxys aus; trage sie auf dem Host in HV_ROUTE_LOCALNET_IFS (.env) ein und führe docker/setup-host.sh erneut aus.',
     'Input: a csak 127.0.0.1-en figyelő szolgáltatást (például a Docker 127.0.0.1-re publikált portját) a proxy közvetlenül a 127.0.0.1-re irányítja. Docker-konténernél ekkor a konténer a docker-proxy címét látja; ha a kliens IP-je kell, Forward bejegyzést használj a konténer IP-jére.': 'Input: ein Dienst, der nur auf 127.0.0.1 lauscht (zum Beispiel ein von Docker auf 127.0.0.1 veröffentlichter Port), wird per DNAT auf 127.0.0.1 erreicht. Bei einem Docker-Container sieht der Container dann die docker-proxy-Adresse; braucht er die Client-IP, nutze einen Forward-Eintrag auf die Container-IP.',
     'ezen a porton már figyel egy helyi szolgáltatás; a beállított interfészeken a proxy megelőzi.': 'auf diesem Port lauscht bereits ein lokaler Dienst; auf den eingestellten Schnittstellen hat der Proxy Vorrang.',
     'A host hallgató portjára érkező forgalmat a kernel továbbítja a hostra (Input) vagy egy magánhálózati gépre (Forward); a kliens IP-címe megmarad. A hallgató portot engedélyező szabály kell: Forward proxyhoz forward, Input proxyhoz host (input) irányú szabály, amely a hallgató portot tartalmazza, és a kliens aktív munkamenete. A többiek csomagjai eldobódnak.': 'Der Kernel leitet den am Lauschport des Hosts eingehenden Verkehr an den Host selbst (Input) oder an einen Rechner im privaten Netz (Forward) weiter; die Client-IP-Adresse bleibt erhalten. Erforderlich ist eine Regel, die den Lauschport erlaubt: für einen Forward-Proxy eine Forward-Regel, für einen Input-Proxy eine Host-(Input-)Regel mit dem Lauschport, und eine aktive Sitzung des Clients. Pakete aller anderen werden verworfen.',
@@ -4099,6 +4110,17 @@ const I18N = {
     'proxy-unauthorized': 'unberechtigte Proxy-Seite (401)',
     'container-spoof': 'Container-Spoofing',
     'container-pivot': 'Container → LAN-Pivot',
+    'no-forward': 'nie weitergeleitetes Ziel (Link-Local / Providernetz)',
+    'ct-invalid': 'ungültiger Verbindungszustand',
+    'grant-iface': 'Freigabe auf fremder Schnittstelle',
+    'portal-connlimit': 'zu viele Portalverbindungen',
+    'container-direct': 'direkter Containerzugriff ohne DNAT',
+    'Konténer-kimenet': 'Container-Ausgang',
+    'Új konténer-kimenet': 'Neuer Container-Ausgang',
+    'Konténer IP-cím': 'Container-IP-Adresse',
+    'Bridge': 'Bridge',
+    'Egy Docker-hálózaton futó konténer kimenő kapcsolatai (például DNS, HTTP, HTTPS letöltéshez). A szabály csak a megadott bridge felől érvényes, a konténer nem nyithat új kapcsolatot a LAN felé, és a 169.254.0.0/16 tartomány sem érhető el.': 'Ausgehende Verbindungen eines Containers in einem Docker-Netz (zum Beispiel DNS, HTTP, HTTPS für Downloads). Der Eintrag gilt nur von der angegebenen Bridge aus, der Container kann keine neuen Verbindungen ins LAN öffnen, und 169.254.0.0/16 bleibt unerreichbar.',
+    'A bridge a Docker-hálózat interfésze (ip -br link). Ha a hálózat újralétrehozáskor új br-… nevet kap, adj neki állandó nevet (com.docker.network.bridge.name), vagy használj *-gal végződő mintát (például br-*).': 'Die Bridge ist die Schnittstelle des Docker-Netzes (ip -br link). Erhält das Netz beim Neuanlegen einen neuen br-…-Namen, gib ihm einen festen Namen (com.docker.network.bridge.name) oder verwende ein Muster mit * am Ende (zum Beispiel br-*).',
     'ipv6': 'IPv6',
     'unknown': 'unbekannt',
     'automatikus frissítés kikapcsolva': 'automatische Aktualisierung ist aus',
@@ -8722,6 +8744,7 @@ function logSubject(entry) {
   if (event === 'admin_portproxy_changed') return String(entry.port_proxies || '');
   if (event !== 'admin_settings_changed') return '';
   if (action === 'proxy') return [entry.proxy_domains, entry.proxy_routes].filter(Boolean).join(' · ');
+  if (action === 'container_egress') return String(entry.container_egress || '');
   return action.startsWith('proxy_cert_') ? String(entry.target || '') : '';
 }
 function logDetail(entry) {
@@ -10015,7 +10038,79 @@ function renderSettings() {
 
   adminPanel.append(renderSettingSection('preauth', settings.preauth || []));
 
+  adminPanel.append(renderContainerEgressSection(settings.container_egress || []));
+
   adminPanel.append(renderConfigFlashSection());
+}
+/* Container egress (DJ-32): outbound ports of single containers on a Docker
+   bridge. The forward chain is fail-closed, so a container that must reach
+   the internet needs an entry; every accept is bound to its bridge. */
+function renderContainerEgressSection(entries) {
+  const section = el('div', { class: 'admin-form' });
+  section.append(el('h3', { text: tr('Konténer-kimenet') }));
+  section.append(el('p', {
+    class: 'port-hint',
+    text: tr('Egy Docker-hálózaton futó konténer kimenő kapcsolatai (például DNS, HTTP, HTTPS letöltéshez). A szabály csak a megadott bridge felől érvényes, a konténer nem nyithat új kapcsolatot a LAN felé, és a 169.254.0.0/16 tartomány sem érhető el.')
+  }));
+  section.append(el('p', {
+    class: 'port-hint',
+    text: tr('A bridge a Docker-hálózat interfésze (ip -br link). Ha a hálózat újralétrehozáskor új br-… nevet kap, adj neki állandó nevet (com.docker.network.bridge.name), vagy használj *-gal végződő mintát (például br-*).')
+  }));
+  const body = el('div');
+  const portList = value => (Array.isArray(value) ? value : []).join(', ');
+  const parsePorts = value => String(value || '').split(/[\s,]+/).filter(Boolean).map(Number);
+  const addRow = entry => {
+    const field = (name, label, value, placeholder, maxlength) => el('div', { class: 'field' },
+      el('label', { text: tr(label) }),
+      el('input', {
+        name, value: value || '', placeholder, maxlength, autocomplete: 'off',
+        'aria-label': tr(label)
+      })
+    );
+    const enabled = el('input', {
+      type: 'checkbox', name: 'ce_enabled', checked: entry.enabled !== false,
+      'aria-label': tr('aktív')
+    });
+    const row = el('div', { class: 'f2b-group', 'data-id': entry.id || '' },
+      el('div', { class: 'proxy-line' },
+        field('ce_label', 'Címke', entry.label, 'Game server', 64),
+        el('label', { class: 'f2b-toggle' }, enabled, tr('aktív')),
+        el('button', {
+          type: 'button', class: 'danger small', onclick: () => row.remove()
+        }, tr('Törlés'))
+      ),
+      el('div', { class: 'proxy-line' },
+        field('ce_address', 'Konténer IP-cím', entry.address, '172.30.0.2', 15),
+        field('ce_bridge', 'Bridge', entry.bridge, 'br-mc', 15),
+        field('ce_tcp', 'TCP portok', portList(entry.tcp), '53, 80, 443', 400),
+        field('ce_udp', 'UDP portok', portList(entry.udp), '53', 400)
+      )
+    );
+    body.append(row);
+  };
+  for (const entry of entries) addRow(entry);
+  section.append(body);
+  section.append(el('div', { class: 'form-actions' },
+    el('button', {
+      type: 'button', class: 'ghost small', onclick: () => addRow({})
+    }, tr('Új konténer-kimenet')),
+    el('button', {
+      type: 'button', class: 'small',
+      onclick: () => adminSend('/api/admin/settings', {
+        action: 'container_egress',
+        container_egress: Array.from(body.children, row => ({
+          ...(row.dataset.id ? { id: row.dataset.id } : {}),
+          label: row.querySelector('[name=ce_label]').value,
+          address: row.querySelector('[name=ce_address]').value.trim(),
+          bridge: row.querySelector('[name=ce_bridge]').value.trim(),
+          tcp: parsePorts(row.querySelector('[name=ce_tcp]').value),
+          udp: parsePorts(row.querySelector('[name=ce_udp]').value),
+          enabled: row.querySelector('[name=ce_enabled]').checked
+        }))
+      })
+    }, tr('Mentés'))
+  ));
+  return section;
 }
 /* Is there state that must be protected with a typed name before import? */
 function configStateNonEmpty() {
@@ -10029,6 +10124,7 @@ function configStateNonEmpty() {
   return !!(settings.proxy_domains || []).length ||
     !!(settings.proxy_routes || []).length ||
     !!(settings.port_proxies || []).length ||
+    !!(settings.container_egress || []).length ||
     !!(settings.preauth || []).length ||
     !!(settings.block || []).length;
 }
@@ -10798,7 +10894,7 @@ function renderPortProxy() {
     adminPanel.append(el('div', {
       class: 'admin-flash',
       text: `${warn.proto.toUpperCase()} ${warn.port}: ` + tr(warn.localnet
-        ? 'a cél csak a 127.0.0.1-en figyel, de a hoston ki van kapcsolva a net.ipv4.conf.all.route_localnet; futtasd a docker/setup-host.sh-t.'
+        ? 'a cél csak a 127.0.0.1-en figyel, de a proxy interfészein ki van kapcsolva a route_localnet; a hoston add meg az interfészeket a HV_ROUTE_LOCALNET_IFS változóban (.env), és futtasd újra a docker/setup-host.sh-t.'
         : warn.docker
         ? 'ezt a portot a Docker is publikálja; a beállított interfészeken a proxy megelőzi.'
         : 'ezen a porton már figyel egy helyi szolgáltatás; a beállított interfészeken a proxy megelőzi.')

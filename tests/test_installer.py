@@ -47,6 +47,7 @@ EXPECTED_NFT_PLACEHOLDERS = {
     "__FWD_MARK__",
     "__DROP_LOG_GROUP__",
     "__PROXY__",
+    "__NO_FORWARD_NETS__",
 }
 
 # Pre-3.0.0 SSH plumbing that must not be described as current behaviour.

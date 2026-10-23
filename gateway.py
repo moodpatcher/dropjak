@@ -215,6 +215,13 @@ PORTPROXY_CHAINS = ("portproxy_nat", "portproxy_input", "portproxy_snat")
 # Receiving chain for the UDP port of the WireGuard tunnel. The portal fills
 # it in; without an agent it stays empty, so the WireGuard port is closed.
 TUNNEL_CHAIN = "tunnel_input"
+# Container egress exceptions (settings ``container_egress``), jumped from the
+# forward chain where the template used to hard-code one container.
+CONTAINER_EGRESS_CHAIN = "container_egress"
+# The per-source log budget shared by every log rule (template set
+# log_src_v4); it must match the template's update statements.
+LOG_SOURCE_SET = "log_src_v4"
+LOG_SOURCE_LIMIT = "limit rate 30/minute burst 60 packets"
 
 # Drop-based fail2ban: only genuine, unapproved TCP traffic counts.
 # The MAC/spoof/ipv6/fail2ban/dns/ssh reasons are excluded (fake source IP
@@ -224,6 +231,42 @@ DROP_BAN_REASONS = frozenset(
     {"no-grant", "wan-drop", "input-wan", "input-lan", "portproxy"}
 )
 DROP_BAN_SKIP_TCP_PORTS = frozenset({53})
+# LAN-side drop reasons whose source address is counted only when the
+# packet's source MAC matches the address's ARP entry or DHCP lease: anyone
+# on the LAN segment can forge a neighbour's address.
+LAN_VERIFIED_DROP_REASONS = frozenset({"no-grant", "input-lan"})
+# dnsmasq lease files (Debian/Ubuntu, then RHEL/Fedora). Missing in the
+# container unless mounted; the ARP table is checked first anyway.
+DHCP_LEASE_PATHS = (
+    "/var/lib/misc/dnsmasq.leases",
+    "/var/lib/dnsmasq/dnsmasq.leases",
+)
+
+
+def dhcp_lease_mac(ip: str, paths=DHCP_LEASE_PATHS) -> str | None:
+    """The MAC address of an active dnsmasq lease for ``ip``, or None.
+
+    A lease line is ``<expiry> <mac> <ip> <hostname> <client-id>``; an
+    expiry of 0 means an infinite lease.
+    """
+    now = time.time()
+    for path in paths:
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                for line in fh:
+                    fields = line.split()
+                    if len(fields) < 3 or fields[2] != ip:
+                        continue
+                    try:
+                        expiry = int(fields[0])
+                    except ValueError:
+                        continue
+                    mac = fields[1].strip().lower()
+                    if (expiry == 0 or expiry > now) and _MAC_RE.match(mac):
+                        return mac
+        except (OSError, UnicodeError):
+            continue
+    return None
 
 
 def infra_exempt_addresses(
@@ -293,6 +336,7 @@ RULESET_CHAINS = (
     "portproxy_input",
     "portproxy_snat",
     "tunnel_input",
+    "container_egress",
     "loopback_guard",
     "breakglass",
 )
@@ -3928,8 +3972,13 @@ class Firewall:
         return str(network)
 
     def _log_statement(self, reason: str, rate: str = "30/minute") -> str:
-        """Rate-limited NFLOG log expression (for a standalone, non-dropping rule)."""
+        """Rate-limited NFLOG log expression (for a standalone, non-dropping rule).
+
+        Like the template's log rules, the source's own budget in the
+        log_src_v4 set comes first (DJ-07), then the rule-wide limit.
+        """
         return (
+            f"update @{LOG_SOURCE_SET} {{ ip saddr {LOG_SOURCE_LIMIT} }} "
             f"limit rate {rate} burst 60 packets log prefix "
             f'"dropjak-drop reason={reason} " group {self.drop_log_group}'
         )
@@ -4370,10 +4419,12 @@ class Firewall:
     def _tunnel_rules(self, tunnels=()) -> list[str]:
         """The tunnel receive rules, if there is an enabled agent.
 
-        Besides the WireGuard UDP port, the portal's sync endpoint is also
-        reachable from the tunnel; the portal's input chain would otherwise
-        allow it only from the LAN and the portal network, so the agent
-        could not refresh its service list.
+        Besides the WireGuard UDP port, the agent sync listener is reachable
+        from the tunnel: only its own port on 10.77.0.1 (DJ-15), never the
+        portal port. Agents installed before the separate listener still
+        call ``10.77.0.1:<portal port>``; a NAT rule (see
+        :meth:`_tunnel_nat_rules`) redirects them to the sync port, so the
+        portal itself stays unreachable from the tunnel.
         """
         if not isinstance(tunnels, dict):
             return []
@@ -4396,8 +4447,99 @@ class Firewall:
             f"add rule inet {self.table} {TUNNEL_CHAIN} "
             f'iifname "{tunnel_mod.INTERFACE}" '
             f"ip saddr {settings_store.TUNNEL_SUBNET} "
-            f"tcp dport {settings_store.PORTAL_PORT} accept",
+            f"ip daddr {settings_store.TUNNEL_SERVER_ADDRESS} "
+            f"tcp dport {settings_store.TUNNEL_SYNC_PORT} accept",
         ]
+
+    def _tunnel_nat_rules(self, tunnels=()) -> list[str]:
+        """Legacy agent sync URLs (portal port) go to the sync listener.
+
+        Only with an enabled agent, like :meth:`_tunnel_rules`. The redirect
+        keeps 10.77.0.1 as the destination (the tunnel interface's address).
+        """
+        if not self._tunnel_rules(tunnels):
+            return []
+        return [
+            f"add rule inet {self.table} portproxy_nat "
+            f'iifname "{tunnel_mod.INTERFACE}" '
+            f"ip saddr {settings_store.TUNNEL_SUBNET} "
+            f"ip daddr {settings_store.TUNNEL_SERVER_ADDRESS} "
+            f"tcp dport {settings_store.PORTAL_PORT} "
+            f"redirect to :{settings_store.TUNNEL_SYNC_PORT}"
+        ]
+
+    def _container_egress_rules(self, entries=()) -> list[str]:
+        """The container egress chain (settings ``container_egress``).
+
+        Per enabled entry: the container's address coming from any other
+        interface is dropped (container-spoof), a new flow from it into the
+        LAN is dropped (container-pivot), the configured outbound ports are
+        accepted only from its bridge, and the replies of the flows the
+        container started go back only to its bridge. The template's
+        no_forward_v4 drop runs before the jump, so the link-local range
+        stays unreachable. Any invalid entry raises FirewallError before
+        execution.
+        """
+        table = self.table
+        chain = CONTAINER_EGRESS_CHAIN
+        lines: list[str] = []
+        for entry in _enabled_custom_entries(entries):
+            try:
+                address = ipaddress.IPv4Address(str(entry.get("address", "")))
+            except ValueError:
+                raise FirewallError("invalid container egress address") from None
+            bridge = str(entry.get("bridge", ""))
+            if not settings_store._BRIDGE_RE.match(bridge):
+                raise FirewallError("invalid container egress bridge")
+            ports = {}
+            for proto in ("tcp", "udp"):
+                raw = entry.get(proto) or []
+                if not isinstance(raw, (list, tuple)) or any(
+                    isinstance(port, bool) or not isinstance(port, int)
+                    or not 1 <= port <= 65535 for port in raw
+                ):
+                    raise FirewallError("invalid container egress port")
+                ports[proto] = sorted(set(raw))
+            if not ports["tcp"] and not ports["udp"]:
+                raise FirewallError("invalid container egress entry")
+            if self.lan_network is not None:
+                lan = f"ip daddr {self.lan_network}"
+            elif self.lan_if:
+                lan = f'oifname "{self.lan_if}"'
+            else:
+                raise FirewallError(
+                    "container egress can only be applied with a known LAN "
+                    "network"
+                )
+            spoof = f'iifname != "{bridge}" ip saddr {address}'
+            lines.append(
+                f"add rule inet {table} {chain} {spoof} "
+                f"{self._log_statement('container-spoof')}"
+            )
+            lines.append(f"add rule inet {table} {chain} {spoof} drop")
+            own = f'iifname "{bridge}" ip saddr {address}'
+            pivot = f"{own} {lan} ct state new"
+            lines.append(
+                f"add rule inet {table} {chain} {pivot} "
+                f"{self._log_statement('container-pivot')}"
+            )
+            lines.append(f"add rule inet {table} {chain} {pivot} drop")
+            for proto in ("tcp", "udp"):
+                if ports[proto]:
+                    lines.append(
+                        f"add rule inet {table} {chain} {own} "
+                        f"{proto} dport {self._port_set(ports[proto])} "
+                        f"meta mark set {self.fwd_mark} accept"
+                    )
+            # Replies of the container's own flows only: a client ->
+            # container flow ends with the client's grant.
+            lines.append(
+                f'add rule inet {table} {chain} oifname "{bridge}" '
+                f"ip daddr {address} ct state established,related "
+                f"ct original ip saddr {address} "
+                f"meta mark set {self.fwd_mark} accept"
+            )
+        return lines
 
     def docker_published_ports(self) -> set[tuple[str, int]]:
         """Host ports DNAT-ed (published) by Docker; on error: empty."""
@@ -4427,7 +4569,7 @@ class Firewall:
 
     def replace_custom(
         self, preauth=(), block=(), *, keep_block: bool = False,
-        port_proxies=(), tunnels=None,
+        port_proxies=(), tunnels=None, container_egress=(),
     ) -> None:
         """Replace the pre-auth/block chains in a single nft transaction.
 
@@ -4444,6 +4586,8 @@ class Firewall:
         The port proxy chains are replaced in the same transaction. The
         tunnel services are added among the port proxy rules as synthetic
         forward entries; the WireGuard UDP port goes into a separate chain.
+        The container egress chain is replaced too; like pre-auth it is
+        emptied (``container_egress=()``) when the settings file is invalid.
         """
         tunnels = tunnels or {}
         synthetic = tunnel_proxy_entries(tunnels)
@@ -4457,12 +4601,13 @@ class Firewall:
                 tunnel_public=tunnel_public_preauth(tunnels),
             )
             + self._tunnel_snat_rules(tunnels)
-            + tunnel_rules + proxy_rules
+            + tunnel_rules + self._tunnel_nat_rules(tunnels) + proxy_rules
+            + self._container_egress_rules(container_egress)
         )
         chains = (
             ("preauth", "preauth_input", "preauth_nat")
             if keep_block else CUSTOM_CHAINS
-        ) + PORTPROXY_CHAINS + (TUNNEL_CHAIN,)
+        ) + PORTPROXY_CHAINS + (TUNNEL_CHAIN, CONTAINER_EGRESS_CHAIN)
         lines = [
             f"add chain inet {self.table} {chain}" for chain in chains
         ]
@@ -5926,6 +6071,38 @@ class Firewall:
                 for line in lines
             ]
         return "\n".join(lines).strip()
+
+    def input_chain_consistent(self, port: int = PORT) -> tuple[bool, str]:
+        """Whether the loaded input chain was rendered for this portal (DJ-18).
+
+        The host-grant accept must exclude this portal's port, and the LAN
+        rules must name this LAN interface. A table rendered with another
+        PORT or interface (a stale native file, a mismatched .env) would let
+        a host grant open the portal port or leave LAN-only rules dead.
+        In dry-run mode it is always consistent.
+        """
+        if self.dry_run:
+            return True, "ok"
+        try:
+            with self._lock:
+                result = self._run(
+                    ["list", "chain", "inet", self.table, "input"],
+                    check=False,
+                )
+        except FirewallError as exc:
+            return False, str(exc)
+        if result.returncode != 0:
+            detail = result.stderr.decode("utf-8", "replace").strip()
+            return False, detail or "the input chain cannot be listed"
+        text = result.stdout.decode("utf-8", "replace")
+        problems = []
+        if f"tcp dport != {int(port)}" not in text:
+            problems.append(f"no host-grant rule excludes the portal port {port}")
+        if self.lan_if and f'iifname "{self.lan_if}"' not in text:
+            problems.append(f"no rule names the LAN interface {self.lan_if}")
+        if problems:
+            return False, "; ".join(problems)
+        return True, "ok"
 
     def healthy(self) -> tuple[bool, str]:
         try:
@@ -9676,6 +9853,9 @@ class Gateway:
         # grants cannot be issued even if the sync has not run yet
         # (fail-closed). prepare() synchronizes before serving.
         self._host_ports_ok = False
+        # False when the loaded input chain was rendered for another portal
+        # port or LAN interface (check_input_chain); host grants are refused.
+        self._input_chain_ok = True
         # Sync + cleanup run under one lock: a cleanup starting with a stale
         # reference list must not delete a freshly added port of a rule
         # created in the meantime.
@@ -9900,6 +10080,7 @@ class Gateway:
                 "restoring host guards, bans and custom chains"
             )
             self.sync_host_ports()
+            self.check_input_chain()
             bans_ok = self.fail2ban.sync()
             try:
                 self._apply_custom_settings()
@@ -9958,9 +10139,37 @@ class Gateway:
         arise. The false state can be healed by a single retry, so that a
         transient nft error does not block further sign-ins.
         """
+        if not getattr(self, "_input_chain_ok", True):
+            return False
         if not self._host_ports_ok:
             self.sync_host_ports()
         return self._host_ports_ok
+
+    def check_input_chain(self) -> bool:
+        """Startup consistency check of the loaded input chain (DJ-18).
+
+        On a mismatch host grants are refused (``_host_ports_healthy``
+        returns false), forward grants keep working. Never fatal.
+        """
+        check = getattr(self.firewall, "input_chain_consistent", None)
+        if check is None:
+            return True
+        try:
+            ok, why = check()
+        except Exception as exc:  # a check must never stop the portal
+            ok, why = False, str(exc)
+        ok = ok is True
+        self._input_chain_ok = ok
+        if not ok:
+            log(
+                "[firewall] ERROR: the loaded input chain does not match this "
+                f"portal ({why}); host grants are refused until the rules "
+                "are re-rendered with the same PORT and HV_LAN_IF"
+            )
+            self._write_audit(
+                "firewall_error", operation="input_chain", reason=why,
+            )
+        return ok
 
     def sync_host_ports(self) -> None:
         """Carrying the ports of the host (input) rules through to the kernel.
@@ -10083,6 +10292,11 @@ class Gateway:
         src = str(record.get("src") or "").strip()
         if not src:
             return
+        # On the LAN a neighbour's address is easy to forge: such a drop
+        # counts only when the logged source MAC is the address's own (DJ-01).
+        if reason in LAN_VERIFIED_DROP_REASONS \
+                and not self._lan_source_verified(src, record.get("mac")):
+            return
         try:
             # Traffic from the WAN also counts toward the packet threshold;
             # LAN-side no-grant/input-lan only toward port diversity, because
@@ -10093,6 +10307,23 @@ class Gateway:
             )
         except Exception as exc:
             log(f"[fail2ban] drop-based ban of {src} failed: {exc}")
+
+    def _lan_source_verified(self, ip: str, mac) -> bool:
+        """Whether a LAN packet's source MAC belongs to its source address.
+
+        The address's ARP entry on the LAN interface, or else its active
+        DHCP lease, must name the same MAC. Without a logged MAC, or with
+        neither entry, the source is unverified and is not counted.
+        """
+        mac = str(mac or "").strip().lower()
+        if not _MAC_RE.match(mac):
+            return False
+        firewall = getattr(self, "firewall", None)
+        lan_if = getattr(firewall, "lan_if", "") or HV_LAN_IF
+        arp_path = getattr(firewall, "arp_path", "") or ARP_PATH
+        if arp_mac(ip, lan_if, arp_path) == mac:
+            return True
+        return dhcp_lease_mac(ip) == mac
 
     def record_proxy_drop(self, ip: str, host: str, path: str) -> None:
         """A proxy 401 (block page) line in the drop log.
@@ -10161,10 +10392,18 @@ class Gateway:
             )
             return
         revoked = 0
-        try:
-            revoked = self.sessions.revoke_ip(ip, reason="fail2ban")
-        except Exception as exc:
-            log(f"[fail2ban] tearing down the sessions of {ip} failed: {exc}")
+        # A drop-signal ban rests on unverified packets (a forged source can
+        # trigger it), so it does not end the address's portal sessions: the
+        # ban rule already drops the address's own new traffic while it
+        # lasts, and the session works again after it (DJ-01).
+        if source != "drop":
+            try:
+                revoked = self.sessions.revoke_ip(ip, reason="fail2ban")
+            except Exception as exc:
+                log(
+                    f"[fail2ban] tearing down the sessions of {ip} failed: "
+                    f"{exc}"
+                )
         self.audit.write(
             "fail2ban_ban",
             ip=ip,
@@ -10288,6 +10527,7 @@ class Gateway:
         # permissions retry once at the first authorize and remain closed in a
         # fail-closed manner.
         self.sync_host_ports()
+        self.check_input_chain()
         ok, why = self.firewall.healthy()
         if ok:
             log(
@@ -10372,6 +10612,7 @@ class Gateway:
                         snapshot.get("preauth", []), snapshot.get("block", []),
                         port_proxies=snapshot.get("port_proxies", []),
                         tunnels=snapshot.get("tunnels", {}),
+                        container_egress=snapshot.get("container_egress", []),
                     )
             except FirewallError as exc:
                 log(
@@ -10414,6 +10655,7 @@ class Gateway:
                 old.get("preauth", []), old.get("block", []),
                 port_proxies=old.get("port_proxies", []),
                 tunnels=old.get("tunnels", {}),
+                container_egress=old.get("container_egress", []),
             )
 
     def apply_settings(self, new_data: dict) -> None:
@@ -10430,6 +10672,7 @@ class Gateway:
                     new_data.get("preauth", []), new_data.get("block", []),
                     port_proxies=new_data.get("port_proxies", []),
                     tunnels=tunnels,
+                    container_egress=new_data.get("container_egress", []),
                 )
             except FirewallError:
                 try:
