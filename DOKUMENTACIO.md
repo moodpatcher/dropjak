@@ -891,6 +891,46 @@ directory); everything else is still removed. Backups in
 `/root/hatarvedelem-backups` are always kept. Missing containers, units,
 tables, files and accounts are skipped with a note, so a repeated run is safe.
 
+#### 10.8. Update
+`update.sh` updates a checkout in place: it first backs up the configuration
+and the runtime state, then runs a fast-forward-only git pull. The backup
+never goes into the repository. It is written to `/root/hatarvedelem-backups`
+(mode 0700, archives 0600), matching the `hv backup` convention; the script
+refuses to run when `HV_BACKUPS` resolves to the checkout or a directory below
+it.
+
+```bash
+sudo ./update.sh                    # asks for confirmation (y/N)
+sudo ./update.sh --yes              # no confirmation
+./update.sh --dry-run               # preview, works without root
+HV_BACKUPS=/srv/backups sudo -E ./update.sh
+```
+
+The configuration backup `hatarvedelem-<timestamp>.tar.gz` contains a copy of
+`.env` as `env`, `secrets/`, and the `dropjak.service.d` systemd drop-in when
+present. The state is written as `dropjak-state-<timestamp>.tar.gz` from the
+Docker volume `dropjak-state` and/or `dropjak-state-native-<timestamp>.tar.gz`
+from `/var/lib/hatarvedelem`. If neither state directory exists, the
+configuration backup is still created and a warning is printed. The script
+never prints the contents of `.env` or the secrets.
+
+The git step is `git pull --ff-only`; nothing is stashed, reset, checked out
+or discarded, so a dirty checkout or a diverged branch fails cleanly with the
+backup intact. After a successful pull the script only prints what is needed
+for the deployment to take effect; it does not run it:
+
+```bash
+# Docker deployment (host-network build), or: sudo deploy/hv rebuild
+DOCKER_BUILDKIT=0 docker build --network host -t dropjak:2 .
+docker compose up -d --force-recreate
+
+# Native deployment: re-run the installer with the same arguments
+sudo ./install.sh <the original arguments>
+```
+
+The native `install.sh` copies the script to `/opt/hatarvedelem/update.sh`
+with mode 0755.
+
 ### 11. Testing
 #### 11.1. Local unit and API tests
 The full suite in the 3.24.0 local working directory is **985 tests**, all OK. Running it in the repository's usual way:
@@ -4881,8 +4921,11 @@ CLI-created users get the `user` role; promote them in **Admin → Users**.
 
 ##### Update
 
+`update.sh` backs up the configuration and the state outside the checkout,
+then runs a fast-forward-only pull (see 10.8); rebuild afterwards:
+
 ```bash
-git pull
+sudo ./update.sh
 DOCKER_BUILDKIT=0 docker build --network host -t dropjak:2 .
 docker compose up -d --force-recreate
 ```
@@ -5110,6 +5153,22 @@ The running version is stored in [`VERSION`](VERSION).
 
 #### Added
 
+- **Update script.** `update.sh` backs up the configuration (`.env` as
+  `env`, `secrets/`, and the `dropjak.service.d` systemd drop-in) and the
+  runtime state (the Docker `dropjak-state` volume and/or
+  `/var/lib/hatarvedelem`) into `/root/hatarvedelem-backups` (mode 0700,
+  archives 0600; `HV_BACKUPS` overrides), then runs `git pull --ff-only` in
+  the checkout. The backup never goes into the repository: a backup directory
+  at or below the checkout is refused. `--dry-run`/`-n` previews without root
+  and creates nothing, `--yes` skips the `y/N` confirmation. A failed backup
+  aborts before git; a dirty or diverged pull fails cleanly with the backup
+  intact. After a successful pull it only prints the follow-up: `hv rebuild`
+  (or `DOCKER_BUILDKIT=0 docker build --network host -t dropjak:2 .` and
+  `docker compose up -d --force-recreate`) for Docker, and a re-run of
+  `install.sh` with the same arguments for native. `install.sh` copies it to
+  `/opt/hatarvedelem/update.sh` with mode 0755. New `tests/test_update.py`
+  (syntax, help, git dry-run, repository guard, root requirement, non-git
+  dry-run); the measured suite is **1151 tests OK**.
 - **Uninstall script.** `uninstall.sh` removes a Dropjak installation for
   both deployment styles: it tears down the Compose stack, containers, local
   image tags and volumes (unless `--keep-data`), stops and disables the
