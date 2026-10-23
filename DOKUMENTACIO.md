@@ -177,8 +177,7 @@ The container does not operate in its own network namespace: it must reach the h
 #### 3.3. Startup sequence
 1. On the host, `dropjak-boot.service`, installed by `docker/setup-host.sh`, loads early a separate `inet hatarvedelem_boot` table: `forward` policy drop, and blocking host SSH (`tcp dport 22`) until the final rules are loaded.
 2. The Docker daemon starts, then the container.
-3. `entrypoint.sh` refuses to start when `HV_PROXY=1` and `HV_PROXY_KEY` is shorter than 32 characters (before touching the firewall; the error says to run `openssl rand -hex 32`). The mandatory env values are `HV_LAN_IF`, `HV_WAN_IF` and `HV_LAN_NET`;
-`HV_PORTAL_NET` defaults to `0.0.0.0/0` (public portal). It renders the template, and loads the `inet hatarvedelem` table.
+3. `entrypoint.sh` refuses to start when `HV_PROXY=1` and `HV_PROXY_KEY` is shorter than 32 characters (before touching the firewall; the error says to run `openssl rand -hex 32`). The mandatory env values are `HV_WAN_IF` and, in the default two-NIC mode, `HV_LAN_IF` and `HV_LAN_NET`; with `HV_SINGLE_NIC=1` the latter two are ignored. `HV_PORTAL_NET` defaults to `0.0.0.0/0` (public portal). It renders the template, and loads the `inet hatarvedelem` table.
 4. The entrypoint flushes the dynamic sets so that no authorization remains without a session. `host_service_tcp` / `host_service_udp` are intentionally not flushed.
 5. It deletes the former `host_ssh_v4` set if it still exists; it can no longer grant access.
 6. It deletes the early boot table.
@@ -229,17 +228,17 @@ The port-based dynamic sets have the `interval,timeout` flag: a rule can also gi
 The approximate order of the forward chain:
 
 1. IPv6 drop (closed despite IPv4 forwarding; the raw prerouting `loopback_guard` already dropped it).
-2. Source IP spoofing prevention: on the LAN interface only `HV_LAN_NET`, from the WAN a LAN source is forbidden.
+2. Source IP spoofing prevention: on the LAN interface only `HV_LAN_NET`, from the WAN a LAN source is forbidden (two-NIC mode; in single-NIC mode there is no LAN-scoped spoof rule).
 3. `banned_v4` drop, logged; this runs before every authorization and pre-auth.
-4. MAC check for authorized IPs on the LAN.
-5. `block` chain; the block precedes every grant. Then the link-local (`no_forward_v4`) drop, and the DNAT requirement: a new flow into `docker*`, `br-*` or a `docker_bridges` interface, or from the WAN into the LAN, is dropped unless it was DNAT-ed (published port, port proxy).
+4. MAC check for authorized IPs on the LAN (two-NIC mode; disabled in single-NIC mode).
+5. `block` chain; the block precedes every grant. Then the link-local (`no_forward_v4`) drop, and the DNAT requirement: a new flow into `docker*`, `br-*` or a `docker_bridges` interface, or from the WAN into the LAN, is dropped unless it was DNAT-ed (published port, port proxy). The WAN→LAN guard is omitted in single-NIC mode.
 6. Full access (`allowed_v4`) and port authorizations (`allowed_tcp`, `allowed_udp`, `allowed_icmp`), with `meta mark set 0x44524a4b`.
 7. The response direction of full access and ICMP with the mark; the response of port authorizations is covered by matching according to `ct original`.
 8. Docker container exceptions (in the template `172.30.0.2`): anti-spoof and LAN-pivot blocking, DNS and 53/80/443 egress, and responses to connections initiated by the container.
 9. `preauth` chain; pre-auth means bypassing the portal, and it also covers the response direction.
 10. Everything else drop.
 
-The input chain is similarly fail-closed, but with the portal, DHCP and LAN DNS as exceptions. Host SSH is opened by the `(IP, 22) ∈ allowed_input_tcp` pair; the generic established rule does not keep revoked SSH alive. The input `block` jump is `iifname "<HV_LAN_IF>" ct direction original jump block`: block entries restrict the LAN clients, so a destination-less entry (for example TCP 443) does not stop inbound WAN traffic to the host (Caddy, tunnels, port proxies), nor replies to the host's own connections. There is no post-DNAT matching. After the `block` jump, but before the MAC guards, the portal and SSH rules, `jump preauth_input` follows: this implements the `input` direction of `preauth` entries, with direct `accept` (no forward mark and no `preauth_nat`). The chain starts with the `banned_v4` drop and matches traffic by `ct original ip daddr`/`ct original proto-dst`. The entry's `scope` decides the interfaces: `lan` (the default, also for entries stored without the field) renders only `iifname "<HV_LAN_IF>"`, including its established accept; `any` renders the LAN and the WAN interface and an interface-free established accept. A `lan` entry without a known LAN interface is skipped with a warning; if neither interface is known, rendering stops with an error.
+The input chain is similarly fail-closed, but with the portal and, in two-NIC mode, DHCP and LAN DNS as exceptions. Host SSH is opened by the `(IP, 22) ∈ allowed_input_tcp` pair; the generic established rule does not keep revoked SSH alive. The input `block` jump is `iifname "<HV_LAN_IF>" ct direction original jump block` in two-NIC mode: block entries restrict the LAN clients, so a destination-less entry (for example TCP 443) does not stop inbound WAN traffic to the host (Caddy, tunnels, port proxies), nor replies to the host's own connections. In single-NIC mode the LAN input block jump is omitted entirely, so block entries never cut WAN input traffic; they stay forward-only. There is no post-DNAT matching. After the `block` jump, but before the MAC guards, the portal and SSH rules, `jump preauth_input` follows: this implements the `input` direction of `preauth` entries, with direct `accept` (no forward mark and no `preauth_nat`). The chain starts with the `banned_v4` drop and matches traffic by `ct original ip daddr`/`ct original proto-dst`. The entry's `scope` decides the interfaces: `lan` (the default, also for entries stored without the field) renders only `iifname "<HV_LAN_IF>"`, including its established accept; in single-NIC mode `lan` uses `HV_WAN_IF` instead. `any` renders the LAN and the WAN interface and an interface-free established accept. A `lan` entry without a known LAN interface is skipped with a warning; if neither interface is known, rendering stops with an error.
 
 #### 4.4. Portal and captive portal
 The HTTP traffic of an unauthorized client is redirected by the prerouting chain to the portal. The portal is always reachable from the LAN; access from the WAN depends on the value of `HV_PORTAL_NET`. The `block` and `preauth` rules look at the pre-DNAT (original) destination, so for a Docker-published service the VM's public address and the published host port must be used, not the container's internal address. Pre-auth in the `input` direction intentionally does not get a `preauth_nat` exception: TCP 80 from the LAN is still redirected to the portal, while the host port from the WAN is directly reachable.
@@ -261,9 +260,9 @@ These are properties of the system that the code and the tests must protect. The
 6. **The portal port (8100) is reserved.** Validation of host rules does not allow adding it; the portal's own, earlier-running accept rule handles it.
 7. **The block precedes everything.** The block chain runs before grants and pre-auth, so no active connection can bypass it; removing the block does not require re-authorization. Toward the host it applies only to traffic from the LAN interface: block entries restrict the LAN clients, not inbound WAN traffic to the host.
 8. **fail2ban overrides everything.** Packets from a banned source are dropped in both the forward and input chains; only the portal and DHCP remain reachable.
-9. **Pre-auth is intentionally public.** Every LAN client can reach the pre-auth destinations without logging in; the list must be kept minimal. The `input`-direction pre-auth rule opens the specified ports of the portal machine **before** login, thereby bypassing the portal gate: it may only be used in justified cases, for the most necessary ports. It never opens 22, 53, 67, 2019 or the portal port. Its `scope` is `lan` by default (only from `HV_LAN_IF`); only an explicit `any` opens the port from the WAN. `block` and fail2ban override this too.
+9. **Pre-auth is intentionally public.** Every client can reach the pre-auth destinations without logging in; the list must be kept minimal. The `input`-direction pre-auth rule opens the specified ports of the portal machine **before** login, thereby bypassing the portal gate: it may only be used in justified cases, for the most necessary ports. It never opens 22, 53, 67, 2019 or the portal port. Its `scope` is `lan` by default (from `HV_LAN_IF`, or `HV_WAN_IF` in single-NIC mode); only an explicit `any` opens the port from the WAN. `block` and fail2ban override this too.
 10. **Breakglass is emergency-only.** The chain is not flushed on reload; the rule must be deleted immediately after use.
-11. **IPv6 is always dropped, in every case.** The raw prerouting `loopback_guard`, the forward chain (first rule) and the input chain (right after the loopback accept, before `breakglass`) drop every IPv6 packet; no rule accepts IPv6, and the boot table drops it too. Only loopback (`::1` on `lo`, which cannot come from the network) passes. `docker/setup-host.sh` and `install.sh` always set `net.ipv6.conf.<HV_LAN_IF>.disable_ipv6 = 1` in `/etc/sysctl.d/90-dropjak.conf` (no opt-out). **Requirement:** the client LAN must have no other IPv6 router. The firewall cannot see traffic that never reaches the gateway: a router advertisement from another device would give the clients an IPv6 path around it. Use RA guard on the switch where the LAN is shared.
+11. **IPv6 is always dropped, in every case.** The raw prerouting `loopback_guard`, the forward chain (first rule) and the input chain (right after the loopback accept, before `breakglass`) drop every IPv6 packet; no rule accepts IPv6, and the boot table drops it too. Only loopback (`::1` on `lo`, which cannot come from the network) passes. `docker/setup-host.sh` and `install.sh` always set `net.ipv6.conf.<HV_LAN_IF>.disable_ipv6 = 1` in `/etc/sysctl.d/90-dropjak.conf` in two-NIC mode; single-NIC mode has no separate LAN interface, so that line is omitted (the firewall still drops IPv6). **Requirement (two-NIC):** the client LAN must have no other IPv6 router. The firewall cannot see traffic that never reaches the gateway: a router advertisement from another device would give the clients an IPv6 path around it. Use RA guard on the switch where the LAN is shared.
 
 #### 5.2. Revocation and consistency
 1. **Revocation is durable.** In case of a failed `nft` call, a pending-revocation entry remains, which is retried with backoff; partial revocation deletes only what is no longer needed.
@@ -575,21 +574,31 @@ Admin operations are logged (`admin_*` events), a denied request as `admin_denie
 The portal's `server_version` value is `Dropjak/2`; this is not the same as the product version. The product version is given by the `VERSION` file and the `version` field of `/api/status`.
 
 ### 9. Configuration
-#### 9.1. Mandatory environment variables
+#### 9.1. Installation modes and mandatory environment variables
+`HV_SINGLE_NIC` selects the mode (default `0`):
+
+- **`0` — two-NIC gateway (default).** The host has a separate client LAN interface. `HV_LAN_IF`, `HV_WAN_IF` and `HV_LAN_NET` are required and the LAN-scoped features are active.
+- **`1` — single-NIC host.** One interface (`HV_WAN_IF`) faces the internet and the clients; the portal is reached by source-IP matching (`HV_PORTAL_NET`). `HV_LAN_IF`/`HV_LAN_NET` are not required and are ignored (a startup log line notes if they are set). Useful for a VPS with a single public NIC, where the VPN/other services and the portal clients come from the internet.
+
 The Docker entrypoint considers these mandatory; without them the container does not start (fail-closed):
 
 | Variable | Example | Meaning |
 |---|---|---|
-| `HV_LAN_IF` | `eth1` | Client-side interface. |
-| `HV_WAN_IF` | `eth0` | Interface toward the internet. |
-| `HV_LAN_NET` | `192.168.10.0/24` | Client network in IPv4 CIDR. |
-| `HV_PORTAL_NET` | `0.0.0.0/0` | From where the portal is reachable; when unset or empty, `0.0.0.0/0` (public). |
+| `HV_WAN_IF` | `eth0` | Interface toward the internet; in single-NIC mode also the client-facing interface. Required in both modes. |
+| `HV_LAN_IF` | `eth1` | Client-side interface. Two-NIC mode only. |
+| `HV_LAN_NET` | `192.168.10.0/24` | Client network in IPv4 CIDR. Two-NIC mode only. |
+| `HV_PORTAL_NET` | `0.0.0.0/0` | From where the portal is reachable; when unset or empty, `0.0.0.0/0` (public). In single-NIC mode this is the only way to restrict portal access. |
 
-`HV_LAN_IF` and `HV_WAN_IF` cannot be the same. The portal is always reachable from the LAN; by default it is public toward the WAN too. Set `HV_PORTAL_NET` to a management CIDR when the portal should not be reachable from the internet.
+In two-NIC mode `HV_LAN_IF` and `HV_WAN_IF` cannot be the same. The portal is always reachable from the LAN; by default it is public toward the WAN too. Set `HV_PORTAL_NET` to a management CIDR when the portal should not be reachable from the internet.
+
+**What single-NIC mode omits.** The template marks every LAN-only line with `__LANONLY__`; the renderer replaces the marker with nothing in two-NIC mode and with `# ` in single-NIC mode. The omitted rules are: DHCP (UDP 67/68), LAN DNS, the HTTP captive redirect (`redirect to :PORT`), masquerade, the LAN MAC-binding drops and ARP-based `client_mac` binding, the LAN spoof checks, the WAN→LAN guard, the container-pivot-to-LAN rule, the LAN input-block jump and the LAN portal accept. Everything else stays active: grants (`allowed_v4`, `allowed_tcp`/`udp`/`icmp`), fail2ban, `no_forward_v4`, the container guards, the IPv6 drop, `breakglass`, pre-auth, the tunnel chain, port proxies, the proxy 80/443 accepts, the source-based portal accept (`ip saddr HV_PORTAL_NET tcp dport PORT accept`) and the host input accepts.
+
+**Security trade-off.** In single-NIC mode grants are IP-based only: `MAC_BINDING`/`Firewall.mac_binding` is `False` even if stale LAN values remain, so a `client_mac` set element and ARP lookup are never required. On a public interface an IP can change hands (DHCP, NAT, a reassigned address), so an active grant may briefly apply to another host at the same address; the TTL limits the window. The admin `block` chain stays forward-only, because its input jump is LAN-scoped and is omitted — block entries cannot cut WAN input traffic in this mode. Because the portal is on the public interface and the direct portal speaks plain HTTP, serve it through the HTTPS proxy (`HV_PROXY=1`, Caddy) or set `HV_WAN_HTTPS_ONLY=1` before exposing it; the startup warning repeats this.
 
 #### 9.2. Main settings
 | Variable | Default | Role |
 |---|---|---|
+| `HV_SINGLE_NIC` | `0` | `1`: single-NIC host (see 9.1). |
 | `PORT` | `8100` | Portal port on the host. |
 | `HV_PORTAL_URL` | empty | Canonical portal address. |
 | `HV_SESSION_TTL` | `3600` | Default access time in seconds. |
@@ -631,14 +640,14 @@ The runtime fail2ban values can be set on the admin **Fail2ban** tab; environmen
 The default root is `HV_STATE_DIR=/var/lib/hatarvedelem`; from there `users.json`, `rules.json`, `groups.json`, `firewall-settings.json` (`HV_SETTINGS`), `audit.jsonl` (`HV_AUDIT_LOG`), `drops.jsonl` (`HV_DROP_LOG_PATH`), `fail2ban.json` (`HV_FAIL2BAN_STATE`). Rotation: audit and drop log `10 MiB`, 5 files. The service catalog is `HV_SERVICES_FILE=/opt/hatarvedelem/services.json`.
 
 #### 9.5. nft placeholders
-The template contains seven placeholders, which both the entrypoint and `install.sh` fill:
+The template contains eight placeholders, which both the entrypoint and `install.sh` fill:
 
 ```text
-__LAN_IF__  __WAN_IF__  __LAN_NET__  __PORTAL_NET__
+__LANONLY__  __LAN_IF__  __WAN_IF__  __LAN_NET__  __PORTAL_NET__
 __PORT__  __FWD_MARK__  __DROP_LOG_GROUP__
 ```
 
-After rendering, no `__...__` pattern may remain in the file; `install.sh` and the native units check this.
+`__LANONLY__` is substituted first: it stands at column 0 on every LAN-only line and becomes an empty string in two-NIC mode, or `# ` in single-NIC mode (commenting the line out). The other placeholders are then filled in both modes. After rendering, no `__...__` pattern may remain in the file; `install.sh` and the native units check this.
 
 #### 9.6. Local development rule
 On the local development machine you **must never run a real firewall load** (`nft -f`, `docker compose up` with the real interfaces, `install.sh`), because the forward chain's policy drop and the rule closing host SSH can also lock out the development machine. For local work, `HV_DRY_RUN=1`, `HV_SKIP_FIREWALL=1` or unit tests/mocks can be used; checking real nft behavior is the task of the dedicated VM.
@@ -656,25 +665,32 @@ docker compose ps
 docker compose logs -f dropjak
 ```
 
-`configure.sh` lists the available interfaces, asks which one is the LAN
-(clients) and which one is the WAN (internet), then the LAN network, the
-portal source network, the management network, the portal port and the first
-admin account. It writes `.env` with mode 0600 and offers the current values
-as defaults when it is re-run; the old file is backed up as
-`.env.bak-<timestamp>`. Leave the admin password empty to generate a random
-one (it is printed and written to `.env`). The portal is public by default
-(`HV_PORTAL_NET=0.0.0.0/0`); give a management CIDR to keep it off the WAN.
-The manual alternative is `cp .env.example .env` plus editing it.
+`configure.sh` lists the available interfaces and first asks whether this is a
+single-NIC host (default: yes when there is no private IPv4 interface besides
+the WAN, or only one non-loopback interface). In single-NIC mode it asks only
+for the WAN (internet and client) interface and writes empty `HV_LAN_IF`/
+`HV_LAN_NET` values with `HV_SINGLE_NIC=1`. Otherwise it asks which one is the
+LAN (clients) and which one is the WAN (internet), then the LAN network. Both
+paths continue with the portal source network, the management network (may be
+empty in single-NIC mode), the portal port and the first admin account. It
+writes `.env` with mode 0600 and offers the current values as defaults when it
+is re-run; the old file is backed up as `.env.bak-<timestamp>`. Leave the admin
+password empty to generate a random one (it is printed and written to `.env`).
+The portal is public by default (`HV_PORTAL_NET=0.0.0.0/0`); give a management
+CIDR to keep it off the WAN. The manual alternative is `cp .env.example .env`
+plus editing it.
 
 The `.env` and, above all, the admin account come **before** `setup-host.sh`:
 once the firewall is loaded, the only way in is the portal, and without an admin
 account the portal's admin interface is unreachable and host SSH stays closed.
 
 `setup-host.sh` installs nftables, loads the early boot protection, installs the
-`dropjak-boot.service` unit, and sets `net.ipv4.ip_forward=1`. It also always
-disables IPv6 on the LAN interface (`net.ipv6.conf.<HV_LAN_IF>.disable_ipv6 = 1`
+`dropjak-boot.service` unit, and sets `net.ipv4.ip_forward=1`. In two-NIC mode
+it also disables IPv6 on the LAN interface (`net.ipv6.conf.<HV_LAN_IF>.disable_ipv6 = 1`
 in `/etc/sysctl.d/90-dropjak.conf`; it reads only the `HV_LAN_IF` line of
-`.env` and stops if it is missing). An SSH session over IPv6 gets no
+`.env` and stops if it is missing). With `HV_SINGLE_NIC=1` it reads
+`HV_LAN_IF` only to note that it is ignored, does not require it, and omits the
+LAN IPv6 setting. An SSH session over IPv6 gets no
 exception: IPv6 is always dropped, so run the installation over IPv4. The boot
 protection closes host SSH (TCP 22) for every source; the script keeps the SSH
 session that started it reachable until the container loads its rules. After
@@ -718,6 +734,20 @@ sudo ./install.sh --wan-if eth0 --lan-if eth1 \
      --portal-net 0.0.0.0/0 --portal-url http://192.168.50.1
 ```
 
+Single-NIC host (one interface, the WAN is also the client side):
+```bash
+sudo ./install.sh --single-nic --wan-if eth0 \
+     --portal-net 0.0.0.0/0 --portal-url http://203.0.113.10
+```
+
+Without `--lan-if`/`--lan-net`/`--gateway-ip`, the installer asks whether it is
+a single-NIC host (default: yes when there is no private IPv4 interface
+besides the WAN). In single-NIC mode it requires only `WAN_IF`, skips the LAN
+interface, CIDR and gateway checks, leaves the LAN values empty, omits the
+LAN IPv6 sysctl line, and writes `HV_SINGLE_NIC=1` into the systemd drop-in
+together with the other environment values. In two-NIC mode the behavior is
+unchanged.
+
 The installer's supported systems: RHEL/AlmaLinux/Rocky/Oracle Linux 8+, Fedora, Debian 11+, Ubuntu 20.04+, SLES/openSUSE Leap; Python 3.8+ and nftables are required. File locations:
 
 | Path | Content |
@@ -728,7 +758,7 @@ The installer's supported systems: RHEL/AlmaLinux/Rocky/Oracle Linux 8+, Fedora,
 | `/etc/systemd/system/dropjak.service` | Portal unit. |
 | `/etc/systemd/system/dropjak-firewall.service` | Early firewall unit. |
 | `/etc/systemd/system/dropjak-boot.service` | Docker early boot protection (installed by `setup-host.sh`). |
-| `/etc/sysctl.d/90-dropjak.conf` | `net.ipv4.ip_forward=1`; `net.ipv6.conf.<LAN_IF>.disable_ipv6=1` (always, no opt-out). |
+| `/etc/sysctl.d/90-dropjak.conf` | `net.ipv4.ip_forward=1`; `net.ipv6.conf.<LAN_IF>.disable_ipv6=1` in two-NIC mode only. |
 
 The native install does not support the Caddy proxy (`__PROXY__` is always rendered commented out), so it needs no `HV_PROXY_KEY`. The `docker_bridges` set stays empty there; only the `docker*`/`br-*` patterns apply.
 
@@ -1086,8 +1116,9 @@ The most common lines:
 
 | Line | What it means |
 |---|---|
-| `HV_LAN_IF` / `HV_WAN_IF` | internal and external interface name (`ip -br link`) |
-| `HV_LAN_NET` | the served internal network |
+| `HV_SINGLE_NIC` | `1`: single-NIC host; `HV_WAN_IF` is also the client side and `HV_LAN_IF`/`HV_LAN_NET` are ignored |
+| `HV_LAN_IF` / `HV_WAN_IF` | internal and external interface name (`ip -br link`); the LAN line is two-NIC only |
+| `HV_LAN_NET` | the served internal network (two-NIC only) |
 | `HV_PORTAL_NET` | the network from which the portal is reachable; `0.0.0.0/0` = from anywhere |
 | `HV_MGMT_NET` | management network for fail2ban exemptions; it does not narrow the portal and does not allow SSH |
 | `PORT` | the portal port on the host (port 80 is redirected here) |
@@ -5021,6 +5052,35 @@ The running version is stored in [`VERSION`](VERSION).
 
 #### Added
 
+- **Single-NIC mode (`HV_SINGLE_NIC=1`, default `0`).** One interface does
+  both jobs: `HV_WAN_IF` is also the client-facing interface, and the portal
+  is reached by source-IP matching (`HV_PORTAL_NET`); `HV_LAN_IF`/
+  `HV_LAN_NET` are not required and are ignored (logged when set). Every
+  LAN-only line of `deploy/dropjak.nft` is marked at column 0 with
+  `__LANONLY__`; `docker/entrypoint.sh` and `install.sh` substitute the
+  marker with nothing in two-NIC mode and with `# ` in single-NIC mode, so
+  the rendered ruleset contains no active `iifname "<LAN>"`, LAN spoof or
+  MAC-binding drop, DHCP 67, LAN DNS, captive `redirect`, `masquerade`,
+  WAN→LAN guard, container-pivot or LAN input-block rule. Grants, fail2ban,
+  `no_forward_v4`, the container guards, IPv6 drop, breakglass, pre-auth,
+  tunnels, port proxies, the proxy 80/443 accepts, the source-based portal
+  accept and host input accepts stay active.
+  `gateway.py` sets `LAN_NETWORK = None` and `MAC_BINDING`/`mac_binding =
+  False` in this mode even with stale LAN values, so grants are IP-based on
+  the public interface (documented trade-off) and no ARP lookup runs. Input
+  pre-auth with `lan` scope uses the WAN interface; forward pre-auth keeps
+  the DNAT-only condition on the WAN; port-proxy `lan`/`both` sides map to
+  the WAN interface; the admin `block` chain stays forward-only because the
+  LAN input jump is omitted. `server.py` warns at startup and recommends
+  `HV_PROXY=1` or `HV_WAN_HTTPS_ONLY=1` for a public portal.
+  `configure.sh` selects the mode interactively, `install.sh` accepts
+  `--single-nic`, and `docker/setup-host.sh` omits the LAN IPv6 sysctl.
+  `docker-compose.yml`, `.env.example`, the configuration/installation
+  sections and section 9 document the new variable. New
+  `tests/test_single_nic.py` (rendering both modes, MAC binding, grants,
+  pre-auth, port proxy), updated `test_configure.py`, `test_installer.py`,
+  `test_block_precedence.py` and `test_port_ranges.py`; the measured suite is
+  **1133 tests OK**.
 - **Domain-mode service in a service rule.** The `target_host` +
   `domain` mode tunnel service (without a WAN port) can now also be
   selected as `service_refs`, while remaining available unchanged as a
@@ -5193,11 +5253,12 @@ are the last entries of this list.
   `breakglass` jump (only loopback precedes it), the raw prerouting
   `loopback_guard` drops every non-loopback IPv6 packet, and the boot
   table's input and prerouting chains drop IPv6 too. `docker/setup-host.sh`
-  (reading `HV_LAN_IF` from `.env`) and `install.sh` always write
+  (reading `HV_LAN_IF` from `.env`) and `install.sh` write
   `net.ipv6.conf.<LAN_IF>.disable_ipv6 = 1` into
-  `/etc/sysctl.d/90-dropjak.conf`; `setup-host.sh` no longer inserts an
-  IPv6 SSH exception into the boot table. Requirement: no other IPv6 router
-  on the client LAN.
+  `/etc/sysctl.d/90-dropjak.conf` in two-NIC mode (omitted in single-NIC
+  mode, which has no separate LAN interface); `setup-host.sh` no longer
+  inserts an IPv6 SSH exception into the boot table. Requirement: no other
+  IPv6 router on the client LAN.
 
 ### [3.24.0] - 2026-10-22
 

@@ -7268,6 +7268,13 @@ def _transport_warnings() -> list[str]:
     plain HTTP.
     """
     warnings: list[str] = []
+    if gateway.SINGLE_NIC:
+        warnings.append(
+            "single-NIC mode (HV_SINGLE_NIC=1): there is no separate client "
+            "LAN and grants are IP-based only (no MAC binding) on the public "
+            "interface. Serve the portal over the HTTPS proxy (HV_PROXY=1) or "
+            "set HV_WAN_HTTPS_ONLY=1."
+        )
     raw = os.environ.get("HV_PORTAL_NET", "").strip() or "0.0.0.0/0"
     try:
         network = ipaddress.ip_network(raw, strict=False) if raw else None

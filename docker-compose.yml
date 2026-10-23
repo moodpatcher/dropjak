@@ -1,8 +1,11 @@
 # Dropjak — Docker Compose
 #
 # The .env file must be created from .env.example. The required values
-# (HV_LAN_IF, HV_WAN_IF, HV_LAN_NET) are checked by the entrypoint; the
-# container does not start if a setting is missing. HV_PORTAL_NET defaults
+# depend on the mode: HV_WAN_IF is always required; HV_LAN_IF and
+# HV_LAN_NET are required only in the default two-NIC mode. With
+# HV_SINGLE_NIC=1 (one interface, the WAN is also the client side) they are
+# ignored and may be empty. The entrypoint checks the values; the container
+# does not start if a required setting is missing. HV_PORTAL_NET defaults
 # to 0.0.0.0/0 (public portal).
 #
 # Important: the container runs in network_mode: host because it must manage
@@ -49,6 +52,10 @@ services:
     # docker/setup-host.sh permanently records it in /etc/sysctl.d/90-dropjak.conf.
 
     environment:
+      # 1: single-NIC host. HV_WAN_IF is also the client-facing interface;
+      # HV_LAN_IF/HV_LAN_NET are ignored. DHCP, LAN DNS, the HTTP redirect,
+      # masquerade, MAC binding and the LAN input block are omitted.
+      HV_SINGLE_NIC: ${HV_SINGLE_NIC:-0}
       HV_LAN_IF: ${HV_LAN_IF:-}
       HV_WAN_IF: ${HV_WAN_IF:-}
       HV_LAN_NET: ${HV_LAN_NET:-}

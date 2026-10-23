@@ -2,8 +2,9 @@
 #
 # Dropjak — interactive configuration
 #
-# Asks for the two interfaces, the LAN network, the portal exposure and the
-# first admin account, then writes the .env file with mode 0600.
+# Asks for the installation mode (single-NIC or LAN+WAN), the interfaces,
+# the networks, the portal exposure and the first admin account, then writes
+# the .env file with mode 0600.
 #
 #   ./configure.sh
 #
@@ -19,9 +20,10 @@ usage() {
     cat <<'EOF'
 Usage: ./configure.sh [--env-file PATH]
 
-Asks for the LAN/WAN interfaces, the LAN network, the portal source network,
-the management network, the portal port and the first admin account, then
-writes the .env file (mode 0600). Current values are offered as defaults.
+Asks for the installation mode (single-NIC, where the WAN interface is also
+the client side, or LAN+WAN), the interfaces, the networks, the portal source
+network, the management network, the portal port and the first admin account,
+then writes the .env file (mode 0600). Current values are offered as defaults.
 EOF
 }
 
@@ -88,9 +90,13 @@ ask_secret() {
 
 confirm() {
     # confirm <prompt> <default y|n>; returns 0 for yes
-    local prompt=$1 default=$2 answer
+    local prompt=$1 default=${2:-n} answer hint
+    case "$default" in
+        [yY]*) hint="Y/n" ;;
+        *) hint="y/N" ;;
+    esac
     while :; do
-        printf '%s [%s]: ' "$prompt" "$default" >&2
+        printf '%s [%s]: ' "$prompt" "$hint" >&2
         if ! IFS= read -r answer; then
             answer=""
         fi
@@ -179,6 +185,7 @@ default_lan_net() {
 info "Dropjak configuration — press Enter to accept the value in brackets."
 show_interfaces
 
+old_single=$(env_get HV_SINGLE_NIC)
 old_lan_if=$(env_get HV_LAN_IF)
 old_wan_if=$(env_get HV_WAN_IF)
 old_lan_net=$(env_get HV_LAN_NET)
@@ -187,36 +194,83 @@ old_mgmt_net=$(env_get HV_MGMT_NET)
 old_port=$(env_get PORT)
 old_admin_user=$(env_get HV_ADMIN_USER)
 
-LAN_IF_DEFAULT=${old_lan_if:-$(default_lan_if)}
-while :; do
-    LAN_IF=$(ask "LAN (client) interface" "${LAN_IF_DEFAULT:-eth1}")
-    valid_ifname "$LAN_IF" || { info "invalid interface name: $LAN_IF"; continue; }
-    break
-done
+# ---------------------------------------------------------------- mode
+# Default: single-NIC when there is no private IPv4 interface or only one
+# non-loopback interface (a VPS with a single public NIC). An existing
+# HV_SINGLE_NIC wins when it is set.
+nonlo_count=$(printf '%s\n' "$interfaces" | awk 'NF { n++ } END { print n + 0 }')
+private_lan_if=$(default_lan_if || true)
+if [ "$old_single" = "1" ]; then
+    SINGLE_DEFAULT=y
+elif [ -n "$old_single" ]; then
+    SINGLE_DEFAULT=n
+elif [ -z "$private_lan_if" ] || [ "$nonlo_count" -le 1 ]; then
+    SINGLE_DEFAULT=y
+else
+    SINGLE_DEFAULT=n
+fi
+if confirm "Single-NIC host (no separate client LAN)?" "$SINGLE_DEFAULT"; then
+    SINGLE_NIC=1
+    info "single-NIC mode: the WAN interface is also the client side."
+else
+    SINGLE_NIC=0
+fi
 
-WAN_IF_DEFAULT=${old_wan_if:-$(default_wan_if)}
-[ -n "$WAN_IF_DEFAULT" ] || WAN_IF_DEFAULT=eth0
-while :; do
-    WAN_IF=$(ask "WAN (internet) interface" "$WAN_IF_DEFAULT")
-    valid_ifname "$WAN_IF" || { info "invalid interface name: $WAN_IF"; continue; }
-    [ "$WAN_IF" != "$LAN_IF" ] || { info "the LAN and WAN interfaces must differ"; continue; }
-    break
-done
+if [ "$SINGLE_NIC" -eq 1 ]; then
+    LAN_IF=""
+    LAN_NET=""
 
-interface_exists "$LAN_IF" \
-    || info "WARNING: interface $LAN_IF does not exist right now; the rules apply once it appears."
-interface_exists "$WAN_IF" \
-    || info "WARNING: interface $WAN_IF does not exist right now; the rules apply once it appears."
+    WAN_IF_DEFAULT=${old_wan_if:-$(default_wan_if)}
+    [ -n "$WAN_IF_DEFAULT" ] || WAN_IF_DEFAULT=eth0
+    while :; do
+        WAN_IF=$(ask "WAN (internet and client) interface" "$WAN_IF_DEFAULT")
+        valid_ifname "$WAN_IF" \
+            || { info "invalid interface name: $WAN_IF"; continue; }
+        break
+    done
+    interface_exists "$WAN_IF" \
+        || info "WARNING: interface $WAN_IF does not exist right now; the rules apply once it appears."
+else
+    LAN_IF_DEFAULT=${old_lan_if:-$(default_lan_if)}
+    while :; do
+        LAN_IF=$(ask "LAN (client) interface" "${LAN_IF_DEFAULT:-eth1}")
+        valid_ifname "$LAN_IF" \
+            || { info "invalid interface name: $LAN_IF"; continue; }
+        break
+    done
 
-LAN_NET_DEFAULT=${old_lan_net:-$(default_lan_net "$LAN_IF")}
-while :; do
-    LAN_NET=$(ask "Internal (client) network in CIDR form" "${LAN_NET_DEFAULT:-192.168.10.0/24}")
-    valid_net "$LAN_NET" || { info "invalid network: $LAN_NET"; continue; }
-    break
-done
+    WAN_IF_DEFAULT=${old_wan_if:-$(default_wan_if)}
+    [ -n "$WAN_IF_DEFAULT" ] || WAN_IF_DEFAULT=eth0
+    while :; do
+        WAN_IF=$(ask "WAN (internet) interface" "$WAN_IF_DEFAULT")
+        valid_ifname "$WAN_IF" \
+            || { info "invalid interface name: $WAN_IF"; continue; }
+        [ "$WAN_IF" != "$LAN_IF" ] \
+            || { info "the LAN and WAN interfaces must differ"; continue; }
+        break
+    done
 
-info "The portal is reachable from the LAN always. This value controls the"
-info "WAN: 0.0.0.0/0 makes it public, a CIDR keeps it off the internet."
+    interface_exists "$LAN_IF" \
+        || info "WARNING: interface $LAN_IF does not exist right now; the rules apply once it appears."
+    interface_exists "$WAN_IF" \
+        || info "WARNING: interface $WAN_IF does not exist right now; the rules apply once it appears."
+
+    LAN_NET_DEFAULT=${old_lan_net:-$(default_lan_net "$LAN_IF")}
+    while :; do
+        LAN_NET=$(ask "Internal (client) network in CIDR form" "${LAN_NET_DEFAULT:-192.168.10.0/24}")
+        valid_net "$LAN_NET" \
+            || { info "invalid network: $LAN_NET"; continue; }
+        break
+    done
+fi
+
+if [ "$SINGLE_NIC" -eq 1 ]; then
+    info "The portal is reached by source-IP matching (there is no LAN"
+    info "interface). 0.0.0.0/0 makes it public, a CIDR restricts it."
+else
+    info "The portal is reachable from the LAN always. This value controls the"
+    info "WAN: 0.0.0.0/0 makes it public, a CIDR keeps it off the internet."
+fi
 PORTAL_NET_DEFAULT=${old_portal_net:-0.0.0.0/0}
 while :; do
     PORTAL_NET=$(ask "Portal source network" "$PORTAL_NET_DEFAULT")
@@ -226,12 +280,25 @@ done
 
 info "The management network is used for fail2ban exemptions; it does not"
 info "narrow the portal and does not allow SSH."
-MGMT_NET_DEFAULT=${old_mgmt_net:-$LAN_NET}
-while :; do
-    MGMT_NET=$(ask "Management network" "$MGMT_NET_DEFAULT")
-    valid_net "$MGMT_NET" || { info "invalid network: $MGMT_NET"; continue; }
-    break
-done
+if [ "$SINGLE_NIC" -eq 1 ]; then
+    info "It may be left empty."
+    MGMT_NET_DEFAULT=${old_mgmt_net:-}
+    while :; do
+        MGMT_NET=$(ask "Management network (optional)" "$MGMT_NET_DEFAULT")
+        [ -z "$MGMT_NET" ] && break
+        valid_net "$MGMT_NET" \
+            || { info "invalid network: $MGMT_NET"; continue; }
+        break
+    done
+else
+    MGMT_NET_DEFAULT=${old_mgmt_net:-$LAN_NET}
+    while :; do
+        MGMT_NET=$(ask "Management network" "$MGMT_NET_DEFAULT")
+        valid_net "$MGMT_NET" \
+            || { info "invalid network: $MGMT_NET"; continue; }
+        break
+    done
+fi
 
 PORT_DEFAULT=${old_port:-8100}
 while :; do
@@ -284,6 +351,7 @@ trap 'rm -f "$tmp"' EXIT
 {
     printf '# Dropjak — generated by configure.sh on %s\n' "$(date -Iseconds)"
     printf '# Re-run ./configure.sh to change these values.\n\n'
+    printf 'HV_SINGLE_NIC=%s\n' "$SINGLE_NIC"
     printf 'HV_LAN_IF=%s\n' "$LAN_IF"
     printf 'HV_WAN_IF=%s\n' "$WAN_IF"
     printf 'HV_LAN_NET=%s\n' "$LAN_NET"
@@ -318,8 +386,14 @@ case "$PORTAL_NET" in
 esac
 
 info "wrote $ENV_FILE (mode 0600)"
-info "  LAN:    $LAN_IF $LAN_NET"
-info "  WAN:    $WAN_IF"
+if [ "$SINGLE_NIC" -eq 1 ]; then
+    info "  mode:   single-NIC (the WAN interface is also the client side)"
+    info "  WAN:    $WAN_IF"
+else
+    info "  mode:   LAN+WAN"
+    info "  LAN:    $LAN_IF $LAN_NET"
+    info "  WAN:    $WAN_IF"
+fi
 info "  portal: http://$portal_hint:$PORT/  — public from the WAN: $public"
 info "  admin:  ${ADMIN_USER:-(disabled)}"
 info "next steps:"

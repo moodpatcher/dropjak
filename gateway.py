@@ -413,8 +413,14 @@ def _parse_lan_network(raw: str):
     return network if network.version == 4 else None
 
 
-LAN_NETWORK = _parse_lan_network(HV_LAN_NET_RAW)
-MAC_BINDING = bool(HV_LAN_IF and LAN_NETWORK is not None)
+# Single-NIC mode (HV_SINGLE_NIC=1): the host has one interface, which is
+# both the WAN and the client-facing side. There is no client LAN (no DHCP,
+# LAN DNS, HTTP redirect, masquerade or MAC binding); the portal is reached
+# by source-IP matching. HV_LAN_IF/HV_LAN_NET are ignored in this mode.
+SINGLE_NIC = _env_bool("HV_SINGLE_NIC", False)
+
+LAN_NETWORK = None if SINGLE_NIC else _parse_lan_network(HV_LAN_NET_RAW)
+MAC_BINDING = bool(not SINGLE_NIC and HV_LAN_IF and LAN_NETWORK is not None)
 ARP_PATH = os.environ.get("HV_ARP_PATH", "").strip() or "/proc/net/arp"
 
 PORTAL_URL = os.environ.get("HV_PORTAL_URL", "").strip()
@@ -3778,6 +3784,7 @@ class Firewall:
         arp_path: str = ARP_PATH,
         fwd_mark: str = FWD_MARK,
         drop_log_group: int = droplog.DROP_LOG_GROUP,
+        single_nic: bool = SINGLE_NIC,
     ) -> None:
         for name in (table, set_name):
             if not _NFT_NAME_RE.match(name):
@@ -3813,8 +3820,13 @@ class Firewall:
         self.lan_if = (lan_if or "").strip()
         self.wan_if = (wan_if or "").strip()
         self.lan_network = lan_network
+        self.single_nic = bool(single_nic)
         self.arp_path = arp_path
-        self.mac_binding = bool(self.lan_if and self.lan_network is not None)
+        # With one interface there is no LAN to bind a MAC address on: grants
+        # are IP-based on the public interface (an accepted trade-off).
+        self.mac_binding = bool(
+            not self.single_nic and self.lan_if and self.lan_network is not None
+        )
         self.binary = binary
         self.dry_run = dry_run
         self.log = logger
@@ -3984,17 +3996,23 @@ class Firewall:
                 input_preauth.append(entry)
             else:
                 forward_preauth.append(entry)
-        if forward_preauth and not self.lan_if:
+        if forward_preauth and not self.single_nic and not self.lan_if:
             raise FirewallError(
                 "a pre-auth rule can only be applied with a known LAN interface"
             )
         # The input direction is traffic towards the host: the point is the
         # host ports reachable before login, so the WAN matters too. Without
         # a known interface the rule could not be restricted safely.
+        # In single-NIC mode the stale LAN value is ignored: the WAN interface
+        # is the client side.
         input_ifaces: list[str] = []
-        for name in (self.lan_if, self.wan_if):
-            if name and name not in input_ifaces:
-                input_ifaces.append(name)
+        if self.single_nic:
+            if self.wan_if:
+                input_ifaces.append(self.wan_if)
+        else:
+            for name in (self.lan_if, self.wan_if):
+                if name and name not in input_ifaces:
+                    input_ifaces.append(name)
         if input_preauth and not input_ifaces:
             raise FirewallError(
                 "an input pre-auth rule can only be applied with a known LAN "
@@ -4060,9 +4078,17 @@ class Firewall:
             # From the WAN only for DNAT-ed (published) traffic: thus the
             # rule does not become an open forwarder towards an arbitrary
             # external destination.
-            interfaces = [(self.lan_if, "")]
-            if self.wan_if and self.wan_if != self.lan_if:
-                interfaces.append((self.wan_if, "ct status dnat "))
+            # In single-NIC mode the WAN interface is the client side, so it
+            # gets the plain interface rule with the DNAT condition (there is
+            # no separate LAN interface and never a plain WAN accept).
+            if self.single_nic:
+                interfaces = (
+                    [(self.wan_if, "ct status dnat ")] if self.wan_if else []
+                )
+            else:
+                interfaces = [(self.lan_if, "")]
+                if self.wan_if and self.wan_if != self.lan_if:
+                    interfaces.append((self.wan_if, "ct status dnat "))
             for iface, extra in interfaces:
                 lines.append(
                     f'add rule inet {self.table} preauth iifname "{iface}" '
@@ -4160,7 +4186,10 @@ class Firewall:
             if scope not in settings_store.PREAUTH_SCOPES:
                 raise FirewallError("invalid pre-auth scope")
             if scope == "lan":
-                if not self.lan_if:
+                # In single-NIC mode the client side is the WAN interface:
+                # use it for both the interface rule and the established rule.
+                iface = self.wan_if if self.single_nic else self.lan_if
+                if not iface:
                     # Fail-closed for this entry only, like the reserved
                     # ports: the other chains must still be applied.
                     self.log(
@@ -4169,8 +4198,8 @@ class Firewall:
                         "LAN scope but no LAN interface is known; skipped"
                     )
                     continue
-                ifaces = [self.lan_if]
-                established = f'iifname "{self.lan_if}" ct state established'
+                ifaces = [iface]
+                established = f'iifname "{iface}" ct state established'
             else:
                 ifaces = input_ifaces
                 established = "ct state established"
@@ -4192,18 +4221,30 @@ class Firewall:
         return lines
 
     def _portproxy_ifaces(self, value) -> list[str]:
-        """The entry's interfaces; an unknown interface raises FirewallError."""
+        """The entry's interfaces; an unknown interface raises FirewallError.
+
+        In single-NIC mode every side maps to the WAN interface (which is also
+        the client-facing interface), deduplicated.
+        """
         wanted = {"wan": ("wan",), "lan": ("lan",), "both": ("lan", "wan")}
         if value not in wanted:
             raise FirewallError("invalid port proxy interface")
         names: list[str] = []
         for side in wanted[value]:
-            name = self.lan_if if side == "lan" else self.wan_if
-            if not name:
-                raise FirewallError(
-                    f"the port proxy can only be applied with a known "
-                    f"{side.upper()} interface"
-                )
+            if self.single_nic:
+                name = self.wan_if
+                if not name:
+                    raise FirewallError(
+                        "the port proxy can only be applied with a known "
+                        "WAN interface"
+                    )
+            else:
+                name = self.lan_if if side == "lan" else self.wan_if
+                if not name:
+                    raise FirewallError(
+                        f"the port proxy can only be applied with a known "
+                        f"{side.upper()} interface"
+                    )
             if name not in names:
                 names.append(name)
         return names

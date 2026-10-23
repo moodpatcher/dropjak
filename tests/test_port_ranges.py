@@ -353,6 +353,7 @@ nft -j list set inet t s
             encoding="utf-8"
         )
         replacements = {
+            "__LANONLY__": "",
             "__LAN_IF__": "eth0", "__WAN_IF__": "eth1",
             "__LAN_NET__": "192.168.10.0/24",
             "__PORTAL_NET__": "0.0.0.0/0", "__PORT__": "8100",

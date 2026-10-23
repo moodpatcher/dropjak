@@ -10,11 +10,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "configure.sh"
 
-# The order of the prompts: LAN if, WAN if, LAN net, portal net, mgmt net,
-# port, optional DNS name, admin yes/no, admin user, admin password.
+# The order of the prompts: single-NIC question, LAN if, WAN if, LAN net,
+# portal net, mgmt net, port, optional DNS name, admin yes/no, admin user,
+# admin password.
 ANSWERS = [
-    "eth1", "eth0", "192.168.10.0/24", "0.0.0.0/0", "192.168.10.0/24",
-    "8100", "", "y", "admin", "secret123",
+    "n", "eth1", "eth0", "192.168.10.0/24", "0.0.0.0/0",
+    "192.168.10.0/24", "8100", "", "y", "admin", "secret123",
 ]
 
 
@@ -37,6 +38,7 @@ class ConfigureScriptTests(unittest.TestCase):
         result = self.run_script(ANSWERS)
         self.assertEqual(result.returncode, 0, result.stderr)
         text = self.env_file.read_text(encoding="utf-8")
+        self.assertIn("HV_SINGLE_NIC=0", text)
         self.assertIn("HV_LAN_IF=eth1", text)
         self.assertIn("HV_WAN_IF=eth0", text)
         self.assertIn("HV_LAN_NET=192.168.10.0/24", text)
@@ -60,7 +62,7 @@ class ConfigureScriptTests(unittest.TestCase):
             "HV_ADMIN_USER=root2\n",
             encoding="utf-8",
         )
-        answers = ["", "", "", "", "", "", "", "", "", ""]
+        answers = ["n", "", "", "", "", "", "", "", "", "", ""]
         result = self.run_script(answers)
         self.assertEqual(result.returncode, 0, result.stderr)
         text = self.env_file.read_text(encoding="utf-8")
@@ -82,7 +84,7 @@ class ConfigureScriptTests(unittest.TestCase):
 
     def test_portal_dns_name_adds_hosts_and_url(self) -> None:
         answers = list(ANSWERS)
-        answers[6] = "gw.example.com"
+        answers[7] = "gw.example.com"
         result = self.run_script(answers)
         self.assertEqual(result.returncode, 0, result.stderr)
         text = self.env_file.read_text(encoding="utf-8")
@@ -92,12 +94,23 @@ class ConfigureScriptTests(unittest.TestCase):
         self.assertIn("HV_PORTAL_URL=http://gw.example.com:8100", text)
 
     def test_no_admin_account(self) -> None:
-        answers = ANSWERS[:7] + ["n"]
+        answers = ANSWERS[:8] + ["n"]
         result = self.run_script(answers)
         self.assertEqual(result.returncode, 0, result.stderr)
         text = self.env_file.read_text(encoding="utf-8")
         self.assertIn("HV_ADMIN_ENABLED=0", text)
         self.assertNotIn("HV_ADMIN_PASSWORD=", text)
+
+    def test_single_nic_writes_empty_lan_values(self) -> None:
+        answers = ["y", "wan9", "", "", "", "", "y", "admin", "secret123"]
+        result = self.run_script(answers)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        text = self.env_file.read_text(encoding="utf-8")
+        self.assertIn("HV_SINGLE_NIC=1", text)
+        self.assertIn("HV_LAN_IF=\n", text)
+        self.assertIn("HV_LAN_NET=\n", text)
+        self.assertIn("HV_WAN_IF=wan9", text)
+        self.assertIn("HV_PORTAL_NET=0.0.0.0/0", text)
 
     def test_empty_password_is_generated(self) -> None:
         answers = list(ANSWERS)

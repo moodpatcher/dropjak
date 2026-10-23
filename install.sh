@@ -20,6 +20,7 @@
 #   sudo ./install.sh --wan-if eth0 --lan-if eth1
 #   sudo ./install.sh --wan-if eth0 --lan-if eth1 \
 #        --portal-net 192.168.1.50/32 --portal-url http://192.168.50.1
+#   sudo ./install.sh --single-nic --wan-if eth0
 #
 set -euo pipefail
 
@@ -48,6 +49,7 @@ LAN_NET=""
 GW_IP=""
 PORTAL_NET=""
 PORTAL_URL=""
+SINGLE_NIC=0
 ASSUME_YES=0
 SKIP_USER=0
 SSH_SRC=""
@@ -81,10 +83,15 @@ usage() {
   cat <<'EOF'
 Usage: sudo ./install.sh [options]
 
-  --wan-if IF          the upstream (internet) interface
+  --wan-if IF          the upstream (internet) interface (required)
   --lan-if IF          the internal (client) interface
   --lan-net CIDR       internal network, e.g. 192.168.50.0/24
   --gateway-ip IP      the gateway address on the internal network, e.g. 192.168.50.1
+  --single-nic         single-NIC host: HV_WAN_IF is also the client-facing
+                       interface (HV_SINGLE_NIC=1). DHCP, LAN DNS, the HTTP
+                       redirect, masquerade, MAC binding and the LAN input
+                       block are disabled; --lan-if/--lan-net/--gateway-ip
+                       are not used.
   --portal-net CIDR    where the portal is reachable from (default: the SSH source or
                        the LAN network). For a public portal: 0.0.0.0/0.
                        This does not control host SSH: it only opens with an active portal
@@ -117,6 +124,7 @@ while [[ $# -gt 0 ]]; do
     --portal-net) PORTAL_NET="${2:-}"; shift 2 ;;
     --port)       PORT="${2:-}"; shift 2 ;;
     --portal-url) PORTAL_URL="${2:-}"; shift 2 ;;
+    --single-nic) SINGLE_NIC=1; shift ;;
     --yes)        ASSUME_YES=1; shift ;;
     --skip-user)  SKIP_USER=1; shift ;;
     -h|--help)    usage; exit 0 ;;
@@ -150,11 +158,16 @@ ask_value() {
 }
 
 confirm() {
-  local prompt="$1" answer
+  local prompt="$1" default="${2:-n}" answer hint
   if [[ $ASSUME_YES -eq 1 ]]; then
     return 0
   fi
-  read -r -p "$prompt [y/N]: " answer
+  case "$default" in
+    [yY]*) hint="Y/n" ;;
+    *) hint="y/N" ;;
+  esac
+  read -r -p "$prompt [$hint]: " answer
+  answer="${answer:-$default}"
   [[ "$answer" =~ ^[yY]([eE][sS])?$ ]]
 }
 
@@ -351,6 +364,21 @@ default_wan_if() {
   ip -4 route show default 2>/dev/null | awk '{print $5; exit}'
 }
 
+# First private-IPv4 interface other than the given (WAN) interface. Empty
+# output means there is no separate client LAN on this host.
+private_lan_if() {
+  local want="$1" iface cidr
+  while read -r iface cidr; do
+    [[ -n "$iface" && "$iface" != "$want" ]] || continue
+    "$PYTHON" - "$cidr" <<'PY' 2>/dev/null || continue
+import ipaddress, sys
+sys.exit(0 if ipaddress.ip_interface(sys.argv[1]).ip.is_private else 1)
+PY
+    printf '%s\n' "$iface"
+    return 0
+  done < <(ip -o -4 addr show scope global 2>/dev/null | awk '{print $2, $4}')
+}
+
 # The SSH source running the installation (if any).
 detect_ssh_src() {
   if [[ -n "${SSH_CONNECTION:-}" ]]; then
@@ -385,35 +413,53 @@ if [[ -z "$WAN_IF" ]]; then
 fi
 iface_ok "$WAN_IF" || die "no such WAN interface: $WAN_IF"
 
-if [[ -z "$LAN_IF" ]]; then
-  note "Available IPv4 interfaces:"
-  ip -o -4 addr show scope global | awk '{print "  " $2 "  " $4}'
-  LAN_IF="$(ask_value "LAN interface (toward clients)" "eth1")"
+# Mode. Given any LAN setting, two-NIC is implied. Otherwise ask, defaulting to
+# single-NIC when the host has no private IPv4 interface besides the WAN.
+if [[ $SINGLE_NIC -eq 0 && -z "$LAN_IF" && -z "$LAN_NET" && -z "$GW_IP" ]]; then
+  single_default=n
+  [[ -n "$(private_lan_if "$WAN_IF")" ]] || single_default=y
+  if confirm "Single-NIC host (no separate client LAN)?" "$single_default"; then
+    SINGLE_NIC=1
+  fi
 fi
-iface_ok "$LAN_IF" || die "no such LAN interface: $LAN_IF"
-[[ "$LAN_IF" != "$WAN_IF" ]] || die "the LAN and WAN interface cannot be the same"
 
-LAN_CIDR="$(first_v4_cidr "$LAN_IF" || true)"
-[[ -n "$LAN_CIDR" ]] || die "interface $LAN_IF has no IPv4 address; configure one first"
+if [[ $SINGLE_NIC -eq 1 ]]; then
+  [[ -z "$LAN_IF" && -z "$LAN_NET" && -z "$GW_IP" ]] \
+    || die "--single-nic cannot be combined with --lan-if/--lan-net/--gateway-ip"
+  LAN_IF=""
+  LAN_NET=""
+  GW_IP=""
+else
+  if [[ -z "$LAN_IF" ]]; then
+    note "Available IPv4 interfaces:"
+    ip -o -4 addr show scope global | awk '{print "  " $2 "  " $4}'
+    LAN_IF="$(ask_value "LAN interface (toward clients)" "eth1")"
+  fi
+  iface_ok "$LAN_IF" || die "no such LAN interface: $LAN_IF"
+  [[ "$LAN_IF" != "$WAN_IF" ]] || die "the LAN and WAN interface cannot be the same"
 
-if [[ -z "$GW_IP" ]]; then
-  GW_IP="${LAN_CIDR%%/*}"
-  GW_IP="$(ask_value "The gateway address on the LAN" "$GW_IP")"
-fi
-is_v4 "$GW_IP" || die "invalid gateway IP: $GW_IP"
+  LAN_CIDR="$(first_v4_cidr "$LAN_IF" || true)"
+  [[ -n "$LAN_CIDR" ]] || die "interface $LAN_IF has no IPv4 address; configure one first"
 
-if [[ -z "$LAN_NET" ]]; then
-  LAN_NET="$("$PYTHON" -c \
-    'import ipaddress,sys; print(ipaddress.ip_interface(sys.argv[1]).network)' \
-    "$LAN_CIDR")"
-  LAN_NET="$(ask_value "Internal network" "$LAN_NET")"
-fi
-LAN_NET="$(canon_v4_net "$LAN_NET")" || die "invalid LAN network: $LAN_NET"
-"$PYTHON" - "$GW_IP" "$LAN_NET" <<'PY' \
-  || die "the gateway IP ($GW_IP) is not inside the LAN network ($LAN_NET)"
+  if [[ -z "$GW_IP" ]]; then
+    GW_IP="${LAN_CIDR%%/*}"
+    GW_IP="$(ask_value "The gateway address on the LAN" "$GW_IP")"
+  fi
+  is_v4 "$GW_IP" || die "invalid gateway IP: $GW_IP"
+
+  if [[ -z "$LAN_NET" ]]; then
+    LAN_NET="$("$PYTHON" -c \
+      'import ipaddress,sys; print(ipaddress.ip_interface(sys.argv[1]).network)' \
+      "$LAN_CIDR")"
+    LAN_NET="$(ask_value "Internal network" "$LAN_NET")"
+  fi
+  LAN_NET="$(canon_v4_net "$LAN_NET")" || die "invalid LAN network: $LAN_NET"
+  "$PYTHON" - "$GW_IP" "$LAN_NET" <<'PY' \
+    || die "the gateway IP ($GW_IP) is not inside the LAN network ($LAN_NET)"
 import ipaddress, sys
 sys.exit(0 if ipaddress.ip_address(sys.argv[1]) in ipaddress.ip_network(sys.argv[2]) else 1)
 PY
+fi
 
 if [[ -z "$PORTAL_NET" ]]; then
   # The portal is public by default; narrow it if it should not be
@@ -425,10 +471,17 @@ PORTAL_NET="$(canon_v4_net "$PORTAL_NET")" \
   || die "invalid portal network: $PORTAL_NET"
 
 if [[ -z "$PORTAL_URL" ]]; then
-  if [[ "$PORT" == "80" ]]; then
-    PORTAL_URL="http://${GW_IP}"
+  if [[ $SINGLE_NIC -eq 1 ]]; then
+    PORTAL_HOST="$(first_v4_cidr "$WAN_IF" || true)"
+    PORTAL_HOST="${PORTAL_HOST%%/*}"
+    [[ -n "$PORTAL_HOST" ]] || PORTAL_HOST="$WAN_IF"
   else
-    PORTAL_URL="http://${GW_IP}:${PORT}"
+    PORTAL_HOST="$GW_IP"
+  fi
+  if [[ "$PORT" == "80" ]]; then
+    PORTAL_URL="http://${PORTAL_HOST}"
+  else
+    PORTAL_URL="http://${PORTAL_HOST}:${PORT}"
   fi
 fi
 [[ "$PORTAL_URL" =~ $PORTAL_URL_RE ]] || die "invalid portal URL: $PORTAL_URL"
@@ -451,11 +504,26 @@ cat <<EOF
   System:              $DISTRO_NAME ($PKG_MANAGER)
   Python:              $PYTHON
   nft:                 $NFT_BIN
+EOF
+if [[ $SINGLE_NIC -eq 1 ]]; then
+  cat <<EOF
+  Mode:                single-NIC (WAN is also the client side)
+  WAN interface:       $WAN_IF
+  Portal source:       $PORTAL_NET
+  Portal:              $PORTAL_URL  (port: $PORT)
+EOF
+else
+  cat <<EOF
+  Mode:                LAN+WAN
   WAN interface:       $WAN_IF
   LAN interface:       $LAN_IF
   LAN network:         $LAN_NET
   Gateway address:     $GW_IP
-  Portal source:       $PORTAL_NET  Portal:              $PORTAL_URL  (port: $PORT)
+  Portal source:       $PORTAL_NET
+  Portal:              $PORTAL_URL  (port: $PORT)
+EOF
+fi
+cat <<EOF
   Program:             $APP_DIR
   State:               $STATE_DIR
 EOF
@@ -567,7 +635,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
+if [[ $SINGLE_NIC -eq 1 ]]; then
+  LAN_PREFIX="# "
+else
+  LAN_PREFIX=""
+fi
 sed \
+  -e "s|__LANONLY__|$LAN_PREFIX|g" \
   -e "s|__LAN_IF__|$(sed_escape "$LAN_IF")|g" \
   -e "s|__WAN_IF__|$(sed_escape "$WAN_IF")|g" \
   -e "s|__LAN_NET__|$(sed_escape "$LAN_NET")|g" \
@@ -609,29 +683,38 @@ for distro_conf in /etc/nftables.conf /etc/sysconfig/nftables.conf; do
   fi
 done
 
-note "Enabling IP forwarding, disabling IPv6 on the LAN interface"
-# IPv6 is always dropped by the firewall, and the client LAN must have no
-# other IPv6 router (a rogue router advertisement would give the clients a
-# path around the gateway). IPv6 is therefore always off on the LAN
+note "Enabling IP forwarding"
+# IPv6 is always dropped by the firewall. In two-NIC mode the client LAN must
+# have no other IPv6 router (a rogue router advertisement would give the
+# clients a path around the gateway), so IPv6 is always off on the LAN
 # interface; there is no opt-out. A dot in the name (VLAN) would split the
 # dotted key, so the slash form is used then.
-if [[ "$LAN_IF" == *.* ]]; then
-  LAN_IPV6_KEY="net/ipv6/conf/${LAN_IF}/disable_ipv6"
-else
-  LAN_IPV6_KEY="net.ipv6.conf.${LAN_IF}.disable_ipv6"
-fi
-cat > "$SYSCTL_FILE" <<EOF
+if [[ $SINGLE_NIC -eq 0 ]]; then
+  if [[ "$LAN_IF" == *.* ]]; then
+    LAN_IPV6_KEY="net/ipv6/conf/${LAN_IF}/disable_ipv6"
+  else
+    LAN_IPV6_KEY="net.ipv6.conf.${LAN_IF}.disable_ipv6"
+  fi
+  cat > "$SYSCTL_FILE" <<EOF
 # Dropjak: the machine forwards traffic as a router.
 net.ipv4.ip_forward = 1
 # IPv6 is always dropped; no IPv6 on the client LAN interface (no opt-out).
 $LAN_IPV6_KEY = 1
 EOF
+else
+  cat > "$SYSCTL_FILE" <<EOF
+# Dropjak: the machine forwards traffic as a router.
+net.ipv4.ip_forward = 1
+# Single-NIC mode: there is no separate client LAN interface; IPv6 is
+# dropped by the firewall (which has no IPv6 forwarding path).
+EOF
+fi
 if command -v sysctl >/dev/null 2>&1; then
   sysctl -q -w net.ipv4.ip_forward=1 >/dev/null
 else
   printf '1\n' > /proc/sys/net/ipv4/ip_forward
 fi
-if [[ -w "/proc/sys/net/ipv6/conf/${LAN_IF}/disable_ipv6" ]]; then
+if [[ $SINGLE_NIC -eq 0 && -w "/proc/sys/net/ipv6/conf/${LAN_IF}/disable_ipv6" ]]; then
   printf '1\n' > "/proc/sys/net/ipv6/conf/${LAN_IF}/disable_ipv6" \
     || warn "cannot disable IPv6 on ${LAN_IF} right now; it will be after a reboot."
 fi
@@ -709,16 +792,17 @@ if grep -qE '__[A-Z0-9_]+__' "$SYSTEMD_UNIT" "$FIREWALL_UNIT"; then
   die "an unfilled placeholder remained in the systemd units"
 fi
 
-# The mark, NFLOG group, interfaces and LAN network of the rendered rules must
-# match the values used by the portal and the drop-log listener. The unit
-# template does not contain these, so we pass them as a drop-in. Without
-# HV_LAN_IF/HV_LAN_NET the portal records no client MAC, while the rules drop
-# every LAN grant without one, and pre-auth/port proxy entries cannot be
-# applied at all.
+# The mark, NFLOG group, interfaces, LAN network and mode of the rendered
+# rules must match the values used by the portal and the drop-log listener.
+# The unit template does not contain these, so we pass them as a drop-in.
+# Without HV_LAN_IF/HV_LAN_NET (two-NIC) the portal records no client MAC,
+# while the rules drop every LAN grant without one. In single-NIC mode the
+# empty LAN values are expected and the portal uses IP-based grants only.
 ENV_DROPIN_DIR="${SYSTEMD_DIR}/${SERVICE}.service.d"
 install -d -m 0755 "$ENV_DROPIN_DIR"
 cat > "$ENV_DROPIN_DIR/10-dropjak-env.conf" <<EOF
 [Service]
+Environment=HV_SINGLE_NIC=$SINGLE_NIC
 Environment=HV_FWD_MARK=$FWD_MARK
 Environment=HV_DROP_LOG_GROUP=$DROP_LOG_GROUP
 Environment=HV_LAN_IF=$LAN_IF
@@ -795,6 +879,7 @@ cat <<EOF
   System:            $DISTRO_NAME ($PKG_MANAGER)
   Python:            $PYTHON
   nft:               $NFT_BIN
+  Mode:              $(if [[ $SINGLE_NIC -eq 1 ]]; then printf 'single-NIC'; else printf 'LAN+WAN'; fi)
   Portal:            $PORTAL_URL
   Firewall status:   systemctl status $FIREWALL_SERVICE
   Portal status:     systemctl status $SERVICE
@@ -803,7 +888,21 @@ cat <<EOF
   Permissions:       $NFT_BIN list set inet hatarvedelem allowed_v4
   User:              HV_USERS=$STATE_DIR/users.json $PYTHON $APP_DIR/server.py user add <name>
 
+EOF
+if [[ $SINGLE_NIC -eq 1 ]]; then
+  cat <<EOF
+  Grants are IP-based only on the public interface; there is no MAC binding.
+  Serve the portal over HTTPS (HV_PROXY=1) or set HV_WAN_HTTPS_ONLY=1 before
+  exposing it publicly.
+
+EOF
+else
+  cat <<EOF
   The clients' default gateway: $GW_IP
+
+EOF
+fi
+cat <<EOF
   HTTPS does not pass before login (we can only direct HTTP to the portal),
   therefore the portal address is: $PORTAL_URL
 

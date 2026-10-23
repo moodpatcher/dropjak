@@ -39,6 +39,7 @@ REQUIRED_RUNTIME_FILES = {
 }
 
 EXPECTED_NFT_PLACEHOLDERS = {
+    "__LANONLY__",
     "__LAN_IF__",
     "__WAN_IF__",
     "__LAN_NET__",
