@@ -294,6 +294,9 @@ class ProxyAuthCountingTests(unittest.TestCase):
         headers = {"X-Forwarded-Host": name, **extra}
         if ip:
             headers["X-Forwarded-For"] = ip
+            bind = tp.bind_cookie(self.server.gateway.sessions, ip, name)
+            if bind:
+                headers["Cookie"] = bind
         resp, _ = self.get("/api/proxy/auth", headers)
         return resp.status
 

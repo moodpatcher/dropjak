@@ -561,6 +561,9 @@
   .picker-foot{padding:5px 9px;font-size:12px;color:var(--muted);background:var(--soft);border-top:1px solid var(--line)}
   .picker-empty{padding:9px;font-size:12px;color:var(--muted)}
   .port-hint{display:block;margin-top:4px;font-size:12px;color:var(--muted)}
+  .lookalike-warn{display:block;margin-top:2px;font-size:12px;color:var(--amber)}
+  .tunnel-digest{margin:8px 0 0;font-size:12px;color:var(--muted);overflow-wrap:anywhere}
+  .tunnel-digest code{display:block;margin-top:2px;color:var(--ink)}
   .port-checks{display:flex;flex-wrap:wrap;gap:8px 18px;padding-top:2px}
   .port-checks label{display:flex;align-items:center;gap:6px;margin:0;font-size:12px;color:#444;cursor:pointer}
   .form-actions{display:flex;gap:7px;justify-content:flex-end;margin-top:4px}
@@ -2441,6 +2444,9 @@ const I18N = {
     'Függő fiókkérelmek': 'Pending account requests',
     'jóváhagyásra vár': 'awaiting approval',
     'Jóváhagyás': 'Approve',
+    'Hasonlít egy admin nevére': 'Resembles an admin name',
+    'Ez a név hasonlít egy admin nevére. Biztosan jóváhagyod?': 'This name resembles an admin name. Approve it anyway?',
+    'Futtatás előtt ellenőrizd a letöltött fájlt; a sha256sum kimenetének egyeznie kell ezzel az értékkel:': 'Before running it, check the downloaded file; the output of sha256sum must match this value:',
     'Elutasítás': 'Reject',
     'Fiókkérelmek': 'Account requests',
     'Fiókkérelmek engedélyezése': 'Allow account requests',
@@ -3467,6 +3473,9 @@ const I18N = {
     'Függő fiókkérelmek': 'Ausstehende Kontoanfragen',
     'jóváhagyásra vár': 'wartet auf Freigabe',
     'Jóváhagyás': 'Freigeben',
+    'Hasonlít egy admin nevére': 'Ähnelt einem Admin-Namen',
+    'Ez a név hasonlít egy admin nevére. Biztosan jóváhagyod?': 'Dieser Name ähnelt einem Admin-Namen. Trotzdem freigeben?',
+    'Futtatás előtt ellenőrizd a letöltött fájlt; a sha256sum kimenetének egyeznie kell ezzel az értékkel:': 'Prüfe die heruntergeladene Datei vor dem Ausführen; die Ausgabe von sha256sum muss mit diesem Wert übereinstimmen:',
     'Elutasítás': 'Ablehnen',
     'Fiókkérelmek': 'Kontoanfragen',
     'Fiókkérelmek engedélyezése': 'Kontoanfragen erlauben',
@@ -7196,6 +7205,16 @@ async function adminSend(path, payload) {
 
 /* ============================================================ admin: users */
 
+/* Look-alike check of a pending account name: the admin name it matches
+   after removing '.', '_' and '-' and folding case, or ''. */
+function lookalikeAdminName(name, users) {
+  const fold = value => String(value || '').replace(/[._-]/g, '').normalize('NFKC').toLowerCase();
+  const key = fold(name);
+  if (!key) return '';
+  const match = users.find(user => user.role === 'admin' && fold(user.name) === key);
+  return match ? match.name : '';
+}
+
 function renderUsers() {
   const allUsers = (adminState && adminState.users) || [];
   const users = allUsers.filter(user => !user.pending);
@@ -7220,12 +7239,14 @@ function renderUsers() {
     )));
     const pendingBody = el('tbody');
     for (const user of pending) {
+      const lookalike = lookalikeAdminName(user.name, users);
       const actions = el('td', { class: 'actions' });
       actions.append(
         el('button', { type: 'button', class: 'ghost small', onclick: () => {
           openUserPreview(user.name);
         } }, tr('Előnézet')),
         el('button', { type: 'button', class: 'ghost small', onclick: () => {
+          if (lookalike && !confirm(tr('Ez a név hasonlít egy admin nevére. Biztosan jóváhagyod?'))) return;
           adminSend('/api/admin/users', { action: 'approve', name: user.name });
         } }, tr('Jóváhagyás')),
         el('button', { type: 'button', class: 'danger small', onclick: () => {
@@ -7236,7 +7257,11 @@ function renderUsers() {
       );
       pendingBody.append(el('tr', {},
         el('td', {}, el('b', { text: user.name }), ' ',
-          el('span', { class: 'muted', text: tr('jóváhagyásra vár') })),
+          el('span', { class: 'muted', text: tr('jóváhagyásra vár') }),
+          lookalike ? el('span', {
+            class: 'lookalike-warn', role: 'note',
+            text: `⚠ ${tr('Hasonlít egy admin nevére')}: ${lookalike}`
+          }) : null),
         el('td', { class: 'mono', text: user.email || '—' }),
         actions
       ));
@@ -8580,6 +8605,9 @@ const AUDIT_EVENT_LABELS = {
   proxy_challenge_shown: ['Proxy-challenge megjelenítve', 'Proxy challenge shown', 'Proxy-Challenge angezeigt'],
   proxy_challenge_passed: ['Proxy-challenge teljesítve', 'Proxy challenge passed', 'Proxy-Challenge bestanden'],
   proxy_challenge_failed: ['Proxy-challenge sikertelen', 'Proxy challenge failed', 'Proxy-Challenge fehlgeschlagen'],
+  proxy_bind_completed: ['Proxy-bejegyzés a munkamenethez kötve', 'Proxy entry bound to the session', 'Proxy-Eintrag an die Sitzung gebunden'],
+  proxy_bind_denied: ['Proxy-kötés elutasítva a portálon', 'Proxy binding refused on the portal', 'Proxy-Bindung am Portal abgelehnt'],
+  proxy_bind_failed: ['Proxy-kötés sikertelen (érvénytelen jegy)', 'Proxy binding failed (invalid ticket)', 'Proxy-Bindung fehlgeschlagen (ungültiges Ticket)'],
   portal_host_redirect: ['Átirányítás idegen hosztra', 'Redirect to foreign host', 'Weiterleitung zu fremdem Host'],
   portal_https_redirect: ['Átirányítás a HTTPS-portálra', 'Redirect to HTTPS portal', 'Weiterleitung zum HTTPS-Portal'],
   host_rejected: ['Ismeretlen hoszt elutasítva', 'Unknown host rejected', 'Unbekannter Host abgelehnt'],
@@ -11254,6 +11282,9 @@ async function runTunnelServiceTest(agent, service) {
   tunnelScheduleTestExpiry(agent.id, service.id);
   renderAdminPanel();
 }
+/* SHA-256 of the last downloaded installer per agent (X-Dropjak-SHA256),
+   shown next to the download button until the page reloads. */
+const tunnelBundleDigests = new Map();
 async function downloadTunnelConfig(agent) {
   const id = typeof agent === 'object' && agent !== null ? agent.id : agent;
   const url = typeof agent === 'object' && agent !== null && agent.bundle_url
@@ -11269,6 +11300,9 @@ async function downloadTunnelConfig(agent) {
       error.data = data;
       throw error;
     }
+    const digest = (response.headers.get('X-Dropjak-SHA256') || '').trim().toLowerCase();
+    if (/^[0-9a-f]{64}$/.test(digest)) tunnelBundleDigests.set(String(id), digest);
+    else tunnelBundleDigests.delete(String(id));
     const blob = await response.blob();
     const objectUrl = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -11752,6 +11786,12 @@ function tunnelAgentCard(agent) {
       el('span', {}, `${tr('Szolgáltatások')}: `,
         el('b', { text: String(services.length) })))
   );
+  const digest = tunnelBundleDigests.get(String(agent.id));
+  if (digest) {
+    card.append(el('div', { class: 'tunnel-digest' },
+      tr('Futtatás előtt ellenőrizd a letöltött fájlt; a sha256sum kimenetének egyeznie kell ezzel az értékkel:'),
+      el('code', { class: 'mono', text: `${digest}  dropjak-agent-${agent.id}.sh` })));
+  }
   if (deleting) {
     card.append(tunnelDeleteConfirmBox(
       tr(`Biztosan törlöd az ügynököt: ${agent.label}? A szolgáltatásai is törlődnek.`),

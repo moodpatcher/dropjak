@@ -13,7 +13,11 @@
 #   - /api/proxy/auth: whether the session of the client IP has selected the
 #     domain rule containing the entry, and where to forward
 #     (X-Dropjak-Upstream: 127.0.0.1:<port> or <ip>:<port>); if the entry
-#     requests a challenge, it returns a 403 captcha page instead;
+#     requests a challenge, it returns a 403 captcha page instead. A private
+#     entry also needs this browser's __Host-dropjak_bind cookie: without it
+#     a page load is sent to the portal's /api/proxy/bind hop, which comes
+#     back to /__dropjak/bind on the entry (answered here, by forward_auth,
+#     with a 302 and the cookie);
 #   - /api/gate/challenge: the challenge page's captcha (/__dropjak/challenge).
 # {$PORT} is the portal port; compose passes it in.
 # {$HV_PROXY_KEY} is the secret shared with the portal: with it the portal
@@ -96,8 +100,9 @@ https:// {
 		reverse_proxy {http.request.header.X-Dropjak-Upstream} {
 			header_up -X-Dropjak-Upstream
 			header_up -X-Dropjak-Proxy-Key
-			# The challenge login cookie does not reach the target application.
-			header_up Cookie "__Host-dropjak_pass=[^;]*;?\s*" ""
+			# Neither the challenge pass nor the session bind cookie reaches
+			# the target application.
+			header_up Cookie "__Host-dropjak_(pass|bind)=[^;]*;?\s*" ""
 			header_up Cookie ";\s*$" ""
 		}
 	}

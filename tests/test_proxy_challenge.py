@@ -181,8 +181,13 @@ class ChallengeHttpTests(unittest.TestCase):
 
     def auth(self, name, ip=USER, cookie="", headers=NAV):
         extra = {"X-Forwarded-Host": name, "X-Forwarded-For": ip, **headers}
+        # The browser has done the bind hop of the private entry (DJ-05).
+        bind = tp.bind_cookie(self.server.gateway.sessions, ip, name)
+        jar = ["a=1"] + ([bind] if bind else [])
         if cookie:
-            extra["Cookie"] = f"a=1; {server.PROXY_PASS_COOKIE}={cookie}; b=2"
+            jar.append(f"{server.PROXY_PASS_COOKIE}={cookie}")
+        if cookie or bind:
+            extra["Cookie"] = "; ".join(jar + ["b=2"])
         return self.request("GET", "/api/proxy/auth", extra)
 
     def status(self, *args, **kwargs):
@@ -230,6 +235,16 @@ class ChallengeHttpTests(unittest.TestCase):
         self.assertIn("<svg", page)
         self.assertIn("<title>Dropjak</title>", page)
         self.assertNotIn("<h1", page)
+        # DJ-28: the inline captcha script runs by hash, not 'unsafe-inline'.
+        csp = resp.getheader("Content-Security-Policy")
+        script_src = next(part for part in csp.split(";")
+                          if part.strip().startswith("script-src"))
+        self.assertNotIn("'unsafe-inline'", script_src)
+        self.assertEqual(
+            server.inline_script_hashes(body),
+            tuple(h for h in script_src.split() if h.startswith("'sha256-")),
+        )
+        self.assertEqual(len(server.inline_script_hashes(body)), 1)
         for removed in (
             "Ellenőrzés", "Erősítsd meg, hogy nem vagy robot.",
             "Nincs hozzáférés", "Bejelentkezés",

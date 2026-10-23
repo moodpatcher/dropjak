@@ -2039,6 +2039,36 @@ class LoginTicketStoreTests(unittest.TestCase):
         )
         self.ip = "127.0.0.9"
 
+    def test_reservations_count_against_the_cap(self) -> None:
+        """DJ-29: attempts in flight count until they are settled."""
+        token = self.store.issue("verify", "alice", self.ip, "fp")
+        self.assertEqual(self.store.reserve(token, "127.0.0.10")[1],
+                         "ip_mismatch")
+        for _ in range(3):
+            ticket, reason = self.store.reserve(token, self.ip)
+            self.assertIsNotNone(ticket, reason)
+        self.assertEqual(self.store.reserve(token, self.ip),
+                         (None, "too_many_attempts"))
+        # A release frees a slot without counting an attempt.
+        self.store.release(token, self.ip)
+        self.assertEqual(self.store.peek(token, self.ip).reserved, 2)
+        self.assertIsNotNone(self.store.reserve(token, self.ip)[0])
+        remaining, closed, attempts, existed = self.store.fail_reserved(
+            token, self.ip
+        )
+        self.assertEqual((remaining, closed, attempts, existed),
+                         (2, False, 1, True))
+        self.assertEqual(self.store.peek(token, self.ip).reserved, 2)
+        self.assertEqual(self.store.reserve(token, self.ip),
+                         (None, "too_many_attempts"))
+        self.store.fail_reserved(token, self.ip)
+        _, closed, _, _ = self.store.fail_reserved(token, self.ip)
+        self.assertTrue(closed)
+        self.assertEqual(self.store.reserve(token, self.ip),
+                         (None, "too_many_attempts"))
+        self.assertEqual(self.store.reserve("", self.ip),
+                         (None, "bad_request"))
+
     def test_issue_fields_and_ip_binding(self) -> None:
         token = self.store.issue(
             "verify", "alice", self.ip, "fingerprint-1"
@@ -4930,6 +4960,58 @@ class HttpTests(unittest.TestCase):
                 )
                 self.assertNotIn("Set-Cookie", headers)
 
+    def test_totp_ticket_cap_holds_under_parallel_codes(self) -> None:
+        """DJ-29: parallel wrong codes cannot test more than the cap."""
+        self.require_totp("alice")
+        source = "127.0.0.32"
+        store = server.LoginTicketStore(max_attempts=3)
+        checked = []
+        lock = threading.Lock()
+        real_verify = self.users.verify_totp
+
+        def slow_verify(name, code):
+            with lock:
+                checked.append(code)
+            # Hold the reservation while the other requests arrive.
+            time.sleep(0.3)
+            return real_verify(name, code)
+
+        with mock.patch.object(server, "LOGIN_TICKETS", store), \
+                mock.patch.object(
+                    self.gw.fail2ban, "record_failure", return_value=None
+                ):
+            secret, _, _, _ = self.enroll_totp(
+                "alice", "hosszu-jelszo-1", source
+            )
+            status, _, body = self.login_from(
+                "alice", "hosszu-jelszo-1", source
+            )
+            self.assertEqual(status, 200, body)
+            ticket = json.loads(body)["ticket"]
+            results = []
+            with mock.patch.object(self.users, "verify_totp", slow_verify):
+                threads = [
+                    threading.Thread(target=lambda: results.append(
+                        self.post_json(
+                            "/api/login/totp",
+                            {"ticket": ticket,
+                             "code": wrong_totp_code(secret)},
+                            source=source,
+                        )
+                    ))
+                    for _ in range(8)
+                ]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join(10)
+        self.assertEqual(len(results), 8)
+        self.assertEqual(len(checked), 3, checked)
+        codes = sorted(json.loads(body).get("code") for _, _, body in results)
+        self.assertEqual(codes.count("ticket_invalid"), 5, codes)
+        self.assertTrue(all(status == 403 for status, _, _ in results))
+        self.assertIsNone(store.peek(ticket, source))
+
     def test_totp_ticket_attempt_cap_with_fail2ban(self) -> None:
         self.require_totp("alice")
         source = "127.0.0.31"
@@ -5624,6 +5706,97 @@ class HttpTests(unittest.TestCase):
                 "https://challenges.cloudflare.com",
                 headers["Content-Security-Policy"],
             )
+
+    def test_csp_allows_inline_scripts_only_by_hash(self) -> None:
+        """DJ-28: no 'unsafe-inline' for scripts; the page's own inline
+        scripts are allowed by their SHA-256."""
+        status, headers, body = self.get("/")
+        self.assertEqual(status, 200)
+        csp = headers["Content-Security-Policy"]
+        script_src = next(
+            part.strip() for part in csp.split(";")
+            if part.strip().startswith("script-src ")
+        )
+        self.assertNotIn("'unsafe-inline'", script_src)
+        blocks = re.findall(rb"<script>(.*?)</script>", body, re.S)
+        self.assertGreaterEqual(len(blocks), 2)
+        for block in blocks:
+            digest = base64.b64encode(hashlib.sha256(block).digest()).decode()
+            self.assertIn(f"'sha256-{digest}'", script_src)
+        # The browser hashes the text as served: no CR to normalize, no
+        # <script> with attributes (other than src) and no inline handler.
+        self.assertNotIn(b"\r", body)
+        markup = re.sub(rb"<script>.*?</script>", b"", body, flags=re.S)
+        self.assertIsNone(re.search(rb"<[a-z][^>]*\son[a-z]+\s*=", markup, re.I))
+        self.assertNotIn(b"javascript:", body)
+        self.assertEqual(
+            len(re.findall(rb"<script\b", body)), len(blocks)
+        )
+        # Other HTML (the proxy login page) gets no script hash at all.
+        self.assertNotIn("'sha256-", server.content_security_policy())
+
+    def _raw_post(self, path: str, obj: dict, headers: dict):
+        conn = self.conn()
+        conn.request("POST", path, body=json.dumps(obj), headers={
+            "Content-Type": "application/json", **headers,
+        })
+        resp = conn.getresponse()
+        resp.read()
+        cookies = [value for name, value in resp.getheaders()
+                   if name.lower() == "set-cookie"]
+        conn.close()
+        return resp.status, cookies
+
+    def test_session_cookie_is_host_prefixed_over_https(self) -> None:
+        """DJ-28: over HTTPS the session cookie is __Host-hv_session."""
+        with mock.patch.object(gateway, "COOKIE_SECURE", True):
+            status, headers, body = self.login("alice", "hosszu-jelszo-1")
+        self.assertEqual(status, 200, body)
+        raw = headers["Set-Cookie"]
+        self.assertTrue(raw.startswith("__Host-hv_session="), raw)
+        attributes = {part.strip() for part in raw.split(";")[1:]}
+        self.assertLessEqual({"Secure", "Path=/", "HttpOnly"}, attributes)
+        self.assertFalse(any(a.lower().startswith("domain") for a in attributes))
+        cookie = self.cookie_from(headers)
+        status, _, body = self.get("/api/status", headers={"Cookie": cookie})
+        self.assertTrue(json.loads(body)["authenticated"])
+        # Logout clears both names.
+        with mock.patch.object(gateway, "COOKIE_SECURE", True):
+            status, cookies = self._raw_post(
+                "/api/logout", {}, {"Cookie": cookie}
+            )
+        self.assertEqual(status, 200)
+        names = sorted(value.split("=", 1)[0] for value in cookies)
+        self.assertEqual(names, ["__Host-hv_session", "hv_session"])
+        for value in cookies:
+            self.assertIn("Max-Age=0", value)
+        status, _, body = self.get("/api/status", headers={"Cookie": cookie})
+        self.assertFalse(json.loads(body)["authenticated"])
+
+    def test_session_cookie_plain_name_on_http(self) -> None:
+        """DJ-28: plain HTTP keeps hv_session; the reader accepts both."""
+        status, headers, body = self.login("alice", "hosszu-jelszo-1")
+        self.assertEqual(status, 200, body)
+        token = self.cookie_from(headers).split("=", 1)[1]
+        self.assertNotIn("Secure", headers["Set-Cookie"])
+        for cookie in (
+            f"hv_session={token}",
+            f"__Host-hv_session={token}",
+            # The __Host- name wins over a (possibly tossed) plain one.
+            f"hv_session=bogus; __Host-hv_session={token}",
+        ):
+            with self.subTest(cookie=cookie):
+                status, _, body = self.get(
+                    "/api/status", headers={"Cookie": cookie}
+                )
+                self.assertTrue(json.loads(body)["authenticated"])
+        status, cookies = self._raw_post(
+            "/api/logout", {}, {"Cookie": f"hv_session={token}"}
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(len(cookies), 2)
+        self.assertTrue(cookies[0].startswith("hv_session=;"))
+        self.assertNotIn("Secure", cookies[0])
 
     def test_connection_cap_per_source_ip(self) -> None:
         """DJ-13: one source cannot hold an unbounded number of threads."""
@@ -12457,6 +12630,53 @@ class StaticUiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.source = (ROOT / "index.html").read_text(encoding="utf-8")
+
+    def test_pending_name_lookalike_warning(self) -> None:
+        """DJ-29: the approval list warns about names resembling an admin."""
+        start = self.source.index("function lookalikeAdminName(")
+        end = self.source.index("\n}\n", start) + 3
+        helper = self.source[start:end]
+        self.assertIn("lookalikeAdminName(user.name, users)", self.source)
+        self.assertIn("class: 'lookalike-warn'", self.source)
+        for text in (
+            "Hasonlít egy admin nevére",
+            "Ez a név hasonlít egy admin nevére. Biztosan jóváhagyod?",
+        ):
+            self.assertEqual(self.source.count(f"'{text}':"), 2, text)
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not available for the JS helper test")
+        script = helper + """
+const users = [
+  { name: 'Admin.One', role: 'admin' }, { name: 'bob', role: 'user' },
+];
+process.stdout.write(JSON.stringify([
+  'admin_one', 'ADMINONE', 'a-d-m-i-n.o_n_e', 'bob_', 'carol', '',
+].map(name => lookalikeAdminName(name, users))));
+"""
+        result = subprocess.run(
+            [node, "-e", script], capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout),
+            ["Admin.One", "Admin.One", "Admin.One", "", "", ""],
+        )
+
+    def test_tunnel_bundle_digest_is_shown(self) -> None:
+        """DJ-08: the installer's SHA-256 appears next to its download."""
+        start = self.source.index("async function downloadTunnelConfig(")
+        body = self.source[start:self.source.index("\n}\n", start)]
+        self.assertIn("response.headers.get('X-Dropjak-SHA256')", body)
+        # The header is read before the blob is saved.
+        self.assertLess(
+            body.index("X-Dropjak-SHA256"), body.index("response.blob()")
+        )
+        self.assertIn("tunnelBundleDigests.get(String(agent.id))", self.source)
+        self.assertIn("class: 'tunnel-digest'", self.source)
+        hint = ("Futtatás előtt ellenőrizd a letöltött fájlt; a sha256sum "
+                "kimenetének egyeznie kell ezzel az értékkel:")
+        self.assertEqual(self.source.count(f"'{hint}':"), 2)
 
     def test_registration_markup_and_text_present(self) -> None:
         for token in (

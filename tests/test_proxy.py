@@ -23,6 +23,7 @@ import threading
 import time
 import types
 import unittest
+import urllib.parse
 from pathlib import Path
 from unittest import mock
 
@@ -359,7 +360,23 @@ def add_session(manager, ip, domains=(), *, authorized=True, ttl=60,
         token=ip, user="u", ip=ip, created=now, expires=now + ttl,
         authorized=authorized, role=role, full=full, grant_parts=grants,
         rule_parts=(gateway.RuleSelection("r", "r", grants, tuple(domains)),),
+        sid="sid-" + ip,
     )
+
+
+def bind_cookie(manager, ip, name) -> str:
+    """The ``__Host-dropjak_bind=...`` pair the bind hop would set for the
+    IP's session on the entry (empty if there is no such session)."""
+    try:
+        ip = gateway.normalize_ip(str(ip).split(",")[-1])
+    except ValueError:
+        return ""
+    name = name.strip().lower().partition(":")[0]
+    sid = manager.domain_session(ip, name)
+    if not sid:
+        return ""
+    value = server._proxy_bind_value(sid, name, int(time.time()) + 3600)
+    return f"{server.PROXY_BIND_COOKIE}={value}"
 
 
 class DomainRuleStoreTests(unittest.TestCase):
@@ -677,10 +694,16 @@ class ProxyEndpointTests(unittest.TestCase):
         conn.close()
         return resp, body
 
-    def auth(self, host, ip="", source="127.0.0.1"):
+    def auth(self, host, ip="", source="127.0.0.1", bind=True):
+        """forward_auth call; ``bind``: this browser holds the bind cookie
+        of the IP's session (as after the bind hop)."""
         headers = {"X-Forwarded-Host": host}
         if ip:
             headers["X-Forwarded-For"] = ip
+        cookie = bind_cookie(self.server.gateway.sessions, ip, host) \
+            if bind and ip else ""
+        if cookie:
+            headers["Cookie"] = cookie
         return self.get("/api/proxy/auth", headers, source)
 
     def test_ask(self) -> None:
@@ -929,6 +952,336 @@ class ProxyEndpointTests(unittest.TestCase):
         self.assertEqual(resp.status, 200)
         self.assertEqual(resp.getheader("Content-Type"), "image/png")
         self.assertTrue(body.startswith(b"\x89PNG"))
+
+
+class ProxyBindTicketStoreTests(unittest.TestCase):
+    def test_ticket_is_single_use_and_short_lived(self) -> None:
+        now = [1000.0]
+        store = server.ProxyBindTicketStore(clock=lambda: now[0])
+        self.assertLessEqual(server.PROXY_BIND_TICKET_TTL, 60)
+        token = store.issue("sid", host("owui"), "198.51.100.1")
+        self.assertGreaterEqual(len(token), 43)
+        ticket = store.consume(token)
+        self.assertEqual(
+            (ticket.sid, ticket.host, ticket.ip),
+            ("sid", host("owui"), "198.51.100.1"),
+        )
+        self.assertIsNone(store.consume(token))
+        late = store.issue("sid", host("owui"), "198.51.100.1")
+        now[0] += server.PROXY_BIND_TICKET_TTL
+        self.assertIsNone(store.consume(late))
+        self.assertIsNone(store.consume(""))
+
+    def test_full_store_drops_the_oldest(self) -> None:
+        store = server.ProxyBindTicketStore(limit=2)
+        first = store.issue("a", "h", "ip")
+        second = store.issue("b", "h", "ip")
+        third = store.issue("c", "h", "ip")
+        self.assertIsNone(store.consume(first))
+        self.assertEqual(store.consume(second).sid, "b")
+        self.assertEqual(store.consume(third).sid, "c")
+
+    def test_bind_cookie_value_checks(self) -> None:
+        now = time.time()
+        value = server._proxy_bind_value("sid-1", host("owui"), int(now) + 60)
+        self.assertTrue(server._proxy_bind_valid(value, "sid-1", host("owui"), now))
+        for sid, name, at in (
+            ("sid-2", host("owui"), now),
+            ("sid-1", host("nas"), now),
+            ("sid-1", host("owui"), now + 61),
+            ("", host("owui"), now),
+        ):
+            with self.subTest(sid=sid, name=name, at=at):
+                self.assertFalse(server._proxy_bind_valid(value, sid, name, at))
+        encoded, _, signature = value.partition(".")
+        self.assertFalse(server._proxy_bind_valid(
+            encoded + "." + "0" * len(signature), "sid-1", host("owui"), now
+        ))
+        # A challenge pass is not a bind cookie, even with the same key.
+        pass_value = server._proxy_pass_value(host("owui"), "", now, int(now) + 60)
+        self.assertFalse(server._proxy_bind_valid(
+            pass_value, "sid-1", host("owui"), now
+        ))
+        self.assertEqual(
+            server._proxy_pass_issued(value, host("owui"), "", now), 0.0
+        )
+
+    def test_return_uri_stays_on_the_entry(self) -> None:
+        for raw, expected in (
+            ("/chat?x=1", "/chat?x=1"), ("", "/"), ("//evil.example/", "/"),
+            ("https://evil.example/", "/"), ("/\\evil", "/"),
+            ("/a b", "/"), ("/x\r\nSet-Cookie: a=b", "/"),
+            ("/__dropjak/bind?t=x", "/"), ("/é", "/"),
+        ):
+            with self.subTest(raw=raw):
+                self.assertEqual(server._proxy_bind_uri(raw), expected)
+
+
+class ProxyBindHttpTests(unittest.TestCase):
+    """DJ-05: a private entry is bound to the portal session, not the IP."""
+
+    USER_IP = "198.51.100.10"
+    OTHER_IP = "198.51.100.11"
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.settings = settings_store.SettingsStore(
+            os.path.join(self.tmp.name, "s.json"), logger=lambda *_: None
+        )
+        self.settings.set_proxy([ROOT_DOMAIN], [
+            {"name": "owui", "port": 3000, **R},
+            {"name": "nas", "port": 3001, **R},
+            {"name": "pub", "port": 3003, "visibility": "public", **R},
+        ])
+        self.sessions = gateway.SessionManager(firewall=None)
+        add_session(self.sessions, self.USER_IP, (host("owui"), host("nas")))
+        add_session(self.sessions, self.OTHER_IP, (host("nas"),))
+        self.audits, self.drops, self.counted = [], [], []
+        gw = types.SimpleNamespace(
+            settings=self.settings,
+            sessions=self.sessions,
+            fail2ban=types.SimpleNamespace(
+                banned=lambda ip: None, proxy_banned=lambda ip: None,
+                record_proxy_unauthorized=self.counted.append,
+            ),
+            audit=types.SimpleNamespace(
+                write=lambda event, **fields: self.audits.append(
+                    (event, fields)
+                )
+            ),
+            record_proxy_drop=lambda *args: self.drops.append(args),
+            certs=settings_store.CertStore(
+                os.path.join(self.tmp.name, "certs"), logger=lambda *_: None
+            ),
+        )
+        old = gateway.PORTAL_URL
+        gateway.PORTAL_URL = ""
+        self.addCleanup(setattr, gateway, "PORTAL_URL", old)
+        self.server = server.AppServer(("127.0.0.1", 0), gw)
+        thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 5)
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.port = self.server.server_address[1]
+        self.get = ProxyEndpointTests.get.__get__(self)
+
+    def auth(self, name, ip=USER_IP, cookie="", uri="/", nav=False):
+        headers = {
+            "X-Forwarded-Host": name, "X-Forwarded-For": ip,
+            "X-Forwarded-Uri": uri,
+        }
+        if cookie:
+            headers["Cookie"] = cookie
+        if nav:
+            headers.update({"Sec-Fetch-Dest": "document",
+                            "Sec-Fetch-Mode": "navigate"})
+        return self.get("/api/proxy/auth", headers)
+
+    def portal_hop(self, name, ip=USER_IP, token=None, r="/"):
+        """GET /api/proxy/bind on the portal's origin, through Caddy."""
+        token = ip if token is None else token
+        query = urllib.parse.urlencode({"host": name, "r": r})
+        headers = {"Host": ROOT_DOMAIN, "X-Forwarded-For": ip}
+        if token:
+            headers["Cookie"] = f"{gateway.SECURE_COOKIE_NAME}={token}"
+        return self.get(f"/api/proxy/bind?{query}", headers)
+
+    def bind(self, name, ip=USER_IP, r="/"):
+        """Both hops; the bind cookie pair the browser keeps."""
+        resp, _ = self.portal_hop(name, ip, r=r)
+        self.assertEqual(resp.status, 302)
+        location = urllib.parse.urlsplit(resp.getheader("Location"))
+        self.assertEqual(location.scheme, "https")
+        self.assertEqual(location.netloc, name)
+        self.assertEqual(location.path, server.PROXY_BIND_PATH)
+        uri = f"{location.path}?{location.query}"
+        resp, _ = self.auth(name, ip, uri=uri, nav=True)
+        self.assertEqual(resp.status, 302)
+        cookie = resp.getheader("Set-Cookie")
+        self.assertTrue(cookie.startswith(server.PROXY_BIND_COOKIE + "="))
+        return cookie.split(";", 1)[0], resp, uri
+
+    def assert_no_upstream(self, resp) -> None:
+        self.assertNotEqual(resp.status, 200)
+        self.assertIsNone(resp.getheader("X-Dropjak-Upstream"))
+
+    def test_full_hop_sets_cookie_and_opens_entry(self) -> None:
+        cookie, resp, _ = self.bind(host("owui"), r="/chat/1?q=2")
+        self.assertEqual(
+            resp.getheader("Location"), f"https://{host('owui')}/chat/1?q=2"
+        )
+        attributes = {
+            part.strip() for part in resp.getheader("Set-Cookie").split(";")
+        }
+        self.assertLessEqual(
+            {"Secure", "HttpOnly", "SameSite=Lax", "Path=/"}, attributes
+        )
+        self.assertFalse(any(a.startswith("Domain") for a in attributes))
+        resp, _ = self.auth(host("owui"), cookie=f"x=1; {cookie}; y=2")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(
+            resp.getheader("X-Dropjak-Upstream"), "127.0.0.1:3000"
+        )
+        events = [event for event, _ in self.audits]
+        self.assertIn("proxy_bind_completed", events)
+
+    def test_same_ip_without_cookie_never_gets_upstream(self) -> None:
+        # The IP holds an authorized session; a second browser behind the
+        # same NAT has no bind cookie.
+        for cookie in ("", "x=1", f"{server.PROXY_BIND_COOKIE}=bogus",
+                       f"{server.PROXY_BIND_COOKIE}=" + server._proxy_bind_value(
+                           "sid-" + self.USER_IP, host("owui"),
+                           int(time.time()) - 1)):
+            with self.subTest(cookie=cookie):
+                resp, body = self.auth(host("owui"), cookie=cookie)
+                self.assert_no_upstream(resp)
+                self.assertEqual(resp.status, 401)
+                self.assertEqual(
+                    json.loads(body)["code"], "proxy_bind_required"
+                )
+                resp, _ = self.auth(host("owui"), cookie=cookie, nav=True)
+                self.assert_no_upstream(resp)
+                self.assertEqual(resp.status, 302)
+                location = urllib.parse.urlsplit(resp.getheader("Location"))
+                self.assertEqual(
+                    (location.scheme, location.netloc, location.path),
+                    ("https", ROOT_DOMAIN, server.PROXY_BIND_START),
+                )
+                self.assertEqual(
+                    urllib.parse.parse_qs(location.query)["host"],
+                    [host("owui")],
+                )
+        # It does not count against the IP that owns the session.
+        self.assertEqual(self.counted, [])
+        self.assertEqual(self.drops, [])
+        # Nor does the portal hop help without the portal session cookie.
+        for token in ("", "wrong-token"):
+            with self.subTest(token=token):
+                resp, _ = self.portal_hop(host("owui"), token=token)
+                self.assertEqual(resp.status, 302)
+                self.assertEqual(resp.getheader("Location"), "/")
+        denied = [f for event, f in self.audits if event == "proxy_bind_denied"]
+        self.assertEqual([f["reason"] for f in denied], ["no_session"] * 2)
+
+    def test_cookie_for_one_host_fails_on_another(self) -> None:
+        cookie, _, _ = self.bind(host("owui"))
+        resp, _ = self.auth(host("nas"), cookie=cookie)
+        self.assert_no_upstream(resp)
+        # The other IP's session cannot use it either.
+        resp, _ = self.auth(host("owui"), self.OTHER_IP, cookie=cookie)
+        self.assert_no_upstream(resp)
+
+    def test_cookie_for_ended_session_fails(self) -> None:
+        cookie, _, _ = self.bind(host("owui"))
+        resp, _ = self.auth(host("owui"), cookie=cookie)
+        self.assertEqual(resp.status, 200)
+        # Logout (or a ban, or expiry) ends the session: the next request
+        # is refused. A new login on the same IP is a new session.
+        del self.sessions._sessions[self.USER_IP]
+        resp, _ = self.auth(host("owui"), cookie=cookie)
+        self.assert_no_upstream(resp)
+        add_session(self.sessions, self.USER_IP, (host("owui"),))
+        self.sessions._sessions[self.USER_IP].sid = "new-sid"
+        resp, _ = self.auth(host("owui"), cookie=cookie)
+        self.assert_no_upstream(resp)
+        self.assertEqual(resp.status, 401)
+
+    def test_ticket_works_once_and_only_for_its_host_and_ip(self) -> None:
+        cookie, _, uri = self.bind(host("owui"))
+        resp, body = self.auth(host("owui"), uri=uri, nav=True)
+        self.assertEqual(resp.status, 401)
+        self.assertIsNone(resp.getheader("Set-Cookie"))
+        self.assertIn(b"/__dropjak/unauthorized.png", body)
+        # A ticket for one host is useless on another, and from another IP.
+        resp, _ = self.portal_hop(host("nas"))
+        location = urllib.parse.urlsplit(resp.getheader("Location"))
+        nas_uri = f"{location.path}?{location.query}"
+        resp, _ = self.auth(host("owui"), uri=nas_uri, nav=True)
+        self.assertEqual(resp.status, 401)
+        self.assertIsNone(resp.getheader("Set-Cookie"))
+        resp, _ = self.portal_hop(host("nas"))
+        location = urllib.parse.urlsplit(resp.getheader("Location"))
+        nas_uri = f"{location.path}?{location.query}"
+        resp, _ = self.auth(host("nas"), self.OTHER_IP, uri=nas_uri, nav=True)
+        self.assertEqual(resp.status, 401)
+        self.assertIsNone(resp.getheader("Set-Cookie"))
+        reasons = [f["reason"] for event, f in self.audits
+                   if event == "proxy_bind_failed"]
+        self.assertEqual(
+            reasons, ["unknown_ticket", "host_mismatch", "ip_mismatch"]
+        )
+        self.assertEqual(self.counted, [])
+
+    def test_portal_hop_refusals(self) -> None:
+        # Public entry, unknown host, a host the session did not select, and
+        # a session of another IP: no ticket.
+        for name, ip, token, reason in (
+            (host("pub"), self.USER_IP, None, "not_private"),
+            ("evil.example.com", self.USER_IP, None, "not_private"),
+            (host("owui"), self.OTHER_IP, None, "not_authorized"),
+        ):
+            with self.subTest(name=name, ip=ip):
+                self.audits.clear()
+                resp, _ = self.portal_hop(name, ip, token=token)
+                self.assertEqual(resp.status, 302)
+                self.assertEqual(resp.getheader("Location"), "/")
+                self.assertEqual(
+                    [f["reason"] for e, f in self.audits
+                     if e == "proxy_bind_denied"], [reason],
+                )
+        # The return path stays on the entry.
+        resp, _ = self.portal_hop(host("owui"), r="//evil.example/x")
+        location = urllib.parse.urlsplit(resp.getheader("Location"))
+        self.assertEqual(urllib.parse.parse_qs(location.query)["r"], ["/"])
+        # Only Caddy may call the hop (a foreign peer learns nothing).
+        resp, body = self.get(
+            f"/api/proxy/bind?host={host('owui')}",
+            {"Cookie": f"{gateway.COOKIE_NAME}={self.USER_IP}",
+             "X-Forwarded-For": self.USER_IP},
+            source="127.0.0.2",
+        )
+        self.assertEqual((resp.status, body), (404, b""))
+
+    def test_portal_hop_passes_portal_forward_auth(self) -> None:
+        # On the root (the portal) the other /api/proxy/ paths stay closed.
+        resp, _ = self.auth(ROOT_DOMAIN, uri="/api/proxy/bind?host=x")
+        self.assertEqual(resp.status, 200)
+        resp, _ = self.auth(ROOT_DOMAIN, uri="/api/proxy/auth")
+        self.assertEqual(resp.status, 404)
+        portal = "dropjak." + ROOT_DOMAIN
+        self.settings.set_portal_domain(portal)
+        self.addCleanup(self.settings.set_portal_domain, "")
+        resp, _ = self.auth(portal, uri="/api/proxy/bind?host=x")
+        self.assertEqual(resp.status, 200)
+        # With its own portal address the hop starts there.
+        resp, _ = self.auth(host("owui"), nav=True)
+        self.assertTrue(resp.getheader("Location").startswith(
+            f"https://{portal}/api/proxy/bind?"
+        ))
+
+    def test_bind_cookie_never_reaches_upstream(self) -> None:
+        text = (ROOT / "deploy" / "Caddyfile").read_text(encoding="utf-8")
+        upstream = text[text.index(
+            "reverse_proxy {http.request.header.X-Dropjak-Upstream}"
+        ):]
+        upstream = upstream[:upstream.index("\n\t\t}")]
+        rules = re.findall(r'header_up Cookie "([^"]*)" "([^"]*)"', upstream)
+        self.assertTrue(rules)
+        for raw in (
+            "__Host-dropjak_bind=abc.def",
+            "a=1; __Host-dropjak_bind=abc; __Host-dropjak_pass=x; b=2",
+            "__Host-dropjak_pass=x; __Host-dropjak_bind=abc",
+        ):
+            with self.subTest(raw=raw):
+                value = raw
+                for pattern, replacement in rules:
+                    value = re.sub(
+                        pattern.replace("\\\\", "\\"), replacement, value
+                    )
+                self.assertNotIn("dropjak_bind", value)
+                self.assertNotIn("dropjak_pass", value)
 
 
 class ProxiedPortalHttpTests(unittest.TestCase):

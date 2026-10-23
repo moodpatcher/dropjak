@@ -2367,8 +2367,27 @@ class TunnelHttpTests(unittest.TestCase):
             rule_parts=(gateway.RuleSelection(
                 "r", "r", (), ("priv.example.com",),
             ),),
+            sid="sid-tunnel",
         )
-        status, response, _ = self.get("/api/proxy/auth", headers=headers)
+        # DJ-05: the private tunnel domain is bound to the session too. A
+        # browser without the bind cookie gets no upstream; a page load is
+        # sent to the portal's bind hop.
+        status, response, body = self.get("/api/proxy/auth", headers=headers)
+        self.assertEqual(status, 401)
+        self.assertIsNone(response.get("X-Dropjak-Upstream"))
+        self.assertEqual(json.loads(body)["code"], "proxy_bind_required")
+        status, response, _ = self.get("/api/proxy/auth", headers={
+            **headers, "Sec-Fetch-Dest": "document",
+        })
+        self.assertEqual(status, 302)
+        self.assertIn("/api/proxy/bind?host=priv.example.com",
+                      response.get("Location"))
+        bind = server._proxy_bind_value(
+            "sid-tunnel", "priv.example.com", int(now) + 60
+        )
+        status, response, _ = self.get("/api/proxy/auth", headers={
+            **headers, "Cookie": f"{server.PROXY_BIND_COOKIE}={bind}",
+        })
         self.assertEqual(status, 200)
         self.assertEqual(
             response.get("X-Dropjak-Upstream"), f"10.77.0.2:{port}"
