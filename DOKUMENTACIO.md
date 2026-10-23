@@ -659,7 +659,12 @@ password, then create a **Host SSH** (input, TCP 22) rule, assign it to the
 admin, and authorize it from the same IP.
 
 #### 10.2. Build note
-According to the snapshot, the VM has no `buildx`, and `docker compose build` cannot reach the Debian mirrors because the fail-closed forward chain also blocks the build container's egress. The working procedure:
+The fail-closed forward chain also blocks the build container's egress, so a
+build over Docker's default bridge cannot resolve or reach
+`deb.debian.org` (`Temporary failure resolving 'deb.debian.org'`), even though
+the Docker daemon itself can pull images. The compose file therefore builds
+with `network: host`, which uses the host's own connectivity. The same build
+can also be made explicitly:
 
 ```bash
 DOCKER_BUILDKIT=0 docker build --network host -t dropjak:2 .
