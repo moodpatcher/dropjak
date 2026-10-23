@@ -69,10 +69,13 @@ Compose v2, one LAN-facing and one WAN-facing interface, and
    sudo ./docker/setup-host.sh
    ```
 
-4. **Start the stack.**
+4. **Build the image, then start the stack.** The build must run on the host
+   network: the fail-closed forward chain blocks the build container's egress,
+   so apt-get cannot reach the Debian mirrors from Compose's bridge.
 
    ```bash
-   docker compose up -d --build
+   DOCKER_BUILDKIT=0 docker build --network host -t dropjak:2 .
+   docker compose up -d
    ```
 
    Open `http://<lan-ip>:8100/`, sign in with the admin account from `.env`,

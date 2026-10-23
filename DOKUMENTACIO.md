@@ -636,7 +636,8 @@ cp .env.example .env
 chmod 600 .env
 # edit .env: HV_LAN_IF, HV_WAN_IF, HV_LAN_NET, HV_PORTAL_NET and the admin account
 sudo ./docker/setup-host.sh
-docker compose up -d --build
+DOCKER_BUILDKIT=0 docker build --network host -t dropjak:2 .
+docker compose up -d
 docker compose ps
 docker compose logs -f dropjak
 ```
@@ -662,13 +663,22 @@ admin, and authorize it from the same IP.
 The fail-closed forward chain also blocks the build container's egress, so a
 build over Docker's default bridge cannot resolve or reach
 `deb.debian.org` (`Temporary failure resolving 'deb.debian.org'`), even though
-the Docker daemon itself can pull images. The compose file therefore builds
-with `network: host`, which uses the host's own connectivity. The same build
-can also be made explicitly:
+the Docker daemon itself can pull images. Build the image on the host network
+instead:
 
 ```bash
 DOCKER_BUILDKIT=0 docker build --network host -t dropjak:2 .
-docker compose up -d --force-recreate
+docker compose up -d
+```
+
+Do not put `network: host` into the compose build section: Compose builds
+through buildx bake and cannot grant the `network.host` entitlement, so
+`docker compose up -d --build` stops with `additional privileges requested`.
+With BuildKit only, the buildx form grants it explicitly:
+
+```bash
+docker buildx build --allow=network.host --network=host -t dropjak:2 --load .
+docker compose up -d
 ```
 
 `--build` should intentionally be omitted if the image is already built. It is worth running the command from a detached script, because the recreate can interrupt SSH. The backups used for the 3.3.0 installation are listed in point 2.2.
@@ -4698,10 +4708,15 @@ session that started it reachable (a single accept rule for that source
 address) until the container loads its rules; every other source is blocked
 immediately.
 
-##### 4. Start
+##### 4. Build and start
+
+The build runs on the host network; the fail-closed forward chain blocks the
+build container's egress, so apt-get cannot reach the Debian mirrors from
+Compose's bridge (see 10.2).
 
 ```bash
-docker compose up -d --build
+DOCKER_BUILDKIT=0 docker build --network host -t dropjak:2 .
+docker compose up -d
 docker compose ps
 docker compose logs -f dropjak
 ```
@@ -4741,7 +4756,8 @@ CLI-created users get the `user` role; promote them in **Admin → Users**.
 
 ```bash
 git pull
-docker compose up -d --build
+DOCKER_BUILDKIT=0 docker build --network host -t dropjak:2 .
+docker compose up -d --force-recreate
 ```
 
 The entry point reloads the firewall rules idempotently. On portal start the

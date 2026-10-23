@@ -10,14 +10,12 @@
 services:
   dropjak:
     container_name: dropjak
+    # The build itself must run on the host network: the fail-closed forward
+    # chain blocks the build container's egress. Compose cannot grant BuildKit
+    # the network.host entitlement, so build the image separately (see the
+    # docs) and start it with `docker compose up -d`.
     build:
       context: .
-      # The build container must reach the Debian mirrors. On the gateway host
-      # the early boot protection (inet hatarvedelem_boot) drops forwarded
-      # traffic, and Docker's build bridge is forwarded, so apt-get gets no
-      # DNS. With host networking the build uses the host's own (output-chain)
-      # connectivity instead.
-      network: host
     image: dropjak:2
     restart: unless-stopped
     network_mode: host
