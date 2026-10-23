@@ -959,7 +959,7 @@ The `host_service_tcp` / `host_service_udp` only grow; if a port remains there, 
 #### 15.3. Common errors
 | Symptom | Likely cause | Action |
 |---|---|---|
-| `docker compose build` cannot reach a mirror | The fail-closed forward chain blocks the build container's egress; there is no buildx. | `DOCKER_BUILDKIT=0 docker build --network host -t dropjak:2 .`, then `up -d --force-recreate`. |
+| `docker compose build` cannot reach a mirror, or stops with `additional privileges requested` | The fail-closed forward chain blocks the build container's egress, and Compose cannot grant BuildKit the `network.host` entitlement. | `DOCKER_BUILDKIT=0 docker build --network host -t dropjak:2 .`, then `docker compose up -d --force-recreate`. |
 | SSH interrupted after installation | The startup flush cleared `allowed_input_tcp`. | Portal from the same IP, or provider console, or breakglass. |
 | The portal does not start | Missing mandatory env, faulty CIDR, nft error, state file error. | `docker compose logs`; check `HV_LAN_IF`, `HV_WAN_IF`, `HV_LAN_NET`, `HV_PORTAL_NET`. |
 | The portal is reachable, but the network is not | No valid grant, expired TTL, fail2ban, block, MAC mismatch. | `/api/status`, admin Sessions/Firewall, `nft list set`, `conntrack`. |
@@ -5017,6 +5017,18 @@ The running version is stored in [`VERSION`](VERSION).
   `test_tunnels` API/session/revocation tests (including a rename that
   follows the real UI payload with an unchanged internal listen port) and one
   new `test_tunnel_ui` static test; the measured suite is **981 tests OK**.
+
+#### Fixed
+
+- **Image build on a gateway host.** The fail-closed forward chain also
+  drops the build container's traffic, so apt-get had no DNS
+  (`Temporary failure resolving 'deb.debian.org'`). Compose cannot request
+  host networking for the build either — buildx bake refuses it with
+  `additional privileges requested` — so the image is built explicitly on the
+  host network (`DOCKER_BUILDKIT=0 docker build --network host -t dropjak:2 .`)
+  and then started with `docker compose up -d`. The README, the installation
+  sections, the setup script's closing message, `.env.example` and
+  `hv rebuild` follow this order.
 
 #### Security
 

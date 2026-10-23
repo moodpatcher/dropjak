@@ -168,5 +168,6 @@ for svc in firewalld ufw; do
 done
 
 info "done."
-info "Next step: cp .env.example .env, set the admin password and the interfaces, then docker compose up -d --build"
+info "Next step: cp .env.example .env, set the admin password and the interfaces, build the image on the host network"
+info "           (DOCKER_BUILDKIT=0 docker build --network host -t dropjak:2 .), then docker compose up -d"
 info "The first container start closes host SSH again; the way back is the portal (port 8100) with the admin account from .env."

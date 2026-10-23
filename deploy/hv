@@ -71,7 +71,10 @@ case "${1:-}" in
         docker compose up -d
         ;;
     rebuild)
-        docker compose up -d --build
+        # The fail-closed forward chain blocks the build container's egress,
+        # and Compose cannot grant BuildKit the network.host entitlement.
+        DOCKER_BUILDKIT=0 docker build --network host -t dropjak:2 . || exit 1
+        docker compose up -d --force-recreate
         ;;
     edit)
         editor=${EDITOR:-}
