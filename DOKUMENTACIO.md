@@ -894,10 +894,9 @@ tables, files and accounts are skipped with a note, so a repeated run is safe.
 #### 10.8. Update
 `update.sh` updates a checkout in place: it first backs up the configuration
 and the runtime state, then runs a fast-forward-only git pull. The backup
-never goes into the repository. It is written to `/root/hatarvedelem-backups`
-(mode 0700, archives 0600), matching the `hv backup` convention; the script
-refuses to run when `HV_BACKUPS` resolves to the checkout or a directory below
-it.
+never goes into the repository. It is written to `/root/dropjak-backups`
+(mode 0700, archives 0600); the script refuses to run when `HV_BACKUPS`
+resolves to the checkout or a directory below it.
 
 ```bash
 sudo ./update.sh                    # asks for confirmation (y/N)
@@ -906,11 +905,11 @@ sudo ./update.sh --yes              # no confirmation
 HV_BACKUPS=/srv/backups sudo -E ./update.sh
 ```
 
-The configuration backup `hatarvedelem-<timestamp>.tar.gz` contains a copy of
+The configuration backup `dropjak-<timestamp>.tar.gz` contains a copy of
 `.env` as `env`, `secrets/`, and the `dropjak.service.d` systemd drop-in when
 present. The state is written as `dropjak-state-<timestamp>.tar.gz` from the
 Docker volume `dropjak-state` and/or `dropjak-state-native-<timestamp>.tar.gz`
-from `/var/lib/hatarvedelem`. If neither state directory exists, the
+from `/var/lib/dropjak`. If neither state directory exists, the
 configuration backup is still created and a warning is printed. The script
 never prints the contents of `.env` or the secrets.
 
@@ -928,7 +927,7 @@ docker compose up -d --force-recreate
 sudo ./install.sh <the original arguments>
 ```
 
-The native `install.sh` copies the script to `/opt/hatarvedelem/update.sh`
+The native `install.sh` copies the script next to the other installed files
 with mode 0755.
 
 ### 11. Testing
@@ -5156,7 +5155,7 @@ The running version is stored in [`VERSION`](VERSION).
 - **Update script.** `update.sh` backs up the configuration (`.env` as
   `env`, `secrets/`, and the `dropjak.service.d` systemd drop-in) and the
   runtime state (the Docker `dropjak-state` volume and/or
-  `/var/lib/hatarvedelem`) into `/root/hatarvedelem-backups` (mode 0700,
+  `/var/lib/dropjak`) into `/root/dropjak-backups` (mode 0700,
   archives 0600; `HV_BACKUPS` overrides), then runs `git pull --ff-only` in
   the checkout. The backup never goes into the repository: a backup directory
   at or below the checkout is refused. `--dry-run`/`-n` previews without root
@@ -5165,8 +5164,8 @@ The running version is stored in [`VERSION`](VERSION).
   intact. After a successful pull it only prints the follow-up: `hv rebuild`
   (or `DOCKER_BUILDKIT=0 docker build --network host -t dropjak:2 .` and
   `docker compose up -d --force-recreate`) for Docker, and a re-run of
-  `install.sh` with the same arguments for native. `install.sh` copies it to
-  `/opt/hatarvedelem/update.sh` with mode 0755. New `tests/test_update.py`
+  `install.sh` with the same arguments for native. `install.sh` copies it
+  into the installation directory with mode 0755. New `tests/test_update.py`
   (syntax, help, git dry-run, repository guard, root requirement, non-git
   dry-run); the measured suite is **1151 tests OK**.
 - **Uninstall script.** `uninstall.sh` removes a Dropjak installation for

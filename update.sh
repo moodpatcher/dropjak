@@ -5,7 +5,7 @@
 # Makes a backup of the configuration and the runtime state, then performs a
 # fast-forward-only git pull in the installation directory (the checkout the
 # script runs from). The backup is always written outside the repository, by
-# default to /root/hatarvedelem-backups, so the working tree stays clean.
+# default to /root/dropjak-backups, so the working tree stays clean.
 #
 # Usage:
 #   sudo ./update.sh [--yes] [--dry-run]
@@ -16,12 +16,12 @@
 #   -h, --help   show this help
 #
 # Environment:
-#   HV_BACKUPS   backup directory (default: /root/hatarvedelem-backups)
+#   HV_BACKUPS   backup directory (default: /root/dropjak-backups)
 #
 set -euo pipefail
 
 STATE_VOLUME="/var/lib/docker/volumes/dropjak-state/_data"
-STATE_DIR="/var/lib/hatarvedelem"
+STATE_DIR="/var/lib/dropjak"
 SYSTEMD_DROPIN="/etc/systemd/system/dropjak.service.d"
 
 ASSUME_YES=0
@@ -50,7 +50,7 @@ Usage: sudo ./update.sh [--yes] [--dry-run]
   -h, --help   this help
 
 The script backs up the configuration and the runtime state to
-/root/hatarvedelem-backups (mode 0700, archives 0600) and then runs
+/root/dropjak-backups (mode 0700, archives 0600) and then runs
 `git pull --ff-only` in the checkout it runs from. The backup never goes
 into the repository. After a successful pull it only prints the commands
 needed for the deployment to take effect.
@@ -79,7 +79,7 @@ fi
 SCRIPT_DIR="$(cd -P -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)" \
   || die "cannot determine the script's directory"
 
-BACKUP_DIR="${HV_BACKUPS:-/root/hatarvedelem-backups}"
+BACKUP_DIR="${HV_BACKUPS:-/root/dropjak-backups}"
 
 # Realpath that also accepts a path that does not exist yet.
 resolve_path() {
@@ -119,7 +119,7 @@ run chmod 700 -- "$BACKUP_DIR" \
 # ---------------------------------------------------------------- survey
 
 TS="$(date +%Y%m%d-%H%M%S)"
-CONFIG_BACKUP="$BACKUP_DIR/hatarvedelem-$TS.tar.gz"
+CONFIG_BACKUP="$BACKUP_DIR/dropjak-$TS.tar.gz"
 DOCKER_STATE_BACKUP="$BACKUP_DIR/dropjak-state-$TS.tar.gz"
 NATIVE_STATE_BACKUP="$BACKUP_DIR/dropjak-state-native-$TS.tar.gz"
 
