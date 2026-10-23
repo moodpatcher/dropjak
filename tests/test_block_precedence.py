@@ -90,7 +90,9 @@ class BlockPrecedenceTemplateTests(unittest.TestCase):
     # In the input chain the block jump is limited to the original
     # direction (DJ-33): every client->host packet is original-direction, a
     # reply-direction packet there belongs to a connection the host opened.
-    INPUT_BLOCK = "ct direction original "
+    # It is also limited to the LAN interface: block entries restrict the
+    # LAN clients, not inbound WAN traffic to the host (Caddy on 443).
+    INPUT_BLOCK = 'iifname "__LAN_IF__" ct direction original '
 
     # -- forward -----------------------------------------------------------
 
@@ -162,7 +164,7 @@ class BlockPrecedenceTemplateTests(unittest.TestCase):
 
     # -- input -------------------------------------------------------------
 
-    def test_input_has_exactly_one_interface_free_block_jump(self) -> None:
+    def test_input_has_exactly_one_lan_block_jump(self) -> None:
         jumps = self.jump_indices(self.input, "block")
         self.assertEqual(len(jumps), 1, jumps)
         self.assertEqual(

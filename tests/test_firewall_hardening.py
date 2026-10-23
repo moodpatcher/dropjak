@@ -24,6 +24,7 @@ shell snippets. They never run nft against the system firewall.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -99,6 +100,7 @@ class ForwardTemplateTests(unittest.TestCase):
         for rule in (
             'oifname "docker*" ct direction original ct status != dnat drop',
             'oifname "br-*" ct direction original ct status != dnat drop',
+            "oifname @docker_bridges ct direction original ct status != dnat drop",
             'iifname "__WAN_IF__" oifname "__LAN_IF__" ct direction original '
             "ct status != dnat drop",
         ):
@@ -107,6 +109,18 @@ class ForwardTemplateTests(unittest.TestCase):
                 self.assertLess(
                     self.forward.index(rule), first_accept(self.forward)
                 )
+
+    def test_custom_bridge_set_is_declared_and_logged(self) -> None:
+        """DJ-03: bridges not named docker*/br-* come from a set."""
+        self.assertRegex(
+            NFT, r"add set inet hatarvedelem docker_bridges \{\s*type ifname\s*\}"
+        )
+        # The template never flushes it: a reload keeps the detected names.
+        self.assertNotIn("flush set inet hatarvedelem docker_bridges", NFT)
+        drop = self.forward.index(
+            "oifname @docker_bridges ct direction original ct status != dnat drop"
+        )
+        self.assertIn("reason=container-direct", self.forward[drop - 1])
 
     def test_lan_source_only_on_lan_interface(self) -> None:
         rule = 'iifname != "__LAN_IF__" ip saddr __LAN_NET__ drop'
@@ -151,8 +165,28 @@ class InputTemplateTests(unittest.TestCase):
             self.assertIn("ct direction original", rule)
 
     def test_input_block_jump_spares_reply_direction(self) -> None:
-        self.assertIn("ct direction original jump block", self.input)
+        self.assertIn(
+            'iifname "__LAN_IF__" ct direction original jump block', self.input
+        )
         self.assertNotIn("jump block", self.input)
+
+    def test_input_block_applies_to_lan_traffic_only(self) -> None:
+        """DJ-33: a destination-less block must not stop WAN traffic to Caddy."""
+        jumps = [rule for rule in self.input if rule.endswith("jump block")]
+        self.assertEqual(
+            jumps, ['iifname "__LAN_IF__" ct direction original jump block']
+        )
+        # The WAN proxy accept is not preceded by any WAN-reachable block jump.
+        wan_proxy = first(self.input, 'iifname "__WAN_IF__" tcp dport { 80, 443 } accept')
+        for rule in self.input[:wan_proxy]:
+            if "jump block" in rule:
+                self.assertIn('iifname "__LAN_IF__"', rule)
+        # Forward behaviour is unchanged: one unconditional jump.
+        forward = chain_rules(NFT, "forward")
+        self.assertEqual(
+            [rule for rule in forward if rule.endswith("jump block")],
+            ["jump block"],
+        )
 
     def test_host_accept_excludes_rendered_portal_port(self) -> None:
         self.assertIn(
@@ -179,11 +213,132 @@ class BootTableTests(unittest.TestCase):
             rules,
             [
                 'iifname "lo" accept',
+                "meta nfproto ipv6 drop",
                 "tcp dport 22 drop",
                 "ct state established,related accept",
                 "udp sport 68 udp dport 67 accept",
             ],
         )
+
+
+class Ipv6DropTests(unittest.TestCase):
+    """Owner's rule: IPv6 is always dropped, in every case (DJ-35)."""
+
+    DROP = "meta nfproto ipv6 drop"
+
+    @staticmethod
+    def hook_chains(template: str) -> dict[str, str]:
+        """chain name -> its hook declaration line."""
+        return dict(re.findall(
+            r"add chain inet \S+ (\w+) \{\s*\n\s*(type \w+ hook [^\n]+)",
+            template,
+        ))
+
+    def test_forward_drops_ipv6_before_anything_else(self) -> None:
+        rules = chain_rules(NFT, "forward")
+        self.assertTrue(rules[0].startswith("meta nfproto ipv6 "), rules[0])
+        self.assertEqual(rules[1], self.DROP)
+
+    def test_input_drops_ipv6_before_any_accept_or_jump(self) -> None:
+        rules = chain_rules(NFT, "input")
+        drop = rules.index(self.DROP)
+        # Only loopback (::1 on lo, never from the network) precedes it; the
+        # breakglass chain comes after, so it cannot open IPv6 either.
+        self.assertEqual(
+            [rule for rule in rules[:drop] if "reason=ipv6" not in rule],
+            ["iif lo accept"],
+        )
+        self.assertLess(drop, rules.index("jump breakglass"))
+
+    def test_every_accepting_filter_hook_drops_ipv6(self) -> None:
+        for name, template in (("dropjak.nft", NFT), ("dropjak-boot.nft", BOOT)):
+            hooks = self.hook_chains(template)
+            if name == "dropjak.nft":
+                # The forward chain is declared in the transaction body.
+                hooks["forward"] = "type filter hook forward priority -10; policy drop;"
+            for chain, declaration in hooks.items():
+                if not declaration.startswith("type filter"):
+                    continue  # nat chains: the raw prerouting drop runs first
+                try:
+                    rules = chain_rules(template, chain)
+                except AssertionError:
+                    rules = []  # declared without a rule body
+                with self.subTest(template=name, chain=chain):
+                    if "policy drop" in declaration and not rules:
+                        continue  # nothing accepts: the policy drops IPv6
+                    first_accept_or_jump = next(
+                        (index for index, rule in enumerate(rules)
+                         if (rule.endswith(" accept") or " jump " in f" {rule}")
+                         and rule not in ("iif lo accept", 'iifname "lo" accept')),
+                        len(rules),
+                    )
+                    drops = [
+                        index for index, rule in enumerate(rules)
+                        if rule in (self.DROP, 'iifname != "lo" meta nfproto ipv6 drop')
+                    ]
+                    self.assertTrue(drops, rules)
+                    self.assertLess(drops[0], first_accept_or_jump, rules)
+
+    def test_prerouting_guard_drops_ipv6_first(self) -> None:
+        for template in (NFT, BOOT):
+            rules = chain_rules(template, "loopback_guard")
+            self.assertEqual(rules[0], 'iifname != "lo" meta nfproto ipv6 drop')
+
+    def test_no_rule_accepts_ipv6(self) -> None:
+        for template in (NFT, BOOT):
+            self.assertNotRegex(template, r"(?m)^[^#\n]*(nfproto ipv6|ip6 )[^#\n]*accept")
+
+    def test_installers_disable_ipv6_on_the_lan_interface(self) -> None:
+        setup = (ROOT / "docker" / "setup-host.sh").read_text(encoding="utf-8")
+        for script in (setup, INSTALL):
+            with self.subTest(script=script[:40]):
+                self.assertIn('"net.ipv6.conf.${LAN_IF}.disable_ipv6"', script)
+                self.assertIn('"net/ipv6/conf/${LAN_IF}/disable_ipv6"'
+                              if script is INSTALL else
+                              '"net/ipv6/conf/$LAN_IF/disable_ipv6"', script)
+                # The key goes into the dropjak sysctl.d file, unconditionally.
+                block = script[re.search(r'cat ?> ?"\$SYSCTL_FILE"', script).start():]
+                block = block[:block.index("EOF\n", block.index("\n") + 1)]
+                self.assertIn("$LAN_IPV6_KEY = 1", block)
+                # No opt-out variable.
+                self.assertNotRegex(script, r"HV_\w*IPV6")
+        # No IPv6 SSH exception is inserted into the boot table any more.
+        self.assertNotIn("ip6 saddr", setup)
+
+    def test_setup_host_reads_the_lan_interface_from_env(self) -> None:
+        setup = (ROOT / "docker" / "setup-host.sh").read_text(encoding="utf-8")
+        start = setup.index("LAN_IF=${HV_LAN_IF:-}")
+        end = setup.index('chmod 0644 "$SYSCTL_FILE"')
+        snippet = setup[start:end]
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, ".env").write_text(
+                "HV_WAN_IF=eth0\n# HV_LAN_IF=old0\nHV_LAN_IF=\"eth1.10\"  \n",
+                encoding="utf-8",
+            )
+            sysctl = os.path.join(tmp, "90-dropjak.conf")
+            result = subprocess.run(
+                ["bash", "-c",
+                 "set -euo pipefail\ndie() { echo \"ERROR: $*\" >&2; exit 1; }\n"
+                 + snippet + '\ncat "$SYSCTL_FILE"\n'],
+                env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                     "REPO_DIR": tmp, "SYSCTL_FILE": sysctl},
+                capture_output=True, text=True, timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("net/ipv6/conf/eth1.10/disable_ipv6 = 1", result.stdout)
+            self.assertIn("net.ipv4.ip_forward = 1", result.stdout)
+            # Without HV_LAN_IF anywhere it refuses (no silent opt-out).
+            Path(tmp, ".env").write_text("HV_WAN_IF=eth0\n", encoding="utf-8")
+            result = subprocess.run(
+                ["bash", "-c",
+                 "set -euo pipefail\ndie() { echo \"ERROR: $*\" >&2; exit 1; }\n"
+                 + snippet],
+                env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                     "REPO_DIR": tmp, "SYSCTL_FILE": sysctl},
+                capture_output=True, text=True, timeout=30,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("HV_LAN_IF is not set", result.stderr)
 
 
 # ------------------------------------------------------------------ renderer
@@ -305,6 +460,134 @@ class SettingsValidationTests(unittest.TestCase):
             gateway.Firewall._custom_dst({"dst": "10.0.0.5"}, "block"),
             "10.0.0.5/32",
         )
+
+    def test_saving_with_host_bits_stays_strict(self) -> None:
+        """DJ-36: the UI/API path and the import keep rejecting host bits."""
+        with self.assertRaisesRegex(settings_store.SettingsError, "host bits must be zero"):
+            self.store.prepare("create", "block", entry={
+                "label": "t", "proto": "tcp", "ports": [443], "dst": "10.0.0.5/8",
+            })
+        with self.assertRaisesRegex(settings_store.SettingsError, "host bits must be zero"):
+            settings_store.validate_state({"block": [{
+                "id": "bcde2345", "label": "t", "proto": "tcp", "ports": [443],
+                "dst": "10.0.0.5/8",
+            }]})
+
+    def test_stored_file_with_host_bits_is_normalized_on_load(self) -> None:
+        """DJ-36: a hand-edited file loads; the network goes to the kernel."""
+        logged: list[str] = []
+        path = os.path.join(self.tmp.name, "hand.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({
+                "preauth": [{"id": "abcd1234", "label": "p", "proto": "tcp",
+                             "ports": [443], "dst": "192.168.1.7/24"}],
+                "block": [{"id": "bcde2345", "label": "b", "proto": "udp",
+                           "ports": [53], "dst": "10.0.0.5/8"}],
+            }, fh)
+        store = settings_store.SettingsStore(path, logger=logged.append)
+        logged.clear()
+        store.load()
+        snapshot = store.snapshot()
+        self.assertEqual(snapshot["error"], "")
+        self.assertEqual(snapshot["preauth"][0]["dst"], "192.168.1.0/24")
+        self.assertEqual(snapshot["block"][0]["dst"], "10.0.0.0/8")
+        self.assertEqual(len([line for line in logged if "host bits" in line]), 2)
+        # What reaches the kernel is the network, never the host-bit form.
+        fw = gateway.Firewall(dry_run=True, logger=lambda *_: None,
+                              lan_if="eth1", wan_if="eth0")
+        rendered = "\n".join(fw._custom_rules(snapshot["preauth"], snapshot["block"]))
+        self.assertIn("ip daddr 10.0.0.0/8 ", rendered)
+        self.assertIn("ip daddr 192.168.1.0/24 ", rendered)
+        self.assertNotIn("10.0.0.5", rendered)
+        self.assertNotIn("192.168.1.7", rendered)
+
+
+class PreauthScopeTests(unittest.TestCase):
+    """DJ-09: input pre-auth entries carry a scope, lan (default) or any."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store = settings_store.SettingsStore(
+            os.path.join(self.tmp.name, "settings.json"),
+            logger=lambda *_: None,
+        )
+
+    def entry(self, **extra):
+        return {"label": "t", "proto": "tcp", "ports": [8443],
+                "direction": "input", **extra}
+
+    def test_scope_defaults_to_lan_and_is_validated(self) -> None:
+        self.assertEqual(
+            settings_store.normalize_entry("preauth", self.entry())["scope"], "lan"
+        )
+        self.assertEqual(
+            settings_store.normalize_entry(
+                "preauth", self.entry(scope=" ANY ")
+            )["scope"],
+            "any",
+        )
+        for bad in ("wan", 1, True):
+            with self.subTest(scope=bad):
+                with self.assertRaisesRegex(settings_store.SettingsError, "scope"):
+                    settings_store.normalize_entry("preauth", self.entry(scope=bad))
+        # A forward entry has no scope field.
+        forward = settings_store.normalize_entry(
+            "preauth", {"label": "t", "proto": "tcp", "ports": [80]}
+        )
+        self.assertNotIn("scope", forward)
+
+    def test_stored_entry_without_scope_loads_as_lan(self) -> None:
+        path = os.path.join(self.tmp.name, "old.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"preauth": [{"id": "abcd1234", "label": "t",
+                                    "proto": "tcp", "ports": [8443],
+                                    "direction": "input"}]}, fh)
+        store = settings_store.SettingsStore(path, logger=lambda *_: None)
+        store.load()
+        self.assertEqual(store.snapshot()["preauth"][0]["scope"], "lan")
+
+    def test_scope_is_saved_and_survives_export_import(self) -> None:
+        data = self.store.prepare("create", "preauth", entry=self.entry(scope="any"))
+        self.store.commit(data)
+        entry_id = data["preauth"][0]["id"]
+        self.assertEqual(self.store.snapshot()["preauth"][0]["scope"], "any")
+        # The bundle's settings section is validate_state() of the snapshot.
+        snapshot = self.store.snapshot()
+        snapshot.pop("error")
+        exported = json.loads(json.dumps(settings_store.validate_state(snapshot)))
+        self.assertEqual(exported["preauth"][0]["scope"], "any")
+        self.assertEqual(
+            settings_store.validate_state(exported)["preauth"][0]["scope"], "any"
+        )
+        data = self.store.prepare(
+            "update", "preauth", entry_id, entry=self.entry(scope="lan")
+        )
+        self.assertEqual(data["preauth"][0]["scope"], "lan")
+
+    def test_ui_has_a_translated_scope_select(self) -> None:
+        index = (ROOT / "index.html").read_text(encoding="utf-8")
+        form = index[index.index("function renderSettingForm("):]
+        form = form[:form.index("\nfunction ")]
+        self.assertIn("el('select', { name: 'scope' }", form)
+        self.assertIn("value: 'lan'", form)
+        self.assertIn("value: 'any'", form)
+        self.assertIn("payload.entry.scope", form)
+        en = index[index.index("  en: {"):index.index("  de: {")]
+        de = index[index.index("  de: {"):index.index("const I18N_PATTERNS")]
+        for text in ("Hatókör", "Csak LAN", "Bármely interfész (LAN + WAN)"):
+            with self.subTest(text=text):
+                self.assertIn(f"tr('{text}')", index)
+                self.assertIn(f"    '{text}': '", en)
+                self.assertIn(f"    '{text}': '", de)
+
+    def test_reserved_ports_still_rejected_with_any_scope(self) -> None:
+        with self.assertRaisesRegex(
+            settings_store.SettingsError, "cannot open these host ports"
+        ):
+            self.store.prepare(
+                "create", "preauth", entry=self.entry(ports=[22], scope="any")
+            )
 
 
 class HostRulePortalPortTests(unittest.TestCase):
@@ -431,6 +714,44 @@ class TableResyncTests(unittest.TestCase):
         self.assertTrue(authorized.authorized)
         self.assertEqual(len(self.fw.grant_calls), 1)
 
+    def test_resync_ends_authorized_sessions(self) -> None:
+        """Decision (a): sessions whose kernel elements were lost end."""
+        session = self.gw.sessions.login("alice", IP)
+        self.gw.sessions.authorize(session.token, IP, self.rule, 60)
+        waiting = self.gw.sessions.login("bob", "192.168.50.24")
+        revoked: list[str] = []
+        self.fw.revoke_all = lambda ip, *args, **kwargs: revoked.append(ip)
+
+        self.fw.token = 99
+        self.assertTrue(self.gw.check_firewall_state())
+        self.assertEqual(self.gw.sessions.count(authorized_only=True), 0)
+        self.assertIsNone(self.gw.sessions.validate(session.token, IP))
+        # A login still waiting for authorization holds no grant and stays.
+        self.assertIsNotNone(self.gw.sessions.validate(waiting.token, "192.168.50.24"))
+        self.assertEqual(revoked, [IP])
+        self.assertEqual(self.gw.sessions.last_end(IP)["reason"], "firewall_reset")
+        ended = [
+            fields for event, fields in self.audit.events
+            if event == "session_ended"
+        ]
+        self.assertEqual(len(ended), 1)
+        self.assertEqual(ended[0]["reason"], "firewall_reset")
+        self.assertEqual(ended[0]["user"], "alice")
+        resync = [
+            fields for event, fields in self.audit.events
+            if event == "firewall_resync"
+        ]
+        self.assertEqual(resync[0]["sessions_revoked"], 1)
+        self.assertIn("firewall_reset", gateway.END_REASONS)
+
+    def test_partial_resync_keeps_sessions_until_it_succeeds(self) -> None:
+        session = self.gw.sessions.login("alice", IP)
+        self.gw.sessions.authorize(session.token, IP, self.rule, 60)
+        self.f2b.sync = lambda: False
+        self.fw.token = 99
+        self.assertFalse(self.gw.check_firewall_state())
+        self.assertNotIn("session_ended", self.audit.names())
+
     def test_flushed_chains_trigger_resync(self) -> None:
         self.fw.token = None  # table present, portal's marker rule gone
         self.assertTrue(self.gw.check_firewall_state())
@@ -511,12 +832,101 @@ class EntrypointTests(unittest.TestCase):
         self.assertIn("- SETPCAP", cap_add)
 
     def test_docker_user_does_not_accept_toward_bridges(self) -> None:
-        start = ENTRYPOINT.index("insert rule ip filter DOCKER-USER \\\n            meta mark \"$HV_FWD_MARK\"")
+        start = ENTRYPOINT.index('set -- meta mark "$HV_FWD_MARK"')
         rule = ENTRYPOINT[start:ENTRYPOINT.index("hv-docker-fwd-mark", start)]
         self.assertIn("oifname != '\"docker*\"'", rule)
         self.assertIn("oifname != '\"br-*\"'", rule)
+        # Detected custom bridges are excluded from the accept too.
+        self.assertIn('for _br in $DOCKER_BRIDGES; do', rule)
+        self.assertIn('"$@" accept', rule)
         # The drop guard for unmarked packets is unchanged.
         self.assertIn('meta mark != "$HV_FWD_MARK" drop', ENTRYPOINT)
+
+    def test_missing_docker_guard_is_never_fatal(self) -> None:
+        """DJ-03: a crash loop would lock the host out; log loudly instead."""
+        self.assertNotRegex(ENTRYPOINT, r"docker_forward_guard[^\n]*\n?[^\n]*\|\|\s*die")
+        self.assertIn("docker_forward_guard || log_guard_error", ENTRYPOINT)
+        watchdog = ENTRYPOINT[ENTRYPOINT.index("start_firewall_watchdog() {"):]
+        self.assertIn("if ! docker_forward_guard; then", watchdog)
+        self.assertIn("-ge 60 ]", watchdog)
+        self.assertIn("log_guard_error", watchdog)
+        self.assertIn("sync_docker_bridges", watchdog)
+
+    def run_entrypoint(self, script: str, tmp: str, **extra: str):
+        """Runs entrypoint functions with fake ip and nft tools on PATH."""
+        functions = ENTRYPOINT.split("# ------------------------------------------------------------------------ main")[0]
+        env = {
+            "PATH": tmp + ":" + os.environ.get("PATH", "/usr/bin:/bin"),
+            "NFT_LOG": os.path.join(tmp, "nft.log"),
+            **extra,
+        }
+        return subprocess.run(
+            ["sh", "-c", functions + "\nset +e\n" + script],
+            env=env, capture_output=True, text=True, timeout=30,
+        )
+
+    def fake_tools(self, tmp: str, nft_body: str) -> None:
+        ip = Path(tmp, "ip")
+        ip.write_text(
+            "#!/bin/sh\n"
+            "cat <<'OUT'\n"
+            "3: docker0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN\n"
+            "4: eth1: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP\n"
+            "5: mynet0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP\n"
+            "6: virbr0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 1500 qdisc noqueue state DOWN\n"
+            "OUT\n",
+            encoding="utf-8",
+        )
+        nft = Path(tmp, "nft")
+        nft.write_text("#!/bin/sh\n" + nft_body, encoding="utf-8")
+        for tool in (ip, nft):
+            tool.chmod(0o755)
+
+    def test_bridges_are_detected_without_the_lan_interface(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.fake_tools(
+                tmp, 'printf "%s\\n" "$*" >>"$NFT_LOG"\ncat >>"$NFT_LOG"\n'
+            )
+            result = self.run_entrypoint(
+                'NFT_BIN=nft\necho "[$(detect_bridges)]"\n'
+                "sync_docker_bridges force\n"
+                'echo "applied=[$DOCKER_BRIDGES_APPLIED]"\n',
+                tmp, HV_LAN_IF="eth1", HV_WAN_IF="virbr0",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            nft_input = Path(tmp, "nft.log").read_text(encoding="utf-8")
+        # The LAN (and here the WAN) interface is never a container bridge.
+        self.assertIn("[docker0 mynet0]", result.stdout)
+        self.assertIn("applied=[docker0 mynet0]", result.stdout)
+        self.assertIn("-f -", nft_input)
+        self.assertIn("flush set inet hatarvedelem docker_bridges", nft_input)
+        self.assertIn(
+            'add element inet hatarvedelem docker_bridges { "docker0", "mynet0" }',
+            nft_input,
+        )
+
+    def test_missing_docker_user_chain_reports_the_reason(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            # No ip filter DOCKER-USER chain; Docker's nftables backend table
+            # exists.
+            self.fake_tools(
+                tmp,
+                'case "$*" in\n'
+                '  *DOCKER-USER*) exit 1 ;;\n'
+                '  *docker-bridges*) exit 0 ;;\n'
+                "esac\nexit 0\n",
+            )
+            result = self.run_entrypoint(
+                "NFT_BIN=nft\nHV_FWD_MARK=0x1\n"
+                "if docker_forward_guard; then echo GUARD-OK; "
+                "else log_guard_error; fi\necho continued\n",
+                tmp,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("GUARD-OK", result.stdout)
+        self.assertIn("ERROR: Docker forward protection is NOT installed", result.stdout)
+        self.assertIn("nftables firewall backend", result.stdout)
+        self.assertIn("continued", result.stdout)
 
     def test_portal_net_fallback_is_exported(self) -> None:
         """Run render_ruleset with HV_PORTAL_NET absent and HV_MGMT_NET set."""
@@ -541,6 +951,35 @@ class EntrypointTests(unittest.TestCase):
             text = Path(rendered).read_text(encoding="utf-8")
         self.assertIn("ip saddr 10.9.0.0/16 tcp dport 8100 accept", text)
         self.assertNotRegex(text, r"__[A-Z0-9_]+__")
+
+    def run_proxy_key_check(self, **extra: str) -> subprocess.CompletedProcess:
+        functions = ENTRYPOINT.split("# ------------------------------------------------------------------------ main")[0]
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **extra}
+        return subprocess.run(
+            ["sh", "-c", functions + "\ncheck_proxy_key\necho passed\n"],
+            env=env, capture_output=True, text=True, timeout=30,
+        )
+
+    def test_proxy_requires_a_long_key(self) -> None:
+        """DJ-10: HV_PROXY=1 without a 32+ character key refuses to start."""
+        for key in ("", "short", "k" * 31):
+            with self.subTest(length=len(key)):
+                result = self.run_proxy_key_check(HV_PROXY="1", HV_PROXY_KEY=key)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("passed", result.stdout)
+                self.assertIn("HV_PROXY_KEY", result.stderr)
+                self.assertIn("openssl rand -hex 32", result.stderr)
+        result = self.run_proxy_key_check(HV_PROXY="yes", HV_PROXY_KEY="k" * 32)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # Without the proxy no key is needed.
+        result = self.run_proxy_key_check(HV_PROXY="0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_proxy_key_is_checked_before_the_firewall(self) -> None:
+        main = ENTRYPOINT.split("# ------------------------------------------------------------------------ main")[1]
+        self.assertLess(main.index("check_proxy_key"), main.index("load_firewall"))
+        # A custom command (CLI user management) is not refused.
+        self.assertLess(main.index('run_as_app "$@"'), main.index("check_proxy_key"))
 
     def test_admin_secret_is_staged_before_any_command(self) -> None:
         main = ENTRYPOINT.split("# ------------------------------------------------------------------------ main")[1]

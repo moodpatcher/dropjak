@@ -119,6 +119,22 @@ class DropExemptTests(unittest.TestCase):
         manager.configure({"drop_exempt": ["203.0.113.2"]})
         self.assertIsNotNone(manager.banned("203.0.113.2"))
 
+    def test_no_blanket_loopback_exemption(self) -> None:
+        """DJ-10 follow-up: Caddy is no longer assumed behind 127.0.0.1.
+
+        With the mandatory HV_PROXY_KEY, Caddy's requests carry the real
+        client IP, so the counters need no loopback exemption list. Only
+        normalize_ip still refuses to ban 127.0.0.1 itself (the input chain
+        accepts loopback first, so such a ban could never take effect).
+        """
+        self.assertFalse(hasattr(fail2ban_mod, "_AUTO_EXEMPT"))
+        manager = self.make_manager()
+        for _ in range(3):
+            manager.record_failure("127.0.0.2", "admin")
+        self.assertIn("127.0.0.2", self.fw.kernel)
+        with self.assertRaises(fail2ban_mod.Fail2banError):
+            fail2ban_mod.normalize_ip("127.0.0.1")
+
     def test_new_entry_clears_pending_counter(self) -> None:
         manager = self.make_manager()
         self.scan(manager, "198.51.100.8", ports=3)

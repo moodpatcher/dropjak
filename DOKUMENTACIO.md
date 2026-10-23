@@ -176,12 +176,12 @@ The container does not operate in its own network namespace: it must reach the h
 #### 3.3. Startup sequence
 1. On the host, `dropjak-boot.service`, installed by `docker/setup-host.sh`, loads early a separate `inet hatarvedelem_boot` table: `forward` policy drop, and blocking host SSH (`tcp dport 22`) until the final rules are loaded.
 2. The Docker daemon starts, then the container.
-3. `entrypoint.sh` checks the mandatory env values (`HV_LAN_IF`, `HV_WAN_IF`, `HV_LAN_NET`, `HV_PORTAL_NET`), renders the template, and loads the `inet hatarvedelem` table.
+3. `entrypoint.sh` refuses to start when `HV_PROXY=1` and `HV_PROXY_KEY` is shorter than 32 characters (before touching the firewall; the error says to run `openssl rand -hex 32`). It checks the mandatory env values (`HV_LAN_IF`, `HV_WAN_IF`, `HV_LAN_NET`, `HV_PORTAL_NET`), renders the template, and loads the `inet hatarvedelem` table.
 4. The entrypoint flushes the dynamic sets so that no authorization remains without a session. `host_service_tcp` / `host_service_udp` are intentionally not flushed.
 5. It deletes the former `host_ssh_v4` set if it still exists; it can no longer grant access.
 6. It deletes the early boot table.
-7. It checks and, if necessary, installs the Docker `DOCKER-USER` guard.
-8. It starts the watchdog, then switches to the `hatarvedelem` user with `setpriv` and runs `server.py`.
+7. It fills the `docker_bridges` set with the host's bridge interfaces (`ip -o link show type bridge`, without `HV_LAN_IF` and `HV_WAN_IF`), then checks and, if necessary, installs the Docker `DOCKER-USER` guard. If no guard can be installed (no `DOCKER-USER` chain, or Docker's nftables firewall backend), it logs an `ERROR` line and keeps starting: stopping would leave the host in a crash loop behind the boot table.
+8. It starts the watchdog (every 5 s: reloads a lost or incomplete table, refreshes `docker_bridges`, reinstalls a missing guard, and repeats the guard `ERROR` at most once a minute), then switches to the `hatarvedelem` user with `setpriv` and runs `server.py`.
 9. On startup `server.py` loads the rules, users, groups, settings, fail2ban state, and if needed reconciles the kernel sets to the empty session table.
 
 `HV_SKIP_FIREWALL=1` skips nft loading, the Docker guard and the watchdog. This is **not secure**, only a developer or emergency opt-in.
@@ -192,15 +192,16 @@ The container does not operate in its own network namespace: it must reach the h
 |---|---|---|
 | `inet hatarvedelem` | table | The final rules. |
 | `forward` | filter, priority `-10`, policy `drop` | All forwarded traffic is blocked by default; it runs before Docker's FORWARD chain. |
-| `input` | filter, policy `drop` | Traffic toward the host; portal, DHCP/DNS, host rules. |
+| `input` | filter, policy `drop` | Traffic toward the host; portal, DHCP/DNS, host rules. IPv6 is dropped right after the loopback accept, before `breakglass`. |
 | `prerouting` | nat, priority `dstnat` | HTTP → portal redirect, pre-auth/block NAT exceptions. |
 | `postrouting` | nat, priority `srcnat` | NAT additions. |
 | `preauth` | custom | Forward destinations/ports reachable before login (LAN, or DNATed WAN traffic). |
 | `preauth_input` | custom | Host (input) ports reachable before login; runs after `block`, before the portal and SSH rules. |
-| `block` | custom | Always-blocked destinations/ports; runs before every authorization. |
+| `block` | custom | Always-blocked destinations/ports; runs before every authorization. The forward chain jumps to it unconditionally, the input chain only for original-direction traffic from `HV_LAN_IF`. |
 | `preauth_nat` | custom | Pre-auth TCP 80 bypasses the portal redirect. |
 | `block_nat` | custom | Drops blocked TCP 80 already before the redirect. |
-| `breakglass` | custom | Emergency SSH rule; the template does not flush it, empty by default. |
+| `breakglass` | custom | Emergency SSH rule; the template does not flush it, empty by default. It runs after the IPv6 drop, so it cannot open IPv6. |
+| `loopback_guard` | filter, priority `raw` (prerouting), policy `accept` | Drops 127/8 sources/destinations and **every IPv6 packet** arriving on a non-loopback interface, before NAT and conntrack. |
 | `inet hatarvedelem_boot` | table | Early boot protection before Docker starts; the container deletes it. |
 
 The template is idempotent: flushing and rebuilding the chains happens in one nft transaction, and it does not touch the dynamic sets. Thus an `nft -f` reload does not log out clients, but when the container starts the entrypoint separately, deliberately flushes the dynamic sets.
@@ -218,30 +219,33 @@ The template is idempotent: flushing and rebuilding the chains happens in one nf
 | `banned_v4` | `ipv4_addr` | 4096 | Sources banned by fail2ban. |
 | `host_service_tcp` | `inet_service` | 65536 | `interval`; add-only: every host TCP port/range ever declared. |
 | `host_service_udp` | `inet_service` | 65536 | Same for UDP, with the `interval` flag. |
+| `docker_bridges` | `ifname` | — | Bridge interfaces not named `docker*`/`br-*` (custom Docker bridge names, other host bridges); filled by the Docker entrypoint and its watchdog, never by the template. Empty on a native install. |
 
 The port-based dynamic sets have the `interval,timeout` flag: a rule can also give a port range (`8000-8100`), which enters the kernel as a single nft element. `auto-merge` cannot be used alongside timeout, so `gateway.py` merges and splits overlapping ranges during grant/revoke operations; partial revocation puts the remaining part back with the remaining TTL. The `host_service_*` sets are `interval`-flagged, permanent, grow-only guard sets: their job is to cut off the established connection of a revoked host access even if conntrack flushing fails or the kernel revives the flow.
 
 #### 4.3. Order of traffic decisions
 The approximate order of the forward chain:
 
-1. IPv6 drop (closed despite IPv4 forwarding).
+1. IPv6 drop (closed despite IPv4 forwarding; the raw prerouting `loopback_guard` already dropped it).
 2. Source IP spoofing prevention: on the LAN interface only `HV_LAN_NET`, from the WAN a LAN source is forbidden.
 3. `banned_v4` drop, logged; this runs before every authorization and pre-auth.
 4. MAC check for authorized IPs on the LAN.
-5. `block` chain; the block precedes every grant.
+5. `block` chain; the block precedes every grant. Then the link-local (`no_forward_v4`) drop, and the DNAT requirement: a new flow into `docker*`, `br-*` or a `docker_bridges` interface, or from the WAN into the LAN, is dropped unless it was DNAT-ed (published port, port proxy).
 6. Full access (`allowed_v4`) and port authorizations (`allowed_tcp`, `allowed_udp`, `allowed_icmp`), with `meta mark set 0x44524a4b`.
 7. The response direction of full access and ICMP with the mark; the response of port authorizations is covered by matching according to `ct original`.
 8. Docker container exceptions (in the template `172.30.0.2`): anti-spoof and LAN-pivot blocking, DNS and 53/80/443 egress, and responses to connections initiated by the container.
 9. `preauth` chain; pre-auth means bypassing the portal, and it also covers the response direction.
 10. Everything else drop.
 
-The input chain is similarly fail-closed, but with the portal, DHCP and LAN DNS as exceptions. Host SSH is opened by the `(IP, 22) ∈ allowed_input_tcp` pair; the generic established rule does not keep revoked SSH alive. After the `block` jump, but before the MAC guards, the portal and SSH rules, `jump preauth_input` follows: this implements the `input` direction of `preauth` entries, with direct `accept` (no forward mark and no `preauth_nat`). The chain starts with the `banned_v4` drop, matches traffic by `ct original ip daddr`/`ct original proto-dst`, and restricts it to the configured LAN and WAN interfaces. If neither interface is known, rendering stops with an error.
+The input chain is similarly fail-closed, but with the portal, DHCP and LAN DNS as exceptions. Host SSH is opened by the `(IP, 22) ∈ allowed_input_tcp` pair; the generic established rule does not keep revoked SSH alive. The input `block` jump is `iifname "<HV_LAN_IF>" ct direction original jump block`: block entries restrict the LAN clients, so a destination-less entry (for example TCP 443) does not stop inbound WAN traffic to the host (Caddy, tunnels, port proxies), nor replies to the host's own connections. There is no post-DNAT matching. After the `block` jump, but before the MAC guards, the portal and SSH rules, `jump preauth_input` follows: this implements the `input` direction of `preauth` entries, with direct `accept` (no forward mark and no `preauth_nat`). The chain starts with the `banned_v4` drop and matches traffic by `ct original ip daddr`/`ct original proto-dst`. The entry's `scope` decides the interfaces: `lan` (the default, also for entries stored without the field) renders only `iifname "<HV_LAN_IF>"`, including its established accept; `any` renders the LAN and the WAN interface and an interface-free established accept. A `lan` entry without a known LAN interface is skipped with a warning; if neither interface is known, rendering stops with an error.
 
 #### 4.4. Portal and captive portal
 The HTTP traffic of an unauthorized client is redirected by the prerouting chain to the portal. The portal is always reachable from the LAN; access from the WAN depends on the value of `HV_PORTAL_NET`. The `block` and `preauth` rules look at the pre-DNAT (original) destination, so for a Docker-published service the VM's public address and the published host port must be used, not the container's internal address. Pre-auth in the `input` direction intentionally does not get a `preauth_nat` exception: TCP 80 from the LAN is still redirected to the portal, while the host port from the WAN is directly reachable.
 
 #### 4.5. Docker integration
-The forward rules put `meta mark set __FWD_MARK__` on forwarded packets. The guard installed in the `DOCKER-USER` chain allows only marked packets through and drops everything else. If the `inet hatarvedelem` table disappears, Docker cannot open a bypass. The default mark is `0x44524a4b`, the default NFLOG group of the drop log is `5`; these must match among the portal, the nft template and the drop-log listener.
+The forward rules put `meta mark set __FWD_MARK__` on forwarded packets. The guard installed in the `DOCKER-USER` chain allows only marked packets through and drops everything else. If the `inet hatarvedelem` table disappears, Docker cannot open a bypass. A marked packet toward a container bridge (`docker*`, `br-*`, and every name in `docker_bridges`) is not accepted in `DOCKER-USER`; it continues to Docker's own isolation rules.
+
+Custom bridge names (`com.docker.network.bridge.name`) need no naming rule: the entrypoint reads every bridge interface at startup, and the watchdog refreshes `docker_bridges` and the `DOCKER-USER` accept when a network is created or removed. The LAN and WAN interfaces are never in the set, even if they are bridges. Docker's nftables firewall backend has no `DOCKER-USER` chain; then, or when the chain is missing for any other reason, the container keeps running and logs `ERROR: Docker forward protection is NOT installed` at start and at most once a minute. Published ports are then guarded only by the `inet hatarvedelem` table (its forward drops cannot be overridden by Docker's accepts, but a lost table would leave them open until the watchdog reloads it). The default mark is `0x44524a4b`, the default NFLOG group of the drop log is `5`; these must match among the portal, the nft template and the drop-log listener.
 
 ### 5. Security invariants
 These are properties of the system that the code and the tests must protect. The detailed mutation matrix is in the [3.5 Propagation matrix](#propagacios-matrix) section.
@@ -253,10 +257,11 @@ These are properties of the system that the code and the tests must protect. The
 4. **MAC binding on the LAN.** If the MAC cannot be resolved from ARP, access is denied; even with a faulty `client_mac` list, authorization without a MAC is not possible.
 5. **Host SSH only with an explicit rule.** Only an input rule that explicitly lists 22 can open TCP 22; a full-access rule never opens SSH.
 6. **The portal port (8100) is reserved.** Validation of host rules does not allow adding it; the portal's own, earlier-running accept rule handles it.
-7. **The block precedes everything.** The block chain runs before grants and pre-auth, so no active connection can bypass it; removing the block does not require re-authorization.
+7. **The block precedes everything.** The block chain runs before grants and pre-auth, so no active connection can bypass it; removing the block does not require re-authorization. Toward the host it applies only to traffic from the LAN interface: block entries restrict the LAN clients, not inbound WAN traffic to the host.
 8. **fail2ban overrides everything.** Packets from a banned source are dropped in both the forward and input chains; only the portal and DHCP remain reachable.
-9. **Pre-auth is intentionally public.** Every LAN client can reach the pre-auth destinations without logging in; the list must be kept minimal. The `input`-direction pre-auth rule opens the specified ports of the portal machine **before** login, thereby bypassing the portal gate: it may only be used in justified cases, for the most necessary ports. `block` and fail2ban override this too.
+9. **Pre-auth is intentionally public.** Every LAN client can reach the pre-auth destinations without logging in; the list must be kept minimal. The `input`-direction pre-auth rule opens the specified ports of the portal machine **before** login, thereby bypassing the portal gate: it may only be used in justified cases, for the most necessary ports. It never opens 22, 53, 67, 2019 or the portal port. Its `scope` is `lan` by default (only from `HV_LAN_IF`); only an explicit `any` opens the port from the WAN. `block` and fail2ban override this too.
 10. **Breakglass is emergency-only.** The chain is not flushed on reload; the rule must be deleted immediately after use.
+11. **IPv6 is always dropped, in every case.** The raw prerouting `loopback_guard`, the forward chain (first rule) and the input chain (right after the loopback accept, before `breakglass`) drop every IPv6 packet; no rule accepts IPv6, and the boot table drops it too. Only loopback (`::1` on `lo`, which cannot come from the network) passes. `docker/setup-host.sh` and `install.sh` always set `net.ipv6.conf.<HV_LAN_IF>.disable_ipv6 = 1` in `/etc/sysctl.d/90-dropjak.conf` (no opt-out). **Requirement:** the client LAN must have no other IPv6 router. The firewall cannot see traffic that never reaches the gateway: a router advertisement from another device would give the clients an IPv6 path around it. Use RA guard on the switch where the LAN is shared.
 
 #### 5.2. Revocation and consistency
 1. **Revocation is durable.** In case of a failed `nft` call, a pending-revocation entry remains, which is retried with backoff; partial revocation deletes only what is no longer needed.
@@ -269,10 +274,13 @@ These are properties of the system that the code and the tests must protect. The
 8. **Conntrack flush is limited.** `CONNTRACK_REMOVED_LIMIT = 16`: if more targeted deletions would be needed and a grant still remains, the system skips the cleanup rather than flushing at the IP level.
 9. **On error, fail-closed.** Any firewall error leads to dropping the session and revoking the old union; HTTP 503.
 10. **Every selected rule ID is resolved before authorization.** Thus a failed lookup does not leave a partial grant.
+11. **A table resync ends the sessions.** When the `inet hatarvedelem` table was reloaded or flushed, the kernel elements of every session are gone. After a successful resync (`firewall_resync`, with `sessions_revoked`) every authorized session ends with reason `firewall_reset` (a `session_ended` audit per session, conntrack flushed); the clients see the reason and log in again. Grants are refused until the resync, so no session is authorized against the bare table.
 
 #### 5.3. Admin and auth
 - Admin endpoints are protected by `_admin_guard`; POST requests are JSON-only and same-origin checked.
-- The server takes the client IP from the socket peer. The only exception is Caddy: from a loopback peer the last `X-Forwarded-For` element is used. With `HV_PROXY_KEY` set, the loopback peer must also send that secret (`X-Dropjak-Proxy-Key`, or `?key=` for `get_certificate`/`ask`); without it, every process on the host and every host-network container counts as Caddy (startup warning).
+- The server takes the client IP from the socket peer. The only exception is Caddy: from a loopback peer the last `X-Forwarded-For` element is used. The loopback peer must also send `HV_PROXY_KEY` (`X-Dropjak-Proxy-Key`, or `?key=` for `get_certificate`/`ask`). The key is mandatory with `HV_PROXY=1`: the Docker entrypoint refuses to start without at least 32 characters (the native install has no proxy). fail2ban therefore has no loopback exemption list any more: Caddy's requests are counted against the real client IP. Only `127.0.0.1` itself stays unbannable (`fail2ban.normalize_ip`; the input chain accepts loopback first, so such a ban could not take effect).
+- `HV_WAN_HTTPS_ONLY=1`: `/api/login*`, `/api/password` and `/api/admin/*` answer `403 {"code": "https_required"}` to a source outside `HV_LAN_NET` that did not come through Caddy. LAN clients and loopback-direct callers (healthcheck, CLI) are unaffected. Each refusal is audited as `https_required`, at most once per source IP per minute. The UI shows a translated "sign in over HTTPS" message.
+- The session cookie gets `Secure` with `HV_COOKIE_SECURE=1`, and on every response that goes out through Caddy even with `HV_COOKIE_SECURE=0`: Caddy serves the portal only in its `https://` site (its `http://` site only asks `/api/proxy/redirect` for a 3xx). Without a key only a proxy root domain counted. Plain-HTTP LAN logins keep working.
 - `/api/*` answers only under an IP literal, the `HV_PORTAL_URL` host, `HV_PORTAL_HOSTS`, or (through Caddy) a root domain or the portal's own address; anything else is 421 (DNS rebinding).
 - Export, import and factory reset require the admin's password again (and the TOTP code when enrolled); a failure counts like a failed login.
 - Failed logins are also counted per login name across all WAN source IPs (`HV_ACCOUNT_LOCK_*`); LAN clients are never locked.
@@ -293,6 +301,8 @@ These are not open bugs, but deliberately documented residual risks:
 | TOCTOU between MAC resolution and the grant | Theoretical race; MAC binding is not authentication. |
 | Test environment fallbacks | Some tests use a mocked nft; real kernel behavior requires a separate live test. |
 | Runtime assumptions | nft/conntrack/NFLOG behavior is modeled by the documentation and tests, but not verified in every live combination. |
+| Another IPv6 router on the client LAN | The gateway drops all IPv6 it sees, but a foreign router advertisement gives clients an IPv6 path that never reaches it. Deployment requirement: no other IPv6 router on the LAN (RA guard on a shared switch). |
+| Docker without `DOCKER-USER` | With Docker's nftables backend no guard can be installed; the portal runs and logs an `ERROR` every minute. |
 
 ### 6. Data model
 #### 6.1. State files
@@ -400,10 +410,12 @@ The validated fields of `firewall-settings.json`:
 | `motd_text` | string, max 2000 | empty = disabled | Post-login notice; only the authorized portal receives it, and only while it is valid. |
 | `motd_expires_at` | ISO-8601 UTC string | empty = permanent | End of the notice's validity; after the expiry time the server does not send it. |
 | `registration_enabled` | boolean | `false` | Public account request switch. |
-| `preauth` | list | empty | Pre-login destinations/ports; the entry's `direction` field is `forward` (default) or `input`. Missing field on load is `forward`; fail-closed fallback on error. |
+| `preauth` | list | empty | Pre-login destinations/ports; the entry's `direction` field is `forward` (default) or `input`. Missing field on load is `forward`; fail-closed fallback on error. An `input` entry has a `scope` field, `lan` (default; a stored entry without it loads as `lan`) or `any`; it is part of the export/import and is set with the **Scope** select of the pre-auth form. |
 | `block` | list | empty | Always-blocked destinations/ports; on error the last good state remains. |
 
 The limits of `settings_store.py`: at most 64 entries, 64 ports, a 64-character label, a 64-character site name, a 2000-character notice; rule identifiers have a strict regex. `motd_expires_at` also includes a time zone and is stored in canonical `YYYY-MM-DDTHH:MM:SSZ` form.
+
+A pre-auth or block destination with host bits (`10.0.0.5/8`) is rejected when saved through the UI/API or imported ("host bits must be zero"). Loading a stored, hand-edited file is lenient: the destination is normalized to its network (`10.0.0.0/8`) with a `[settings] WARNING` log line, instead of invalidating the whole file. `Firewall._custom_dst` stays strict, so a host-bit network never reaches the kernel.
 
 #### 6.6. Audit and drop log
 The common fields of an audit entry: `ts`, `time`, `event`, `severity`, `ip`, `user`, `ua`. The value of `severity` is `info`, `warn` or `alert`; old entries count as `info`. The event families: authentication, access, session, admin, fail2ban, service/firewall, CLI, TOTP-ticket lifecycle.
@@ -487,7 +499,7 @@ At the bottom of the **Settings** tab, the entire configuration can be exported 
 
 - `settings`: the complete, normalized content of `firewall-settings.json` (site name, MOTD, registration, proxy domains/routes, port proxies, the tunnel agents and their multi-port services, pre-auth and block).
 - `rules`, `groups`: the storage form of the rule and group store (with collection members, domains).
-- `users`: password hash (PBKDF2 salt, hash, iteration), role, status flags, direct rules, email, TOTP secret, TOTP step, recovery-code hashes, as well as the admin provisioning marker originating from `.env`.
+- `users`: password hash (PBKDF2 salt, hash, iteration), role, status flags, direct rules, email, TOTP secret, TOTP step, recovery-code hashes. The admin provisioning marker (derived from the `.env` password) is **not** exported; only the private pre-import backup keeps it.
 - `certs`: per root domain, the certificate chain and the private key in PEM.
 - `fail2ban`: exclusively the settings with the 13 known keys.
 
@@ -499,7 +511,7 @@ At the bottom of the **Settings** tab, the entire configuration can be exported 
 
 If the current state is not empty, the client must enter the **current** site name (`confirm`); on an empty installation this can be omitted. An installation created only from `.env` with the seeded rule set counts as empty; the UI is more cautious and asks for confirmation even with a single user. For a valid bundle, the server, before the first write, saves the current state as `config-backup-<UTC>.json` with `0600` in the state directory, then overwrites the sections through the existing storage paths, applies the nftables rules and the fail2ban setting, and finally closes every session and login ticket. It then restarts with `SIGTERM`; Compose's `restart: unless-stopped` starts it again. On an error during the write, it restores the previous state from the backup, does not restart, and writes a `config_import_failed` / `rollback_failed` entry. The backup itself is an importable bundle, so it can be restored manually if necessary.
 
-**`.env` admin conflict.** On startup `provision_admin` re-validates the `HV_ADMIN_USER`/`HV_ADMIN_PASSWORD` pair. If the imported bundle contains the same username with a different password (and the provisioning marker differs), then after the restart the `.env` password becomes valid, with a mandatory change at first login. The imported admin's password therefore does not remain in this case; an admin imported under a different name does not conflict.
+**`.env` admin and the provisioning marker.** On startup `provision_admin` re-validates the `HV_ADMIN_USER`/`HV_ADMIN_PASSWORD` pair against the stored marker. An imported user record without a marker keeps this installation's marker for the same user name; for `HV_ADMIN_USER` without one, a fresh marker of the current `.env` password is stored (`server._carry_provision_marker`). So after the restart `provision_admin` sees the `.env` password as already provisioned, and the imported (possibly UI-changed) password stays in effect. A bundle from an older version that still carries a marker imports it unchanged; if that marker does not match the `.env` password, the `.env` password becomes valid after the restart, with a mandatory change at first login.
 
 **Factory reset.** `POST /api/admin/config/reset`, `{"confirm": "<site name>"}`; confirmation is always mandatory, and without a site name the word "Dropjak". First the runtime state is cleared (sessions and tickets, releasing every fail2ban ban, nftables flush and flushing the custom chains); if this fails, the operation stops with 503 and nothing is deleted. Then users, rules, groups, settings, fail2ban state and certificates are deleted, along with the previous `config-backup-*.json` backups. The logs, `.env`, service files and application assets are untouched. The `config_reset` audit entry is written after the deletion, then the service restarts; the `.env` admin is recreated at that point. If there is no `.env` admin, recovery is possible only from the command line; the UI warns about this.
 
@@ -586,7 +598,9 @@ The Docker entrypoint considers these mandatory; without them the container does
 | `HV_PBKDF2_ITERATIONS` | `600000` | Password hash iteration count. |
 | `HV_RATE_WINDOW` / `HV_RATE_MAX` | `60` / `10` | Login rate limit. |
 | `HV_TOTP_ISSUER` | `Dropjak` | TOTP issuer fallback when there is no site name. |
-| `HV_COOKIE_SECURE` | `0` | `1` behind HTTPS termination. |
+| `HV_COOKIE_SECURE` | `0` | `1`: `Secure` session cookie on every response (plain-HTTP LAN logins then stop working). Responses through Caddy get `Secure` anyway. |
+| `HV_PROXY` / `HV_PROXY_KEY` | `0` / empty | Caddy domain proxy; with `HV_PROXY=1` the key (at least 32 characters, `openssl rand -hex 32`) is mandatory, given to both services. |
+| `HV_WAN_HTTPS_ONLY` | `0` | `1`: login, password and admin endpoints answer `403 https_required` to non-LAN sources that did not come through Caddy. Needs `HV_PROXY=1` for WAN logins. |
 
 #### 9.3. Firewall, state, fail2ban
 | Variable | Default | Role |
@@ -647,7 +661,11 @@ once the firewall is loaded, the only way in is the portal, and without an admin
 account the portal's admin interface is unreachable and host SSH stays closed.
 
 `setup-host.sh` installs nftables, loads the early boot protection, installs the
-`dropjak-boot.service` unit, and sets `net.ipv4.ip_forward=1`. The boot
+`dropjak-boot.service` unit, and sets `net.ipv4.ip_forward=1`. It also always
+disables IPv6 on the LAN interface (`net.ipv6.conf.<HV_LAN_IF>.disable_ipv6 = 1`
+in `/etc/sysctl.d/90-dropjak.conf`; it reads only the `HV_LAN_IF` line of
+`.env` and stops if it is missing). An SSH session over IPv6 gets no
+exception: IPv6 is always dropped, so run the installation over IPv4. The boot
 protection closes host SSH (TCP 22) for every source; the script keeps the SSH
 session that started it reachable until the container loads its rules. After
 the first container start the boot table is deleted and the final rules take
@@ -700,7 +718,9 @@ The installer's supported systems: RHEL/AlmaLinux/Rocky/Oracle Linux 8+, Fedora,
 | `/etc/systemd/system/dropjak.service` | Portal unit. |
 | `/etc/systemd/system/dropjak-firewall.service` | Early firewall unit. |
 | `/etc/systemd/system/dropjak-boot.service` | Docker early boot protection (installed by `setup-host.sh`). |
-| `/etc/sysctl.d/90-dropjak.conf` | `net.ipv4.ip_forward=1`. |
+| `/etc/sysctl.d/90-dropjak.conf` | `net.ipv4.ip_forward=1`; `net.ipv6.conf.<LAN_IF>.disable_ipv6=1` (always, no opt-out). |
+
+The native install does not support the Caddy proxy (`__PROXY__` is always rendered commented out), so it needs no `HV_PROXY_KEY`. The `docker_bridges` set stays empty there; only the `docker*`/`br-*` patterns apply.
 
 The `dropjak-firewall.service` has `DefaultDependencies=no`, `Before=network-pre.target`, and intentionally no `ExecStop`: stopping the service does not open the network. The portal unit depends on the firewall unit with `Requires=`, and uses `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`, `RestrictAddressFamilies` and similar hardening.
 
@@ -5033,9 +5053,10 @@ The running version is stored in [`VERSION`](VERSION).
 #### Security
 
 Fixes from the 2026-10-23 security review (finding IDs DJ-00 to DJ-36).
-Items marked as design steps in that review (DJ-05, DJ-24, DJ-35, mandatory
+Items marked as design steps in that review (DJ-05, DJ-24, mandatory
 admin TOTP, enrollment codes, agent-side key generation, encrypted export)
-are not part of this change.
+are not part of this change; the owner's decisions on the other follow-ups
+are the last entries of this list.
 
 - **fail2ban (DJ-01, DJ-22).** Ban rules match only `ct direction original`,
   so a ban no longer drops replies to LAN clients. Drop-signal bans skip an
@@ -5060,9 +5081,9 @@ are not part of this change.
   token prefix; the provisioning marker has a random salt; case-variant
   user names are refused and PBKDF2 hashes are rehashed to the current
   count.
-- **Proxy trust (DJ-10, DJ-28).** Optional `HV_PROXY_KEY` shared by the
-  portal and Caddy; without it the loopback trust stays, with a startup
-  warning. Caddy sends HSTS; the CSP lists Cloudflare only with Turnstile.
+- **Proxy trust (DJ-10, DJ-28).** `HV_PROXY_KEY` shared by the portal and
+  Caddy (mandatory with `HV_PROXY=1`, see below). Caddy sends HSTS; the CSP
+  lists Cloudflare only with Turnstile.
 - **Portal server (DJ-00, DJ-13, DJ-15).** Startup warnings for a public
   plain-HTTP portal; connection caps (`HV_MAX_CONNECTIONS`,
   `HV_MAX_CONNECTIONS_PER_IP`); tunnel peers reach only
@@ -5071,7 +5092,7 @@ are not part of this change.
   errors restart it with back-off, no fsync per packet; reads stop at the
   limit instead of parsing every rotated file.
 - **Settings (DJ-09, DJ-36).** Input pre-auth cannot open 22, 53, 67, 2019
-  or the portal port; destinations with host bits are rejected.
+  or the portal port; destinations with host bits are rejected when saved.
 - **Containers and installers (DJ-08, DJ-20, DJ-21, DJ-23, DJ-30).** The
   agent installer prints its SHA-256 (the portal sends `X-Dropjak-SHA256`),
   installs as root into a private 0700 directory and refuses unsafe
@@ -5080,6 +5101,66 @@ are not part of this change.
   password can come from `./secrets/dropjak_admin_password`; the agent
   refuses every route next hop as a target; the Caddy admin socket is 0660.
 - **Other.** `docker/entrypoint.sh` exports the `HV_PORTAL_NET` fallback.
+- **Sessions after a table resync (DJ-04, decision a).** After a successful
+  resync every authorized session ends with reason `firewall_reset`
+  (fail-closed): one `session_ended` audit per session, `sessions_revoked`
+  on `firewall_resync`, conntrack flushed, and a hu/en/de explanation on
+  the client, which logs in again.
+- **Input block only for LAN traffic (DJ-33).** The input chain's block
+  jump is `iifname "<LAN_IF>" ct direction original jump block`, so a
+  destination-less block entry (for example TCP 443) no longer stops
+  inbound WAN traffic to Caddy. The forward jump is unchanged; no post-DNAT
+  matching.
+- **Provisioning marker out of the export (DJ-27).** Exports no longer carry
+  `provisioned_from`. On import a record without a marker keeps this
+  installation's marker for the same user; for `HV_ADMIN_USER` without one a
+  fresh marker of the current `.env` password (`HV_ADMIN_PASSWORD` or its
+  file) is stored, so the next start does not reset a UI-changed password.
+  Old bundles with a marker still import; the private pre-import backup
+  keeps the markers so a rollback restores the exact state.
+- **Mandatory proxy key (DJ-10).** `docker/entrypoint.sh` refuses to start
+  (exit 1) when `HV_PROXY=1` and `HV_PROXY_KEY` is shorter than 32
+  characters; the message says to run `openssl rand -hex 32` and put the
+  value in `.env`. The check runs before the firewall is touched and does
+  not apply to CLI commands. The native install has no proxy, so it needs no
+  key. fail2ban's `_AUTO_EXEMPT` (`127.0.0.1`) is removed; `127.0.0.1`
+  itself stays unbannable through `normalize_ip`. The startup warning says
+  the key is required.
+- **WAN HTTPS-only switch (DJ-00).** New `HV_WAN_HTTPS_ONLY` (default `0`):
+  with `1`, `/api/login*`, `/api/password` and `/api/admin/*` answer
+  `403 {"code": "https_required"}` to non-LAN sources that did not come
+  through Caddy; LAN and loopback-direct callers are unaffected. Refusals
+  are audited as `https_required` (at most once per IP per minute, hu/en/de
+  labels). Responses through Caddy get a `Secure` session cookie even with
+  `HV_COOKIE_SECURE=0`, so plain-HTTP LAN logins keep working. The
+  plain-HTTP startup warning is silenced by the switch; a new warning flags
+  the switch without `HV_PROXY=1`.
+- **Container bridges (DJ-03).** The entrypoint reads every bridge
+  interface (`ip -o link show type bridge`, without the LAN and WAN
+  interfaces) into the new `docker_bridges` nft set; new flows into those
+  need DNAT like `docker*`/`br-*`, and the `DOCKER-USER` accept excludes
+  them too. The watchdog refreshes both. A missing `DOCKER-USER` chain or
+  Docker's nftables backend is no longer fatal: the container keeps running
+  and logs a loud `ERROR` at start and at most once a minute.
+- **Input pre-auth scope (DJ-09).** Input pre-auth entries have a `scope`,
+  `lan` (default; stored entries without it load as `lan`) or `any`. `lan`
+  renders `iifname "<LAN_IF>"` only (also for the established accept);
+  `any` keeps the LAN + WAN behaviour. Validated in `settings_store`, part of
+  export/import, and a **Scope** select (hu/en/de) in the pre-auth form. The
+  reserved-port rule is unchanged.
+- **Hand-edited settings (DJ-36).** Saving stays strict, but loading a
+  stored file normalizes a destination with host bits to its network with a
+  logged warning instead of invalidating the file. `Firewall._custom_dst`
+  stays strict.
+- **IPv6 always dropped (DJ-35).** The input chain drops IPv6 before the
+  `breakglass` jump (only loopback precedes it), the raw prerouting
+  `loopback_guard` drops every non-loopback IPv6 packet, and the boot
+  table's input and prerouting chains drop IPv6 too. `docker/setup-host.sh`
+  (reading `HV_LAN_IF` from `.env`) and `install.sh` always write
+  `net.ipv6.conf.<LAN_IF>.disable_ipv6 = 1` into
+  `/etc/sysctl.d/90-dropjak.conf`; `setup-host.sh` no longer inserts an
+  IPv6 SSH exception into the boot table. Requirement: no other IPv6 router
+  on the client LAN.
 
 ### [3.24.0] - 2026-10-22
 

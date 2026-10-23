@@ -494,6 +494,8 @@ class TemplateOrderTests(unittest.TestCase):
     def test_loopback_guard_before_nat(self) -> None:
         """With route_localnet, a 127/8 packet arriving from outside is dropped."""
         guard = [
+            # IPv6 is always dropped (DJ-35), first, at the earliest hook.
+            'iifname != "lo" meta nfproto ipv6 drop',
             'iifname != "lo" ip daddr 127.0.0.0/8 drop',
             'iifname != "lo" ip saddr 127.0.0.0/8 drop',
         ]

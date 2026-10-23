@@ -205,10 +205,6 @@ DEFAULT_PROXY_WINDOW = _clamp(
     MAX_WINDOW,
 )
 
-# The portal's own local traffic (healthcheck, local administration) is not
-# banned automatically. The rest of 127.0.0.0/8 (test environment) remains.
-_AUTO_EXEMPT = {"127.0.0.1"}
-
 
 def normalize_exempt(value) -> list[str]:
     """Validate the drop-signal allowlist: IPv4 addresses or CIDRs.
@@ -926,8 +922,6 @@ class Fail2ban:
             address = normalize_ip(ip)
         except Fail2banError:
             return None
-        if address in _AUTO_EXEMPT:
-            return None
         record = None
         with self._lock:
             self._refresh_locked()
@@ -987,8 +981,6 @@ class Fail2ban:
         try:
             address = normalize_ip(ip)
         except Fail2banError:
-            return None
-        if address in _AUTO_EXEMPT:
             return None
         # The source of a dropped first packet is unverified. Allowlisted
         # infrastructure (management network, agent endpoints, upstream

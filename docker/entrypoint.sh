@@ -193,6 +193,18 @@ run_as_app() {
         -- "$@"
 }
 
+check_proxy_key() {
+    # With HV_PROXY=1 the portal trusts Caddy's X-Forwarded-For and serves it
+    # the certificate private keys. Without the shared key every host process
+    # (and every host-network container) would pass as Caddy, so the key is
+    # mandatory. Checked before the firewall is touched: the loaded table
+    # stays as it is.
+    [ "$(env_bool HV_PROXY 0)" = "1" ] || return 0
+    _key=${HV_PROXY_KEY:-}
+    [ "${#_key}" -ge 32 ] && return 0
+    die "HV_PROXY=1 requires HV_PROXY_KEY of at least 32 characters (now ${#_key}). Generate one with: openssl rand -hex 32 ; put HV_PROXY_KEY=<that value> in the .env file next to docker-compose.yml, then run: docker compose up -d (both the dropjak and the caddy service read it)."
+}
+
 # --------------------------------------------------------------------- firewall
 
 render_ruleset() {
@@ -269,6 +281,58 @@ render_ruleset() {
     log "rule file ready: $RENDERED"
 }
 
+detect_bridges() {
+    # Prints the host's bridge interfaces, space separated, except the LAN
+    # and WAN interfaces themselves (a bridged LAN or WAN must keep its
+    # normal forwarding). Docker networks with a custom
+    # com.docker.network.bridge.name do not match docker*/br-*, so the
+    # forward chain also needs their names. Without the ip tool the list is
+    # empty and only the name patterns apply.
+    command -v ip >/dev/null 2>&1 || return 0
+    ip -o link show type bridge 2>/dev/null | while IFS= read -r _line; do
+        _name=${_line#*: }
+        _name=${_name%%:*}
+        _name=${_name%%@*}
+        [ "$_name" != "${HV_LAN_IF:-}" ] || continue
+        [ "$_name" != "${HV_WAN_IF:-}" ] || continue
+        valid_ifname "$_name" || continue
+        printf '%s\n' "$_name"
+    done | sort -u | tr '\n' ' ' | sed 's/ *$//'
+}
+
+DOCKER_BRIDGES=""
+DOCKER_BRIDGES_APPLIED="-"
+
+sync_docker_bridges() {
+    # Fills the docker_bridges set (forward chain: a new flow into a bridge
+    # needs DNAT). $1 = force rewrites it even if the list is unchanged, for
+    # example after a template reload left the set empty. Flush and add run
+    # in one nft transaction, so there is no moment without the old names.
+    _bridges=$(detect_bridges)
+    if [ "${1:-}" != "force" ] && [ "$_bridges" = "$DOCKER_BRIDGES_APPLIED" ]; then
+        return 0
+    fi
+    _elements=""
+    for _br in $_bridges; do
+        _elements="${_elements:+$_elements, }\"$_br\""
+    done
+    if ! {
+        printf 'flush set inet hatarvedelem docker_bridges\n'
+        if [ -n "$_elements" ]; then
+            printf 'add element inet hatarvedelem docker_bridges { %s }\n' "$_elements"
+        fi
+    } | "$NFT_BIN" -f -; then
+        log "WARNING: cannot update the docker_bridges set; the docker*/br-* patterns still apply"
+        return 1
+    fi
+    DOCKER_BRIDGES=$_bridges
+    DOCKER_BRIDGES_APPLIED=$_bridges
+    log "container bridges that need DNAT for new flows: docker*, br-*$(printf '%s' "$_bridges" | sed 's/ /, /g; s/^./, &/')"
+    return 0
+}
+
+DOCKER_GUARD_PROBLEM=""
+
 docker_forward_guard() {
     # Docker's ip filter FORWARD chain would pass traffic with its own rules
     # (for example the published container ports) even if our inet table
@@ -276,10 +340,18 @@ docker_forward_guard() {
     # forwarded packet except the one marked by the inet hatarvedelem forward
     # chain. The mark is only put on the packet if our rules actually ran and
     # permitted it.
+    # Returns 1 with the reason in DOCKER_GUARD_PROBLEM when no guard can be
+    # installed; the caller logs it. That is never fatal: stopping the
+    # container would leave the host in a crash loop behind the boot table.
+    DOCKER_GUARD_PROBLEM=""
     DOCKER_USER=$("$NFT_BIN" list chain ip filter DOCKER-USER 2>/dev/null || true)
     if [ -z "$DOCKER_USER" ]; then
-        log "Docker DOCKER-USER chain is absent; no Docker forward protection needed"
-        return 0
+        if "$NFT_BIN" list table ip docker-bridges >/dev/null 2>&1; then
+            DOCKER_GUARD_PROBLEM="Docker uses its nftables firewall backend, which has no DOCKER-USER chain"
+        else
+            DOCKER_GUARD_PROBLEM="the Docker DOCKER-USER chain (ip filter) is missing"
+        fi
+        return 1
     fi
     # The list of old rules is taken before insertion; the handles remain valid
     # after insertion.
@@ -290,20 +362,26 @@ docker_forward_guard() {
     if ! "$NFT_BIN" insert rule ip filter DOCKER-USER \
             meta mark != "$HV_FWD_MARK" drop \
             comment '"hv-docker-fwd-guard"'; then
-        log "ERROR: cannot set up Docker forward protection (DOCKER-USER drop)"
+        DOCKER_GUARD_PROBLEM="cannot insert the DOCKER-USER drop rule"
         return 1
     fi
     # A marked packet is accepted here only if it does not leave through a
-    # Docker bridge. Toward a bridge it continues to Docker's own rules
-    # (published-port DNAT, isolation, Docker 28's block of unpublished
-    # ports); an accept here would skip them. A plain return for every
-    # marked packet would not work: Docker's FORWARD chain has no rule for
-    # LAN->WAN traffic, and its policy is drop.
+    # container bridge (docker*, br-* and the detected custom bridges).
+    # Toward a bridge it continues to Docker's own rules (published-port
+    # DNAT, isolation, Docker 28's block of unpublished ports); an accept
+    # here would skip them. A plain return for every marked packet would not
+    # work: Docker's FORWARD chain has no rule for LAN->WAN traffic, and its
+    # policy is drop.
+    set -- meta mark "$HV_FWD_MARK" oifname != '"docker*"' oifname != '"br-*"'
+    for _br in $DOCKER_BRIDGES; do
+        case "$_br" in
+            docker* | br-*) ;;
+            *) set -- "$@" oifname != "\"$_br\"" ;;
+        esac
+    done
     if ! "$NFT_BIN" insert rule ip filter DOCKER-USER \
-            meta mark "$HV_FWD_MARK" oifname != '"docker*"' \
-            oifname != '"br-*"' accept \
-            comment '"hv-docker-fwd-mark"'; then
-        log "ERROR: cannot set up Docker forward permission (DOCKER-USER accept)"
+            "$@" accept comment '"hv-docker-fwd-mark"'; then
+        DOCKER_GUARD_PROBLEM="cannot insert the DOCKER-USER accept rule for marked packets"
         return 1
     fi
     # Logging only: sends unmarked (i.e. to-be-dropped) packets
@@ -340,11 +418,17 @@ EOF
     return 0
 }
 
+log_guard_error() {
+    log "ERROR: Docker forward protection is NOT installed: $DOCKER_GUARD_PROBLEM. Published container ports are guarded only by the inet hatarvedelem table; if that table disappears, Docker's own rules pass them. The portal keeps running; the watchdog retries every 5 seconds and repeats this error every minute until the guard is in place (Docker iptables backend with DOCKER-USER)."
+}
+
 start_firewall_watchdog() {
     [ "$(env_bool HV_FIREWALL_WATCHDOG 1)" = "1" ] || return 0
     (
+        guard_error_at=0
         while :; do
             sleep 5
+            reloaded=0
             forward=$("$NFT_BIN" list chain inet hatarvedelem forward 2>/dev/null || true)
             case "$forward" in
                 *"policy drop"*) ;;
@@ -359,14 +443,31 @@ start_firewall_watchdog() {
                     # (Gateway.check_firewall_state); until then it issues
                     # no new grant.
                     log "firewall reloaded"
+                    reloaded=1
                 else
                     log "ERROR: firewall reload failed"
                 fi
-                docker_forward_guard || true
-            elif ! "$NFT_BIN" list chain ip filter DOCKER-USER 2>/dev/null \
-                    | grep -q 'hv-docker-fwd-guard'; then
-                log "WARNING: Docker forward protection is missing; reconfiguring"
-                docker_forward_guard || true
+            fi
+            # New or removed bridges (docker network create/rm), and the
+            # empty set after a reload.
+            bridges_before=$DOCKER_BRIDGES_APPLIED
+            if [ "$reloaded" = "1" ]; then
+                sync_docker_bridges force || true
+            else
+                sync_docker_bridges || true
+            fi
+            if [ "$reloaded" = "1" ] \
+                    || [ "$DOCKER_BRIDGES_APPLIED" != "$bridges_before" ] \
+                    || ! "$NFT_BIN" list chain ip filter DOCKER-USER 2>/dev/null \
+                        | grep -q 'hv-docker-fwd-guard'; then
+                if ! docker_forward_guard; then
+                    # Loud, but at most once a minute; every round retries.
+                    now=$(date +%s)
+                    if [ $((now - guard_error_at)) -ge 60 ]; then
+                        log_guard_error
+                        guard_error_at=$now
+                    fi
+                fi
             fi
         done
     ) &
@@ -539,8 +640,10 @@ load_firewall() {
         log "the early boot protection has handed over to the final rules"
     fi
 
-    docker_forward_guard \
-        || die "without Docker forward protection the firewall can be bypassed; startup stopped"
+    sync_docker_bridges force || true
+    # Never fatal (see docker_forward_guard); the watchdog keeps retrying
+    # and repeats the error every minute.
+    docker_forward_guard || log_guard_error
 
     if [ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo 0)" != "1" ]; then
         if (echo 1 >/proc/sys/net/ipv4/ip_forward) 2>/dev/null; then
@@ -564,6 +667,8 @@ export HV_STATE_DIR="$STATE_DIR"
 if [ "$#" -gt 0 ]; then
     run_as_app "$@"
 fi
+
+check_proxy_key
 
 skip_firewall=$(env_bool HV_SKIP_FIREWALL 0)
 if [ "$skip_firewall" = "1" ]; then

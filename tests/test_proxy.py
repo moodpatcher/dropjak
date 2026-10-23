@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import glob
 import http.client
+import ipaddress
 import json
 import os
 import re
@@ -23,6 +24,7 @@ import time
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -1086,6 +1088,117 @@ class ProxiedPortalHttpTests(unittest.TestCase):
             body="{}",
         )
         self.assertEqual(resp.status, 403)
+
+    # -- DJ-00: HV_WAN_HTTPS_ONLY ------------------------------------------
+
+    WAN = "203.0.113.50"
+    LAN = "192.168.10.20"
+    KEY = "k" * 40
+
+    def https_only(self):
+        """WAN_HTTPS_ONLY on; 127.0.0.5 plays a WAN peer, 127.0.0.6 a LAN one.
+
+        The test server only sees loopback peers, so the peer address is
+        mapped; 127.0.0.1 stays the (keyed) Caddy peer.
+        """
+        mapping = {"127.0.0.5": self.WAN, "127.0.0.6": self.LAN}
+
+        def peer(handler):
+            raw = handler.client_address[0]
+            return mapping.get(raw, raw)
+
+        stack = mock.patch.multiple(
+            gateway, WAN_HTTPS_ONLY=True, PROXY_KEY=self.KEY,
+            LAN_NETWORK=ipaddress.ip_network("192.168.10.0/24"),
+        )
+        stack.start()
+        self.addCleanup(stack.stop)
+        for patcher in (
+            mock.patch.object(server.Handler, "_peer_ip", peer),
+            mock.patch.object(
+                server, "_HTTPS_REQUIRED_AUDIT",
+                gateway.RateLimiter(window=60, maximum=1),
+            ),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def audit_rows(self, event):
+        with open(self.audit_path, encoding="utf-8") as fh:
+            rows = [json.loads(line) for line in fh]
+        return [row for row in rows if row.get("event") == event]
+
+    def test_wan_https_only_refuses_plain_http_from_wan(self) -> None:
+        self.https_only()
+        before = len(self.audit_rows("https_required"))
+        direct = {"Host": "192.168.10.1:8100"}
+        resp, body = self.login(direct, source="127.0.0.5")
+        self.assertEqual(resp.status, 403, body)
+        self.assertEqual(json.loads(body)["code"], "https_required")
+        for method, path in (
+            ("POST", "/api/login/totp"), ("POST", "/api/password"),
+            ("GET", "/api/admin/state"), ("POST", "/api/admin/users"),
+        ):
+            with self.subTest(path=path):
+                resp, body = self.request(
+                    method, path,
+                    {**direct, "Content-Type": "application/json"},
+                    "127.0.0.5", body="{}" if method == "POST" else None,
+                )
+                self.assertEqual(resp.status, 403, body)
+                self.assertEqual(json.loads(body)["code"], "https_required")
+        # The status and challenge endpoints stay open (the page loads).
+        resp, _ = self.request("GET", "/api/status", direct, "127.0.0.5")
+        self.assertEqual(resp.status, 200)
+        # One audit row per IP per minute, however many refusals.
+        rows = self.audit_rows("https_required")[before:]
+        self.assertEqual(len(rows), 1, rows)
+        self.assertEqual(rows[0]["ip"], self.WAN)
+        self.assertEqual(rows[0]["path"], "/api/login")
+
+    def test_wan_https_only_spares_lan_loopback_and_caddy(self) -> None:
+        self.https_only()
+        direct = {"Host": "192.168.10.1:8100"}
+        # LAN over plain HTTP: allowed, cookie without Secure.
+        resp, body = self.login(direct, source="127.0.0.6")
+        self.assertEqual(resp.status, 200, body)
+        self.assertNotIn("Secure", resp.getheader("Set-Cookie"))
+        # Loopback-direct (healthcheck, CLI, host tests).
+        resp, body = self.login(direct, source="127.0.0.3")
+        self.assertEqual(resp.status, 200, body)
+        # Through Caddy (keyed), under any host name: allowed, Secure.
+        resp, body = self.login({
+            "Host": "192.168.10.1", "X-Forwarded-For": "198.51.100.79",
+            server.PROXY_KEY_HEADER: self.KEY,
+        })
+        self.assertEqual(resp.status, 200, body)
+        self.assertIn("; Secure", resp.getheader("Set-Cookie"))
+        # A bare loopback peer without the key is not Caddy, and its
+        # X-Forwarded-For is ignored: the peer is loopback, so it passes,
+        # but the cookie is not Secure.
+        resp, body = self.login({**direct, "X-Forwarded-For": self.WAN})
+        self.assertEqual(resp.status, 200, body)
+        self.assertNotIn("Secure", resp.getheader("Set-Cookie"))
+
+    def test_https_required_has_ui_text_and_audit_label(self) -> None:
+        index = (ROOT / "index.html").read_text(encoding="utf-8")
+        self.assertIn("https_required: 'Erről a hálózatról csak HTTPS-en", index)
+        self.assertIn("  https_required: ['", index)
+        self.assertIn("API_ERROR_CODES[data.code]", index)
+        for marker in ("'From this network you can sign in only over HTTPS.",
+                       "'Aus diesem Netzwerk ist die Anmeldung nur über HTTPS"):
+            self.assertIn(marker, index)
+
+    def test_wan_https_only_off_keeps_plain_http(self) -> None:
+        mapping = {"127.0.0.5": self.WAN}
+        with mock.patch.object(
+            server.Handler, "_peer_ip",
+            lambda handler: mapping.get(handler.client_address[0],
+                                        handler.client_address[0]),
+        ):
+            resp, body = self.login({"Host": "192.168.10.1:8100"},
+                                    source="127.0.0.5")
+        self.assertEqual(resp.status, 200, body)
 
 
 class ProxyFirewallTemplateTests(unittest.TestCase):

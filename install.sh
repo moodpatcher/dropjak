@@ -611,15 +611,31 @@ for distro_conf in /etc/nftables.conf /etc/sysconfig/nftables.conf; do
   fi
 done
 
-note "Enabling IP forwarding"
-cat > "$SYSCTL_FILE" <<'EOF'
+note "Enabling IP forwarding, disabling IPv6 on the LAN interface"
+# IPv6 is always dropped by the firewall, and the client LAN must have no
+# other IPv6 router (a rogue router advertisement would give the clients a
+# path around the gateway). IPv6 is therefore always off on the LAN
+# interface; there is no opt-out. A dot in the name (VLAN) would split the
+# dotted key, so the slash form is used then.
+if [[ "$LAN_IF" == *.* ]]; then
+  LAN_IPV6_KEY="net/ipv6/conf/${LAN_IF}/disable_ipv6"
+else
+  LAN_IPV6_KEY="net.ipv6.conf.${LAN_IF}.disable_ipv6"
+fi
+cat > "$SYSCTL_FILE" <<EOF
 # Dropjak: the machine forwards traffic as a router.
 net.ipv4.ip_forward = 1
+# IPv6 is always dropped; no IPv6 on the client LAN interface (no opt-out).
+$LAN_IPV6_KEY = 1
 EOF
 if command -v sysctl >/dev/null 2>&1; then
   sysctl -q -w net.ipv4.ip_forward=1 >/dev/null
 else
   printf '1\n' > /proc/sys/net/ipv4/ip_forward
+fi
+if [[ -w "/proc/sys/net/ipv6/conf/${LAN_IF}/disable_ipv6" ]]; then
+  printf '1\n' > "/proc/sys/net/ipv6/conf/${LAN_IF}/disable_ipv6" \
+    || warn "cannot disable IPv6 on ${LAN_IF} right now; it will be after a reboot."
 fi
 
 note "Loading the firewall"

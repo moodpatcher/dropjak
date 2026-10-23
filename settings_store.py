@@ -1392,7 +1392,15 @@ def _check_tunnel_listen_ports(port_proxies, tunnels) -> None:
                 keys.add(key)
 
 
-def _normalize_dst(raw) -> str:
+def _normalize_dst(raw, warnings: list[str] | None = None) -> str:
+    """Normalize a destination (IP or CIDR) of a pre-auth or block entry.
+
+    New and edited entries are strict: ``10.0.0.5/8`` is a typo, not a
+    request for all of 10/8, so it is rejected. With ``warnings`` (loading
+    a stored file) a destination with host bits is instead normalized to
+    its network and a warning is appended, so one hand-edited entry does
+    not invalidate the whole file (which would clear every pre-auth entry).
+    """
     if raw is None:
         raw = ""
     if not isinstance(raw, str):
@@ -1401,14 +1409,19 @@ def _normalize_dst(raw) -> str:
     if not raw:
         return ""
     try:
-        # strict: "10.0.0.5/8" is a typo, not a request for all of 10/8.
         network = ipaddress.ip_network(raw, strict=True)
     except ValueError as exc:
-        raise SettingsError(
-            f"invalid destination (host bits must be zero): {raw}"
-            if "has host bits set" in str(exc)
-            else f"invalid destination: {raw}"
-        ) from exc
+        host_bits = "has host bits set" in str(exc)
+        if not host_bits or warnings is None:
+            raise SettingsError(
+                f"invalid destination (host bits must be zero): {raw}"
+                if host_bits
+                else f"invalid destination: {raw}"
+            ) from exc
+        network = ipaddress.ip_network(raw, strict=False)
+        warnings.append(
+            f"destination {raw} has host bits set; loaded as {network}"
+        )
     if network.version != 4:
         raise SettingsError(f"only an IPv4 destination can be given: {raw}")
     if network.is_multicast:
@@ -1433,6 +1446,28 @@ def _normalize_direction(raw) -> str:
         return "forward"
     if value not in ("forward", "input"):
         raise SettingsError(f"invalid direction: {raw!r}")
+    return value
+
+
+PREAUTH_SCOPES = ("lan", "any")
+
+
+def _normalize_scope(raw) -> str:
+    """The scope of an input pre-auth entry: ``lan`` (default) or ``any``.
+
+    ``lan`` opens the host port only to traffic arriving on the LAN
+    interface; ``any`` also to the WAN (and every other interface). Older
+    entries have no scope: they load as ``lan``.
+    """
+    if raw is None:
+        return "lan"
+    if not isinstance(raw, str):
+        raise SettingsError("the scope can only be lan or any")
+    value = raw.strip().lower()
+    if not value:
+        return "lan"
+    if value not in PREAUTH_SCOPES:
+        raise SettingsError(f"invalid scope: {raw!r}")
     return value
 
 
@@ -1464,7 +1499,14 @@ def _normalize_ports(raw) -> list[int]:
     return sorted(ports)
 
 
-def normalize_entry(kind: str, entry, entry_id: str = "") -> dict:
+def normalize_entry(
+    kind: str, entry, entry_id: str = "", warnings: list[str] | None = None
+) -> dict:
+    """Validate one pre-auth or block entry.
+
+    ``warnings`` is only passed when a stored file is loaded: see
+    :func:`_normalize_dst`.
+    """
     if kind not in ("preauth", "block"):
         raise SettingsError(f"unknown settings type: {kind!r}")
     if not isinstance(entry, dict):
@@ -1478,7 +1520,7 @@ def normalize_entry(kind: str, entry, entry_id: str = "") -> dict:
             entry_id = secrets.token_hex(4)
     # The type is not stored in the entry; the list carries it.
     label = _text(entry.get("label"), "label")
-    dst = _normalize_dst(entry.get("dst", ""))
+    dst = _normalize_dst(entry.get("dst", ""), warnings)
     proto = str(entry.get("proto", "")).strip().lower()
     if proto not in ("tcp", "udp"):
         raise SettingsError(f"invalid protocol: {entry.get('proto')!r}")
@@ -1494,9 +1536,13 @@ def normalize_entry(kind: str, entry, entry_id: str = "") -> dict:
             "(otherwise the portal redirect takes precedence)"
         )
     direction = ""
+    scope = ""
     if kind == "preauth":
         # Older entries have no direction: those are forward.
         direction = _normalize_direction(entry.get("direction"))
+        # The scope only applies to the input direction; it is still
+        # validated, so a typo is not silently dropped.
+        scope = _normalize_scope(entry.get("scope"))
     normalized = {
         "id": entry_id,
         "label": label,
@@ -1507,6 +1553,8 @@ def normalize_entry(kind: str, entry, entry_id: str = "") -> dict:
     }
     if kind == "preauth":
         normalized["direction"] = direction
+        if direction == "input":
+            normalized["scope"] = scope
     return normalized
 
 
@@ -1538,7 +1586,14 @@ def legacy_proxy_domain(data) -> str:
     return _proxy_domain(data.get("proxy_domain", ""))
 
 
-def validate_state(data) -> dict:
+def validate_state(data, warnings: list[str] | None = None) -> dict:
+    """Validate a whole settings state.
+
+    ``warnings`` is passed only by :meth:`SettingsStore.load`: then a
+    pre-auth or block destination with host bits is normalized (and
+    reported there) instead of invalidating the file. Saving, import and
+    export stay strict.
+    """
     if not isinstance(data, dict):
         raise SettingsError("settings must be a JSON object")
     registration_enabled = data.get("registration_enabled", False)
@@ -1612,7 +1667,7 @@ def validate_state(data) -> dict:
             entry_id = raw_entry.get("id")
             if entry_id is not None and not isinstance(entry_id, str):
                 raise SettingsError("invalid entry ID")
-            entry = normalize_entry(kind, raw_entry, entry_id or "")
+            entry = normalize_entry(kind, raw_entry, entry_id or "", warnings)
             if entry["id"] in seen:
                 raise SettingsError(
                     f"duplicate entry ID: {entry['id']}"
@@ -1661,7 +1716,8 @@ class SettingsStore:
         try:
             with open(self.path, "r", encoding="utf-8") as fh:
                 raw = json.load(fh)
-            data = validate_state(raw)
+            warnings: list[str] = []
+            data = validate_state(raw, warnings)
             legacy = legacy_proxy_domain(raw)
         except FileNotFoundError:
             with self._lock:
@@ -1678,6 +1734,9 @@ class SettingsStore:
                 f"customization falls back to defaults: {exc}"
             )
             return
+        for warning in warnings:
+            # A hand-edited file; the portal writes normalized networks.
+            self.log(f"[settings] WARNING: {self.path}: {warning}")
         if isinstance(raw, dict) and "proxy_domains" not in raw \
                 and raw.get("proxy_routes") and not legacy:
             self.log(

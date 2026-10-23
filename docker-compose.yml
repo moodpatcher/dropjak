@@ -159,9 +159,13 @@ services:
       # 1: the firewall opens TCP 80/443 for the caddy proxy service
       # (together with COMPOSE_PROFILES=proxy). See the .env.example file.
       HV_PROXY: ${HV_PROXY:-0}
-      # Secret shared with the caddy service (openssl rand -hex 32); without
-      # it every host process is trusted as Caddy.
+      # Secret shared with the caddy service (openssl rand -hex 32), at
+      # least 32 characters; mandatory with HV_PROXY=1 (the entrypoint
+      # refuses to start without it).
       HV_PROXY_KEY: ${HV_PROXY_KEY:-}
+      # 1: login, password and admin endpoints answer 403 to non-LAN
+      # sources that did not come through Caddy (HTTPS).
+      HV_WAN_HTTPS_ONLY: ${HV_WAN_HTTPS_ONLY:-0}
       # The Caddy admin API Unix socket is on the caddy-admin volume; the portal
       # restarts Caddy through it when ACME is disabled (cache flush).
       HV_CADDY_ADMIN: ${HV_CADDY_ADMIN:-/run/caddy-admin/admin.sock}

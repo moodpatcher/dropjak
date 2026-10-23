@@ -42,10 +42,13 @@ flush chain inet hatarvedelem_boot loopback_guard
 # administration is not blocked; replies to the host's own outbound
 # connections (Docker image pulls, NTP, DNS lookups); and DHCP requests, so
 # LAN clients keep their addresses. Host SSH (TCP 22) stays closed; use the
-# provider console during this window.
+# provider console during this window. IPv6 is dropped everywhere except on
+# loopback; the forward chain has no rule, so its policy drops everything.
 table inet hatarvedelem_boot {
     chain input {
         iifname "lo" accept
+        # IPv6 is always dropped, replies included (see dropjak.nft).
+        meta nfproto ipv6 drop
         tcp dport 22 drop
         ct state established,related accept
         udp sport 68 udp dport 67 accept
@@ -55,6 +58,7 @@ table inet hatarvedelem_boot {
     # loopback target): packets with a destination or source in 127/8 from
     # outside must not reach the loopback services before the final rules are loaded.
     chain loopback_guard {
+        iifname != "lo" meta nfproto ipv6 drop
         iifname != "lo" ip daddr 127.0.0.0/8 drop
         iifname != "lo" ip saddr 127.0.0.0/8 drop
     }

@@ -27,6 +27,7 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 import urllib.parse
 from pathlib import Path
@@ -1427,6 +1428,7 @@ class TransportWarningTests(unittest.TestCase):
     def warnings(self, env: dict, **patches) -> list[str]:
         values = {
             "COOKIE_SECURE": False, "PROXY_ENABLED": False, "PROXY_KEY": "",
+            "WAN_HTTPS_ONLY": False,
             "PORTAL_URL": "http://192.168.10.1:8100",
             "PORTAL_HOSTS": frozenset(),
         }
@@ -1461,6 +1463,26 @@ class TransportWarningTests(unittest.TestCase):
         )
         out = self.warnings({}, PORTAL_URL="")
         self.assertTrue(any("HV_PORTAL_HOSTS" in line for line in out), out)
+
+    def test_proxy_key_warning_says_it_is_mandatory(self) -> None:
+        out = self.warnings({}, PROXY_ENABLED=True, PROXY_KEY="k" * 31)
+        self.assertEqual(len(out), 1, out)
+        self.assertIn("requires an HV_PROXY_KEY", out[0])
+        self.assertIn("openssl rand -hex 32", out[0])
+
+    def test_wan_https_only(self) -> None:
+        """DJ-00: the switch silences the plain-HTTP warning; without the
+        proxy it warns that WAN users cannot sign in."""
+        self.assertEqual(
+            self.warnings(
+                {"HV_PORTAL_NET": "0.0.0.0/0"}, WAN_HTTPS_ONLY=True,
+                PROXY_ENABLED=True, PROXY_KEY="k" * 32,
+            ),
+            [],
+        )
+        out = self.warnings({}, WAN_HTTPS_ONLY=True)
+        self.assertEqual(len(out), 1, out)
+        self.assertIn("HV_WAN_HTTPS_ONLY=1 without HV_PROXY=1", out[0])
 
 
 class UserStoreAccountRequestTests(unittest.TestCase):
@@ -2314,6 +2336,71 @@ class AdminProvisionTests(unittest.TestCase):
         self.assertTrue(marker.startswith("v2$"))
         self.assertTrue(self.store.verify("admin", "sajat-jelszo-3"))
         self.assertFalse(self.store.record("admin").must_change_password)
+
+    # -- DJ-27: the marker stays out of the export ----------------------------
+
+    def _source_export(self) -> dict:
+        """An export from another installation whose admin changed the password."""
+        source = gateway.UserStore(
+            os.path.join(self.tmp.name, "source.json"), iterations=10_000
+        )
+        with mock.patch.multiple(
+            gateway, ADMIN_ENABLED=True, ADMIN_USER="admin",
+            ADMIN_PASSWORD="forras-env-jelszo-9",
+        ):
+            gateway.provision_admin(source)
+        source.set_password("admin", "sajat-jelszo-3")
+        return source.export_records()
+
+    def _import(self, records: dict, env_password: str) -> None:
+        gw = types.SimpleNamespace(users=self.store)
+        with mock.patch.multiple(
+            gateway, ADMIN_ENABLED=True, ADMIN_USER="admin",
+            ADMIN_PASSWORD=env_password,
+        ):
+            self.store.replace_all(server._carry_provision_marker(gw, records))
+
+    def test_export_leaves_out_the_marker(self) -> None:
+        records = self._source_export()
+        self.assertNotIn("provisioned_from", records["admin"])
+        self.assertNotIn("provisioned_from", json.dumps(records))
+
+    def test_import_keeps_the_current_installations_marker(self) -> None:
+        self._provision(True, "admin", "hosszu-jelszo-1")
+        current = self.store.provisioned_from("admin")
+        self._import(self._source_export(), "hosszu-jelszo-1")
+        self.assertEqual(self.store.provisioned_from("admin"), current)
+        # The next start does not reset the imported (UI-changed) password.
+        self.assertEqual(
+            self._provision(True, "admin", "hosszu-jelszo-1"), "unchanged"
+        )
+        self.assertTrue(self.store.verify("admin", "sajat-jelszo-3"))
+        self.assertFalse(self.store.verify("admin", "hosszu-jelszo-1"))
+
+    def test_import_without_current_marker_marks_the_env_password(self) -> None:
+        # The target has no marker for the admin (e.g. after a factory reset
+        # before the restart): a fresh marker of the .env password is stored.
+        self._import(self._source_export(), "cel-env-jelszo-5")
+        marker = self.store.provisioned_from("admin")
+        self.assertTrue(gateway.provision_marker_matches(
+            marker, "cel-env-jelszo-5", 10_000
+        ))
+        self.assertEqual(
+            self._provision(True, "admin", "cel-env-jelszo-5"), "unchanged"
+        )
+        self.assertTrue(self.store.verify("admin", "sajat-jelszo-3"))
+
+    def test_old_bundle_with_marker_still_imports(self) -> None:
+        records = self._source_export()
+        old_marker = gateway.provision_marker("forras-env-jelszo-9", 10_000)
+        records["admin"]["provisioned_from"] = old_marker
+        self._provision(True, "admin", "hosszu-jelszo-1")
+        self._import(records, "hosszu-jelszo-1")
+        self.assertEqual(self.store.provisioned_from("admin"), old_marker)
+
+    def test_import_without_env_password_stores_no_marker(self) -> None:
+        self._import(self._source_export(), "")
+        self.assertEqual(self.store.provisioned_from("admin"), "")
 
 
 # ------------------------------------------------------------------ session
@@ -12928,7 +13015,9 @@ process.stdout.write(JSON.stringify(
         for token in (
             "el('label', { text: tr('Irány') })",
             "direction: formValue(box, 'direction') === 'input'",
-            "entry.direction === 'input' ? 'Input (host)' : 'Forward'",
+            "${tr('Input (host)')} · ${tr(entry.scope === 'any' ? "
+            "'Bármely interfész (LAN + WAN)' : 'Csak LAN')}`",
+            ": tr('Forward') })",
             "Az Input (host) irány a portálgép saját portjait nyitja meg "
             "bejelentkezés előtt; ez megkerüli a portál kapuját, ezért csak "
             "indokolt esetben használd.",
@@ -15189,9 +15278,9 @@ class FirewallCustomTests(unittest.TestCase):
         self.fw.apply_custom(preauth=[
             {"dst": "", "proto": "tcp", "ports": [25565]},
             {"dst": "192.168.50.10", "proto": "tcp", "ports": [8443],
-             "direction": "input"},
+             "direction": "input", "scope": "any"},
             {"dst": "", "proto": "udp", "ports": [51820],
-             "direction": "input"},
+             "direction": "input", "scope": "any"},
             {"dst": "10.0.0.1", "proto": "tcp", "ports": [9000],
              "direction": "input", "enabled": False},
         ])
@@ -15260,6 +15349,11 @@ class FirewallCustomTests(unittest.TestCase):
         )
         wan_only.apply_custom(preauth=[{
             "dst": "", "proto": "tcp", "ports": [8443],
+            "direction": "input", "scope": "any",
+        }, {
+            # LAN scope (the default) without a LAN interface: skipped, the
+            # rest still applies.
+            "dst": "", "proto": "tcp", "ports": [8444],
             "direction": "input",
         }])
         input_lines = [
@@ -15271,6 +15365,7 @@ class FirewallCustomTests(unittest.TestCase):
         self.assertTrue(scoped)
         self.assertTrue(all('iifname "eth0"' in line for line in scoped))
         self.assertFalse(any('iifname "eth1"' in line for line in input_lines))
+        self.assertFalse(any("8444" in line for line in input_lines))
 
         self.tools.clear()
         no_iface = gateway.Firewall(
@@ -15285,6 +15380,54 @@ class FirewallCustomTests(unittest.TestCase):
                 "direction": "input",
             }])
         self.assertEqual(self.tools.script(), [])
+
+    def test_preauth_input_scope(self) -> None:
+        """DJ-09: "lan" (the default, also for stored entries without the
+        field) opens the host port on the LAN interface only; "any" keeps
+        LAN + WAN and the interface-free established accept."""
+        for scope in (None, "lan"):
+            with self.subTest(scope=scope):
+                self.tools.clear()
+                entry = {"dst": "", "proto": "tcp", "ports": [8443],
+                         "direction": "input"}
+                if scope is not None:
+                    entry["scope"] = scope
+                self.fw.apply_custom(preauth=[entry])
+                input_lines = [
+                    line for line in self.tools.script()
+                    if line.startswith("add rule inet hatarvedelem preauth_input ")
+                    and "8443" in line
+                ]
+                self.assertEqual(input_lines, [
+                    'add rule inet hatarvedelem preauth_input iifname "eth1" '
+                    "meta l4proto tcp ct original proto-dst 8443 accept",
+                    'add rule inet hatarvedelem preauth_input iifname "eth1" '
+                    "ct state established meta l4proto tcp "
+                    "ct original proto-dst 8443 accept",
+                ])
+        self.tools.clear()
+        self.fw.apply_custom(preauth=[{
+            "dst": "", "proto": "tcp", "ports": [8443],
+            "direction": "input", "scope": "any",
+        }])
+        input_lines = [
+            line for line in self.tools.script()
+            if line.startswith("add rule inet hatarvedelem preauth_input ")
+            and "8443" in line
+        ]
+        self.assertEqual(input_lines, [
+            'add rule inet hatarvedelem preauth_input iifname "eth1" '
+            "meta l4proto tcp ct original proto-dst 8443 accept",
+            'add rule inet hatarvedelem preauth_input iifname "eth0" '
+            "meta l4proto tcp ct original proto-dst 8443 accept",
+            "add rule inet hatarvedelem preauth_input ct state established "
+            "meta l4proto tcp ct original proto-dst 8443 accept",
+        ])
+        with self.assertRaisesRegex(gateway.FirewallError, "scope"):
+            self.fw.apply_custom(preauth=[{
+                "dst": "", "proto": "tcp", "ports": [8443],
+                "direction": "input", "scope": "wan",
+            }])
 
 
 class RulesetTemplateTests(unittest.TestCase):

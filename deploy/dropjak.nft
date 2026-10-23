@@ -145,6 +145,14 @@ add set inet hatarvedelem no_forward_v4 {
     flags interval
 }
 add element inet hatarvedelem no_forward_v4 { 169.254.0.0/16 }
+# Container bridges whose name does not match docker*/br-* (a Docker network
+# with a custom com.docker.network.bridge.name, other bridges on the host).
+# The Docker entrypoint fills it from `ip -o link show type bridge` (without
+# the LAN and WAN interfaces) at startup and the watchdog keeps it current;
+# loading the template does not clear it. Empty on a native install.
+add set inet hatarvedelem docker_bridges {
+    type ifname
+}
 
 # The forward chain is created further below, in the same transaction as the
 # rules, with priority -10. Thus it runs BEFORE the Docker ip filter FORWARD
@@ -211,7 +219,7 @@ add chain inet hatarvedelem postrouting {
     type nat hook postrouting priority srcnat; policy accept;
 }
 
-# Loopback guard before NAT and conntrack (raw priority), when the address is still
+# Loopback and IPv6 guard before NAT and conntrack (raw priority), when the address is still
 # the original address as it arrived on the wire. The input port proxy DNATs to
 # 127.0.0.1 for a target that only listens on 127.0.0.1, which requires
 # net.ipv4.conf.all.route_localnet=1 on the host; with that, the kernel would
@@ -219,6 +227,7 @@ add chain inet hatarvedelem postrouting {
 # as martians either. This chain drops them on every non-loopback interface, so
 # the loopback services are reachable only through the proxy (authorized DNAT).
 # It is harmless without route_localnet too: these packets are martians anyway.
+# It also drops every IPv6 packet that did not arrive on loopback.
 add chain inet hatarvedelem loopback_guard {
     type filter hook prerouting priority raw; policy accept;
 }
@@ -315,10 +324,13 @@ table inet hatarvedelem {
         # from the WAN only if it was DNAT-ed (a published port or a port
         # proxy entry). Only the original direction is checked: the replies of
         # flows the container or the LAN host started are not affected.
+        # Bridges with other names are covered by the docker_bridges set.
         oifname "docker*" ct direction original ct status != dnat limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=container-direct " group __DROP_LOG_GROUP__
         oifname "docker*" ct direction original ct status != dnat drop
         oifname "br-*" ct direction original ct status != dnat limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=container-direct " group __DROP_LOG_GROUP__
         oifname "br-*" ct direction original ct status != dnat drop
+        oifname @docker_bridges ct direction original ct status != dnat limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=container-direct " group __DROP_LOG_GROUP__
+        oifname @docker_bridges ct direction original ct status != dnat drop
         iifname "__WAN_IF__" oifname "__LAN_IF__" ct direction original ct status != dnat limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=wan-drop " group __DROP_LOG_GROUP__
         iifname "__WAN_IF__" oifname "__LAN_IF__" ct direction original ct status != dnat drop
 
@@ -387,13 +399,16 @@ table inet hatarvedelem {
     chain input {
         iif lo accept
 
-        # Emergency chain in the very first place: the temporary accept in it
-        # survives reloading the template. Empty by default.
-        jump breakglass
-        # The portal and SSH are IPv4-only; on IPv6 we accept no incoming traffic
-        # (except loopback).
+        # IPv6 is always dropped: the portal, SSH and every grant are
+        # IPv4-only, and nothing may open IPv6 (the breakglass chain below
+        # included). Only loopback (::1 on lo) passes above; it cannot come
+        # from the network.
         meta nfproto ipv6 limit rate 10/minute burst 20 packets log prefix "dropjak-drop reason=ipv6 " group __DROP_LOG_GROUP__
         meta nfproto ipv6 drop
+
+        # Emergency chain right after the IPv6 drop: the temporary accept in it
+        # survives reloading the template. Empty by default.
+        jump breakglass
 
         # The DHCP request arrives with a 0.0.0.0 source before address assignment, so
         # we let it through before the source check. Only from the standard
@@ -425,17 +440,21 @@ table inet hatarvedelem {
         ip saddr @banned_v4 ct direction original limit rate 30/minute burst 60 packets log prefix "dropjak-drop reason=fail2ban " group __DROP_LOG_GROUP__
         ip saddr @banned_v4 ct direction original drop
 
-        # The admin-configured block also applies to traffic toward the host.
-        # It is unconditional, so host permissions and existing host connections
-        # cannot bypass it either. The earlier acceptance of loopback, breakglass, DHCP
-        # and the portal remains untouched, so a block entry cannot lock out the portal
-        # or emergency access. The block chain matches the conntrack original tuple,
-        # so it runs for every packet; no conntrack flush is needed.
+        # The admin-configured block also applies to LAN traffic toward the host.
+        # Host permissions and existing host connections cannot bypass it. The
+        # earlier acceptance of loopback, breakglass, DHCP and the portal remains
+        # untouched, so a block entry cannot lock out the portal or emergency
+        # access. The block chain matches the conntrack original tuple, so it runs
+        # for every packet; no conntrack flush is needed.
         # Only the original direction: a reply packet in the input chain belongs
         # to a connection the host itself opened (ACME, image pulls), and its
         # original tuple names the remote server, so a destination-less block
         # entry would otherwise cut the host's own outbound traffic.
-        ct direction original jump block
+        # Only from the LAN interface (DJ-33): block entries restrict the LAN
+        # clients, so a destination-less entry (for example TCP 443) must not
+        # stop inbound WAN traffic to the host (Caddy, tunnels, port proxies).
+        # The forward jump above stays unconditional.
+        iifname "__LAN_IF__" ct direction original jump block
 
         # Pre-login host (input) permissions. The block has already run,
         # so the block overrides this too; it stands before the portal and SSH rules
@@ -634,6 +653,9 @@ table inet hatarvedelem {
     }
 
     chain loopback_guard {
+        # IPv6 never gets past the first hook either (the input and forward
+        # chains drop it too): no NAT rule and no later chain sees it.
+        iifname != "lo" meta nfproto ipv6 drop
         iifname != "lo" ip daddr 127.0.0.0/8 drop
         iifname != "lo" ip saddr 127.0.0.0/8 drop
     }

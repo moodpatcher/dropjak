@@ -434,6 +434,11 @@ PROXY_KEY = os.environ.get("HV_PROXY_KEY", "").strip()
 # Whether the Caddy domain proxy is enabled (HV_PROXY=1): in that case the
 # portal is also reachable over HTTPS on the root domains.
 PROXY_ENABLED = _env_bool("HV_PROXY", False)
+# HV_WAN_HTTPS_ONLY=1: the login, password and admin endpoints refuse
+# (403 https_required) a non-LAN source that did not come through Caddy, so
+# WAN credentials never cross the network over the plain-HTTP portal port.
+# LAN clients and loopback-direct callers are unaffected.
+WAN_HTTPS_ONLY = _env_bool("HV_WAN_HTTPS_ONLY", False)
 # Caddy admin API (Unix socket on the shared caddy-admin volume); the
 # portal flushes Caddy's certificate cache through it. Empty means disabled.
 CADDY_ADMIN = os.environ.get(
@@ -1001,6 +1006,7 @@ AUDIT_SEVERITY = {
     "admin_session_terminate_failed": "warn",
     "portal_host_redirect": "warn", "proxy_challenge_failed": "warn",
     "host_rejected": "warn", "account_locked": "alert",
+    "https_required": "warn",
     "step_up_failed": "warn",
     "cli_password_changed": "warn",
     "cli_user_deleted": "warn", "cli_totp_reset": "warn",
@@ -4146,10 +4152,32 @@ class Firewall:
             if dst:
                 match += f" ct original ip daddr {dst}"
             match += f" ct original proto-dst {self._port_set(ports)}"
+            # The scope (DJ-09): "lan" (the default, also for entries stored
+            # without the field) opens the host port only on the LAN
+            # interface; "any" on every known interface, and keeps the
+            # established accept interface-free.
+            scope = str(entry.get("scope") or "lan").strip().lower()
+            if scope not in settings_store.PREAUTH_SCOPES:
+                raise FirewallError("invalid pre-auth scope")
+            if scope == "lan":
+                if not self.lan_if:
+                    # Fail-closed for this entry only, like the reserved
+                    # ports: the other chains must still be applied.
+                    self.log(
+                        "[firewall] WARNING: input pre-auth "
+                        f"{entry.get('id') or entry.get('label') or ''} has "
+                        "LAN scope but no LAN interface is known; skipped"
+                    )
+                    continue
+                ifaces = [self.lan_if]
+                established = f'iifname "{self.lan_if}" ct state established'
+            else:
+                ifaces = input_ifaces
+                established = "ct state established"
             # The packet goes towards the host, so a direct accept is needed:
             # no forward mark, and the DNAT WAN condition is not applicable
-            # either. Before login the source may be any known interface.
-            for iface in input_ifaces:
+            # either.
+            for iface in ifaces:
                 lines.append(
                     f'add rule inet {self.table} preauth_input '
                     f'iifname "{iface}" {match} accept'
@@ -4159,7 +4187,7 @@ class Firewall:
             # chain).
             lines.append(
                 f"add rule inet {self.table} preauth_input "
-                f"ct state established {match} accept"
+                f"{established} {match} accept"
             )
         return lines
 
@@ -7616,17 +7644,19 @@ class UserStore:
             clean[name] = record
         return clean
 
-    def export_records(self) -> dict:
+    def export_records(self, include_marker: bool = False) -> dict:
         """The current user records for the configuration bundle.
 
         The provisioning marker is left out (DJ-27): it is derived from the
         .env admin password and allows offline guessing of it. The import
         side carries the target installation's own marker over instead
-        (``server._carry_provision_marker``).
+        (``server._carry_provision_marker``). ``include_marker`` is only for
+        the private pre-import backup, which must restore the exact state.
         """
         records = self._clean_import_records(self._read_raw())
-        for record in records.values():
-            record.pop("provisioned_from", None)
+        if not include_marker:
+            for record in records.values():
+                record.pop("provisioned_from", None)
         return records
 
     def validate_import_records(self, raw) -> dict:

@@ -69,6 +69,9 @@ PROXY_LOOPBACK = ("127.0.0.1", "::1")
 # and ask calls cannot send headers, so there the key comes in the query.
 PROXY_KEY_HEADER = "X-Dropjak-Proxy-Key"
 _PROXY_KEY_QUERY_RE = re.compile(r"([?&]key=)[^&\s]*")
+# HV_WAN_HTTPS_ONLY refusals are audited at most once per source IP per
+# minute, so a client retrying in a loop does not flood the log.
+_HTTPS_REQUIRED_AUDIT = gateway.RateLimiter(window=60, maximum=1)
 # The /api/ paths that check their caller themselves (loopback/Caddy or the
 # tunnel agent's token) and are therefore exempt from the Host allowlist.
 _HOST_CHECK_EXEMPT_PREFIXES = ("/api/proxy/", "/api/gate/")
@@ -826,8 +829,12 @@ def _fail2ban_config(snapshot: dict) -> dict:
     return {key: snapshot[key] for key in _FAIL2BAN_CONFIG_KEYS}
 
 
-def _config_bundle(gw) -> dict:
-    """The full exportable configuration (without logs and runtime state)."""
+def _config_bundle(gw, include_markers: bool = False) -> dict:
+    """The full exportable configuration (without logs and runtime state).
+
+    ``include_markers`` keeps the provisioning markers; only the private
+    pre-import backup uses it, never a download (DJ-27).
+    """
     try:
         settings = gw.settings.snapshot()
         error = settings.pop("error", "")
@@ -838,7 +845,7 @@ def _config_bundle(gw) -> dict:
             "settings": settings,
             "rules": gw.rules.export_records(),
             "groups": gw.groups.export_records(),
-            "users": gw.users.export_records(),
+            "users": gw.users.export_records(include_marker=include_markers),
             "certs": gw.certs.export_all(),
             "fail2ban": _fail2ban_config(gw.fail2ban.snapshot()),
         }
@@ -1006,9 +1013,34 @@ def _validate_config_bundle(gw, bundle) -> dict:
     }
 
 
+def _carry_provision_marker(gw, users: dict) -> dict:
+    """Keep the provisioning markers of this installation across an import.
+
+    Exports carry no marker (DJ-27), but without one ``provision_admin``
+    would treat the imported .env admin as an old marker-less entry and
+    reset its password to the .env value on the next start. An imported
+    record without a marker keeps the current installation's marker for
+    the same user; for HV_ADMIN_USER without one, a fresh marker of the
+    current .env password is stored, so the imported password stays in
+    effect. Old bundles that still carry a marker import it unchanged.
+    """
+    carried = dict(users)
+    for name, record in users.items():
+        if not isinstance(record, dict) or record.get("provisioned_from"):
+            continue
+        marker = gw.users.provisioned_from(name)
+        if not marker and name == gateway.ADMIN_USER and gateway.ADMIN_PASSWORD:
+            marker = gateway.provision_marker(
+                gateway.ADMIN_PASSWORD, gw.users.iterations
+            )
+        if marker:
+            carried[name] = dict(record, provisioned_from=marker)
+    return carried
+
+
 def _apply_config_bundle(gw, bundle: dict) -> None:
     """Write the already validated sections through the existing store paths."""
-    gw.users.replace_all(bundle["users"])
+    gw.users.replace_all(_carry_provision_marker(gw, bundle["users"]))
     gw.rules.replace_all(bundle["rules"])
     gw.groups.replace_all(bundle["groups"])
     gw.apply_settings(bundle["settings"])
@@ -1381,7 +1413,67 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _cookie_secure(self) -> bool:
-        return gateway.COOKIE_SECURE or self._via_proxy()
+        """Whether the session cookie gets the Secure attribute.
+
+        Caddy serves the portal only in its https:// site (its http:// site
+        only asks /api/proxy/redirect for a 3xx), so with HV_PROXY_KEY set a
+        response that goes back through Caddy always reaches the browser
+        over HTTPS, under any host name. Without a key a bare loopback peer
+        is not conclusive; then only a proxy root domain counts. Plain-HTTP
+        LAN logins keep a cookie without Secure (unless HV_COOKIE_SECURE=1).
+        """
+        if gateway.COOKIE_SECURE or self._via_proxy():
+            return True
+        return bool(gateway.PROXY_KEY) and self._from_caddy()
+
+    @staticmethod
+    def _https_only_path(path: str) -> bool:
+        return (
+            path == "/api/login" or path.startswith("/api/login/")
+            or path == "/api/password" or path.startswith("/api/admin/")
+        )
+
+    def _https_required(self, path: str) -> bool:
+        """HV_WAN_HTTPS_ONLY: refuse credentials over the plain-HTTP port.
+
+        Applies to the login, password and admin endpoints. A request that
+        came through Caddy (HTTPS) passes, and so do LAN sources and
+        loopback-direct callers (healthcheck, the CLI, tests on the host).
+        Returns True when the 403 has already been sent.
+        """
+        if not gateway.WAN_HTTPS_ONLY or not self._https_only_path(path):
+            return False
+        if self._from_caddy():
+            return False
+        peer = self._peer_ip()
+        try:
+            address = ipaddress.ip_address(peer)
+        except ValueError:
+            address = None
+        if address is not None and (
+            address.is_loopback
+            or (gateway.LAN_NETWORK is not None
+                and address in gateway.LAN_NETWORK)
+        ):
+            return False
+        if _HTTPS_REQUIRED_AUDIT.allow(peer):
+            self._audit(
+                "https_required",
+                ip=peer,
+                path=path[:200],
+                reason="non-LAN source on the plain-HTTP portal port",
+            )
+        self._discard_body()
+        self._json(
+            403,
+            {
+                "ok": False,
+                "error": "Sign-in from this network is allowed only over "
+                         "HTTPS. Open the portal at its https:// address.",
+                "code": "https_required",
+            },
+        )
+        return True
 
     def log_message(self, fmt: str, *args) -> None:
         # The request line of Caddy's get_certificate/ask call carries the
@@ -1982,6 +2074,8 @@ class Handler(BaseHTTPRequestHandler):
         if self._tunnel_peer_refused(path):
             return
         if self._reject_unknown_host(path):
+            return
+        if self._https_required(path):
             return
 
         if path == "/api/challenge":
@@ -3518,7 +3612,9 @@ class Handler(BaseHTTPRequestHandler):
             # Backup before the first write; if it fails, nothing changes.
             try:
                 backup_path = _config_backup_path(self.gw)
-                _write_private_json(backup_path, _config_bundle(self.gw))
+                _write_private_json(
+                    backup_path, _config_bundle(self.gw, include_markers=True)
+                )
             except (OSError, ConfigBundleError) as exc:
                 self._audit(
                     "config_import_failed", user=session.user,
@@ -5007,6 +5103,8 @@ class Handler(BaseHTTPRequestHandler):
         if self._tunnel_peer_refused(path):
             return
         if self._reject_unknown_host(path):
+            return
+        if self._https_required(path):
             return
         if path == "/api/register":
             return self._register()
@@ -7178,22 +7276,31 @@ def _transport_warnings() -> list[str]:
     except ValueError:
         network = None
     if network is not None and not network.is_private \
-            and network.prefixlen < 24 and not gateway.COOKIE_SECURE:
+            and network.prefixlen < 24 and not gateway.COOKIE_SECURE \
+            and not gateway.WAN_HTTPS_ONLY:
         warnings.append(
             f"HV_PORTAL_NET={network} opens the portal port to the internet "
             "over plain HTTP: passwords, 2FA codes and session cookies "
             "cross the network unencrypted. Serve WAN users through the "
             "Caddy HTTPS proxy (HV_PROXY=1, COMPOSE_PROFILES=proxy), set "
-            "HV_COOKIE_SECURE=1, and narrow HV_PORTAL_NET to a management "
-            "network."
+            "HV_WAN_HTTPS_ONLY=1 (or HV_COOKIE_SECURE=1), and narrow "
+            "HV_PORTAL_NET to a management network."
         )
     if gateway.PROXY_ENABLED and len(gateway.PROXY_KEY) < 32:
+        # The Docker entrypoint refuses to start in this state; only a
+        # portal started some other way gets this far.
         warnings.append(
-            "HV_PROXY=1 without an HV_PROXY_KEY of at least 32 characters: "
-            "every process on the host (and every host-network container) "
-            "is trusted as Caddy, including X-Forwarded-For and the "
-            "certificate private keys. Generate one with "
+            "HV_PROXY=1 requires an HV_PROXY_KEY of at least 32 characters "
+            "(the container entrypoint refuses to start without it): "
+            "without it every process on the host (and every host-network "
+            "container) is trusted as Caddy, including X-Forwarded-For and "
+            "the certificate private keys. Generate one with "
             "'openssl rand -hex 32' and give it to both services."
+        )
+    if gateway.WAN_HTTPS_ONLY and not gateway.PROXY_ENABLED:
+        warnings.append(
+            "HV_WAN_HTTPS_ONLY=1 without HV_PROXY=1: there is no HTTPS "
+            "portal, so sources outside the LAN cannot sign in at all."
         )
     if not gateway.PORTAL_URL and not gateway.PORTAL_HOSTS:
         warnings.append(

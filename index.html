@@ -2922,6 +2922,8 @@ const I18N = {
     'A fiókot kikapcsolták.': 'The account was disabled.',
     'Az adminisztrátor lezárta a munkamenetet.': 'The administrator terminated the session.',
     'A portál újraindult, ezért a munkamenetek törlődtek.': 'The portal restarted, so sessions were cleared.',
+    'A tűzfal újratöltődött, ezért a munkamenet lezárult. Lépj be újra.': 'The firewall was reloaded, so the session ended. Sign in again.',
+    'Erről a hálózatról csak HTTPS-en lehet belépni. Nyisd meg a portált a https:// címén.': 'From this network you can sign in only over HTTPS. Open the portal at its https:// address.',
     'A munkamenet megszűnt.': 'The session ended.',
     'válassz hozzáférési szabályt': 'choose an access rule',
     'ez a szabály nem tartozik hozzád': 'this rule is not assigned to you',
@@ -3106,6 +3108,10 @@ const I18N = {
     'A pre-auth szabály a portál bejelentkezés nélkül is átengedi a megadott cél és port forgalmát. Üres cél esetén minden célra érvényes. Csak tudatosan nyilvános szolgáltatáshoz használd.': 'The pre-auth rule lets traffic to the given destination and port through without a portal sign-in. An empty destination means any destination. Only use it for a deliberately public service.',
     'Forward irányban WAN felől csak DNAT-olt (publikált) portokra érvényes. A cél a DNAT előtti cím (publikált Docker-portnál a VM IP-je), nem a konténer belső címe.': 'In the Forward direction it only applies to DNATed (published) ports from the WAN side. The destination is the pre-DNAT address (for a published Docker port, the VM IP), not the container’s internal address.',
     'Az Input (host) irány a portálgép saját portjait nyitja meg bejelentkezés előtt; ez megkerüli a portál kapuját, ezért csak indokolt esetben használd.': 'The Input (host) direction opens the portal machine’s own ports before sign-in; this bypasses the portal gate, so use it only when justified.',
+    'Hatókör': 'Scope',
+    'Csak LAN': 'LAN only',
+    'Bármely interfész (LAN + WAN)': 'Any interface (LAN + WAN)',
+    'Az Input (host) szabály alapból csak a LAN felől nyit; a „Bármely interfész” a WAN felől, azaz az internetről is elérhetővé teszi a portot.': 'An Input (host) entry opens only from the LAN by default; “Any interface” also makes the port reachable from the WAN, that is, from the internet.',
     'A domain szabály a kiválasztott proxy-bejegyzéseket nyitja meg; ilyenkor az irány nem értelmezett.': 'A domain rule opens the selected proxy entries; the direction is not interpreted in that case.',
     'A tűzfalbeállítások mentve.': 'Firewall settings saved.',
     // -- Fail2ban ------------------------------------------------------
@@ -3942,6 +3948,8 @@ const I18N = {
     'A fiókot kikapcsolták.': 'Das Konto wurde deaktiviert.',
     'Az adminisztrátor lezárta a munkamenetet.': 'Der Administrator hat die Sitzung beendet.',
     'A portál újraindult, ezért a munkamenetek törlődtek.': 'Das Portal wurde neu gestartet, daher wurden die Sitzungen gelöscht.',
+    'A tűzfal újratöltődött, ezért a munkamenet lezárult. Lépj be újra.': 'Die Firewall wurde neu geladen, daher wurde die Sitzung beendet. Melde dich erneut an.',
+    'Erről a hálózatról csak HTTPS-en lehet belépni. Nyisd meg a portált a https:// címén.': 'Aus diesem Netzwerk ist die Anmeldung nur über HTTPS möglich. Öffne das Portal unter seiner https://-Adresse.',
     'A munkamenet megszűnt.': 'Die Sitzung wurde beendet.',
     'válassz hozzáférési szabályt': 'wähle eine Zugriffsregel',
     'ez a szabály nem tartozik hozzád': 'diese Regel ist dir nicht zugewiesen',
@@ -4128,6 +4136,10 @@ const I18N = {
     'A pre-auth szabály a portál bejelentkezés nélkül is átengedi a megadott cél és port forgalmát. Üres cél esetén minden célra érvényes. Csak tudatosan nyilvános szolgáltatáshoz használd.': 'Die Pre-auth-Regel lässt Verkehr zum angegebenen Ziel und Port ohne Portal-Anmeldung durch. Ein leeres Ziel bedeutet beliebiges Ziel. Verwende sie nur für einen bewusst öffentlichen Dienst.',
     'Forward irányban WAN felől csak DNAT-olt (publikált) portokra érvényes. A cél a DNAT előtti cím (publikált Docker-portnál a VM IP-je), nem a konténer belső címe.': 'In der Richtung Weiterleitung gilt sie von der WAN-Seite nur für DNATete (veröffentlichte) Ports. Das Ziel ist die Adresse vor dem DNAT (bei einem veröffentlichten Docker-Port die VM-IP), nicht die interne Container-Adresse.',
     'Az Input (host) irány a portálgép saját portjait nyitja meg bejelentkezés előtt; ez megkerüli a portál kapuját, ezért csak indokolt esetben használd.': 'Die Richtung Eingang (Host) öffnet die eigenen Ports der Portalmaschine vor der Anmeldung; das umgeht das Portalgatter, daher nur bei Bedarf verwenden.',
+    'Hatókör': 'Geltungsbereich',
+    'Csak LAN': 'Nur LAN',
+    'Bármely interfész (LAN + WAN)': 'Jede Schnittstelle (LAN + WAN)',
+    'Az Input (host) szabály alapból csak a LAN felől nyit; a „Bármely interfész” a WAN felől, azaz az internetről is elérhetővé teszi a portot.': 'Ein Eingang-(Host-)Eintrag öffnet standardmäßig nur aus dem LAN; „Jede Schnittstelle“ macht den Port auch aus dem WAN, also aus dem Internet, erreichbar.',
     'A domain szabály a kiválasztott proxy-bejegyzéseket nyitja meg; ilyenkor az irány nem értelmezett.': 'Eine Domain-Regel öffnet die gewählten Proxy-Einträge; die Richtung wird dabei nicht ausgewertet.',
     'A tűzfalbeállítások mentve.': 'Firewall-Einstellungen gespeichert.',
     // -- Fail2ban ------------------------------------------------------
@@ -5492,7 +5504,14 @@ function fmtRemaining(sec) {
 function minutesOf(seconds) {
   return Math.max(1, Math.round(Number(seconds) / 60));
 }
+/* Error codes whose text the page owns (Hungarian source, translated by tr()). */
+const API_ERROR_CODES = {
+  https_required: 'Erről a hálózatról csak HTTPS-en lehet belépni. Nyisd meg a portált a https:// címén.'
+};
 function apiError(data, fallback) {
+  if (data && data.code && Object.prototype.hasOwnProperty.call(API_ERROR_CODES, data.code)) {
+    return tr(API_ERROR_CODES[data.code]);
+  }
   return tr((data && data.error) || fallback);
 }
 async function postJson(path, payload) {
@@ -8564,6 +8583,7 @@ const AUDIT_EVENT_LABELS = {
   portal_host_redirect: ['Átirányítás idegen hosztra', 'Redirect to foreign host', 'Weiterleitung zu fremdem Host'],
   portal_https_redirect: ['Átirányítás a HTTPS-portálra', 'Redirect to HTTPS portal', 'Weiterleitung zum HTTPS-Portal'],
   host_rejected: ['Ismeretlen hoszt elutasítva', 'Unknown host rejected', 'Unbekannter Host abgelehnt'],
+  https_required: ['HTTPS kötelező, kérés elutasítva', 'HTTPS required, request refused', 'HTTPS erforderlich, Anfrage abgelehnt'],
   account_locked: ['Fiók ideiglenesen zárolva', 'Account temporarily locked', 'Konto vorübergehend gesperrt'],
   step_up_failed: ['Sikertelen újrahitelesítés', 'Re-authentication failed', 'Erneute Anmeldung fehlgeschlagen'],
   login_success: ['Sikeres belépés', 'Sign-in successful', 'Anmeldung erfolgreich'],
@@ -9715,6 +9735,10 @@ function renderSettingForm(kind, entryId) {
         enabled: boolValue(box, 'enabled')
       }
     };
+    // The scope only applies to the input direction (lan by default).
+    if (payload.entry.direction === 'input') {
+      payload.entry.scope = formValue(box, 'scope') === 'any' ? 'any' : 'lan';
+    }
     if (edit) payload.id = entry.id;
     adminSend('/api/admin/settings', payload);
   }});
@@ -9737,19 +9761,40 @@ function renderSettingForm(kind, entryId) {
       autocomplete: 'off'
     })
   ));
+  const directionSelect = el('select', { name: 'direction' },
+    el('option', {
+      value: 'forward', text: tr('Forward'),
+      selected: draftValue(draft, 'direction', edit ? entry.direction || 'forward' : 'forward') !== 'input'
+    }),
+    el('option', {
+      value: 'input', text: tr('Input (host)'),
+      selected: draftValue(draft, 'direction', edit ? entry.direction || 'forward' : 'forward') === 'input'
+    })
+  );
   grid.append(el('div', { class: 'field' },
     el('label', { text: tr('Irány') }),
-    el('select', { name: 'direction' },
+    directionSelect
+  ));
+  // Input pre-auth scope: LAN only (default, also for older entries) or
+  // every interface, including the WAN.
+  const savedScope = edit && entry.scope === 'any' ? 'any' : 'lan';
+  const scopeField = el('div', { class: 'field' },
+    el('label', { text: tr('Hatókör') }),
+    el('select', { name: 'scope' },
       el('option', {
-        value: 'forward', text: tr('Forward'),
-        selected: draftValue(draft, 'direction', edit ? entry.direction || 'forward' : 'forward') !== 'input'
+        value: 'lan', text: tr('Csak LAN'),
+        selected: draftValue(draft, 'scope', savedScope) !== 'any'
       }),
       el('option', {
-        value: 'input', text: tr('Input (host)'),
-        selected: draftValue(draft, 'direction', edit ? entry.direction || 'forward' : 'forward') === 'input'
+        value: 'any', text: tr('Bármely interfész (LAN + WAN)'),
+        selected: draftValue(draft, 'scope', savedScope) === 'any'
       })
     )
-  ));
+  );
+  const syncScope = () => { scopeField.hidden = directionSelect.value !== 'input'; };
+  directionSelect.addEventListener('change', syncScope);
+  syncScope();
+  grid.append(scopeField);
   grid.append(el('div', { class: 'field' },
     el('label', { text: tr('Protokoll') }),
     el('select', { name: 'proto' },
@@ -9783,6 +9828,10 @@ function renderSettingForm(kind, entryId) {
     box.append(el('p', {
       class: 'port-hint',
       text: tr('Az Input (host) irány a portálgép saját portjait nyitja meg bejelentkezés előtt; ez megkerüli a portál kapuját, ezért csak indokolt esetben használd.')
+    }));
+    box.append(el('p', {
+      class: 'port-hint',
+      text: tr('Az Input (host) szabály alapból csak a LAN felől nyit; a „Bármely interfész” a WAN felől, azaz az internetről is elérhetővé teszi a portot.')
     }));
   }
   const actions = el('div', { class: 'form-actions' });
@@ -9863,7 +9912,9 @@ function renderSettingSection(kind, entries) {
     );
     body.append(el('tr', {},
       el('td', {}, el('b', { text: entry.label })),
-      el('td', { text: tr(entry.direction === 'input' ? 'Input (host)' : 'Forward') }),
+      el('td', { text: entry.direction === 'input'
+        ? `${tr('Input (host)')} · ${tr(entry.scope === 'any' ? 'Bármely interfész (LAN + WAN)' : 'Csak LAN')}`
+        : tr('Forward') }),
       el('td', { class: 'mono', text: entry.dst || tr('bármely') }),
       el('td', { class: 'mono', text: String(entry.proto || '').toUpperCase() }),
       el('td', { class: 'mono', text: (entry.ports || []).join(', ') || '—' }),
