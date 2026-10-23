@@ -7617,8 +7617,17 @@ class UserStore:
         return clean
 
     def export_records(self) -> dict:
-        """The current user records for the configuration bundle."""
-        return self._clean_import_records(self._read_raw())
+        """The current user records for the configuration bundle.
+
+        The provisioning marker is left out (DJ-27): it is derived from the
+        .env admin password and allows offline guessing of it. The import
+        side carries the target installation's own marker over instead
+        (``server._carry_provision_marker``).
+        """
+        records = self._clean_import_records(self._read_raw())
+        for record in records.values():
+            record.pop("provisioned_from", None)
+        return records
 
     def validate_import_records(self, raw) -> dict:
         return self._clean_import_records(raw)
@@ -7780,6 +7789,9 @@ END_REASONS: dict[str, str] = {
         "belépési kísérlet miatt."
     ),
     "server_restart": "A portál újraindult, ezért a munkamenetek törlődtek.",
+    "firewall_reset": (
+        "A tűzfal újratöltődött, ezért a munkamenet lezárult. Lépj be újra."
+    ),
 }
 
 
@@ -9297,6 +9309,33 @@ class SessionManager:
             self._thread.join(timeout=5)
             self._thread = None
 
+    def end_authorized(self, reason: str = "firewall_reset") -> list[Session]:
+        """End every authorized session and revoke its grants.
+
+        Called after a table resync: the kernel elements of these sessions
+        went with the old table, so the clients look authorized but are
+        dropped. Ending them is fail-closed; the clients log in again.
+        Sessions still waiting for authorization have no grant and stay.
+        Returns the ended sessions, so the caller can audit each one.
+        """
+        ended: list[Session] = []
+        with self._lock:
+            for token, session in list(self._sessions.items()):
+                if not session.authorized:
+                    continue
+                del self._sessions[token]
+                ended.append(session)
+                self._remember_end_locked(session.ip, reason)
+            grants: dict[str, list[Ports]] = {}
+            for session in ended:
+                grants.setdefault(session.ip, []).extend(session.grants)
+            for ip, ports in grants.items():
+                # Under the session lock like revoke_user(); the conntrack
+                # flush also cuts flows the reloaded table still accepts as
+                # established.
+                self._revoke_access_locked(ip, ports)
+        return ended
+
     def shutdown(self, reason: str = "service_stop") -> int:
         """Immediately revoke every session and firewall grant.
 
@@ -9803,7 +9842,8 @@ class Gateway:
         startup flush. Until it succeeds, ``_host_ports_ok`` is false and
         ``_firewall_in_sync`` refuses new grants. Returns True if a resync ran.
         Existing sessions are not re-granted: their kernel elements went with
-        the old table, so those clients have to authorize again.
+        the old table, so every authorized session is ended with reason
+        ``firewall_reset`` (fail-closed) and those clients log in again.
         """
         if self._fw_token is None or self._firewall_in_sync():
             return False
@@ -9842,13 +9882,33 @@ class Gateway:
                     reason="partial resync; retrying",
                 )
                 return False
-            self._fw_token = new_token
-            self._fw_lost_logged = False
+        # Outside the Gateway lock (lock order SessionManager -> Gateway), but
+        # before the new token is recorded: until then _firewall_in_sync()
+        # still refuses grants, so every authorized session here predates
+        # the reload.
+        ended = self.sessions.end_authorized(reason="firewall_reset")
+        for session in ended:
             self._write_audit(
-                "firewall_resync", reason="table reloaded",
-                sessions=self.sessions.count(),
+                "session_ended",
+                user=session.user,
+                sid=session.sid,
+                ip=session.ip,
+                reason="firewall_reset",
+                authorized=session.authorized,
+                rule=session.rule,
             )
-            return True
+        self._fw_token = new_token
+        self._fw_lost_logged = False
+        if ended:
+            log(
+                f"[firewall] ended {len(ended)} authorized session(s) after "
+                "the table reload; the clients must log in again"
+            )
+        self._write_audit(
+            "firewall_resync", reason="table reloaded",
+            sessions_revoked=len(ended),
+        )
+        return True
 
     def _firewall_watch_loop(self) -> None:
         while not self._fw_watch_stop.wait(self.FIREWALL_CHECK_SECONDS):
