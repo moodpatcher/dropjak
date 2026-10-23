@@ -21,7 +21,7 @@
 set -euo pipefail
 
 STATE_VOLUME="/var/lib/docker/volumes/dropjak-state/_data"
-STATE_DIR="/var/lib/dropjak"
+STATE_DIR="/var/lib/hatarvedelem"
 SYSTEMD_DROPIN="/etc/systemd/system/dropjak.service.d"
 
 ASSUME_YES=0

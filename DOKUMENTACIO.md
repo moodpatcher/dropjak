@@ -901,7 +901,7 @@ The configuration backup `dropjak-<timestamp>.tar.gz` contains a copy of
 `.env` as `env`, `secrets/`, and the `dropjak.service.d` systemd drop-in when
 present. The state is written as `dropjak-state-<timestamp>.tar.gz` from the
 Docker volume `dropjak-state` and/or `dropjak-state-native-<timestamp>.tar.gz`
-from `/var/lib/dropjak`. If neither state directory exists, the
+from `/var/lib/hatarvedelem`. If neither state directory exists, the
 configuration backup is still created and a warning is printed. The script
 never prints the contents of `.env` or the secrets.
 
@@ -5202,7 +5202,7 @@ The running version is stored in [`VERSION`](VERSION).
 - **Update script.** `update.sh` backs up the configuration (`.env` as
   `env`, `secrets/`, and the `dropjak.service.d` systemd drop-in) and the
   runtime state (the Docker `dropjak-state` volume and/or
-  `/var/lib/dropjak`) into `/root/dropjak-backups` (mode 0700,
+  `/var/lib/hatarvedelem`) into `/root/dropjak-backups` (mode 0700,
   archives 0600; `HV_BACKUPS` overrides), then runs `git pull --ff-only` in
   the checkout. The backup never goes into the repository: a backup directory
   at or below the checkout is refused. `--dry-run`/`-n` previews without root
