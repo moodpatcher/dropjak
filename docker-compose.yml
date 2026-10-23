@@ -84,6 +84,11 @@ services:
       HV_ADMIN_PASSWORD_FILE: ${HV_ADMIN_PASSWORD_FILE:-/run/secrets/dropjak_admin_password}
       PORT: ${PORT:-8100}
       HV_PORTAL_URL: ${HV_PORTAL_URL:-}
+      # First-start seed for Admin -> Settings -> Proxy, filled by
+      # configure.sh's HTTPS mode. Applied only while no settings file
+      # exists; the admin UI is authoritative afterwards.
+      HV_PROXY_DOMAINS: ${HV_PROXY_DOMAINS:-}
+      HV_PORTAL_DOMAIN: ${HV_PORTAL_DOMAIN:-}
       # Further DNS names of the portal (comma separated); the /api/
       # endpoints answer only under these, an IP address, the HV_PORTAL_URL
       # host and the Caddy root domains (DNS rebinding protection).

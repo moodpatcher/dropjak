@@ -424,6 +424,15 @@ MAC_BINDING = bool(not SINGLE_NIC and HV_LAN_IF and LAN_NETWORK is not None)
 ARP_PATH = os.environ.get("HV_ARP_PATH", "").strip() or "/proc/net/arp"
 
 PORTAL_URL = os.environ.get("HV_PORTAL_URL", "").strip()
+# First-start seed for Admin → Settings → Proxy, filled by configure.sh's
+# HTTPS mode. The settings store applies these only when its file does not
+# exist yet; afterwards the admin interface is authoritative.
+PROXY_DOMAINS_ENV = [
+    item.strip().lower()
+    for item in os.environ.get("HV_PROXY_DOMAINS", "").split(",")
+    if item.strip()
+]
+PORTAL_DOMAIN_ENV = os.environ.get("HV_PORTAL_DOMAIN", "").strip().lower()
 # Further host names (host or host:port, comma separated) under which the
 # portal's /api/ endpoints answer, besides IP literals, the PORTAL_URL host
 # and the Caddy root domains (DNS rebinding protection, see server.py).
@@ -9674,11 +9683,34 @@ class Gateway:
         )
         self.groups = groups if groups is not None else GroupStore()
         self.firewall = firewall if firewall is not None else Firewall()
+        # First-start proxy seed from the environment (configure.sh's HTTPS
+        # mode). It is applied only when no settings file exists yet, so the
+        # values saved later in Admin → Settings → Proxy always win. An
+        # invalid seed is logged and ignored; it must never stop startup.
+        fresh_settings = (
+            settings is None
+            and not os.path.exists(settings_store.SETTINGS_PATH)
+        )
         self.settings = (
             settings
             if settings is not None
             else settings_store.SettingsStore()
         )
+        if fresh_settings and (PROXY_DOMAINS_ENV or PORTAL_DOMAIN_ENV):
+            try:
+                self.settings.seed_proxy(
+                    PROXY_DOMAINS_ENV, PORTAL_DOMAIN_ENV
+                )
+                log(
+                    "[settings] first start: proxy seed from the environment "
+                    f"(roots: {', '.join(PROXY_DOMAINS_ENV) or '—'}; "
+                    f"portal: {PORTAL_DOMAIN_ENV or '—'})"
+                )
+            except settings_store.SettingsError as exc:
+                log(
+                    "[settings] WARNING: ignoring the proxy seed from the "
+                    f"environment: {exc}"
+                )
         # Uploaded certificates live next to the settings file, under certs/.
         self.certs = certs if certs is not None else settings_store.CertStore(
             os.path.join(

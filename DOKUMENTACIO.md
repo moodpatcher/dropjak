@@ -611,6 +611,7 @@ In two-NIC mode `HV_LAN_IF` and `HV_WAN_IF` cannot be the same. The portal is al
 | `HV_TOTP_ISSUER` | `Dropjak` | TOTP issuer fallback when there is no site name. |
 | `HV_COOKIE_SECURE` | `0` | `1`: `Secure` session cookie on every response (plain-HTTP LAN logins then stop working). Responses through Caddy get `Secure` anyway. |
 | `HV_PROXY` / `HV_PROXY_KEY` | `0` / empty | Caddy domain proxy; with `HV_PROXY=1` the key (at least 32 characters, `openssl rand -hex 32`) is mandatory, given to both services. |
+| `HV_PROXY_DOMAINS` / `HV_PORTAL_DOMAIN` | empty | First-start seed for Admin → Settings → Proxy: comma-separated root domain(s) and the Dropjak subdomain (strictly under a root). Applied only while the settings file does not exist; afterwards the admin UI is authoritative. `configure.sh` fills them in HTTPS mode. |
 | `HV_WAN_HTTPS_ONLY` | `0` | `1`: login, password and admin endpoints answer `403 https_required` to non-LAN sources that did not come through Caddy. Needs `HV_PROXY=1` for WAN logins. |
 
 #### 9.3. Firewall, state, fail2ban
@@ -672,7 +673,36 @@ for the WAN (internet and client) interface and writes empty `HV_LAN_IF`/
 `HV_LAN_NET` values with `HV_SINGLE_NIC=1`. Otherwise it asks which one is the
 LAN (clients) and which one is the WAN (internet), then the LAN network. Both
 paths continue with the portal source network, the management network (may be
-empty in single-NIC mode), the portal port and the first admin account. It
+empty in single-NIC mode) and the portal port. The next question is how the
+portal is reached by default:
+
+1. `http://<host-ip>:PORT` — plain HTTP on the host IP (the default; no proxy
+   variables are written).
+2. `https://<subdomain>` — HTTPS through the Caddy proxy. It asks for a root
+   domain (e.g. `example.com`) and a Dropjak subdomain strictly under it
+   (e.g. `fw.example.com`), then writes
+   `HV_PROXY=1`, `COMPOSE_PROFILES=proxy`, `HV_PROXY_KEY`,
+   `HV_PROXY_DOMAINS`, `HV_PORTAL_DOMAIN`, `HV_PORTAL_URL=https://<sub>`,
+   `HV_PORTAL_HOSTS=<sub>` and `HV_WAN_HTTPS_ONLY=1`. A re-run keeps the
+   existing `HV_PROXY_KEY`; if the old `.env` had `HV_PROXY=1`, mode 2 is the
+   default. When switching back to mode 1 the proxy variables are removed.
+
+For mode 2 the DNS must already be in place, otherwise Caddy cannot obtain a
+certificate: an `A` record for the root domain **and** a wildcard
+`A *.root` must point at the host's public IPv4 address. The records must be
+“DNS only” (no CDN proxy, so Caddy sees the real client IP) and there must be
+no `AAAA` record, because incoming IPv6 is dropped by the firewall. The same
+reminder is printed while asking and in the final summary.
+
+The `.env` values `HV_PROXY_DOMAINS`/`HV_PORTAL_DOMAIN` are only a
+**first-start seed**: on startup the portal writes them into
+`firewall-settings.json` if that file does not exist yet. After the first
+start, Admin → Settings → Proxy is authoritative and later starts never
+overwrite it, so the domains can be changed in the UI without touching `.env`.
+An invalid seed (for example a subdomain outside the root) is logged as a
+warning and ignored; startup continues with the defaults.
+
+After the access-mode question the script asks for the first admin account. It
 writes `.env` with mode 0600 and offers the current values as defaults when it
 is re-run; the old file is backed up as `.env.bak-<timestamp>`. Leave the admin
 password empty to generate a random one (it is printed and written to `.env`).
@@ -5052,6 +5082,24 @@ The running version is stored in [`VERSION`](VERSION).
 
 #### Added
 
+- **Access mode in `configure.sh`; first-start proxy seed.** The optional
+  “Portal DNS name” question is replaced by a choice between
+  `http://<host-ip>:PORT` (plain HTTP, default, no proxy variables) and
+  `https://<subdomain>` (root domain plus a Dropjak subdomain strictly under
+  it, HTTPS through Caddy). HTTPS mode writes `HV_PROXY=1`,
+  `COMPOSE_PROFILES=proxy`, a generated or preserved `HV_PROXY_KEY`,
+  `HV_PROXY_DOMAINS`, `HV_PORTAL_DOMAIN`, `HV_PORTAL_URL`,
+  `HV_PORTAL_HOSTS` and `HV_WAN_HTTPS_ONLY=1`, validates the DNS names,
+  re-prompts on a subdomain outside the root, and prints the
+  A/wildcard-A/DNS-only/no-AAAA requirement. `gateway.py` reads
+  `HV_PROXY_DOMAINS`/`HV_PORTAL_DOMAIN` as a first-start seed and calls the
+  new `SettingsStore.seed_proxy()` only while `firewall-settings.json` does
+  not exist; afterwards Admin → Settings → Proxy stays authoritative, and an
+  invalid seed is logged as a warning instead of stopping startup.
+  `docker-compose.yml`, `.env.example`, the installation section and the
+  settings table document the variables. New `test_configure` HTTPS-mode and
+  seeding tests (invalid subdomain, key preservation, existing-file
+  protection, invalid seed warning).
 - **Single-NIC mode (`HV_SINGLE_NIC=1`, default `0`).** One interface does
   both jobs: `HV_WAN_IF` is also the client-facing interface, and the portal
   is reached by source-IP matching (`HV_PORTAL_NET`); `HV_LAN_IF`/

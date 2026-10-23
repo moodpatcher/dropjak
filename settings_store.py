@@ -1947,6 +1947,24 @@ class SettingsStore:
             data["portal_challenge"] = None
         return self.commit(data)
 
+    def seed_proxy(self, domains, portal_domain="") -> dict:
+        """One-time initial proxy configuration from the environment.
+
+        Only for the first start, while the settings file does not exist
+        yet: ``configure.sh``'s HTTPS mode passes the root domain(s) in
+        ``HV_PROXY_DOMAINS`` and the Dropjak subdomain in
+        ``HV_PORTAL_DOMAIN``. Once the file exists the admin interface
+        (Admin → Settings → Proxy) is authoritative; a later start must not
+        overwrite it. The values go through the same normalizers as
+        :meth:`set_proxy` and the whole state is committed atomically.
+        """
+        domains = _proxy_domains(list(domains or []))
+        with self._lock:
+            data = self._copy_locked()
+        data["proxy_domains"] = domains
+        data["portal_domain"] = portal_domain
+        return self.commit(data)
+
     def set_proxy(self, domains, routes, referenced=(), portal_challenge=UNSET) -> dict:
         """Save the proxy root domains and routes.
 

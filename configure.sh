@@ -3,8 +3,9 @@
 # Dropjak — interactive configuration
 #
 # Asks for the installation mode (single-NIC or LAN+WAN), the interfaces,
-# the networks, the portal exposure and the first admin account, then writes
-# the .env file with mode 0600.
+# the networks, the portal exposure (plain HTTP by IP or HTTPS through the
+# Caddy proxy) and the first admin account, then writes the .env file with
+# mode 0600.
 #
 #   ./configure.sh
 #
@@ -22,8 +23,10 @@ Usage: ./configure.sh [--env-file PATH]
 
 Asks for the installation mode (single-NIC, where the WAN interface is also
 the client side, or LAN+WAN), the interfaces, the networks, the portal source
-network, the management network, the portal port and the first admin account,
-then writes the .env file (mode 0600). Current values are offered as defaults.
+network, the management network, the portal port, how the portal is reached
+by default (plain HTTP on the host IP, or HTTPS through the Caddy proxy) and
+the first admin account, then writes the .env file (mode 0600). Current values
+are offered as defaults.
 EOF
 }
 
@@ -130,6 +133,22 @@ valid_ifname() {
     [ "${#1}" -le 15 ]
 }
 
+valid_dns_name() {
+    # A lowercase DNS name: letters, digits, hyphens and dots, at least one
+    # dot, no label starting or ending with a hyphen, at most 253 characters.
+    "$PYTHON" -c '
+import re, sys
+name = sys.argv[1]
+label = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+sys.exit(0 if (
+    name == name.lower()
+    and len(name) <= 253
+    and "." in name
+    and all(re.fullmatch(label, part) for part in name.split("."))
+) else 1)
+' "$1"
+}
+
 interface_exists() {
     ip link show dev "$1" >/dev/null 2>&1
 }
@@ -193,6 +212,10 @@ old_portal_net=$(env_get HV_PORTAL_NET)
 old_mgmt_net=$(env_get HV_MGMT_NET)
 old_port=$(env_get PORT)
 old_admin_user=$(env_get HV_ADMIN_USER)
+old_proxy=$(env_get HV_PROXY)
+old_proxy_key=$(env_get HV_PROXY_KEY)
+old_proxy_domains=$(env_get HV_PROXY_DOMAINS)
+old_portal_domain=$(env_get HV_PORTAL_DOMAIN)
 
 # ---------------------------------------------------------------- mode
 # Default: single-NIC when there is no private IPv4 interface or only one
@@ -307,9 +330,64 @@ while :; do
     break
 done
 
-info "Optional: a DNS name the portal is opened under (for example"
-info "gw.example.com). Leave it empty to open the portal by IP address."
-PORTAL_DOMAIN=$(ask "Portal DNS name (optional)" "")
+# ------------------------------------------------------------- access mode
+# Default: the HTTPS proxy when the existing .env already enables it,
+# otherwise plain HTTP on the host IP.
+ACCESS_DEFAULT=1
+if [ "$old_proxy" = "1" ]; then
+    ACCESS_DEFAULT=2
+fi
+info "How should the portal be reached by default?"
+printf '  1) http://<host-ip>:PORT   (IP address, plain HTTP)\n' >&2
+printf '  2) https://<subdomain>     (root domain + Dropjak subdomain, Caddy HTTPS)\n' >&2
+while :; do
+    ACCESS_MODE=$(ask "Choice" "$ACCESS_DEFAULT")
+    case "$ACCESS_MODE" in
+        1|2) break ;;
+        *) info "please answer 1 or 2" ;;
+    esac
+done
+
+PROXY_ROOT=""
+PORTAL_DOMAIN=""
+PROXY_KEY=""
+if [ "$ACCESS_MODE" = 2 ]; then
+    info "HTTPS mode: Caddy gets a certificate for the Dropjak subdomain. The"
+    info "root domain and a wildcard under it must already point at this host's"
+    info "public IPv4 address: \"DNS only\" (no CDN proxy, so Caddy sees the"
+    info "real client IP), and no AAAA record (incoming IPv6 is dropped)."
+    PROXY_ROOT_DEFAULT=${old_proxy_domains%%,*}
+    while :; do
+        PROXY_ROOT=$(ask "Root domain (e.g. example.com)" "$PROXY_ROOT_DEFAULT")
+        PROXY_ROOT=$(printf '%s' "$PROXY_ROOT" | tr '[:upper:]' '[:lower:]' | sed 's/\.$//')
+        valid_dns_name "$PROXY_ROOT" && break
+        info "invalid domain: $PROXY_ROOT (lowercase letters, digits, hyphens and dots; at least one dot)"
+        PROXY_ROOT_DEFAULT=""
+    done
+    PORTAL_SUB_DEFAULT=${old_portal_domain:-fw.$PROXY_ROOT}
+    while :; do
+        PORTAL_DOMAIN=$(ask "Dropjak subdomain (e.g. fw.$PROXY_ROOT)" "$PORTAL_SUB_DEFAULT")
+        PORTAL_DOMAIN=$(printf '%s' "$PORTAL_DOMAIN" | tr '[:upper:]' '[:lower:]' | sed 's/\.$//')
+        if ! valid_dns_name "$PORTAL_DOMAIN"; then
+            info "invalid domain: $PORTAL_DOMAIN (lowercase letters, digits, hyphens and dots; at least one dot)"
+            PORTAL_SUB_DEFAULT=""
+            continue
+        fi
+        case "$PORTAL_DOMAIN" in
+            *".$PROXY_ROOT")
+                [ "$PORTAL_DOMAIN" != "$PROXY_ROOT" ] && break ;;
+        esac
+        info "the Dropjak subdomain must be strictly under the root domain ($PROXY_ROOT)"
+        PORTAL_SUB_DEFAULT=""
+    done
+    info "DNS: A $PROXY_ROOT and a wildcard A *.$PROXY_ROOT must point at the"
+    info "host's public IPv4 address (DNS only, no CDN proxy; no AAAA record)."
+    if [ -n "$old_proxy_key" ]; then
+        PROXY_KEY=$old_proxy_key
+    else
+        PROXY_KEY=$("$PYTHON" -c 'import secrets; print(secrets.token_hex(32))')
+    fi
+fi
 
 if confirm "Create/update the admin account at every start?" "y"; then
     ADMIN_ENABLED=1
@@ -358,10 +436,23 @@ trap 'rm -f "$tmp"' EXIT
     printf 'HV_PORTAL_NET=%s\n' "$PORTAL_NET"
     printf 'HV_MGMT_NET=%s\n' "$MGMT_NET"
     printf 'PORT=%s\n' "$PORT"
-    if [ -n "$PORTAL_DOMAIN" ]; then
-        printf '\n# The portal answers under this DNS name too (instead of a redirect to the IP).\n'
-        printf 'HV_PORTAL_HOSTS=%s,%s:%s\n' "$PORTAL_DOMAIN" "$PORTAL_DOMAIN" "$PORT"
-        printf 'HV_PORTAL_URL=http://%s:%s\n' "$PORTAL_DOMAIN" "$PORT"
+    if [ "$ACCESS_MODE" = 2 ]; then
+        printf '\n# HTTPS through the Caddy proxy: the portal is reached on the\n'
+        printf '# Dropjak subdomain. HV_PROXY opens 80/443 and COMPOSE_PROFILES\n'
+        printf '# starts Caddy.\n'
+        printf 'HV_PROXY=1\n'
+        printf 'COMPOSE_PROFILES=proxy\n'
+        printf '# Shared secret between Caddy and the portal (mandatory with HV_PROXY=1).\n'
+        printf 'HV_PROXY_KEY=%s\n' "$PROXY_KEY"
+        printf '# First-start seed (Admin -> Settings -> Proxy): the root domain and\n'
+        printf '# the Dropjak subdomain. After the settings file exists, the admin UI\n'
+        printf '# is authoritative and these values are no longer applied.\n'
+        printf 'HV_PROXY_DOMAINS=%s\n' "$PROXY_ROOT"
+        printf 'HV_PORTAL_DOMAIN=%s\n' "$PORTAL_DOMAIN"
+        printf 'HV_PORTAL_URL=https://%s\n' "$PORTAL_DOMAIN"
+        printf 'HV_PORTAL_HOSTS=%s\n' "$PORTAL_DOMAIN"
+        printf '# WAN credentials only over HTTPS (through Caddy).\n'
+        printf 'HV_WAN_HTTPS_ONLY=1\n'
     fi
     printf '\nHV_ADMIN_ENABLED=%s\n' "$ADMIN_ENABLED"
     if [ "$ADMIN_ENABLED" = 1 ]; then
@@ -379,7 +470,7 @@ trap - EXIT
 # ------------------------------------------------------------------- summary
 
 wan_addr=$(ip -4 -o addr show dev "$WAN_IF" scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1 || true)
-portal_hint=${PORTAL_DOMAIN:-${wan_addr:-<host-ip>}}
+portal_hint=${wan_addr:-<host-ip>}
 case "$PORTAL_NET" in
     0.0.0.0/0) public="yes (0.0.0.0/0)" ;;
     *) public="no ($PORTAL_NET)" ;;
@@ -394,7 +485,14 @@ else
     info "  LAN:    $LAN_IF $LAN_NET"
     info "  WAN:    $WAN_IF"
 fi
-info "  portal: http://$portal_hint:$PORT/  — public from the WAN: $public"
+if [ "$ACCESS_MODE" = 2 ]; then
+    info "  portal: https://$PORTAL_DOMAIN (root: $PROXY_ROOT, HTTPS via Caddy)"
+    info "  DNS:    A $PROXY_ROOT and a wildcard A *.$PROXY_ROOT must point at"
+    info "          the host's public IPv4 (DNS only, no CDN proxy; no AAAA"
+    info "          record — incoming IPv6 is dropped)."
+else
+    info "  portal: http://$portal_hint:$PORT (plain HTTP) — public from the WAN: $public"
+fi
 info "  admin:  ${ADMIN_USER:-(disabled)}"
 info "next steps:"
 info "  sudo ./docker/setup-host.sh"
