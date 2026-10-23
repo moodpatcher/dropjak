@@ -862,6 +862,35 @@ sudo nft delete table inet hatarvedelem
 
 After that the forward chain no longer protects, so only if another mechanism takes over its role.
 
+#### 10.7. Uninstall / removal
+`uninstall.sh` removes a Dropjak installation completely, for both deployment
+styles. In a Docker Compose checkout it is run from the repository; the native
+`install.sh` also copies it to `/opt/hatarvedelem/uninstall.sh`.
+
+```bash
+sudo ./uninstall.sh                 # asks for confirmation (type UNINSTALL)
+sudo ./uninstall.sh --yes           # no confirmation
+sudo ./uninstall.sh --keep-data     # keep users, rules, settings and certificates
+./uninstall.sh --dry-run            # preview, works without root
+```
+
+The script stops and disables the systemd units, brings down the
+`dropjak0` WireGuard interface, deletes the `inet hatarvedelem` and
+`inet hatarvedelem_boot` nftables tables (and nothing else), removes the
+Compose stack, its containers, the local `dropjak` image tags and the volumes
+(`dropjak-state` plus the project-scoped Caddy volumes), then removes
+`/opt/hatarvedelem`, `/var/lib/hatarvedelem`, `/run/dropjak`, the nftables and
+sysctl files, and finally the `hatarvedelem` system user and group. The
+installation directory containing the script is removed last, together with
+the script itself; a directory that does not contain a Dropjak marker file
+(`docker-compose.yml`, `install.sh`, `configure.sh` or `server.py`) is refused.
+
+`--keep-data` preserves the `dropjak-state` Docker volume and
+`/var/lib/hatarvedelem` (and therefore the account that owns the state
+directory); everything else is still removed. Backups in
+`/root/hatarvedelem-backups` are always kept. Missing containers, units,
+tables, files and accounts are skipped with a note, so a repeated run is safe.
+
 ### 11. Testing
 #### 11.1. Local unit and API tests
 The full suite in the 3.24.0 local working directory is **985 tests**, all OK. Running it in the repository's usual way:
@@ -5081,6 +5110,20 @@ The running version is stored in [`VERSION`](VERSION).
 
 #### Added
 
+- **Uninstall script.** `uninstall.sh` removes a Dropjak installation for
+  both deployment styles: it tears down the Compose stack, containers, local
+  image tags and volumes (unless `--keep-data`), stops and disables the
+  systemd units, deletes the `dropjak0` WireGuard interface and the
+  `inet hatarvedelem`/`inet hatarvedelem_boot` nftables tables, removes the
+  installed files, the `hatarvedelem` user/group and finally the installation
+  directory and the script itself. `--dry-run`/`-n` previews without root,
+  `--keep-data` preserves `dropjak-state` and `/var/lib/hatarvedelem`, and
+  `/root/hatarvedelem-backups` is always kept. The install directory is
+  refused unless it contains a Dropjak marker file. `install.sh` copies the
+  script to `/opt/hatarvedelem/uninstall.sh` with mode 0755. New
+  `tests/test_uninstall.py` (syntax, help, both marker layouts in dry-run,
+  root requirement, dangerous-directory guard); the measured suite is
+  **1145 tests OK**.
 - **No default rules on a fresh installation.** The shipped
   `services.json` has an empty `scenarios` list, so a new installation's
   rules file starts empty instead of being seeded with the four old

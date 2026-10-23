@@ -600,6 +600,8 @@ install -m 0644 "$SRC_DIR/server.py" "$SRC_DIR/gateway.py" \
   "$SRC_DIR/index.html" "$SRC_DIR/icon.png" "$SRC_DIR/blocked.png" \
   "$SRC_DIR/unauthorized.png" "$SRC_DIR/sus.png" "$SRC_DIR/ok.png" \
   "$SRC_DIR/services.json" "$SRC_DIR/VERSION" "$APP_DIR/"
+# The uninstaller is a shell script, so it needs the executable bit.
+install -m 0755 "$SRC_DIR/uninstall.sh" "$APP_DIR/"
 if [[ -f "$SRC_DIR/README.md" ]]; then
   install -m 0644 "$SRC_DIR/README.md" "$APP_DIR/"
 fi
