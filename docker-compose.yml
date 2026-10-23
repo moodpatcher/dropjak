@@ -1,8 +1,9 @@
 # Dropjak — Docker Compose
 #
 # The .env file must be created from .env.example. The required values
-# (HV_LAN_IF, HV_WAN_IF, HV_LAN_NET, HV_PORTAL_NET) are checked by the
-# entrypoint; the container does not start if a setting is missing.
+# (HV_LAN_IF, HV_WAN_IF, HV_LAN_NET) are checked by the entrypoint; the
+# container does not start if a setting is missing. HV_PORTAL_NET defaults
+# to 0.0.0.0/0 (public portal).
 #
 # Important: the container runs in network_mode: host because it must manage
 # the VM's forward chain. Therefore there is no ports: mapping, and the portal
@@ -51,11 +52,12 @@ services:
       HV_LAN_IF: ${HV_LAN_IF:-}
       HV_WAN_IF: ${HV_WAN_IF:-}
       HV_LAN_NET: ${HV_LAN_NET:-}
-      # Backward-compatible base value for HV_PORTAL_NET only; SSH is not
-      # enabled by it alone (that needs a host rule opening TCP 22).
+      # Management network: fail2ban exemptions and other management
+      # defaults. It does not control portal access and does not allow SSH.
       HV_MGMT_NET: ${HV_MGMT_NET:-}
-      # The portal source network. When empty, the value of HV_MGMT_NET is used.
-      # For a public portal: HV_PORTAL_NET=0.0.0.0/0.
+      # The portal source network. Empty: 0.0.0.0/0, the portal is public
+      # (guarded by the admin account, proof-of-work and fail2ban). Set a
+      # CIDR to keep it off the WAN.
       HV_PORTAL_NET: ${HV_PORTAL_NET:-}
       # Startup admin account. With HV_ADMIN_ENABLED=1 the container
       # creates the user, or updates it to the given password.

@@ -1433,7 +1433,7 @@ class TransportWarningTests(unittest.TestCase):
             "PORTAL_HOSTS": frozenset(),
         }
         values.update(patches)
-        clean = {"HV_PORTAL_NET": "", "HV_MGMT_NET": ""}
+        clean = {"HV_PORTAL_NET": "192.168.10.0/24", "HV_MGMT_NET": ""}
         clean.update(env)
         with mock.patch.dict(os.environ, clean), \
                 mock.patch.multiple(gateway, **values):
@@ -1444,8 +1444,8 @@ class TransportWarningTests(unittest.TestCase):
         self.assertEqual(len(out), 1, out)
         self.assertIn("plain HTTP", out[0])
         self.assertIn("HV_COOKIE_SECURE=1", out[0])
-        # Via the old base value too.
-        self.assertTrue(self.warnings({"HV_MGMT_NET": "0.0.0.0/0"}))
+        # An empty HV_PORTAL_NET means the public default.
+        self.assertTrue(self.warnings({"HV_PORTAL_NET": ""}))
 
     def test_narrow_or_secure_portal_does_not_warn(self) -> None:
         self.assertEqual(self.warnings({"HV_PORTAL_NET": "192.168.10.0/24"}), [])

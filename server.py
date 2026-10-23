@@ -7262,15 +7262,13 @@ class CaddyAdmin:
 def _transport_warnings() -> list[str]:
     """Startup warnings about how the portal is exposed (plain HTTP, Caddy).
 
-    The firewall template gets HV_PORTAL_NET (empty: HV_MGMT_NET); a broad,
-    non-private source network means the portal port is open to the
-    internet, where the direct portal speaks plain HTTP.
+    The firewall template gets HV_PORTAL_NET (empty: 0.0.0.0/0, the
+    entrypoint's public default); a broad, non-private source network means
+    the portal port is open to the internet, where the direct portal speaks
+    plain HTTP.
     """
     warnings: list[str] = []
-    raw = (
-        os.environ.get("HV_PORTAL_NET", "").strip()
-        or os.environ.get("HV_MGMT_NET", "").strip()
-    )
+    raw = os.environ.get("HV_PORTAL_NET", "").strip() or "0.0.0.0/0"
     try:
         network = ipaddress.ip_network(raw, strict=False) if raw else None
     except ValueError:

@@ -416,11 +416,9 @@ sys.exit(0 if ipaddress.ip_address(sys.argv[1]) in ipaddress.ip_network(sys.argv
 PY
 
 if [[ -z "$PORTAL_NET" ]]; then
-  if [[ -n "$SSH_SRC" ]] && is_v4 "$SSH_SRC"; then
-    PORTAL_NET="$SSH_SRC/32"
-  else
-    PORTAL_NET="$LAN_NET"
-  fi
+  # The portal is public by default; narrow it if it should not be
+  # reachable from the internet.
+  PORTAL_NET="0.0.0.0/0"
   PORTAL_NET="$(ask_value "Portal source network (0.0.0.0/0 = from anywhere)" "$PORTAL_NET")"
 fi
 PORTAL_NET="$(canon_v4_net "$PORTAL_NET")" \

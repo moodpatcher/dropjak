@@ -213,8 +213,10 @@ render_ruleset() {
     HV_LAN_IF=${HV_LAN_IF:-}
     HV_WAN_IF=${HV_WAN_IF:-}
     HV_LAN_NET=${HV_LAN_NET:-}
-    HV_MGMT_NET=${HV_MGMT_NET:-}
-    HV_PORTAL_NET=${HV_PORTAL_NET:-$HV_MGMT_NET}
+    # The portal is public by default: the admin account, the proof-of-work
+    # captcha and fail2ban guard the login. HV_MGMT_NET does not narrow it;
+    # set HV_PORTAL_NET to a CIDR to keep the portal off the WAN.
+    HV_PORTAL_NET=${HV_PORTAL_NET:-0.0.0.0/0}
     # A plain assignment does not export a variable that was absent from the
     # environment, and require_env reads the environment (printenv).
     export HV_PORTAL_NET

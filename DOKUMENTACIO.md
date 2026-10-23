@@ -170,13 +170,15 @@ The container does not operate in its own network namespace: it must reach the h
 | `settings_store.py` | Validation and atomic, fault-tolerant writing of `firewall-settings.json`; pre-auth/block/site fields. |
 | `docker/entrypoint.sh` | First start order, env validation, nft loading, flushing dynamic sets, Docker guard, watchdog, privilege dropping. |
 | `install.sh` | Native, systemd-based installation; copying files, filling placeholders, units and drop-in. |
+| `configure.sh` | Interactive `.env` generator for the Docker installation (interfaces, networks, portal exposure, first admin account). |
 | `deploy/hv` | Docker operational helper (status, logs, restart, rebuild, backup, test, e2e). |
 | `index.html` | Complete single-page portal and admin UI, in three languages. |
 
 #### 3.3. Startup sequence
 1. On the host, `dropjak-boot.service`, installed by `docker/setup-host.sh`, loads early a separate `inet hatarvedelem_boot` table: `forward` policy drop, and blocking host SSH (`tcp dport 22`) until the final rules are loaded.
 2. The Docker daemon starts, then the container.
-3. `entrypoint.sh` refuses to start when `HV_PROXY=1` and `HV_PROXY_KEY` is shorter than 32 characters (before touching the firewall; the error says to run `openssl rand -hex 32`). It checks the mandatory env values (`HV_LAN_IF`, `HV_WAN_IF`, `HV_LAN_NET`, `HV_PORTAL_NET`), renders the template, and loads the `inet hatarvedelem` table.
+3. `entrypoint.sh` refuses to start when `HV_PROXY=1` and `HV_PROXY_KEY` is shorter than 32 characters (before touching the firewall; the error says to run `openssl rand -hex 32`). The mandatory env values are `HV_LAN_IF`, `HV_WAN_IF` and `HV_LAN_NET`;
+`HV_PORTAL_NET` defaults to `0.0.0.0/0` (public portal). It renders the template, and loads the `inet hatarvedelem` table.
 4. The entrypoint flushes the dynamic sets so that no authorization remains without a session. `host_service_tcp` / `host_service_udp` are intentionally not flushed.
 5. It deletes the former `host_ssh_v4` set if it still exists; it can no longer grant access.
 6. It deletes the early boot table.
@@ -581,9 +583,9 @@ The Docker entrypoint considers these mandatory; without them the container does
 | `HV_LAN_IF` | `eth1` | Client-side interface. |
 | `HV_WAN_IF` | `eth0` | Interface toward the internet. |
 | `HV_LAN_NET` | `192.168.10.0/24` | Client network in IPv4 CIDR. |
-| `HV_PORTAL_NET` | `0.0.0.0/0` | From where the portal is reachable; when empty, `HV_MGMT_NET`. |
+| `HV_PORTAL_NET` | `0.0.0.0/0` | From where the portal is reachable; when unset or empty, `0.0.0.0/0` (public). |
 
-`HV_LAN_IF` and `HV_WAN_IF` cannot be the same. The portal is always reachable from the LAN; `HV_PORTAL_NET=0.0.0.0/0` also exposes it toward the WAN, so it may be used only in justified cases.
+`HV_LAN_IF` and `HV_WAN_IF` cannot be the same. The portal is always reachable from the LAN; by default it is public toward the WAN too. Set `HV_PORTAL_NET` to a management CIDR when the portal should not be reachable from the internet.
 
 #### 9.2. Main settings
 | Variable | Default | Role |
@@ -646,15 +648,23 @@ On the local development machine you **must never run a real firewall load** (`n
 ```bash
 git clone git@github.com:moodpatcher/dropjak.git
 cd dropjak
-cp .env.example .env
-chmod 600 .env
-# edit .env: HV_LAN_IF, HV_WAN_IF, HV_LAN_NET, HV_PORTAL_NET and the admin account
+./configure.sh              # interfaces, networks and the first admin account -> .env (0600)
 sudo ./docker/setup-host.sh
 DOCKER_BUILDKIT=0 docker build --network host -t dropjak:2 .
 docker compose up -d
 docker compose ps
 docker compose logs -f dropjak
 ```
+
+`configure.sh` lists the available interfaces, asks which one is the LAN
+(clients) and which one is the WAN (internet), then the LAN network, the
+portal source network, the management network, the portal port and the first
+admin account. It writes `.env` with mode 0600 and offers the current values
+as defaults when it is re-run; the old file is backed up as
+`.env.bak-<timestamp>`. Leave the admin password empty to generate a random
+one (it is printed and written to `.env`). The portal is public by default
+(`HV_PORTAL_NET=0.0.0.0/0`); give a management CIDR to keep it off the WAN.
+The manual alternative is `cp .env.example .env` plus editing it.
 
 The `.env` and, above all, the admin account come **before** `setup-host.sh`:
 once the firewall is loaded, the only way in is the portal, and without an admin
@@ -724,7 +734,7 @@ The native install does not support the Caddy proxy (`__PROXY__` is always rende
 
 The `dropjak-firewall.service` has `DefaultDependencies=no`, `Before=network-pre.target`, and intentionally no `ExecStop`: stopping the service does not open the network. The portal unit depends on the firewall unit with `Requires=`, and uses `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`, `RestrictAddressFamilies` and similar hardening.
 
-The `deploy/hv` helper is **not** installed by `install.sh`; it is made for Docker Compose and uses a hard-coded `/root/hatarvedelem` path.
+The `deploy/hv` helper is **not** installed by `install.sh`; it is made for Docker Compose and operates on the checkout it lives in (it changes into its parent directory). Run it as `./deploy/hv <command>` from the checkout.
 
 #### 10.4. Upgrade
 For Docker:
@@ -927,6 +937,7 @@ The complete, detailed entries are in the [7. Changelog](#valtozasnaplo) section
 | `services.json` | Initial service and scenario catalog. |
 | `docker-compose.yml`, `Dockerfile` | Docker host network, state volume, healthcheck, image. |
 | `install.sh`, `.env.example`, `.dockerignore`, `.gitignore` | Native installer, configuration sample, Docker and git exclusions. |
+| `configure.sh` | Interactive `.env` generator (LAN/WAN interfaces, networks, portal source, admin account). |
 | `docker/entrypoint.sh` | Env validation, rendering, nft, set flush, boot table, Docker guard, watchdog, setpriv. |
 | `docker/setup-host.sh` | Boot nft/unit and `ip_forward` on the host. |
 | `deploy/dropjak.nft` | Complete nftables template with seven placeholders. |
@@ -952,7 +963,7 @@ docker compose ps
 docker compose logs -f dropjak
 curl -fsS http://127.0.0.1:8100/api/status | python3 -m json.tool
 
-# With the deploy/hv helper (Docker, /root/hatarvedelem)
+# With the deploy/hv helper (Docker, from the checkout)
 ./deploy/hv status
 ./deploy/hv logs
 ./deploy/hv restart
@@ -1078,7 +1089,7 @@ The most common lines:
 | `HV_LAN_IF` / `HV_WAN_IF` | internal and external interface name (`ip -br link`) |
 | `HV_LAN_NET` | the served internal network |
 | `HV_PORTAL_NET` | the network from which the portal is reachable; `0.0.0.0/0` = from anywhere |
-| `HV_MGMT_NET` | now only the default value of `HV_PORTAL_NET`; does not allow SSH |
+| `HV_MGMT_NET` | management network for fail2ban exemptions; it does not narrow the portal and does not allow SSH |
 | `PORT` | the portal port on the host (port 80 is redirected here) |
 | `HV_ADMIN_ENABLED` | `1`: creates/updates the admin account at startup |
 | `HV_ADMIN_USER` / `HV_ADMIN_PASSWORD` | the admin account details |
@@ -4687,10 +4698,17 @@ the only way back in is the portal. Without an admin account the portal's admin
 interface is unreachable, so the password must be in `.env` before step 4.
 
 ```bash
-cp .env.example .env
-chmod 600 .env
-editor .env
+./configure.sh
 ```
+
+The script asks for the LAN and WAN interfaces (it lists them with their
+addresses), the LAN network, the portal source network, the management
+network, the portal port and the first admin account, then writes `.env`
+with mode 0600. Press Enter to accept the offered default. The portal is
+public by default (`HV_PORTAL_NET=0.0.0.0/0`); narrow it if it should not be
+reachable from the internet. Leave the admin password empty to generate one.
+Re-running the script preserves the current values as defaults and backs up
+the old file.
 
 Required values:
 
@@ -4702,9 +4720,9 @@ Required values:
 | `HV_PORTAL_NET` | `0.0.0.0/0` | source networks allowed to reach the portal |
 | `HV_ADMIN_ENABLED` / `HV_ADMIN_USER` / `HV_ADMIN_PASSWORD` | `1` / `admin` / a long random password | first admin, created or updated at container start |
 
-If `HV_PORTAL_NET` is empty, it falls back to `HV_MGMT_NET`. The portal is
-always reachable from the LAN interface. Use `0.0.0.0/0` only if the portal
-must be reachable from the internet.
+If `HV_PORTAL_NET` is unset or empty, the portal is public (`0.0.0.0/0`). The
+portal is always reachable from the LAN interface. Set it to a management
+CIDR if the portal must not be reachable from the internet.
 
 Find interface names with `ip -br link`. All other settings are documented in
 `.env.example`.
@@ -5037,6 +5055,24 @@ The running version is stored in [`VERSION`](VERSION).
   `test_tunnels` API/session/revocation tests (including a rename that
   follows the real UI payload with an unchanged internal listen port) and one
   new `test_tunnel_ui` static test; the measured suite is **981 tests OK**.
+- **`configure.sh` — interactive configuration.** Asks for the LAN and WAN
+  interfaces (listing them with their addresses), the LAN network, the portal
+  source network, the management network, the portal port, an optional portal
+  DNS name and the first admin account, then writes `.env` with mode 0600.
+  Re-running it offers the current values as defaults and backs up the old
+  file. An empty admin password is generated. New `tests/test_configure.py`.
+
+#### Changed
+
+- **The portal is public by default.** When `HV_PORTAL_NET` is unset or
+  empty, the portal is reachable from the WAN (`0.0.0.0/0`) instead of
+  falling back to `HV_MGMT_NET`. `configure.sh` proposes the same default and
+  writes it to `.env`; the installer and `.env.example` follow it too. The login is guarded by the admin account,
+  the proof-of-work captcha and fail2ban; the startup warning about serving
+  a public portal over plain HTTP remains. `HV_MGMT_NET` now only supplies
+  management defaults (for example the fail2ban exemptions) and does not
+  narrow the portal or allow SSH. Set `HV_PORTAL_NET` to a CIDR to keep the
+  portal off the WAN.
 
 #### Fixed
 
@@ -5100,7 +5136,8 @@ are the last entries of this list.
   `NET_BIND_SERVICE` (`SETPCAP` added to compose for this); the admin
   password can come from `./secrets/dropjak_admin_password`; the agent
   refuses every route next hop as a target; the Caddy admin socket is 0660.
-- **Other.** `docker/entrypoint.sh` exports the `HV_PORTAL_NET` fallback.
+- **Other.** `docker/entrypoint.sh` exports `HV_PORTAL_NET`, defaulting it to
+  `0.0.0.0/0` (public portal) when it is unset or empty.
 - **Sessions after a table resync (DJ-04, decision a).** After a successful
   resync every authorized session ends with reason `firewall_reset`
   (fail-closed): one `session_ended` audit per session, `sessions_revoked`
