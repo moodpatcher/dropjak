@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Statikus és node-tesztek az admin Alagutak (WireGuard) fülhöz.
+"""Static and node tests for the admin Tunnels (WireGuard) tab.
 
-A teszt nem indít böngészőt: az ``index.html`` füljelölőit, az űrlapmezőket,
-a POST-műveleteket, a letöltési URL-t és a HU/EN/DE szótárakat ellenőrzi.
-A tiszta segédfüggvényeket (kézfogás kora, szolgáltatás-törzs, bájtformázás)
-node-dal futtatjuk, mint a test_gateway.py QR-tesztje.
+The test starts no browser: it checks ``index.html``'s tab markers, form
+fields, POST operations, download URL and the HU/EN/DE dictionaries.
+The pure helper functions (handshake age, service body, byte formatting)
+run with node, as in the QR test of test_gateway.py.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ def _js_function(name: str, source: str) -> str:
         rf"function {re.escape(name)}\([^)]*\) \{{.*?\n\}}", source, re.S
     )
     if match is None:
-        raise AssertionError(f"hiányzó JS függvény: {name}")
+        raise AssertionError(f"missing JS function: {name}")
     return match.group(0)
 
 
@@ -49,7 +49,7 @@ def _pattern_sections(source: str) -> tuple[str, str]:
 
 
 class TunnelUiStaticTests(unittest.TestCase):
-    """Az Alagutak fül statikus frontend-jelölői."""
+    """Static frontend markers of the Tunnels tab."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -65,12 +65,12 @@ class TunnelUiStaticTests(unittest.TestCase):
             "adminPanel.append(tunnelAgentsSection(agents));",
         ):
             self.assertIn(token, self.source, token)
-        # A proxy és az alagutak egy fülön vannak.
+        # The proxy and the tunnels share one tab.
         self.assertNotIn('data-admin="tunnels"', self.source)
         self.assertNotIn("adminTabName === 'tunnels'", self.source)
         self.assertNotIn("function renderTunnels()", self.source)
-        # Az adminSetTab az alapértelmezett ágon a teljes állapotot tölti be,
-        # így a fülnek nincs külön betöltője.
+        # adminSetTab loads the full state on the default branch,
+        # so the tab has no separate loader.
         start = self.source.index("function adminSetTab(name)")
         end = self.source.index("function openAdminEntity", start)
         self.assertIn("else return loadAdminState();", self.source[start:end])
@@ -112,8 +112,8 @@ class TunnelUiStaticTests(unittest.TestCase):
             "dropjak-agent-${id}.sh",
             "agent.bundle_url",
             "tunnels.error",
-            # Elérhetőségi teszt: művelet, eredménytérkép, soron belüli
-            # pirula és a hozzá tartozó fordítások.
+            # Reachability test: action, result map, in-row
+            # pill and the related translations.
             "action: 'tunnel_service_test'",
             "let tunnelTestResults = new Map();",
             "tunnelTestResults.get(tunnelTestKey(agent.id, service.id))",
@@ -124,7 +124,7 @@ class TunnelUiStaticTests(unittest.TestCase):
             "class: 'test-result-lines'",
             "tr(ok ? 'Elérhető' : 'Nem érhető el')",
             "tr('Teszt')",
-            # Átdolgozott ügynök-/szolgáltatáslista.
+            # Reworked agent/service list.
             "class: 'tunnel-agent-card'",
             "class: 'tunnel-agent-head'",
             "class: 'tunnel-agent-address mono'",
@@ -136,7 +136,7 @@ class TunnelUiStaticTests(unittest.TestCase):
             "class: 'tunnel-service-new'",
             "tunnelOpenAgentEdit(agent.id)",
             "tunnelOpenServiceEdit(agent.id, service.id)",
-            # Állapotfrissítés és a letiltott ügynök semleges jelzése.
+            # Status refresh and the neutral marker of a disabled agent.
             "let tunnelStatusCheckedAt = null;",
             "let tunnelStatusLoading = false;",
             "function refreshTunnelStatus()",
@@ -151,9 +151,9 @@ class TunnelUiStaticTests(unittest.TestCase):
             "class: 'tunnel-status-spinner'",
         ):
             self.assertIn(token, self.source, token)
-        # A törlések oldalon belüli, kétlépcsős megerősítést használnak:
-        # a natív confirm() helyett a kártya/sor maga változik meg, mert a
-        # böngésző letilthatja a felugró párbeszédablakokat.
+        # Deletions use an in-page, two-step confirmation:
+        # instead of the native confirm() the card/row itself changes, because
+        # the browser may disable pop-up dialogs.
         card = _js_function("tunnelAgentCard", self.source)
         services = _js_function("tunnelServicesSection", self.source)
         box = _js_function("tunnelDeleteConfirmBox", self.source)
@@ -167,8 +167,8 @@ class TunnelUiStaticTests(unittest.TestCase):
         for section in (card, services):
             self.assertNotIn("confirm(", section)
             self.assertIn("tunnelDeleteConfirmBox(", section)
-        # Az ügynök törlése a szolgáltatásait is törli; a figyelmeztetés
-        # szövege változatlan, hogy a fordítói minták érvényesek maradjanak.
+        # Deleting an agent also deletes its services; the warning text stays
+        # unchanged so the translation patterns remain valid.
         self.assertIn(
             "tr(`Biztosan törlöd az ügynököt: ${agent.label}? "
             "A szolgáltatásai is törlődnek.`)",
@@ -178,8 +178,8 @@ class TunnelUiStaticTests(unittest.TestCase):
             "tr(`Biztosan törlöd a szolgáltatást: ${service.label}?`)",
             services,
         )
-        # Az első kattintás csak kijelöli a törlést; a payload a megerősítő
-        # gombon marad, ugyanaz, mint korábban.
+        # The first click only marks the deletion; the payload stays on the
+        # confirming button, the same as before.
         self.assertIn("tunnelDeleteConfirm = { kind: 'agent', id: agent.id }", card)
         self.assertIn(
             "tunnelDeleteConfirm = { kind: 'service', id: service.id, "
@@ -193,7 +193,7 @@ class TunnelUiStaticTests(unittest.TestCase):
             "action: 'tunnel_service_delete', agent_id: agent.id, id: service.id",
             services,
         )
-        # A létrehozás után azonnal letöltődik a konfiguráció.
+        # The configuration downloads immediately after creation.
         self.assertIn("if (data.agent_id) await downloadTunnelConfig(", self.source)
         self.assertIn(
             "A fájl a WireGuard titkos kulcsot is tartalmazza",
@@ -201,8 +201,8 @@ class TunnelUiStaticTests(unittest.TestCase):
         )
 
     def test_agent_panel_layout_and_one_form_at_a_time(self) -> None:
-        # A CSS a meglévő tokenekre épül; a szűk nézetben a szolgáltatás-
-        # sorok egymás alá kerülnek, nem görget oldalra.
+        # The CSS builds on the existing tokens; in the narrow view the service
+        # rows stack below each other and do not scroll sideways.
         for token in (
             ".tunnel-agent-card{",
             ".tunnel-agent-head{",
@@ -217,15 +217,15 @@ class TunnelUiStaticTests(unittest.TestCase):
             ".tunnel-service-row{grid-template-columns:1fr",
         ):
             self.assertIn(token, self.source, token)
-        # Az „Új ügynök” lenyitható; a szolgáltatás űrlapja is disclosure.
+        # The "Új ügynök" (new agent) section is collapsible; the service form is a disclosure too.
         agents = _js_function("tunnelAgentsSection", self.source)
         services = _js_function("tunnelServicesSection", self.source)
         self.assertIn("el('details', { class: 'tunnel-agent-new' }", agents)
         self.assertIn("el('summary', {}, tr('Új ügynök'))", agents)
         self.assertIn("el('details', { class: 'tunnel-service-new'", services)
         self.assertIn("tr('Új szolgáltatás')", services)
-        # Egyszerre csak egy szerkesztő: ugyanaz az adminEdit állapot dönt,
-        # és a másik ágban nem renderelődik űrlap.
+        # Only one editor at a time: the same adminEdit state decides,
+        # and no form renders in the other branch.
         self.assertIn("adminEdit && adminEdit.kind === 'tunnel-service'", services)
         self.assertIn("&& adminEdit.agent === agent.id", services)
         self.assertIn("if (editingId === 'new')", services)
@@ -233,17 +233,17 @@ class TunnelUiStaticTests(unittest.TestCase):
         card = _js_function("tunnelAgentCard", self.source)
         self.assertIn("adminEdit.kind === 'tunnel-agent'", card)
         self.assertIn("tunnelOpenAgentEdit(agent.id)", card)
-        # A teszt gomb a sorban van, és töltés közben letiltott.
+        # The test button is in the row and disabled while loading.
         self.assertIn("disabled: testing", services)
         self.assertIn("action: 'tunnel_service_test'", self.source)
         self.assertIn("agent_id: agent.id,", self.source)
         self.assertIn("service_id: service.id", self.source)
-        # Nincs natív alert()/confirm() az alagút-szakaszban.
+        # There is no native alert()/confirm() in the tunnel section.
         start = self.source.index(
-            "/* ============================================================ admin: alagutak */"
+            "/* ============================================================ admin: tunnels */"
         )
         end = self.source.index(
-            "/* ============================================================ admin: munkamenetek */",
+            "/* ============================================================ admin: sessions */",
             start,
         )
         section = self.source[start:end]
@@ -251,10 +251,10 @@ class TunnelUiStaticTests(unittest.TestCase):
         self.assertNotIn("confirm(", section)
 
     def test_agent_status_refresh_and_inline_error(self) -> None:
-        # Az állapotfrissítés gomb akkor is látszik, ha nincs ügynök; a
-        # kattintás GET-et indít, és a válaszból csak az alagút-nézet
-        # cserélődik. Hiba esetén a flash az ügynöklista tetején is
-        # megjelenik, nem csak az oldal tetején.
+        # The status refresh button is visible even without agents; the
+        # click issues a GET and only the tunnel view is replaced from the
+        # response. On error the flash also appears at the top of the agent
+        # list, not only at the top of the page.
         agents = _js_function("tunnelAgentsSection", self.source)
         self.assertIn(
             "if (adminFlash && adminFlash.kind === 'err')", agents
@@ -270,9 +270,9 @@ class TunnelUiStaticTests(unittest.TestCase):
         self.assertIn("adminState.tunnels = data.tunnels", refresh)
         self.assertNotIn("postJson(", refresh)
 
-        # Az „aktív” csak engedélyezett, friss kézfogású és legfeljebb
-        # 90 másodperce szinkronizált ügynöknél jelenik meg; letiltva
-        # semleges pirula, nem offline.
+        # "active" appears only for an enabled agent with a fresh handshake,
+        # synced at most 90 seconds ago; when disabled it is a neutral pill,
+        # not offline.
         active = _js_function("tunnelActiveState", self.source)
         self.assertIn("agent.enabled === false", active)
         self.assertIn("< 180", active)
@@ -286,18 +286,18 @@ class TunnelUiStaticTests(unittest.TestCase):
 
     def test_proxy_and_tunnels_share_one_page(self) -> None:
         start = self.source.index("function renderPortProxy()")
-        end = self.source.index("admin: munkamenetek", start)
+        end = self.source.index("admin: sessions", start)
         body = self.source[start:end]
-        # A közvetlen proxy űrlapja és az alagút-szakasz ugyanabban a
-        # renderelésben van; a közvetlen proxyhoz nem kell ügynök.
+        # The direct proxy form and the tunnel section are in the same
+        # render; the direct proxy needs no agent.
         self.assertIn("action: 'port_proxies'", body)
         self.assertIn("'Közvetlen proxyk'", body)
         self.assertIn("tunnelSettingsSection(tunnels)", body)
         self.assertIn("tunnelAgentsSection(agents)", body)
 
     def test_service_rule_kind_and_direct_assignment_wiring(self) -> None:
-        # A szolgáltatás szabály saját típus, a hozzárendelés pedig minden
-        # szabálytípusnál a közvetlen felhasználó/csoport halmazt küldi.
+        # The service rule is its own type, and assignment sends the direct
+        # user/group set for every rule type.
         for token in (
             "['service', 'Szolgáltatás']",
             "if ((rule.service_refs || []).length) return 'service';",
@@ -311,7 +311,7 @@ class TunnelUiStaticTests(unittest.TestCase):
             "groups: directGroups",
         ):
             self.assertIn(token, self.source, token)
-        # A gyűjtő tagválasztója nem zárja ki a szolgáltatás szabályokat.
+        # The collection member selector does not exclude service rules.
         start = self.source.index("const memberChoices")
         end = self.source.index("const submit", start)
         choices = self.source[start:end]
@@ -319,7 +319,7 @@ class TunnelUiStaticTests(unittest.TestCase):
         self.assertIn("!item.collection", choices)
 
     def test_rule_service_picker_includes_domain_services(self) -> None:
-        """A domain-módú szolgáltatás szolgáltatás-szabályként is választható."""
+        """A domain-mode service can also be chosen as a service rule."""
         self.assertNotIn("if (service.domain) continue;", self.source)
         start = self.source.index("const serviceChoices")
         end = self.source.index("const savedDirection", start)
@@ -328,16 +328,16 @@ class TunnelUiStaticTests(unittest.TestCase):
         self.assertIn(
             "service.domain ? ` · ${tr('domain')}` : ''", picker
         )
-        # A jelölés mindhárom nyelven fordul.
+        # The marker is translated into all three languages.
         en, de = _i18n_sections(self.source)
         self.assertIn("'domain': 'domain'", en)
         self.assertIn("'domain': 'Domain'", de)
-        # A súgó kimondja, hogy a domain a portál proxyján át nyílik.
+        # The help text states that the domain opens through the portal proxy.
         self.assertIn(
             "a domain-módú szolgáltatás a portál proxyján keresztül "
             "a domainjét adja", self.source,
         )
-        # A szabálysor a domaint a szolgáltatás neve mellett mutatja.
+        # The rule row shows the domain next to the service name.
         summary = _js_function("ruleSummary", self.source)
         self.assertIn(
             "service.domain ? ` (${service.domain})` : ''", summary
@@ -351,14 +351,14 @@ class TunnelUiStaticTests(unittest.TestCase):
             "challenge: challenge.read()",
             "tr('Challenge mentése')",
             "'Alagút-domainek': 'Tunnel domains'",
-            # A domain szabály választója az alagút-domaineket is kínálja.
+            # The domain rule selector also offers the tunnel domains.
             "[...(settingsData().proxy_routes || []), ...tunnelDomains]",
             "root: service.domain, tunnel: true",
             "'Alagút': 'Tunnel'",
         ):
             self.assertIn(token, self.source, token)
-        # Az új szolgáltatás űrlapján nincs külön aktív pipa: az állapotot
-        # a szolgáltatás sorának kapcsolója kezeli.
+        # The new service form has no separate enabled checkbox: the state is
+        # handled by the service row's switch.
         start = self.source.index(
             "function tunnelServiceForm(agent, service)"
         )
@@ -410,7 +410,7 @@ class TunnelUiStaticTests(unittest.TestCase):
             "Új szolgáltatás",
             "Szolgáltatás szerkesztése",
             "mindkettő",
-            # Domaines (Caddy mögötti) szolgáltatás.
+            # Domain-mode (behind Caddy) service.
             "Domain (opcionális)",
             "Ha kitöltöd, a szolgáltatás a proxy gyökérdomain alatt, "
             "HTTPS-en érhető el.",
@@ -424,7 +424,7 @@ class TunnelUiStaticTests(unittest.TestCase):
             "portál- és domain szabály nélkül elérhető. Privát: domain "
             "szabály szükséges.",
             "A domaines szolgáltatáshoz egyetlen célport kell.",
-            # Szolgáltatás szabály és közvetlen hozzárendelés.
+            # Service rule and direct assignment.
             "Szolgáltatás (alagút)",
             "Közvetlen hozzárendelés",
             "Keresés a szolgáltatások között…",
@@ -441,14 +441,14 @@ class TunnelUiStaticTests(unittest.TestCase):
             "A konfiguráció letöltődött. A fájl a WireGuard titkos kulcsot "
             "is tartalmazza: őrizd bizalmasan.",
             "A konfiguráció letöltése nem sikerült.",
-            # A szerver által visszaadott sikerüzenetek is fordulnak.
+            # The success messages returned by the server are translated too.
             "Az alagút beállításai mentve.",
             "Az ügynök létrejött; töltsd le a konfigurációját.",
             "Az ügynök mentve.",
             "Az ügynök törölve.",
             "A szolgáltatás mentve.",
             "A szolgáltatás törölve.",
-            # Elérhetőségi teszt és az új oszlop-/állapotcímkék.
+            # Reachability test and the new column/status labels.
             "Elérés",
             "Teszt",
             "Teszt folyamatban…",
@@ -466,7 +466,7 @@ class TunnelUiStaticTests(unittest.TestCase):
             "tunnel: a szolgáltatás ki van kapcsolva",
             "tunnel: nincs tesztelhető portleképezés",
             "tunnel: az ügynök- és szolgáltatás-azonosító kell",
-            # Állapotfrissítés, utolsó szinkron és a letiltás üzenetei.
+            # Status refresh, last sync and the disable messages.
             "utolsó szinkron",
             "nincs szinkron",
             "Állapot frissítése",
@@ -482,16 +482,16 @@ class TunnelUiStaticTests(unittest.TestCase):
         )
         for text in sources:
             with self.subTest(text=text):
-                self.assertIn(f"'{text}':", en, f"hiányzó angol fordítás: {text}")
-                self.assertIn(f"'{text}':", de, f"hiányzó német fordítás: {text}")
+                self.assertIn(f"'{text}':", en, f"missing English translation: {text}")
+                self.assertIn(f"'{text}':", de, f"missing German translation: {text}")
 
     def test_confirmation_patterns_and_audit_label(self) -> None:
         en, de = _pattern_sections(self.source)
         for section in (en, de):
             self.assertIn("Biztosan törlöd az ügynököt:", section)
             self.assertIn("Biztosan törlöd a szolgáltatást:", section)
-        # A figyelmeztetések oldalon belüli, kétlépcsős megerősítésben
-        # jelennek meg; a natív confirm() már nem használt itt.
+        # The warnings appear in an in-page, two-step confirmation;
+        # the native confirm() is no longer used here.
         for section in (
             _js_function("tunnelAgentCard", self.source),
             _js_function("tunnelServicesSection", self.source),
@@ -502,7 +502,7 @@ class TunnelUiStaticTests(unittest.TestCase):
         self.assertIn("Delete service ${m[1]}?", en)
         self.assertIn("Agent ${m[1]} wirklich löschen?", de)
         self.assertIn("Dienst ${m[1]} wirklich löschen?", de)
-        # A szerveroldali alagút-validációs hibák mintái is fordítottak.
+        # The server-side tunnel validation error patterns are translated too.
         for section in (en, de):
             self.assertIn("tunnel: a WireGuard port 1024 és 65535 között lehet", section)
             self.assertIn("tunnel: a végpont szöveg kell", section)
@@ -514,8 +514,8 @@ class TunnelUiStaticTests(unittest.TestCase):
             self.assertIn("a public mező igaz", section)
             self.assertIn("tunnel: a protokoll tcp, udp vagy both lehet", section)
             self.assertIn("hálózati hiba: ", section)
-            # Új többportos/szolgáltatás-validációs üzenetek és a dinamikus
-            # „Szolgáltatás: …” ports_label fordítása.
+            # New multi-port/service validation messages and the translation of
+            # the dynamic "Szolgáltatás: …" ports_label.
             self.assertIn("tunnel: a mappings lista kell", section)
             self.assertIn("tunnel: a célportok száma nem egyezik", section)
             self.assertIn("tunnel: ugyanaz a hallgató port eltérő célportra mutat", section)
@@ -528,13 +528,13 @@ class TunnelUiStaticTests(unittest.TestCase):
 
 
 class TunnelHelpersNodeTests(unittest.TestCase):
-    """A tiszta segédfüggvények valódi node-futtatással."""
+    """The pure helper functions with real node execution."""
 
     @classmethod
     def setUpClass(cls) -> None:
         cls.source = INDEX_PATH.read_text(encoding="utf-8")
 
-    @unittest.skipUnless(shutil.which("node"), "node nem érhető el")
+    @unittest.skipUnless(shutil.which("node"), "node is not available")
     def test_helpers(self) -> None:
         age = _js_function("tunnelHandshakeAge", self.source)
         payload = _js_function("tunnelServicePayload", self.source)
@@ -562,7 +562,7 @@ class TunnelHelpersNodeTests(unittest.TestCase):
             + domain_error + "\n"
             + mapping_label + "\n"
             + rule_kind + "\n"
-            # Minimális DOM a ruleSummary összegzésének vizsgálatához.
+            # Minimal DOM for examining the ruleSummary output.
             + r"""
 class FakeNode {
   constructor(tag) {
@@ -612,7 +612,7 @@ assert.deepStrictEqual(
   tunnelHandshakeAge(-2600, 1000), { value: 1, unit: 'hour' });
 assert.deepStrictEqual(
   tunnelHandshakeAge(1000 - 86400 * 2, 1000), { value: 2, unit: 'day' });
-// Jövőbeli időpont nem ad negatív kort.
+// A future timestamp does not yield a negative age.
 assert.deepStrictEqual(
   tunnelHandshakeAge(1100, 1000), { value: 0, unit: 'second' });
 
@@ -632,7 +632,7 @@ assert.deepStrictEqual(
       { proto: 'tcp', listen: '8000-8001', target: '9000-9001' }
     ]
   });
-// Ismeretlen protokoll TCP-re esik vissza; id nélkül nincs id mező.
+// An unknown protocol falls back to TCP; without an id there is no id field.
 assert.deepStrictEqual(
   tunnelServicePayload('a1', {
     id: 's1', label: 'web', target_host: 'h', mappings: []
@@ -642,7 +642,7 @@ assert.deepStrictEqual(
     label: 'web', target_host: 'h', enabled: true, public: false,
     domain: '', mappings: []
   });
-// Domaines mód: egyetlen TCP-leképezés, a meglévő belső port megtartásával.
+// Domain mode: a single TCP mapping, keeping the existing internal port.
 assert.deepStrictEqual(
   tunnelServicePayload('a1', {
     id: 's2', label: 'web', target_host: 'h', public: true,
@@ -656,8 +656,8 @@ assert.deepStrictEqual(
     domain: 'mc.example.com',
     mappings: [{ proto: 'tcp', listen: '41001', target: '8443' }]
   });
-// A sor kapcsolója nem küld domain_target mezőt: a meglévő célport marad,
-// nem ürül ki (korábban ez „legalább egy port kell” hibát adott).
+// The row switch sends no domain_target field: the existing target port stays,
+// it does not clear (previously this produced a "at least one port required" error).
 assert.deepStrictEqual(
   tunnelServicePayload('a1', {
     id: 's3', label: 'mptech', target_host: 'cave-horror', enabled: false,
@@ -674,7 +674,7 @@ assert.ok(!('id' in tunnelServicePayload('a1', {
   label: 'x', target_host: 'h',
   mappings: [{ proto: 'tcp', listen: '1', target: '1' }]
 })));
-// Régi mezők nem kerülhetnek a törzsbe.
+// Legacy fields must not get into the body.
 const legacyPayload = tunnelServicePayload('a1', {
   label: 'x', listen_port: 1, target: 'h:1', proto: 'tcp',
   mappings: [{ proto: 'tcp', listen: '1', target: '1' }]
@@ -683,7 +683,7 @@ assert.ok(!('listen_port' in legacyPayload));
 assert.ok(!('target' in legacyPayload));
 assert.ok(!('tunnel_port' in legacyPayload));
 
-// Port-hozzárendelés ellenőrzése: üres lista, hiányzó oldal, eltérő hossz.
+// Port mapping validation: empty list, missing side, different length.
 assert.strictEqual(
   tunnelMappingError([]), 'Adj meg legalább egy port-hozzárendelést.');
 assert.strictEqual(
@@ -707,9 +707,9 @@ assert.match(
 assert.match(
   tunnelMappingError([{ listen: 'abc', target: '1' }]),
   /Külső port: érvénytelen port: abc/);
-// A szerver a beírt sorrendben, indexenként párosít: az ismétlődő célport
-// nem olvad össze a darabszám-ellenőrzés előtt, a rendezés pedig nem
-// cseréli fel a párokat.
+// The server pairs by index in the entered order: a repeated target port
+// does not merge before the count check, and sorting does not
+// swap the pairs.
 assert.strictEqual(
   tunnelMappingError([{ listen: '8000,8001', target: '9001,9001' }]), '');
 assert.strictEqual(
@@ -720,7 +720,7 @@ assert.deepStrictEqual(
 assert.deepStrictEqual(
   parsePortSequence('8000,8000'),
   { ports: [8000, 8000] });
-// Domaines mód: egyetlen célport, a belső portot a szerver osztja ki.
+// Domain mode: a single target port; the internal port is allocated by the server.
 assert.strictEqual(tunnelDomainTargetError('25565'), '');
 assert.strictEqual(
   tunnelDomainTargetError('8000-8001'),
@@ -730,27 +730,27 @@ assert.strictEqual(
   'A domaines szolgáltatáshoz egyetlen célport kell.');
 assert.match(tunnelDomainTargetError('abc'), /Célport: érvénytelen port: abc/);
 
-// A tömör megjelenítés a hallgató és a belső tartományt is mutatja.
+// The compact display shows both the listen and the internal range.
 assert.strictEqual(
   tunnelMappingLabel({ proto: 'tcp', listen: '8000-8100', target: '18000-18100' }),
   'TCP 8000–8100 → 18000–18100');
 assert.strictEqual(
   tunnelMappingLabel({ proto: 'both', listen: '80', target: '8080' }),
   'TCP+UDP 80 → 8080');
-// A céloldal is a párosítási sorrendben jelenik meg, nem rendezve.
+// The target side also appears in pairing order, not sorted.
 assert.strictEqual(
   tunnelMappingLabel({ proto: 'tcp', listen: '8000,8001', target: '9001,9000' }),
   'TCP 8000–8001 → 9001, 9000');
 
-// A szolgáltatás szabály felismerése az irány előtt történik.
+// Recognition of a service rule happens before the direction.
 assert.strictEqual(ruleKind({ service_refs: ['a1/s1'] }), 'service');
 assert.strictEqual(
   ruleKind({ service_refs: ['a1/s1'], direction: 'input' }), 'service');
 assert.strictEqual(ruleKind({ direction: 'input' }), 'input');
 assert.strictEqual(ruleKind({ domains: ['example.com'] }), 'domain');
 assert.strictEqual(ruleKind({ collection: true }), 'collection');
-// A gyűjtő elsőbbsége: a tagokból összesített service_refs/services nem
-// teszi szolgáltatás-szabállyá a gyűjtőt.
+// Collection precedence: the service_refs/services aggregated from members do not
+// turn the collection into a service rule.
 assert.strictEqual(ruleKind({
   collection: true, members: ['svc'],
   service_refs: ['a1/s1'], services: [{ ref: 'a1/s1', label: 'MC' }]
@@ -761,7 +761,7 @@ assert.strictEqual(ruleKind({
 assert.strictEqual(ruleKind({
   domains: ['example.com'], service_refs: ['a1/s1']
 }), 'domain');
-// A gyűjtő összegzése a tagok nevét mutatja, nem szolgáltatás-chipet.
+// The collection summary shows the members' names, not a service chip.
 const collectionSummary = ruleSummary({
   id: 'col', label: 'Gyűjtő', collection: true, members: ['svc'],
   service_refs: ['a1/s1'], services: [{ ref: 'a1/s1', label: 'MC' }],

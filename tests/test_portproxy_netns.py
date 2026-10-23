@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Port proxy csomagszinten: valódi nft szabályok egy user+net névtérben.
+"""Port proxy at packet level: real nft rules in a user+net namespace.
 
-A tests/portproxy_netns.py-t futtatja ``unshare -rn`` alatt (root nem kell).
-A cél szolgáltatások csak a 127.0.0.1-en figyelnek (TCP és UDP), mint a
-Docker 127.0.0.1-re publikált portja; input és forward, WAN és LAN kliens.
-Kihagyva, ha a user namespace vagy az nft/nsenter nem érhető el.
+Runs tests/portproxy_netns.py under ``unshare -rn`` (root is not needed).
+The target services listen only on 127.0.0.1 (TCP and UDP), like Docker's
+port published on 127.0.0.1; input and forward, WAN and LAN client.
+Skipped if the user namespace or nft/nsenter is unavailable.
 """
 
 from __future__ import annotations
@@ -21,20 +21,20 @@ HELPER = Path(__file__).resolve().with_name("portproxy_netns.py")
 
 @unittest.skipUnless(
     all(shutil.which(tool) for tool in ("unshare", "nsenter", "nft", "ip")),
-    "nincs unshare/nsenter/nft/ip",
+    "unshare/nsenter/nft/ip not available",
 )
 class PortProxyPacketTests(unittest.TestCase):
     def test_loopback_only_targets_end_to_end(self) -> None:
         probe = subprocess.run(["unshare", "-rn", "true"], capture_output=True)
         if probe.returncode != 0:
-            self.skipTest("a user namespace nem elérhető")
+            self.skipTest("the user namespace is not available")
         result = subprocess.run(
             ["unshare", "-rn", sys.executable, str(HELPER)],
             capture_output=True, text=True, timeout=240,
         )
         if result.returncode != 0 and not result.stdout.strip():
             if "Operation not permitted" in result.stderr:
-                self.skipTest("a névtérben nem engedélyezett: " + result.stderr[-200:])
+                self.skipTest("not permitted in the namespace: " + result.stderr[-200:])
             self.fail(result.stderr[-3000:])
         report = json.loads(result.stdout)
         failed = {

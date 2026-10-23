@@ -1,12 +1,12 @@
 # Dropjak — Docker image
 #
-# A portál és az nftables egy konténerben fut. A konténer a host hálózati
-# névterét használja (network_mode: host), különben az nftables-szabályok nem
-# a VM forward-láncára vonatkoznának.
+# The portal and nftables run in one container. The container uses the host's
+# network namespace (network_mode: host); otherwise the nftables rules would
+# not apply to the VM's forward chain.
 FROM python:3.12-slim-bookworm
 
 LABEL org.opencontainers.image.title="Dropjak" \
-      org.opencontainers.image.description="Portálos hálózati belépőkapu nftables alapon" \
+      org.opencontainers.image.description="Portal-gated network entry gateway on nftables" \
       org.opencontainers.image.licenses="MIT"
 
 ENV PYTHONUNBUFFERED=1 \
@@ -16,15 +16,16 @@ ENV PYTHONUNBUFFERED=1 \
     HV_NFT_SET=allowed_v4 \
     PORT=8100
 
-# nftables: a szabályok betöltése és a dinamikus halmaz kezelése.
-# conntrack: a kilépő kliensek meglévő kapcsolatainak azonnali bontása.
-# iproute2 + wireguard-tools: a dropjak0 WireGuard-interfész és a peerek
-# kezelése (ip link/addr, wg set/show). A portál nem rootként fut, de az
-# entrypoint ambient CAP_NET_ADMIN képességgel indítja (setpriv), ami
-# elegendő az interfész létrehozásához; a /run/dropjak tmpfs-en a kulcsfájlok
-# 0600-osak, és a művelet után azonnal törlődnek.
-# util-linux: setpriv, amivel a portál nem rootként, ambient képességekkel indul.
-# passwd: useradd a rendszerfelhasználóhoz (a slim image nem tartalmazza).
+# nftables: loading the rules and managing the dynamic set.
+# conntrack: immediate teardown of the existing connections of exiting clients.
+# iproute2 + wireguard-tools: managing the dropjak0 WireGuard interface and
+# the peers (ip link/addr, wg set/show). The portal does not run as root, but
+# the entrypoint starts it with the ambient CAP_NET_ADMIN capability (setpriv),
+# which is enough to create the interface; on the /run/dropjak tmpfs the key
+# files are 0600 and are deleted immediately after the operation.
+# util-linux: setpriv, with which the portal starts as a non-root user with
+# ambient capabilities.
+# passwd: useradd for the system user (the slim image does not contain it).
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -46,8 +47,8 @@ WORKDIR /opt/hatarvedelem
 
 COPY gateway.py server.py droplog.py settings_store.py fail2ban.py tunnel.py index.html icon.png blocked.png unauthorized.png sus.png ok.png services.json VERSION ./
 COPY deploy/hatarvedelem.nft ./deploy/hatarvedelem.nft
-# A korai boot-védelmet adó tábla: a frissítéskori set-flag migráció a régi
-# tábla törlése előtt tölti be (fail-closed időablak).
+# The table providing early boot protection: the set-flag migration during an
+# upgrade loads it before deleting the old table (fail-closed time window).
 COPY deploy/hatarvedelem-boot.nft ./deploy/hatarvedelem-boot.nft
 COPY deploy/tunnel-agent ./tunnel-agent
 COPY docker/entrypoint.sh /usr/local/bin/hatarvedelem-entrypoint
@@ -56,8 +57,8 @@ RUN chmod 0755 /usr/local/bin/hatarvedelem-entrypoint \
     && chmod 0755 /opt/hatarvedelem/deploy/hatarvedelem.nft \
     && chown -R root:root /opt/hatarvedelem
 
-# A 80-as port forgalmát az nft redirect irányítja ide; a portál maga nem
-# foglalja el a 80-at. PORT=80 is működik a NET_BIND_SERVICE képességgel.
+# Port 80 traffic is directed here by the nft redirect; the portal itself does
+# not occupy port 80. PORT=80 works too with the NET_BIND_SERVICE capability.
 EXPOSE 8100
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \

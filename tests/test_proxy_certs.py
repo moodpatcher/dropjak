@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""Domain beállítások, feltöltött tanúsítványok és a proxy naplózása.
+"""Domain settings, uploaded certificates and proxy logging.
 
-* ``proxy_acme`` kapcsoló (érvényesítés, régi fájl alapértéke);
-* ``CertStore``: érvényes pár, hibás/eltérő/lejárt/nem fedő tanúsítvány,
-  wildcard-lefedés, metaadat kulcsanyag nélkül, törlés, árva takarítás;
-* ``/api/proxy/cert`` (loopback, via-proxy védelem), ``/api/proxy/ask``
-  kikapcsolt ACME-vel;
-* ``proxy_page_opened`` audit csak navigációra és 200-as bejegyzésre;
-* ``proxy-unauthorized`` drop-sor 401-re, és ez nem táplálja a fail2ban
-  drop/port-jelzését;
-* admin API (/api/admin/certs, proxy_acme, gyökér törlése).
+* the ``proxy_acme`` switch (validation, legacy file default);
+* ``CertStore``: valid pair, broken/mismatched/expired/non-covering certificate,
+  wildcard coverage, metadata without key material, deletion, orphan cleanup;
+* ``/api/proxy/cert`` (loopback, via-proxy protection), ``/api/proxy/ask``
+  with ACME turned off;
+* ``proxy_page_opened`` audit only for navigation and 200 entries;
+* ``proxy-unauthorized`` drop rows for 401, and this does not feed fail2ban's
+  drop/port signal;
+* admin API (/api/admin/certs, proxy_acme, root deletion).
 
-A teszt-PEM-ek egyszer generált, statikus EC P-256 párok (2126-ig érvényes,
-illetve egy 2021-ben lejárt tanúsítvány); futás közben nincs openssl-hívás.
+The test PEMs are once-generated, static EC P-256 pairs (valid until 2126,
+and a certificate expired in 2021); no openssl call during the run.
 """
 
 from __future__ import annotations
@@ -64,7 +64,7 @@ sbSYFW5vQl3RLmNT+d6AUOfLWpo9aGcCIQDaB6KtgZ/TfqaZCCmSx1v/ePDt3wju
 dz674+jH6I8AVw==
 -----END CERTIFICATE-----
 """
-# SAN: csak *.z1.example.com (a gyökeret magát nem fedi)
+# SAN: only *.z1.example.com (it does not cover the root itself)
 CERT_WILD = """-----BEGIN CERTIFICATE-----
 MIIBqjCCAVCgAwIBAgIUEX4oUzzq0HIkAu084I4n+hu5zMswCgYIKoZIzj0EAwIw
 GzEZMBcGA1UEAwwQKi56MS5leGFtcGxlLmNvbTAgFw0yNjEwMjEyMDQyMDdaGA8y
@@ -127,7 +127,7 @@ class ProxyAcmeSettingTests(unittest.TestCase):
     def test_default_legacy_and_validation(self) -> None:
         store = settings_store.SettingsStore(self.path, logger=quiet)
         self.assertIs(store.snapshot()["proxy_acme"], True)
-        # Régi, kulcs nélküli fájl: a korábbi viselkedés (ACME be).
+        # Legacy file without a key: the earlier behaviour (ACME on).
         with open(self.path, "w", encoding="utf-8") as fh:
             json.dump({"proxy_domains": [ROOT_DOMAIN], "proxy_routes": []}, fh)
         store = settings_store.SettingsStore(self.path, logger=quiet)
@@ -185,7 +185,7 @@ class CertStoreTests(unittest.TestCase):
         text = json.dumps(public)
         for marker in KEY_MARKERS:
             self.assertNotIn(marker, text)
-        # Újraindítás után a lemezről ugyanaz töltődik be.
+        # After a restart the same thing is loaded from disk.
         reloaded = settings_store.CertStore(self.dir, logger=quiet)
         self.assertEqual(reloaded.public(self.settings), public)
 
@@ -196,30 +196,30 @@ class CertStoreTests(unittest.TestCase):
         self.assertEqual(first["uncovered"], [ROOT_DOMAIN])
         self.assertIsNotNone(self.store.bundle(f"owui.{ROOT_DOMAIN}", ROOT_DOMAIN))
         self.assertIsNone(self.store.bundle(ROOT_DOMAIN, ROOT_DOMAIN))
-        # Csak egy címke: a mélyebb név nem fedett.
+        # Only one label: the deeper name is not covered.
         self.assertIsNone(
             self.store.bundle(f"a.owui.{ROOT_DOMAIN}", ROOT_DOMAIN)
         )
 
     def test_rejections_write_nothing(self) -> None:
         cases = [
-            ("eltérő kulcs", ROOT_DOMAIN, CERT_VALID, KEY_B, "nem tartozik"),
-            ("szemét", ROOT_DOMAIN, "nem pem", KEY_A, "CERTIFICATE"),
-            ("hibás base64", ROOT_DOMAIN,
+            ("mismatched key", ROOT_DOMAIN, CERT_VALID, KEY_B, "do not belong together"),
+            ("garbage", ROOT_DOMAIN, "not pem", KEY_A, "CERTIFICATE"),
+            ("bad base64", ROOT_DOMAIN,
              "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----",
-             KEY_A, "nem tartozik"),
-            ("szemét kulcs", ROOT_DOMAIN, CERT_VALID, "x", "PRIVATE KEY"),
-            ("túl nagy", ROOT_DOMAIN,
+             KEY_A, "do not belong together"),
+            ("garbage key", ROOT_DOMAIN, CERT_VALID, "x", "PRIVATE KEY"),
+            ("too large", ROOT_DOMAIN,
              CERT_VALID + " " * settings_store.MAX_CERT_PEM, KEY_A, "KiB"),
-            ("lejárt", ROOT_DOMAIN, CERT_EXPIRED, KEY_A, "lejárt"),
-            ("nem fedi", ROOT_DOMAIN, CERT_OTHER, KEY_A, "nem fedi le"),
-            ("másik gyökér", SECOND, CERT_VALID, KEY_A, "nem fedi le"),
-            ("kulcs a láncban", ROOT_DOMAIN, CERT_VALID + KEY_A, KEY_A,
+            ("expired", ROOT_DOMAIN, CERT_EXPIRED, KEY_A, "expired"),
+            ("does not cover", ROOT_DOMAIN, CERT_OTHER, KEY_A, "does not cover"),
+            ("other root", SECOND, CERT_VALID, KEY_A, "does not cover"),
+            ("key in the chain", ROOT_DOMAIN, CERT_VALID + KEY_A, KEY_A,
              "CERTIFICATE"),
-            ("titkosított", ROOT_DOMAIN, CERT_VALID,
-             KEY_A.replace("PRIVATE", "ENCRYPTED PRIVATE"), "jelszó"),
-            ("nem szöveg", ROOT_DOMAIN, None, KEY_A, "PEM"),
-            ("rossz gyökér", "../x", CERT_VALID, KEY_A, "domainnév"),
+            ("encrypted", ROOT_DOMAIN, CERT_VALID,
+             KEY_A.replace("PRIVATE", "ENCRYPTED PRIVATE"), "unencrypted"),
+            ("not text", ROOT_DOMAIN, None, KEY_A, "PEM"),
+            ("bad root", "../x", CERT_VALID, KEY_A, "domain name"),
         ]
         for label, root, chain, key, message in cases:
             with self.subTest(label):
@@ -245,7 +245,7 @@ class CertStoreTests(unittest.TestCase):
             self.store.public(self.settings, now=after)[0]["warning"],
             "expired",
         )
-        # A lejárt feltöltött tanúsítványt a Caddy nem kapja meg (204).
+        # Caddy does not get the expired uploaded certificate (204).
         self.assertIsNone(
             self.store.bundle(ROOT_DOMAIN, ROOT_DOMAIN, now=after)
         )
@@ -329,7 +329,7 @@ class ProxyCertEndpointTests(unittest.TestCase):
         })
 
     def test_loopback_covered_name_gets_chain_and_key(self) -> None:
-        # Az ismeretlen, de a wildcard által fedett név is (challenge-re).
+        # The unknown but wildcard-covered name too (for the challenge).
         for name in (ROOT_DOMAIN, f"owui.{ROOT_DOMAIN}", f"PUB.{ROOT_DOMAIN}",
                      f"x.{ROOT_DOMAIN}"):
             with self.subTest(name=name):
@@ -355,7 +355,7 @@ class ProxyCertEndpointTests(unittest.TestCase):
             ({"X-Forwarded-For": self.OUTSIDER}, "127.0.0.1"),
             ({"X-Forwarded-Host": ROOT_DOMAIN}, "127.0.0.1"),
             ({"X-Forwarded-Uri": "/api/proxy/cert"}, "127.0.0.1"),
-            # A Caddy reverse_proxy a portálnak a gyökér Hostját adja.
+            # Caddy's reverse_proxy passes the root Host to the portal.
             ({"Host": ROOT_DOMAIN}, "127.0.0.1"),
         ]
         for headers, source in variants:
@@ -363,7 +363,7 @@ class ProxyCertEndpointTests(unittest.TestCase):
                 resp, body = self.cert(ROOT_DOMAIN, headers, source)
                 self.assertEqual(resp.status, 404)
                 self.assertEqual(body, b"")
-        # A gyökérdomainen át (forward_auth) a Caddy nem is továbbítja.
+        # Through the root domain (forward_auth) Caddy does not even forward it.
         resp, body = self.get("/api/proxy/auth", {
             "X-Forwarded-Host": ROOT_DOMAIN,
             "X-Forwarded-For": self.OUTSIDER,
@@ -381,7 +381,7 @@ class ProxyCertEndpointTests(unittest.TestCase):
                 with self.subTest(acme=acme, name=name):
                     resp, _ = self.get(f"/api/proxy/ask?domain={name}")
                     self.assertEqual(resp.status, code)
-        # A feltöltött tanúsítvány kikapcsolt ACME mellett is kiszolgál.
+        # The uploaded certificate is served even with ACME turned off.
         resp, _ = self.cert(ROOT_DOMAIN)
         self.assertEqual(resp.status, 200)
 
@@ -423,7 +423,7 @@ class ProxyCertEndpointTests(unittest.TestCase):
                 self.assertEqual(resp.status, 200)
         self.assertEqual(self.opened(), [])
         nav = {"Sec-Fetch-Dest": "document"}
-        # Publikus bejegyzés: üres felhasználó; hosszú útvonal csonkolva.
+        # Public entry: empty user; long path truncated.
         resp, _ = self.auth(
             f"pub.{ROOT_DOMAIN}", self.OUTSIDER,
             **{**nav, "X-Forwarded-Uri": "/" + "a" * 500},
@@ -432,7 +432,7 @@ class ProxyCertEndpointTests(unittest.TestCase):
         [row] = self.opened()
         self.assertEqual((row["user"], row["visibility"]), ("", "public"))
         self.assertEqual(len(row["path"]), 200)
-        # A gyökérdomain portálja, a 401 és a 404 nem proxy-oldalmegnyitás.
+        # The root domain's portal, the 401 and the 404 are not proxy page opens.
         self.audits.clear()
         for name, ip, code in ((ROOT_DOMAIN, self.OUTSIDER, 200),
                                (owui, self.OUTSIDER, 401),
@@ -458,7 +458,7 @@ class ProxyCertEndpointTests(unittest.TestCase):
 
 
 class ProxyDropSignalTests(unittest.TestCase):
-    """A proxy-unauthorized drop-sorok nem léptetik a drop/port-jelzést."""
+    """proxy-unauthorized drop rows do not trigger the drop/port signal."""
 
     IP = "203.0.113.50"
 
@@ -501,13 +501,13 @@ class ProxyDropSignalTests(unittest.TestCase):
         for index in range(40):
             self.gw.record_proxy_drop(self.IP, "owui.z1.example.com", f"/{index}")
         rows = self.drops.read()
-        # Az nft log-szabályok mintájára 30/perc.
+        # Following the nft log rules, 30/minute.
         self.assertEqual(len(rows), 30)
         self.assertTrue(all(
             row["reason"] == "proxy-unauthorized" and row["group"] == "proxy"
             and row["src"] == self.IP for row in rows
         ))
-        # Ugyanez az NFLOG-visszahíváson át sem számítana (ok-szűrés).
+        # The same would not count through the NFLOG callback either (reason filtering).
         for port in (80, 443, 8080, 8443, 22, 3000):
             self.drops.listener._count_packet({
                 "reason": "proxy-unauthorized", "src": self.IP,
@@ -515,7 +515,7 @@ class ProxyDropSignalTests(unittest.TestCase):
             })
         self.assertEqual(self.f2b._drop_events, {})
         self.assertIsNone(self.f2b.banned(self.IP))
-        # Pozitív kontroll: a valódi drop-csomag ugyanitt tiltáshoz vezet.
+        # Positive control: a real drop packet leads to a ban in the same place.
         for port in (81, 82, 83):
             self.drops.listener._count_packet({
                 "reason": "wan-drop", "src": self.IP,
@@ -525,7 +525,7 @@ class ProxyDropSignalTests(unittest.TestCase):
 
 
 class CertAdminHttpTests(unittest.TestCase):
-    """Admin API: /api/admin/certs, proxy_acme, a gyökér törlése."""
+    """Admin API: /api/admin/certs, proxy_acme, root deletion."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -601,7 +601,7 @@ class CertAdminHttpTests(unittest.TestCase):
 
     def test_upload_metadata_only_and_audit(self) -> None:
         cookie = self.admin()
-        # 64 KiB fölötti JSON-törzs (két nagy PEM) is átjut ezen a végponton.
+        # A JSON body over 64 KiB (two large PEMs) also gets through this endpoint.
         status, _, body = self.post("/api/admin/certs", {
             "action": "upload", "root": ROOT_DOMAIN,
             "cert": CERT_VALID + "\n" * 40000, "key": KEY_A + "\n" * 10000,
@@ -631,7 +631,7 @@ class CertAdminHttpTests(unittest.TestCase):
             text = fh.read()
         for marker in KEY_MARKERS:
             self.assertNotIn(marker, text)
-        # Törlés, majd újra: nincs mit törölni.
+        # Delete, then again: nothing left to delete.
         status, _, body = self.post("/api/admin/certs", {
             "action": "delete", "root": ROOT_DOMAIN,
         }, cookie=cookie, source="127.0.0.5")
@@ -696,7 +696,7 @@ class CertAdminHttpTests(unittest.TestCase):
 
 
 class HttpsPortalRedirectTests(unittest.TestCase):
-    """A WAN-ról közvetlenül nyitott http portál 308-cal a HTTPS-gyökérre."""
+    """The http portal opened directly from the WAN redirects with 308 to the HTTPS root."""
 
     WAN, BANNED, PROXY_BANNED, LAN = (
         "127.0.0.2", "127.0.0.3", "127.0.0.4", "127.0.0.5"
@@ -781,14 +781,14 @@ class HttpsPortalRedirectTests(unittest.TestCase):
         self.assertEqual(event, "portal_https_redirect")
         self.assertEqual(fields["target"], f"https://{ROOT_DOMAIN}/?q")
         self.assertEqual(fields["ip"], self.WAN)
-        # Idegen Host nélkül (a kapu saját címével) is.
+        # Also without a foreign Host (with the gateway's own address).
         self.assertRedirect(
             self.request(headers={"Host": "192.168.10.1:8100"}),
             f"https://{ROOT_DOMAIN}/",
         )
 
     def test_post_and_api_not_redirected(self) -> None:
-        self.assertEqual(self.request("/api/nincs").status, 404)
+        self.assertEqual(self.request("/api/nonexistent").status, 404)
         self.assertNoHttpsRedirect(self.request("/", method="POST"))
         self.assertNoHttpsRedirect(self.request("/api/logout", method="POST"))
 
@@ -796,7 +796,7 @@ class HttpsPortalRedirectTests(unittest.TestCase):
         for source in (self.LAN, "127.0.0.1", self.BANNED, self.PROXY_BANNED):
             with self.subTest(source=source):
                 resp = self.request(source=source)
-                # A foreign-Host captive átirányítás marad a kapu címére.
+                # The foreign-Host captive redirect stays at the gateway's address.
                 self.assertEqual(resp.status, 302)
                 self.assertEqual(
                     resp.getheader("Location"), gateway.PORTAL_URL
@@ -824,7 +824,7 @@ class HttpsPortalRedirectTests(unittest.TestCase):
         self.settings.set_proxy_acme(False)
         self.addCleanup(self.settings.set_proxy_acme, True)
         self.assertEqual(self.request().status, 302)
-        # A csak *.root SAN-ú tanúsítvány a gyökeret nem fedi.
+        # The certificate with only a *.root SAN does not cover the root.
         self.certs.install(ROOT_DOMAIN, CERT_WILD, KEY_A)
         self.addCleanup(self.certs.delete, ROOT_DOMAIN)
         self.assertEqual(self.request().status, 302)

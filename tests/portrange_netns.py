@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Porttartomány csomagszintű teszt egy user+net névtérben (root nélkül).
+"""Port range packet-level test in a user+net namespace (without root).
 
-Futtatás:  unshare -rn python3 tests/portrange_netns.py
+Run:  unshare -rn python3 tests/portrange_netns.py
 
-A külső névtér a portálgép (veth0 = 10.20.0.1), a gyermek névtér a kliens
-(10.20.0.2). A host TCP/UDP 18005 és 18011 hallgató a 0.0.0.0-n figyel.
-A valódi Firewall adja ki a 18000-18010 input tartományt, majd visszavonja.
-Kimenet: JSON a vizsgálatokkal; a kilépési kód 0, ha minden rendben.
+The outer namespace is the portal host (veth0 = 10.20.0.1), the child namespace
+is the client (10.20.0.2). The host TCP/UDP listeners on 18005 and 18011
+listen on 0.0.0.0. The real Firewall issues the 18000-18010 input range, then
+revokes it. Output: JSON with the checks; exit code 0 if everything is fine.
 """
 
 from __future__ import annotations

@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Dropjak — a kapu magja.
+Dropjak — the core of the gateway.
 
-Ez a modul nem foglalkozik HTTP-vel. Felhasználók, jelszó-hashelés,
-munkamenetek, captcha és nftables-integráció vannak benne. A HTTP-réteg
-a server.py-ban él.
+This module does not deal with HTTP. It contains users, password hashing,
+sessions, captcha and nftables integration. The HTTP layer lives in
+server.py.
 
-Biztonsági alapelv: a jelszó önmagában csak választási lehetőséget ad, és
-hálózati hozzáférés CSAK akkor jön létre, ha az nftables-szabály tényleg
-érvénybe lépett. Ha a tűzfal nem frissíthető, nincs engedély.
+Security principle: a password on its own only provides a choice, and
+network access is created ONLY if the nftables rule actually took effect.
+If the firewall cannot be updated, there is no grant.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ import settings_store
 import tunnel as tunnel_mod
 
 
-# --------------------------------------------------------------- konfiguráció
+# --------------------------------------------------------------- configuration
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 
@@ -85,14 +85,14 @@ def _env_bool(name: str, default: bool = False) -> bool:
 def _startup_flush_mode(
     flush_on_start: bool, allow_stale_grants: bool
 ) -> str:
-    """Az induláskori ürítés döntése.
+    """Startup flush decision.
 
-    ``flush``: a kezelő kérte a tiszta indulást.
-    ``reconcile``: az ürítés ki van kapcsolva, de az árva engedélyek nem
-    maradhatnak a kernelben; a dinamikus halmazokat a memóriabeli (üres)
-    munkamenet-táblához igazítjuk.
-    ``stale_allowed``: kifejezett, nem biztonságos opt-in; a korábbi
-    engedélyek a kernel TTL-ig életben maradhatnak.
+    ``flush``: the operator requested a clean start.
+    ``reconcile``: flushing is disabled, but orphaned grants must not
+    remain in the kernel; the dynamic sets are aligned with the in-memory
+    (empty) session table.
+    ``stale_allowed``: explicit, insecure opt-in; earlier grants may
+    remain alive until the kernel TTL.
     """
     if flush_on_start:
         return "flush"
@@ -112,23 +112,22 @@ AUDIT_PATH = (
 AUDIT_MAX_BYTES = _env_int("HV_AUDIT_MAX_BYTES", 10 * 1024 * 1024, 256 * 1024)
 AUDIT_KEEP = min(20, _env_int("HV_AUDIT_KEEP", 5, 1))
 
-# Fenntartott, régi szabály-azonosító. A korábbi beépített teljes
-# hozzáférésű szabály azonosítója; ma már nem létezik szabály, de az
-# azonosítót soha nem adjuk ki és nem lehet felvenni, hogy egy régi
-# rules.json/users.json/groups.json ne keltsen új életre rejtett
-# jogosultságot.
+# Reserved legacy rule identifier. The identifier of the earlier built-in
+# full-access rule; no such rule exists today, but the identifier is never
+# handed out and cannot be taken, so that an old rules.json/users.json/
+# groups.json cannot bring a hidden grant back to life.
 LEGACY_ADMIN_RULE_ID = "admin-full"
 ROLE_ADMIN = "admin"
 ROLE_USER = "user"
 
-# Induláskori admin fiók a Docker Compose környezetéből. Kikapcsolt
-# állapotban a portál nem nyúl a felhasználókhoz.
+# Startup admin account from the Docker Compose environment. When disabled,
+# the portal does not touch the users.
 ADMIN_ENABLED = _env_bool("HV_ADMIN_ENABLED", False)
 ADMIN_USER = os.environ.get("HV_ADMIN_USER", "").strip()
 ADMIN_PASSWORD = os.environ.get("HV_ADMIN_PASSWORD", "")
-# A jelszó környezeti változó helyett fájlból is jöhet (Docker secret,
-# csak root által olvasható fájl). Ha mindkettő meg van adva, a közvetlen
-# változó az elsődleges.
+# The password may also come from a file instead of an environment
+# variable (Docker secret, a file readable only by root). If both are
+# given, the direct variable takes precedence.
 ADMIN_PASSWORD_FILE = os.environ.get("HV_ADMIN_PASSWORD_FILE", "").strip()
 if not ADMIN_PASSWORD and ADMIN_PASSWORD_FILE:
     try:
@@ -138,10 +137,10 @@ if not ADMIN_PASSWORD and ADMIN_PASSWORD_FILE:
         ADMIN_PASSWORD = ""
 
 PORT = _env_int("PORT", 8100, 1)
-CHALLENGE_TTL = _env_int("HV_CHALLENGE_TTL", 600, 30)   # másodperc
+CHALLENGE_TTL = _env_int("HV_CHALLENGE_TTL", 600, 30)   # seconds
 
-# A belépés után a felhasználó választja ki a hozzáférés hosszát. A termék
-# szintű korlát 1 perc – 30 nap; a HV_MIN_TTL/HV_MAX_TTL csak szűkítheti.
+# After login the user chooses the length of access. The product-level
+# limit is 1 minute – 30 days; HV_MIN_TTL/HV_MAX_TTL can only narrow it.
 ABSOLUTE_MIN_TTL = 60
 ABSOLUTE_MAX_TTL = 30 * 24 * 60 * 60
 MIN_TTL = max(
@@ -153,16 +152,16 @@ MAX_TTL = min(
     max(_env_int("HV_MAX_TTL", ABSOLUTE_MAX_TTL, 1), MIN_TTL),
 )
 DEFAULT_TTL = min(max(_env_int("HV_SESSION_TTL", 3600, 1), MIN_TTL), MAX_TTL)
-# A jelszó megadása és a szolgáltatásválasztás közötti ablak.
+# The window between entering the password and choosing the service.
 AUTH_TTL = min(max(_env_int("HV_AUTH_TTL", 600, 1), 60), 3600)
-# Visszafelé kompatibilitás: a régi név az alapértelmezett hozzáférési idő.
+# Backward compatibility: the old name is the default access duration.
 SESSION_TTL = DEFAULT_TTL
 
 SERVICES_PATH = (
     os.environ.get("HV_SERVICES_FILE", "").strip()
     or os.path.join(BASE, "services.json")
 )
-# Az eredeti POW_DIFFICULTY nevet is elfogadjuk a visszafelé kompatibilitásért.
+# We also accept the original POW_DIFFICULTY name for backward compatibility.
 POW_DIFFICULTY = min(
     6, _env_int("HV_POW_DIFFICULTY", _env_int("POW_DIFFICULTY", 4, 1), 1)
 )
@@ -175,13 +174,14 @@ NFT_BIN = os.environ.get("HV_NFT_BIN", "").strip() or shutil.which("nft") or "/u
 NFT_TABLE = os.environ.get("HV_NFT_TABLE", "hatarvedelem").strip()
 NFT_SET = os.environ.get("HV_NFT_SET", "allowed_v4").strip()
 CONNTRACK_BIN = os.environ.get("HV_CONNTRACK_BIN", "").strip() or shutil.which("conntrack") or ""
-# A forward-lánc által megjelölt csomagok azonosítója. A Docker-védelem
-# csak ezt a jelölést engedi át. A sablon és a portál ugyanezt használja.
+# Identifier of the packets marked by the forward chain. The Docker
+# protection lets through only this mark. The template and the portal use
+# the same one.
 FWD_MARK = os.environ.get("HV_FWD_MARK", "0x44524a4b").strip().lower()
 if not re.match(r"^0x[0-9a-f]{1,8}$", FWD_MARK):
     FWD_MARK = "0x44524a4b"
-# A pre-auth port 80-as forgalma a preroutingban conntrack-jelölést kap,
-# hogy a portál-átirányítás ne térítse el. Ez nem hozzáférési jelölés.
+# Pre-auth port 80 traffic receives a conntrack mark in prerouting so that
+# the portal redirect does not divert it. This is not an access mark.
 PREAUTH_CT_MARK = "0x50524541"
 CUSTOM_CHAINS = (
     "preauth",
@@ -190,28 +190,28 @@ CUSTOM_CHAINS = (
     "preauth_nat",
     "block_nat",
 )
-# A port proxy (nftables DNAT) futásidejű láncai. A sablon csak a rájuk
-# ugró szabályokat tartalmazza, a tartalmukat a portál tölti fel:
-#   portproxy_nat:   DNAT/redirect (a -101-es prerouting láncból, a Docker
-#                    DNAT-je előtt)
-#   portproxy_input: a redirectelt (input) proxy engedélyezése
-#   portproxy_snat:  a kért forward bejegyzések masquerade-je
+# Runtime chains of the port proxy (nftables DNAT). The template contains
+# only the rules jumping to them; the portal fills in their contents:
+#   portproxy_nat:   DNAT/redirect (from the -101 prerouting chain, before
+#                    the Docker DNAT)
+#   portproxy_input: allowing the redirected (input) proxy
+#   portproxy_snat:  masquerade of the requested forward entries
 PORTPROXY_CHAINS = ("portproxy_nat", "portproxy_input", "portproxy_snat")
-# A WireGuard-alagút UDP-portjának fogadó lánca. A portál tölti fel; ügynök
-# nélkül üres marad, ezért a WireGuard port zárva van.
+# Receiving chain for the UDP port of the WireGuard tunnel. The portal fills
+# it in; without an agent it stays empty, so the WireGuard port is closed.
 TUNNEL_CHAIN = "tunnel_input"
 
-# Drop-alapú fail2ban: csak a valódi, engedély nélküli TCP-forgalom számít.
-# A MAC/spoof/ipv6/fail2ban/dns/ssh okok kimaradnak (hamis forrás-IP vagy
-# szabályos, lejárt munkamenet), és a szabályos kliens UDP-háttérzaja
-# (mDNS, LLMNR, NetBIOS, DNS) sem tiltás.
+# Drop-based fail2ban: only genuine, unapproved TCP traffic counts.
+# The MAC/spoof/ipv6/fail2ban/dns/ssh reasons are excluded (fake source IP
+# or a regular, expired session), and the regular client's UDP background
+# noise (mDNS, LLMNR, NetBIOS, DNS) is not a ban either.
 DROP_BAN_REASONS = frozenset(
     {"no-grant", "wan-drop", "input-wan", "input-lan", "portproxy"}
 )
 DROP_BAN_SKIP_TCP_PORTS = frozenset({53})
-# Az admin Tűzfal nézet nyers (iptables -L -n jellegű) kiírásában megjelenő
-# láncok sorrendje. A custom láncok a forward után következnek, hogy a
-# pre-auth és a blokk szabályai egy helyen, olvasható sorrendben legyenek.
+# Order of the chains that appear in the raw (iptables -L -n style) output
+# of the admin Firewall view. The custom chains follow forward, so that the
+# pre-auth and block rules are in one place in a readable order.
 RULESET_CHAINS = (
     "forward",
     "input",
@@ -233,12 +233,12 @@ RULESET_CHAINS = (
 
 
 def _enabled_custom_entries(entries) -> list[dict]:
-    """Csak az engedélyezett, jól formált pre-auth/blokk bejegyzések.
+    """Only the enabled, well-formed pre-auth/block entries.
 
-    A felületen kikapcsolt (``enabled: false``) bejegyzés nem kerülhet a
-    kernelbe: a kapcsoló a szabály tényleges eltávolítását jelenti, nem
-    csak a felületi elrejtését. A nem szótár alakú elemek kimaradnak, mert
-    azokat az nft szabály-összeállítás úgysem tudná értelmezni.
+    An entry disabled in the UI (``enabled: false``) must not reach the
+    kernel: the switch means the actual removal of the rule, not merely
+    hiding it in the UI. Non-dict elements are left out, because the
+    nft rule assembly could not interpret them anyway.
     """
     return [
         entry for entry in entries
@@ -247,12 +247,13 @@ def _enabled_custom_entries(entries) -> list[dict]:
 
 
 def tunnel_proxy_entries(tunnels) -> list[dict]:
-    """A bekapcsolt alagút-szolgáltatások szintetikus port proxy bejegyzései.
+    """Synthetic port proxy entries for the enabled tunnel services.
 
-    A DNAT a felhő hallgató portjáról az ügynök WireGuard-címére mutat; a
-    forward engedélyezést a forward lánc meglévő ct original szabálya adja,
-    ezért a bejegyzés ``forward`` típusú. A ``_tunnel`` jelölés választja el
-    a felhasználói port proxy bejegyzésektől (figyelmeztetés, conntrack).
+    The DNAT points from the cloud listener port to the agent's WireGuard
+    address; forwarding is allowed by the existing ct original rule of the
+    forward chain, therefore the entry is of type ``forward``. The
+    ``_tunnel`` marker separates it from user port proxy entries (warning,
+    conntrack).
     """
     entries: list[dict] = []
     if not isinstance(tunnels, dict):
@@ -262,8 +263,8 @@ def tunnel_proxy_entries(tunnels) -> list[dict]:
             continue
         for item in settings_store.agent_services_expanded(agent):
             if item.get("domain"):
-                # Domaines szolgáltatás: nincs WAN-hallgató port és DNAT; a
-                # forgalom a Caddyn át, a WireGuard-alagúton megy.
+                # Domain-mode service: no WAN listener port and no DNAT; the
+                # traffic goes through Caddy over the WireGuard tunnel.
                 continue
             entries.append({
                 "id": (
@@ -283,12 +284,12 @@ def tunnel_proxy_entries(tunnels) -> list[dict]:
 
 
 def tunnel_public_preauth(tunnels) -> list[tuple[str, int]]:
-    """A nyilvános, portos alagút-szolgáltatások WAN pre-auth párjai.
+    """WAN pre-auth pairs of the public, port-based tunnel services.
 
-    Csak bekapcsolt ügynök bekapcsolt, ``public`` szolgáltatásai kerülnek
-    bele, és csak a port-módúak: a domaines szolgáltatásnak nincs WAN-
-    hallgató portja. Elem: ``(proto, listen_port)``; a ``both`` két
-    protokollra bomlik. A lista determinisztikusan rendezett.
+    Only the enabled, ``public`` services of enabled agents are included,
+    and only the port-mode ones: a domain-mode service has no WAN listener
+    port. Element: ``(proto, listen_port)``; ``both`` splits into two
+    protocols. The list is deterministically sorted.
     """
     pairs: set[tuple[str, int]] = set()
     if not isinstance(tunnels, dict):
@@ -312,24 +313,25 @@ def tunnel_public_preauth(tunnels) -> list[tuple[str, int]]:
 
 _LAN_IF_RE = re.compile(r"^[A-Za-z0-9_.:@+-]{1,15}$")
 DRY_RUN = os.environ.get("HV_DRY_RUN", "0") == "1"
-# Ugyanazt a megengedő logikát használjuk, mint a többi logikai változónál:
-# 1/true/yes/on (kis/nagybetűtől és környező szóköztől függetlenül). A régi
-# ``== "1"`` összehasonlítás a ``true``/``yes``/``on`` értékeket csendben
-# kikapcsolta, ami induláskor a kernelben maradt engedélyeket jelentett.
+# We use the same permissive logic as for the other boolean variables:
+# 1/true/yes/on (regardless of case and surrounding whitespace). The old
+# ``== "1"`` comparison silently turned off the ``true``/``yes``/``on``
+# values, which meant grants left behind in the kernel at startup.
 FLUSH_ON_START = _env_bool("HV_FLUSH_ON_START", True)
-# Kifejezett, NEM biztonságos opt-in: ha a kezelő kikapcsolta az induláskori
-# ürítést, ezzel engedélyezheti, hogy a korábbi folyamat kernelben maradt
-# engedélyei a TTL-ig életben maradjanak. Alapértelmezésben tiltott: ilyenkor
-# a portál a memóriabeli (üres) munkamenet-táblához igazítja a dinamikus
-# halmazokat, és eltávolítja az árva engedélyeket.
+# Explicit, NOT secure opt-in: if the operator disabled the startup
+# flush, this allows the grants left in the kernel by an earlier process
+# to remain alive until the TTL. Disabled by default: in that case the
+# portal aligns the dynamic sets with the in-memory (empty) session table
+# and removes the orphaned grants.
 ALLOW_STALE_GRANTS_ON_START = _env_bool(
     "HV_ALLOW_STALE_GRANTS_ON_START", False
 )
 
-# A LAN interfész és hálózat. Ha mindkettő ismert, a portál a kliens
-# engedélyezett IP-jéhez az ARP-táblából származó MAC-címet is rögzíti, és
-# a tűzfal a LAN-on csak ezzel a MAC-címmel engedi át a forgalmat. Ez zárja
-# ki, hogy egy kliens egy másik engedélyezett kliens IP-címét használja.
+# The LAN interface and network. If both are known, the portal also
+# records, for the client's allowed IP, the MAC address taken from the ARP
+# table, and the firewall lets traffic through on the LAN only with this
+# MAC address. This rules out a client using the IP address of another
+# allowed client.
 HV_LAN_IF = os.environ.get("HV_LAN_IF", "").strip()
 HV_WAN_IF = os.environ.get("HV_WAN_IF", "").strip()
 HV_LAN_NET_RAW = os.environ.get("HV_LAN_NET", "").strip()
@@ -350,11 +352,11 @@ MAC_BINDING = bool(HV_LAN_IF and LAN_NETWORK is not None)
 ARP_PATH = os.environ.get("HV_ARP_PATH", "").strip() or "/proc/net/arp"
 
 PORTAL_URL = os.environ.get("HV_PORTAL_URL", "").strip()
-# A Caddy domain proxy be van-e kapcsolva (HV_PROXY=1): ekkor a portál a
-# gyökérdomaineken HTTPS-en is elérhető.
+# Whether the Caddy domain proxy is enabled (HV_PROXY=1): in that case the
+# portal is also reachable over HTTPS on the root domains.
 PROXY_ENABLED = _env_bool("HV_PROXY", False)
-# A Caddy admin API-ja (Unix socket a közös caddy-admin köteten); a portál
-# ezen keresztül üríti a Caddy tanúsítvány-gyorsítótárát. Üresen kikapcsolva.
+# Caddy admin API (Unix socket on the shared caddy-admin volume); the
+# portal flushes Caddy's certificate cache through it. Empty means disabled.
 CADDY_ADMIN = os.environ.get(
     "HV_CADDY_ADMIN", "/run/caddy-admin/admin.sock"
 ).strip()
@@ -369,7 +371,7 @@ TURNSTILE_SECRET = os.environ.get("TURNSTILE_SECRET", "").strip()
 TURNSTILE_ON = bool(TURNSTILE_SITEKEY and TURNSTILE_SECRET)
 TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
 
-# Időalapú egyszeri jelszó (TOTP, RFC 6238) a kétfaktoros belépéshez.
+# Time-based one-time password (TOTP, RFC 6238) for two-factor login.
 TOTP_ISSUER = os.environ.get("HV_TOTP_ISSUER", "").strip() or "Dropjak"
 TOTP_PERIOD = 30
 TOTP_DIGITS = 6
@@ -377,32 +379,33 @@ TOTP_WINDOW = 1
 _TOTP_RECOVERY_RE = re.compile(r"^[0-9a-f]{64}$")
 
 USERNAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,32}$")
-# E-mail-cím a fiók-kéréshez. A 254 karakter az RFC 5321 gyakorlati felső
-# határa; a minta egyszerű, de a nyilvánvalóan hibás alakokat kiszűri.
+# E-mail address for account requests. The 254 characters are the
+# practical upper limit of RFC 5321; the pattern is simple, but it filters
+# out the obviously invalid forms.
 MAX_EMAIL = 254
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 _NFT_NAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,31}$")
 _SERVICE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
-# Szolgáltatás-szabály hivatkozása: "<ügynök-azonosító>/<szolgáltatás-azonosító>".
+# Service rule reference: "<agent-id>/<service-id>".
 _SERVICE_REF_RE = re.compile(
     r"^[a-z0-9][a-z0-9_-]{0,31}/[a-z0-9][a-z0-9_-]{0,31}$"
 )
 
 
 def normalize_email(raw, strict=True) -> str:
-    """Az e-mail-cím egységes alakja: körbevágott, kisbetűs.
+    """Canonical form of an e-mail address: trimmed, lowercased.
 
-    ``strict`` esetén hibás bemenetre ``ValueError``-t dob; különben üres
-    sztringet ad vissza, hogy a hívó fail-safe módon kezelhesse.
+    With ``strict`` it raises ``ValueError`` on invalid input; otherwise it
+    returns an empty string so the caller can handle it in a fail-safe way.
     """
     if not isinstance(raw, str):
         if strict:
-            raise ValueError("érvénytelen e-mail-cím")
+            raise ValueError("invalid e-mail address")
         return ""
     value = raw.strip().lower()
     if not value:
         if strict:
-            raise ValueError("az e-mail-cím kötelező")
+            raise ValueError("e-mail address is required")
         return ""
     if (
         len(value) > MAX_EMAIL
@@ -410,7 +413,7 @@ def normalize_email(raw, strict=True) -> str:
         or not EMAIL_RE.match(value)
     ):
         if strict:
-            raise ValueError("érvénytelen e-mail-cím")
+            raise ValueError("invalid e-mail address")
         return ""
     return value
 
@@ -423,10 +426,10 @@ def log(message: str) -> None:
         print(message, flush=True)
 
 
-# ------------------------------------------------------------------ IP-segéd
+# ------------------------------------------------------------------ IP helpers
 
 def normalize_ip(raw: str) -> str:
-    """Az IPv4-mapped IPv6 címeket sima IPv4-re hozza."""
+    """Reduces IPv4-mapped IPv6 addresses to plain IPv4."""
     addr = ipaddress.ip_address(str(raw).strip())
     if addr.version == 6 and addr.ipv4_mapped is not None:
         addr = addr.ipv4_mapped
@@ -444,11 +447,12 @@ _MAC_RE = re.compile(r"^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$")
 
 
 def arp_mac(ip: str, interface: str = "", path: str = ARP_PATH) -> str | None:
-    """A LAN-kliens MAC-címe az ARP-táblából.
+    """The LAN client's MAC address from the ARP table.
 
-    Csak teljes (``0x2``) bejegyzést fogadunk el, és ha ismert az interfész,
-    csak azon a bejegyzést. Bármilyen hiba esetén ``None``-t adunk, mert a
-    hívó ilyenkor fail-closed módon megtagadja az engedélyt.
+    We accept only complete (``0x2``) entries, and if the interface is
+    known, only the entry on that interface. On any error we return
+    ``None``, because the caller then denies the grant in a fail-closed
+    way.
     """
     try:
         address = normalize_ip(ip)
@@ -478,32 +482,32 @@ def arp_mac(ip: str, interface: str = "", path: str = ARP_PATH) -> str | None:
     return None
 
 
-# --------------------------------------------------------------- szolgáltatások
+# --------------------------------------------------------------- services
 
 class CatalogError(ValueError):
-    """A szolgáltatáskatalógus hiányzik vagy hibás."""
+    """The service catalog is missing or invalid."""
 
 
 class AccessError(ValueError):
-    """A kért hozzáférés érvénytelen (szolgáltatás vagy időtartam)."""
+    """The requested access is invalid (service or duration)."""
 
 
 @dataclass(frozen=True)
 class Ports:
-    """Egy szabály által engedélyezett célportok.
+    """Destination ports allowed by a rule.
 
-    A szabályok portokból állnak: több TCP- és UDP-port, opcionálisan ICMP,
-    illetve teljes hozzáférés. A port a kliens által kért, DNAT előtti
-    célport, ezért Docker által publikált konténerport esetén a host portját
-    kell megadni.
+    Rules consist of ports: several TCP and UDP ports, optionally ICMP,
+    or full access. The port is the destination port requested by the
+    client, before DNAT, therefore for a container port published by
+    Docker the host port must be given.
     """
 
     tcp: tuple[int, ...] = ()
     udp: tuple[int, ...] = ()
     icmp: bool = False
     full: bool = False
-    # forward: a kapu továbbítja a forgalmat (internet, Docker-konténer).
-    # input: a portálgép saját szolgáltatását nyitja meg a kliens IP-jének.
+    # forward: the gateway forwards the traffic (internet, Docker container).
+    # input: opens the portal machine's own service to the client IP.
     direction: str = "forward"
 
     def public(self) -> dict:
@@ -531,36 +535,36 @@ class Ports:
 
 @dataclass(frozen=True)
 class RuleSelection:
-    """Egy munkamenet által kiválasztott szabály és annak engedélyei.
+    """A rule selected by a session and its grants.
 
-    A munkamenet több szabályt is választhat; a tényleges tűzfalengedély a
-    választások grantjeinek irányonkénti uniója. A ``rule_id``/``label`` a
-    részleges visszavonásnál és a megjelenítésnél azonosítja a választást.
+    A session may select several rules; the actual firewall grant is the
+    per-direction union of the selections' grants. ``rule_id``/``label``
+    identify the selection during partial revocation and display.
     """
 
     rule_id: str
     label: str
     grants: tuple[Ports, ...]
-    # A választás által engedélyezett proxy-hostnevek (explicit domain
-    # szabály és domain-módú szolgáltatás együtt).
+    # Proxy hostnames allowed by the selection (explicit domain rule and
+    # domain-mode service together).
     domains: tuple[str, ...] = ()
-    # A választáshoz tartozó szolgáltatás-hivatkozások és a belőlük feloldott
-    # domainek; a megjelenítéshez (választott szolgáltatás címkéje) kellenek.
+    # The service references belonging to the selection and the domains
+    # resolved from them; needed for display (label of the selected service).
     service_refs: tuple[str, ...] = ()
     service_domains: tuple[str, ...] = ()
 
 
 def union_grants(parts) -> tuple[Ports, ...]:
-    """Ports-engedélyek irányonkénti uniója.
+    """Per-direction union of Ports grants.
 
-    A ``full`` engedély egy irányban minden portot és ICMP-t lefed, ezért
-    az adott irány többi része eltűnik az unióból. Egyébként a TCP/UDP
-    portok halmazként egyesülnek (növekvő sorrendben), az ICMP pedig
-    VAGY-kapcsolatot kap. Az eredmény determinisztikus: ``forward``, majd
-    ``input`` sorrendben, az üres részek nélkül.
+    A ``full`` grant covers every port and ICMP in one direction, therefore
+    the rest of that direction disappears from the union. Otherwise the
+    TCP/UDP ports are united as sets (in ascending order), and ICMP gets a
+    logical OR. The result is deterministic: ``forward``, then ``input``
+    order, without the empty parts.
 
-    Ismeretlen irány ``FirewallError``, összhangban a
-    :meth:`Firewall._elements` viselkedésével.
+    An unknown direction raises ``FirewallError``, consistent with the
+    behaviour of :meth:`Firewall._elements`.
     """
 
     combined: dict[str, dict] = {}
@@ -568,7 +572,7 @@ def union_grants(parts) -> tuple[Ports, ...]:
         direction = part.direction
         if direction not in ("forward", "input"):
             raise FirewallError(
-                f"érvénytelen szabályirány: {direction!r}"
+                f"invalid rule direction: {direction!r}"
             )
         entry = combined.setdefault(
             direction, {"tcp": set(), "udp": set(), "icmp": False, "full": False}
@@ -602,11 +606,11 @@ def union_grants(parts) -> tuple[Ports, ...]:
 
 @dataclass(frozen=True)
 class Service:
-    """Egy választható szolgáltatás és a hozzá tartozó célportok.
+    """A selectable service and its destination ports.
 
-    A katalógus csak a kezdő szabályok létrehozásához és a régi,
-    szolgáltatás-alapú rules.json átalakításához kell. A futó rendszerben a
-    szabályok már portokat tartalmaznak.
+    The catalog is needed only to create the initial rules and to convert
+    the old, service-based rules.json. In the running system the rules
+    already contain ports.
     """
 
     id: str
@@ -631,7 +635,7 @@ class Service:
 
 @dataclass(frozen=True)
 class Scenario:
-    """Kész szolgáltatás-csomag a gyors választáshoz."""
+    """A ready-made service bundle for quick selection."""
 
     id: str
     label: str
@@ -653,12 +657,12 @@ class Scenario:
 
 @dataclass(frozen=True)
 class Rule:
-    """Admin által kezelt hozzáférési szabály.
+    """An access rule managed by an admin.
 
-    A szabály egy vagy több célportot tartalmaz (TCP és/vagy UDP), opcionális
-    ICMP-t, illetve teljes hozzáférést. A felhasználó csak a neki
-    (közvetlenül vagy csoporton keresztül) kiosztott szabályok közül
-    választhat, és a szabály a kiválasztott ideig él.
+    A rule contains one or more destination ports (TCP and/or UDP),
+    optionally ICMP, or full access. The user may choose only from the
+    rules assigned to them (directly or through a group), and the rule
+    lives for the selected duration.
     """
 
     id: str
@@ -672,54 +676,56 @@ class Rule:
     max_ttl: int = MAX_TTL
     builtin: bool = False
     created: int = 0
-    # Gyűjtőszabály: egyedi szabály-azonosítók, amelyek portjai unióként
-    # érvényesek. A tárolt portmezők ilyenkor üresek; a feloldott nézet
-    # számolja ki az uniót.
+    # Collection rule: individual rule identifiers whose ports apply as a
+    # union. The stored port fields are empty in this case; the resolved
+    # view computes the union.
     members: tuple[str, ...] = ()
-    # forward: továbbított (internet/Docker) forgalom; input: a portálgép
-    # saját szolgáltatása. Egyedi szabálynál ez a saját iránya; a
-    # gyűjtőszabálynak nincs saját iránya, az engedélyeket a tagjaiból
-    # származtatjuk (lásd grants). A feloldott gyűjtőnél a megjelenítési
-    # érték "mixed" is lehet, ha a tagok iránya vegyes.
+    # forward: forwarded (internet/Docker) traffic; input: the portal
+    # machine's own service. For an individual rule this is its own
+    # direction; a collection rule has no direction of its own, its grants
+    # are derived from its members (see grants). For a resolved collection
+    # the display value may also be "mixed" if the members' directions are
+    # mixed.
     direction: str = "forward"
-    # A gyűjtő feloldott input (host) uniója. A tcp/udp/icmp mezők a
-    # forward uniót tárolják; a kettő együtt adja a megjelenítési uniót.
+    # The resolved input (host) union of the collection. The tcp/udp/icmp
+    # fields store the forward union; together the two give the display
+    # union.
     input_tcp: tuple[int, ...] = ()
     input_udp: tuple[int, ...] = ()
-    # Domain szabály: teljes proxy-hostnevek, portok nélkül; az nftables-hez
-    # nem nyúl. Gyűjtőnél a tagok domainjeinek feloldott uniója.
+    # Domain rule: full proxy hostnames, without ports; it does not touch
+    # nftables. For a collection, the resolved union of the members' domains.
     domains: tuple[str, ...] = ()
-    # Szolgáltatás-szabály: "<ügynök-azonosító>/<szolgáltatás-azonosító>"
-    # hivatkozások. A "services" kulcsot szándékosan nem használjuk, mert az
-    # a régi szolgáltatás-alapú szabályokat jelöli (_is_legacy).
+    # Service rule: "<agent-id>/<service-id>" references. We deliberately
+    # do not use the "services" key, because that marks the old
+    # service-based rules (_is_legacy).
     service_refs: tuple[str, ...] = ()
-    # A hivatkozásokból feloldott forward portok; nem perzisztált értékek.
-    # Hiányzó/letiltott szolgáltatásnál üresek maradnak (fail-closed).
+    # Forward ports resolved from the references; non-persisted values.
+    # They stay empty for a missing/disabled service (fail-closed).
     service_tcp: tuple[int, ...] = ()
     service_udp: tuple[int, ...] = ()
-    # A hivatkozásokból feloldott proxy-hostnevek (csak domain-módú
-    # szolgáltatások); nem perzisztált, a session_domains része.
+    # Proxy hostnames resolved from the references (domain-mode services
+    # only); non-persisted, part of session_domains.
     service_domains: tuple[str, ...] = ()
-    # A hivatkozásokból feloldott, teljes leképezés-aláírás:
-    # ``(ref, proto, listen_port, target_host, target_port)`` tuple-ök
-    # rendezett uniója; domain-módú szolgáltatásnál ``proto="domain"`` sor
-    # is szerepel, hogy az átnevezés is érvénytelenítsen. Nem perzisztált,
-    # mint a service_tcp/service_udp. A döntéskori ellenőrzés ezzel észleli
-    # a célhost/célport átirányítást akkor is, ha a hallgató portok
-    # változatlanok.
+    # The full mapping signature resolved from the references:
+    # sorted union of ``(ref, proto, listen_port, target_host, target_port)``
+    # tuples; for a domain-mode service a row with ``proto="domain"`` is
+    # also included so that renaming invalidates it too. Non-persisted,
+    # like service_tcp/service_udp. The check at decision time uses this to
+    # detect a target-host/target-port redirect even if the listener ports
+    # are unchanged.
     service_signature: tuple[tuple[str, str, int, str, int], ...] = ()
 
     @property
     def ports(self) -> Ports:
-        """Megjelenítési unió; a tűzfal-kényszerítéshez a grants mérvadó.
+        """Display union; grants are authoritative for firewall enforcement.
 
-        Egyedi szabálynál a saját portjai. Gyűjtőnél a forward és az input
-        portok egyesítése, hogy a meglévő megjelenítő kód a teljes uniót
-        mutassa; az irány csak megjelenítési érték.
+        For an individual rule, its own ports. For a collection, the union
+        of the forward and input ports so that the existing display code
+        shows the full union; the direction is only a display value.
         """
         if self.service_refs and not self.collection:
-            # A szolgáltatás-szabály mindig forward irányú; a portokat a
-            # hivatkozott szolgáltatások hallgató portjai adják.
+            # A service rule is always forward direction; the ports are
+            # given by the listener ports of the referenced services.
             return Ports(self.service_tcp, self.service_udp, direction="forward")
         if not self.collection:
             return Ports(
@@ -734,20 +740,21 @@ class Rule:
 
     @property
     def grants(self) -> tuple[Ports, ...]:
-        """A tényleges hozzáférési engedélyek, irányonként.
+        """The actual access grants, per direction.
 
-        Egyedi szabály: pontosan a saját portjai. Gyűjtő: a forward unió
-        egy forward, az input unió egy input Ports-ban. A tűzfal mindig
-        ezt használja, soha nem a megjelenítési ports mezőt.
+        Individual rule: exactly its own ports. Collection: the forward
+        union in one forward Ports, the input union in one input Ports.
+        The firewall always uses this, never the display ports field.
         """
         if self.service_refs and not self.collection:
-            # Szolgáltatás-szabály: csak akkor ad engedélyt, ha legalább egy
-            # port feloldódott. A hiányzó hivatkozás így nem nyit semmit.
+            # Service rule: grants only if at least one port was resolved.
+            # A missing reference therefore opens nothing.
             if not (self.service_tcp or self.service_udp):
                 return ()
             return (self.ports,)
         if not self.collection:
-            # A domain szabály a proxy-kapun hat, tűzfalengedélye nincs.
+            # A domain rule acts on the proxy gateway; it has no firewall
+            # grant.
             return () if self.domains else (self.ports,)
         parts: list[Ports] = []
         if self.tcp or self.udp or self.icmp:
@@ -762,11 +769,11 @@ class Rule:
 
     @property
     def session_domains(self) -> tuple[str, ...]:
-        """A munkamenetben megnyíló proxy-hostnevek.
+        """The proxy hostnames opened in the session.
 
-        Az explicit domain szabály hostnevei és a domain-módú
-        szolgáltatásokból feloldott nevek uniója, az első előfordulás
-        sorrendjében, ismétlődés nélkül.
+        The union of the explicit domain rule's hostnames and the names
+        resolved from the domain-mode services, in order of first
+        occurrence, without duplicates.
         """
         if not self.service_domains:
             return self.domains
@@ -781,11 +788,12 @@ class Rule:
         return bool(self.members)
 
     def _service_entries(self) -> list[dict]:
-        """A szolgáltatás-hivatkozások megjelenítési alakja.
+        """Display form of the service references.
 
-        A címkét a szerver tölti ki a beállításokból. Egyetlen hivatkozásnál
-        a feloldott portok is ide kerülnek; többnél a feloldás unió, ezért
-        az egyedi portokat a szerver oldja fel.
+        The label is filled in by the server from the settings. With a
+        single reference the resolved ports are also included here; with
+        several, resolution is a union, so the server resolves the
+        individual ports.
         """
         if not self.service_refs:
             return []
@@ -803,9 +811,9 @@ class Rule:
 
     def public(self) -> dict:
         if self.collection:
-            # A gyűjtőnek nincs saját iránya: a payloadból szándékosan
-            # kimarad a direction kulcs, a portok pedig a megjelenítési
-            # uniót mutatják.
+            # A collection has no direction of its own: the direction key
+            # is deliberately left out of the payload, and the ports show
+            # the display union.
             ports = self.ports
             return {
                 "id": self.id,
@@ -847,10 +855,11 @@ class Rule:
             "services": self._service_entries(),
         }
         if self.service_refs:
-            # A szolgáltatás-szabály nem domain és nem gyűjtő: ezeket a
-            # mezőket szándékosan nem adjuk ki. A portok a hivatkozásokból
-            # feloldott, nem perzisztált értékek, ezért a tcp/udp mezők is
-            # ezeket mutatják (a gyűjtő feloldott nézetéhez hasonlóan).
+            # A service rule is neither a domain nor a collection: these
+            # fields are deliberately not returned. The ports are values
+            # resolved from the references, not persisted, so the tcp/udp
+            # fields show these as well (similar to the resolved view of a
+            # collection).
             ports = self.ports
             payload["tcp"] = list(ports.tcp)
             payload["udp"] = list(ports.udp)
@@ -862,7 +871,7 @@ class Rule:
 
 @dataclass(frozen=True)
 class Group:
-    """Felhasználócsoport, amely szabályokat fog össze."""
+    """A user group that bundles rules."""
 
     id: str
     label: str
@@ -886,8 +895,8 @@ def _utc_iso(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(timespec="seconds")
 
 
-# A naplóbejegyzések súlyossága. A központi térkép teszi lehetővé, hogy a
-# felület és a szűrők ugyanazt a besorolást lássák, mint a naplóíró.
+# Severity of the log entries. The central map lets the UI and the filters
+# see the same classification as the log writer.
 AUDIT_SEVERITY = {
     "login_failed": "warn", "logout_failed": "warn", "access_denied": "warn",
     "password_change_failed": "warn", "registration_failed": "warn",
@@ -923,8 +932,8 @@ AUDIT_SEVERITY = {
 }
 DEFAULT_SEVERITY = "info"
 
-# Ezek az értékek soha nem kerülhetnek a naplóba. Pontos kulcs-egyezés:
-# a ``ticket_hash``, ``session`` és ``sid`` megengedett.
+# These values must never reach the log. Exact key match: ``ticket_hash``,
+# ``session`` and ``sid`` are allowed.
 SENSITIVE_AUDIT_KEYS = {
     "pass", "password", "password_hash", "hash", "secret", "totp_secret",
     "code", "recovery", "recovery_code", "cookie", "token", "ticket",
@@ -937,21 +946,21 @@ def audit_severity(event: str) -> str:
 
 
 def _search_key(value) -> str:
-    """Kereséshez normalizált szöveg: kisbetű, elválasztók szóközzé.
+    """Text normalized for search: lowercased, separators turned into spaces.
 
-    Az aláhúzás és a kötőjel ugyanazt a szóhatárt jelöli, mint a szóköz,
-    ezért az ``access_granted``, ``ACCESS-GRANTED`` és ``Access granted``
-    alakok ugyanarra a kulcsra jutnak. Az ismételt whitespace összevonva.
+    The underscore and the hyphen mark the same word boundary as a space,
+    therefore ``access_granted``, ``ACCESS-GRANTED`` and ``Access granted``
+    all end up on the same key. Repeated whitespace is collapsed.
     """
     text = str(value).lower().replace("_", " ").replace("-", " ")
     return " ".join(text.split())
 
 
 def _search_values(value):
-    """Az audit-bejegyzés értékei rekurzívan, a kulcsok nélkül.
+    """The values of the audit entry recursively, without the keys.
 
-    A szabadszöveges keresés csak látható értékekre illeszkedhet: a JSON
-    kulcsnevei (``event``, ``user``) ne találjanak minden sorra.
+    Free-text search may match only visible values: the JSON key names
+    (``event``, ``user``) should not match every row.
     """
     if isinstance(value, dict):
         for nested in value.values():
@@ -963,8 +972,9 @@ def _search_values(value):
         yield value
 
 
-# Az IP-szűrő ezekben a mezőkben keres: a kliens (ip), illetve a művelet
-# tárgya (pl. az admin által tiltott/feloldott cím a target mezőben).
+# The IP filter searches in these fields: the client (ip), and the object
+# of the operation (e.g. the address banned/unbanned by the admin in the
+# target field).
 AUDIT_IP_FIELDS = ("ip", "target", "target_ip", "session_ip", "request_ip")
 
 
@@ -979,11 +989,11 @@ def _audit_ip_match(item: dict, network) -> bool:
 
 
 class AuditLog:
-    """JSON Lines napló a portál minden lényeges eseményéről.
+    """JSON Lines log of every significant event of the portal.
 
-    A napló a state-kötetben marad meg, méretkorláttal rotálva. A bejegyzések
-    soha nem tartalmaznak jelszót vagy jelszó-hash-t. Írási hiba nem
-    akaszthatja meg a belépést: a hiba a folyamat naplójába kerül.
+    The log is kept in the state volume, rotated with a size limit. The
+    entries never contain a password or password hash. A write error must
+    not interrupt login: the error goes to the process log.
     """
 
     def __init__(
@@ -1014,16 +1024,16 @@ class AuditLog:
             except FileNotFoundError:
                 continue
             except OSError as exc:
-                self.log(f"[napló] rotáció nem sikerült: {exc}")
+                self.log(f"[audit] rotation failed: {exc}")
                 return
         try:
             os.replace(self.path, f"{self.path}.1")
         except OSError as exc:
-            self.log(f"[napló] rotáció nem sikerült: {exc}")
+            self.log(f"[audit] rotation failed: {exc}")
 
     def write(self, event: str, **fields) -> dict:
         now = time.time()
-        # Az explicit súlyosság felülírja a központi besorolást.
+        # An explicit severity overrides the central classification.
         severity = fields.pop("severity", None)
         if severity is None:
             severity = audit_severity(event)
@@ -1037,9 +1047,10 @@ class AuditLog:
             if value is None:
                 continue
             if key in SENSITIVE_AUDIT_KEYS:
-                # Csak a kulcs nevét naplózzuk a folyamatnaplóba, az értéket
-                # soha. Az érzékeny mező kimarad az audit-bejegyzésből.
-                self.log(f"[napló] érzékeny mező elhagyva: {key}")
+                # We log only the name of the key to the process log, never
+                # the value. The sensitive field is omitted from the audit
+                # entry.
+                self.log(f"[audit] sensitive field omitted: {key}")
                 continue
             if isinstance(value, str):
                 entry[key] = value[:500]
@@ -1062,7 +1073,7 @@ class AuditLog:
                 finally:
                     os.close(fd)
         except OSError as exc:
-            self.log(f"[napló] írási hiba: {exc}")
+            self.log(f"[audit] write error: {exc}")
         else:
             user = entry.get("user", "")
             ip = entry.get("ip", "")
@@ -1072,7 +1083,7 @@ class AuditLog:
                 if key in entry
             )
             self.log(
-                f"[esemény] {entry['event']}"
+                f"[event] {entry['event']}"
                 + (f" user={user}" if user else "")
                 + (f" ip={ip}" if ip else "")
                 + (f" {detail}" if detail else "")
@@ -1098,10 +1109,10 @@ class AuditLog:
         ip=None,
         events=None,
     ) -> list[dict]:
-        """Az ``ip`` egy ipaddress-hálózat (egy cím: /32 vagy /128) vagy None.
+        """``ip`` is an ipaddress network (a single address: /32 or /128) or None.
 
-        Az ``events`` pontos eseménykódok halmaza (többes szűrő); az
-        ``event`` a régi, részleges egyezésű egyes szűrő.
+        ``events`` is a set of exact event codes (multi-filter); ``event`` is
+        the old single filter with partial matching.
         """
         limit = max(1, min(2000, int(limit)))
         events = frozenset(str(code).lower() for code in events or ())
@@ -1137,10 +1148,10 @@ class AuditLog:
                             continue
                         if event_raw:
                             raw_event = str(item.get("event", "")).lower()
-                            # A nyers eseménykód részleges egyezése marad az
-                            # eddigi viselkedés (pl. ``admin_`` család), a
-                            # normalizált alak pedig a megjelenített,
-                            # szóközös/kötőjeles címkéket is megtalálja.
+                            # Partial matching of the raw event code remains
+                            # the previous behaviour (e.g. the ``admin_``
+                            # family), and the normalized form also finds the
+                            # displayed labels with spaces/hyphens.
                             if event_raw not in raw_event and (
                                 not event_key
                                 or event_key not in _search_key(raw_event)
@@ -1150,18 +1161,18 @@ class AuditLog:
                             continue
                         if ip is not None and not _audit_ip_match(item, ip):
                             continue
-                        # A régi bejegyzésekben nincs severity mező: ezek
-                        # alapértelmezésként "info" szintűek.
+                        # Old entries have no severity field: they count as
+                        # "info" level by default.
                         if severity and str(
                             item.get("severity", DEFAULT_SEVERITY)
                         ).lower() != severity:
                             continue
                         if q:
-                            # Csak az értékek számítanak: a kulcsnevek nem,
-                            # különben ``q=event`` vagy ``q=user`` minden
-                            # sorra illeszkedne. A nyers és a normalizált
-                            # alakot is próbáljuk, hogy az aláhúzásos kód és
-                            # a szóközös címke is találjon.
+                            # Only the values count: not the key names,
+                            # otherwise ``q=event`` or ``q=user`` would match
+                            # every row. We try both the raw and the
+                            # normalized form, so that the underscored code
+                            # and the label with spaces both match.
                             values = list(_search_values(item))
                             raw_haystack = " ".join(
                                 str(value) for value in values
@@ -1178,17 +1189,17 @@ class AuditLog:
             except FileNotFoundError:
                 continue
             except OSError as exc:
-                self.log(f"[napló] olvasási hiba ({path}): {exc}")
+                self.log(f"[audit] read error ({path}): {exc}")
         rows.sort(key=lambda item: float(item.get("ts", 0)), reverse=True)
         return rows[:limit]
 
 
 class ServiceCatalog:
-    """A services.json által leírt szolgáltatások és scenariók.
+    """The services and scenarios described by services.json.
 
-    A katalógus portjai határozzák meg, milyen célportokra nyílik meg a
-    forward-lánc. A fájl induláskor töltődik be; hibás katalógussal a portál
-    nem indul el (fail-closed).
+    The catalog's ports determine which destination ports the forward
+    chain opens. The file is loaded at startup; with an invalid catalog
+    the portal does not start (fail-closed).
     """
 
     def __init__(
@@ -1219,16 +1230,16 @@ class ServiceCatalog:
         if raw is None:
             return ()
         if not isinstance(raw, list):
-            raise CatalogError(f"{sid}: a(z) {field} mező lista kell legyen")
+            raise CatalogError(f"{sid}: {field} must be a list")
         ports: list[int] = []
         for value in raw:
             if isinstance(value, bool) or not isinstance(value, int):
                 raise CatalogError(
-                    f"{sid}: érvénytelen port a(z) {field} listában: {value!r}"
+                    f"{sid}: invalid port in the {field} list: {value!r}"
                 )
             if not 1 <= value <= 65535:
                 raise CatalogError(
-                    f"{sid}: a port 1 és 65535 között lehet: {value}"
+                    f"{sid}: the port must be between 1 and 65535: {value}"
                 )
             if value not in ports:
                 ports.append(value)
@@ -1237,11 +1248,11 @@ class ServiceCatalog:
     @classmethod
     def from_data(cls, data: dict, source: str = "") -> "ServiceCatalog":
         if not isinstance(data, dict):
-            raise CatalogError("a katalógus gyökere JSON-objektum kell legyen")
+            raise CatalogError("the catalog root must be a JSON object")
         raw_services = data.get("services")
         if not isinstance(raw_services, list) or not raw_services:
             raise CatalogError(
-                "a katalógusban legalább egy szolgáltatás kell legyen"
+                "the catalog must contain at least one service"
             )
 
         services: list[Service] = []
@@ -1250,23 +1261,23 @@ class ServiceCatalog:
         for item in raw_services:
             if not isinstance(item, dict):
                 raise CatalogError(
-                    "minden szolgáltatás JSON-objektum kell legyen"
+                    "every service must be a JSON object"
                 )
             sid = item.get("id")
             if not isinstance(sid, str) or not _SERVICE_ID_RE.match(sid):
                 raise CatalogError(
-                    f"érvénytelen szolgáltatás-azonosító: {sid!r}"
+                    f"invalid service identifier: {sid!r}"
                 )
             if sid in seen:
-                raise CatalogError(f"duplikált szolgáltatás-azonosító: {sid}")
+                raise CatalogError(f"duplicate service identifier: {sid}")
             seen.add(sid)
             label = item.get("label", sid)
             description = item.get("description", "")
             if not isinstance(label, str) or not label.strip() or len(label) > 80:
-                raise CatalogError(f"{sid}: a címke 1–80 karakter kell legyen")
+                raise CatalogError(f"{sid}: the label must be 1–80 characters")
             if not isinstance(description, str) or len(description) > 240:
                 raise CatalogError(
-                    f"{sid}: a leírás legfeljebb 240 karakter lehet"
+                    f"{sid}: the description may be at most 240 characters"
                 )
             tcp = cls._ports(item.get("tcp"), "tcp", sid)
             udp = cls._ports(item.get("udp"), "udp", sid)
@@ -1274,17 +1285,17 @@ class ServiceCatalog:
             full = item.get("all", False)
             if not isinstance(icmp, bool) or not isinstance(full, bool):
                 raise CatalogError(
-                    f"{sid}: az icmp/all mező logikai érték kell legyen"
+                    f"{sid}: the icmp/all field must be a boolean"
                 )
             if full:
                 full_count += 1
                 if tcp or udp or icmp:
                     raise CatalogError(
-                        f"{sid}: a teljes hozzáféréshez nem adható port vagy icmp"
+                        f"{sid}: full access cannot have a port or icmp"
                     )
             if not (tcp or udp or icmp or full):
                 raise CatalogError(
-                    f"{sid}: legalább egy port, icmp vagy all szükséges"
+                    f"{sid}: at least one port, icmp or all is required"
                 )
             services.append(
                 Service(
@@ -1299,61 +1310,61 @@ class ServiceCatalog:
             )
         if full_count > 1:
             raise CatalogError(
-                "legfeljebb egy teljes hozzáférésű szolgáltatás lehet"
+                "there may be at most one full-access service"
             )
 
         raw_scenarios = data.get("scenarios", [])
         if not isinstance(raw_scenarios, list):
-            raise CatalogError("a scenarios mező lista kell legyen")
+            raise CatalogError("the scenarios field must be a list")
         scenarios: list[Scenario] = []
         scenario_ids: set[str] = set()
         default_count = 0
         for item in raw_scenarios:
             if not isinstance(item, dict):
-                raise CatalogError("minden scenario JSON-objektum kell legyen")
+                raise CatalogError("every scenario must be a JSON object")
             scn_id = item.get("id")
             if not isinstance(scn_id, str) or not _SERVICE_ID_RE.match(scn_id):
                 raise CatalogError(
-                    f"érvénytelen scenario-azonosító: {scn_id!r}"
+                    f"invalid scenario identifier: {scn_id!r}"
                 )
             if scn_id in scenario_ids:
                 raise CatalogError(
-                    f"duplikált scenario-azonosító: {scn_id}"
+                    f"duplicate scenario identifier: {scn_id}"
                 )
             scenario_ids.add(scn_id)
             label = item.get("label", scn_id)
             description = item.get("description", "")
             if not isinstance(label, str) or not label.strip() or len(label) > 80:
                 raise CatalogError(
-                    f"{scn_id}: a címke 1–80 karakter kell legyen"
+                    f"{scn_id}: the label must be 1–80 characters"
                 )
             if not isinstance(description, str) or len(description) > 240:
                 raise CatalogError(
-                    f"{scn_id}: a leírás legfeljebb 240 karakter lehet"
+                    f"{scn_id}: the description may be at most 240 characters"
                 )
             raw_ids = item.get("services")
             if not isinstance(raw_ids, list) or not raw_ids:
                 raise CatalogError(
-                    f"{scn_id}: legalább egy szolgáltatás kell legyen"
+                    f"{scn_id}: at least one service is required"
                 )
             scn_services: list[str] = []
             for value in raw_ids:
                 if not isinstance(value, str) or value not in seen:
                     raise CatalogError(
-                        f"{scn_id}: ismeretlen szolgáltatás: {value!r}"
+                        f"{scn_id}: unknown service: {value!r}"
                     )
                 if value not in scn_services:
                     scn_services.append(value)
             ttl = item.get("default_ttl", DEFAULT_TTL)
             if isinstance(ttl, bool) or not isinstance(ttl, int):
                 raise CatalogError(
-                    f"{scn_id}: a default_ttl egész szám kell legyen"
+                    f"{scn_id}: default_ttl must be an integer"
                 )
             ttl = min(max(ttl, MIN_TTL), MAX_TTL)
             is_default = item.get("default", False)
             if not isinstance(is_default, bool):
                 raise CatalogError(
-                    f"{scn_id}: a default mező logikai érték kell legyen"
+                    f"{scn_id}: the default field must be a boolean"
                 )
             if is_default:
                 default_count += 1
@@ -1369,7 +1380,7 @@ class ServiceCatalog:
             )
         if default_count > 1:
             raise CatalogError(
-                "legfeljebb egy alapértelmezett scenario lehet"
+                "there may be at most one default scenario"
             )
 
         return cls(tuple(services), tuple(scenarios), source)
@@ -1382,15 +1393,15 @@ class ServiceCatalog:
                 data = json.load(fh)
         except FileNotFoundError as exc:
             raise CatalogError(
-                f"hiányzó szolgáltatáskatalógus: {path}"
+                f"missing service catalog: {path}"
             ) from exc
         except OSError as exc:
             raise CatalogError(
-                f"a szolgáltatáskatalógus nem olvasható: {path}: {exc}"
+                f"the service catalog cannot be read: {path}: {exc}"
             ) from exc
         except ValueError as exc:
             raise CatalogError(
-                f"a szolgáltatáskatalógus nem érvényes JSON: {path}: {exc}"
+                f"the service catalog is not valid JSON: {path}: {exc}"
             ) from exc
         return cls.from_data(data, source=path)
 
@@ -1413,26 +1424,26 @@ class ServiceCatalog:
         }
 
     def resolve(self, ids) -> tuple[Service, ...]:
-        """A kliens által küldött azonosítók ellenőrzése és feloldása.
+        """Validate and resolve the identifiers sent by the client.
 
-        Ha a teljes hozzáférés szerepel a választásban, az minden mást
-        magába foglal, ezért csak azt adjuk vissza.
+        If full access is part of the selection, it includes everything
+        else, so we return only that.
         """
         if not isinstance(ids, (list, tuple)):
-            raise AccessError("a szolgáltatások listája hiányzik")
+            raise AccessError("the service list is missing")
         if len(ids) > 32:
-            raise AccessError("túl sok szolgáltatás")
+            raise AccessError("too many services")
         chosen: list[str] = []
         for raw in ids:
             if not isinstance(raw, str):
-                raise AccessError("érvénytelen szolgáltatás-azonosító")
+                raise AccessError("invalid service identifier")
             sid = raw.strip()
             if sid not in self.services:
-                raise AccessError(f"ismeretlen szolgáltatás: {sid}")
+                raise AccessError(f"unknown service: {sid}")
             if sid not in chosen:
                 chosen.append(sid)
         if not chosen:
-            raise AccessError("válassz legalább egy szolgáltatást")
+            raise AccessError("select at least one service")
         full = next(
             (self.services[sid] for sid in chosen if self.services[sid].full),
             None,
@@ -1452,65 +1463,68 @@ class ServiceCatalog:
 
 
 def format_duration(seconds) -> str:
-    """A másodpercben megadott időtartam emberi alakja."""
+    """Human-readable English form of a duration given in seconds."""
     value = max(0, int(seconds))
     if value > 0 and value % 3600 == 0:
-        return f"{value // 3600} óra"
-    if value % 60 == 0:
-        return f"{value // 60} perc"
-    return f"{value} másodperc"
+        count, unit = value // 3600, "hour"
+    elif value % 60 == 0:
+        count, unit = value // 60, "minute"
+    else:
+        count, unit = value, "second"
+    return f"{count} {unit}" + ("" if count == 1 else "s")
 
 
 def validate_ttl(raw) -> int:
-    """A választott hozzáférési idő ellenőrzése (másodperc)."""
+    """Validation of the selected access duration (seconds)."""
     if isinstance(raw, bool) or not isinstance(raw, int):
-        raise AccessError("a hozzáférés hossza egész másodperc kell legyen")
+        raise AccessError("the access duration must be a whole number of seconds")
     if raw < MIN_TTL or raw > MAX_TTL:
         raise AccessError(
-            f"a hozzáférés hossza {format_duration(MIN_TTL)} és "
-            f"{format_duration(MAX_TTL)} között lehet"
+            f"the access duration must be between {format_duration(MIN_TTL)} and "
+            f"{format_duration(MAX_TTL)}"
         )
     return raw
 
 
-# ------------------------------------------------------------- szabályok/csoportok
+# ------------------------------------------------------------- rules/groups
 
 class RuleStoreError(RuntimeError):
-    """A szabálytár hibás vagy nem írható."""
+    """The rule store is invalid or not writable."""
 
 
 class GroupStoreError(RuntimeError):
-    """A csoporttár hibás vagy nem írható."""
+    """The group store is invalid or not writable."""
 
 
 def _clean_text(raw, field: str, maximum: int, required: bool = True) -> str:
     if raw is None:
         raw = ""
     if not isinstance(raw, str):
-        raise ValueError(f"{field}: szöveg kell")
+        raise ValueError(f"{field}: a string is required")
     value = raw.strip()
     if required and not value:
-        raise ValueError(f"{field}: nem lehet üres")
+        raise ValueError(f"{field}: must not be empty")
     if len(value) > maximum:
-        raise ValueError(f"{field}: legfeljebb {maximum} karakter lehet")
+        raise ValueError(f"{field}: at most {maximum} characters allowed")
     return value
 
 
 def _copy_label(label: str, suffix: str = " (copy)", maximum: int = 80) -> str:
-    """Másolatnév úgy, hogy az utótag a hosszkorlátba is beleférjen.
+    """Copy name such that the suffix also fits within the length limit.
 
-    A törzset az utótag hosszával rövidítjük, így hosszú forrásnév esetén
-    sem tűnik el a másolat jelölése, és a két név nem lesz azonos.
+    The stem is truncated by the length of the suffix, so that even with a
+    long source name the copy marker does not disappear and the two names
+    do not become identical.
     """
     if len(label) + len(suffix) <= maximum:
         return label + suffix
     return label[: max(0, maximum - len(suffix))] + suffix
 
 
-def _clean_id(raw, field: str = "azonosító") -> str:
+def _clean_id(raw, field: str = "identifier") -> str:
     if not isinstance(raw, str) or not _SERVICE_ID_RE.match(raw.strip()):
         raise ValueError(
-            f"{field}: 1–32 karakter, kisbetű, szám, kötőjel vagy aláhúzás"
+            f"{field}: 1–32 characters, lowercase letter, digit, hyphen or underscore"
         )
     return raw.strip()
 
@@ -1519,30 +1533,31 @@ def _clean_str_list(raw, field: str, pattern=None, maximum: int = 64) -> tuple[s
     if raw is None:
         return ()
     if not isinstance(raw, list) or len(raw) > maximum:
-        raise ValueError(f"{field}: legfeljebb {maximum} elemű lista kell")
+        raise ValueError(f"{field}: a list of at most {maximum} elements is required")
     out: list[str] = []
     for value in raw:
         if not isinstance(value, str):
-            raise ValueError(f"{field}: érvénytelen elem")
+            raise ValueError(f"{field}: invalid element")
         value = value.strip()
         if not value:
             continue
         if pattern is not None and not pattern.match(value):
-            raise ValueError(f"{field}: érvénytelen elem: {value!r}")
+            raise ValueError(f"{field}: invalid element: {value!r}")
         if value not in out:
             out.append(value)
     return tuple(out)
 
 
 def _clean_rule_members(raw, field: str = "members") -> tuple[str, ...]:
-    """Gyűjtőszabály tagjainak ellenőrzése.
+    """Validation of the members of a collection rule.
 
-    A tagok egyedi szabály-azonosítók; az ismétlődést nem csendben vonjuk
-    össze, mert az elgépelt szabálylista így láthatatlanul megváltozna.
+    The members are individual rule identifiers; duplicates are not
+    silently merged, because a mistyped rule list would otherwise change
+    invisibly.
     """
     if not isinstance(raw, list):
         raise ValueError(
-            f"{field}: 1–64 szabály-azonosítóból álló lista kell"
+            f"{field}: a list of 1–64 rule identifiers is required"
         )
     values = [
         value.strip() for value in raw
@@ -1552,47 +1567,48 @@ def _clean_rule_members(raw, field: str = "members") -> tuple[str, ...]:
         raw, field, pattern=_SERVICE_ID_RE, maximum=64
     )
     if len(values) != len(cleaned):
-        raise ValueError(f"{field}: ismétlődő szabály-azonosító")
+        raise ValueError(f"{field}: duplicate rule identifier")
     if not 1 <= len(cleaned) <= 64:
         raise ValueError(
-            f"{field}: legalább 1 és legfeljebb 64 egyedi szabály kell"
+            f"{field}: at least 1 and at most 64 unique rules are required"
         )
     return cleaned
 
 
 def _clean_rule_domains(raw, known=None) -> tuple[str, ...]:
-    """Domain szabály proxy-bejegyzései: 1–64 egyedi teljes hostnév.
+    """Proxy entries of a domain rule: 1–64 unique full hostnames.
 
-    ``known`` megadásakor (mentéskor) csak létező bejegyzésre hivatkozhat;
-    betöltéskor csak az alakot ellenőrizzük.
+    When ``known`` is given (on save), the rule may reference only an
+    existing entry; on load only the shape is validated.
     """
     if not isinstance(raw, list):
-        raise ValueError("domains: 1–64 proxy-bejegyzésből álló lista kell")
+        raise ValueError("domains: a list of 1–64 proxy entries is required")
     cleaned = _clean_str_list(
         [value.lower() if isinstance(value, str) else value for value in raw],
         "domains", pattern=settings_store._FQDN_RE, maximum=64,
     )
     if not cleaned:
-        raise ValueError("domains: legalább egy proxy-bejegyzést válassz")
+        raise ValueError("domains: select at least one proxy entry")
     if known is not None:
         missing = [name for name in cleaned if name not in known]
         if missing:
             raise ValueError(
-                f"ismeretlen proxy-bejegyzés: {', '.join(missing)}"
+                f"unknown proxy entry: {', '.join(missing)}"
             )
     return cleaned
 
 
 def _clean_service_refs(raw, field: str = "service_refs") -> tuple[str, ...]:
-    """Szolgáltatás-szabály hivatkozásai: 1–64 egyedi ``ügynök/szolgáltatás``.
+    """References of a service rule: 1–64 unique ``agent/service``.
 
-    Az alakot szigorúan ellenőrizzük; a létezést és a bekapcsolt állapotot a
-    hívó (mentéskor a visszahívás) ellenőrzi. Betöltéskor a hiányzó hivatkozás
-    nem dobja el a szabályt, csak üres feloldott portokat ad (fail-closed).
+    The shape is strictly validated; existence and enabled state are
+    checked by the caller (by the callback on save). On load, a missing
+    reference does not discard the rule, it only yields empty resolved
+    ports (fail-closed).
     """
     if not isinstance(raw, list):
         raise ValueError(
-            f"{field}: 1–64 szolgáltatás-hivatkozásból álló lista kell"
+            f"{field}: a list of 1–64 service references is required"
         )
     values = [
         value.strip() for value in raw
@@ -1602,16 +1618,16 @@ def _clean_service_refs(raw, field: str = "service_refs") -> tuple[str, ...]:
         raw, field, pattern=_SERVICE_REF_RE, maximum=64
     )
     if len(values) != len(cleaned):
-        raise ValueError(f"{field}: ismétlődő szolgáltatás-hivatkozás")
+        raise ValueError(f"{field}: duplicate service reference")
     if not 1 <= len(cleaned) <= 64:
         raise ValueError(
-            f"{field}: legalább 1 és legfeljebb 64 egyedi szolgáltatás kell"
+            f"{field}: at least 1 and at most 64 unique services are required"
         )
     return cleaned
 
 
 def merge_port_intervals(values) -> list[tuple[int, int]]:
-    """Portok összefüggő intervallumai; az átfedő és szomszédos részek egyesülnek."""
+    """Contiguous intervals of ports; overlapping and adjacent parts merge."""
     merged: list[tuple[int, int]] = []
     for port in sorted(set(values)):
         if not isinstance(port, int) or isinstance(port, bool):
@@ -1630,7 +1646,7 @@ def format_port_interval(lo: int, hi: int, dash: str = "-") -> str:
 
 
 def format_ports(values, dash: str = "-", separator: str = ", ") -> str:
-    """Portok tömör szövege; a szomszédos portok tartományként jelennek meg."""
+    """Compact text form of ports; adjacent ports appear as a range."""
     return separator.join(
         format_port_interval(lo, hi, dash)
         for lo, hi in merge_port_intervals(values)
@@ -1638,30 +1654,30 @@ def format_ports(values, dash: str = "-", separator: str = ", ") -> str:
 
 
 def _parse_port_token(value, field: str) -> tuple[int, int]:
-    """Egy port vagy ``lo-hi`` tartomány értelmezése (mindkettő zárt)."""
+    """Parse a single port or a ``lo-hi`` range (both inclusive)."""
     text = value.strip().replace("–", "-").replace("—", "-")
     match = re.fullmatch(r"(\d+)(?:\s*-\s*(\d+))?", text)
     if match is None:
-        raise ValueError(f"{field}: érvénytelen port: {value!r}")
+        raise ValueError(f"{field}: invalid port: {value!r}")
     low = int(match.group(1))
     high = int(match.group(2)) if match.group(2) else low
     if not 1 <= low <= 65535 or not 1 <= high <= 65535:
-        raise ValueError(f"{field}: a port 1 és 65535 között lehet: {value}")
+        raise ValueError(f"{field}: the port must be between 1 and 65535: {value}")
     if low > high:
         raise ValueError(
-            f"{field}: a tartomány kezdete nem lehet nagyobb a végénél: {value}"
+            f"{field}: the start of the range cannot be greater than its end: {value}"
         )
     return low, high
 
 
 def _clean_ports(raw, field: str, maximum: int = 256) -> tuple[int, ...]:
-    """Portlista normalizálása.
+    """Normalization of a port list.
 
-    Elfogad JSON-listát (a felület ezt küldi), egyetlen egész számot, vagy
-    vessző/szóköz elválasztású szöveget. Az elem lehet egy port vagy
-    ``lo-hi`` tartomány. Az átfedő tartományokat összevonjuk, majd a
-    belső, visszafelé kompatibilis alakhoz egyedi, növekvő portokra
-    bontjuk. A korlát a felbontott portok számára vonatkozik.
+    Accepts a JSON list (what the UI sends), a single integer, or
+    comma/whitespace separated text. An element may be a single port or a
+    ``lo-hi`` range. Overlapping ranges are merged, then split into unique,
+    ascending ports for the internal, backward-compatible form. The limit
+    applies to the number of resolved ports.
     """
     if raw is None:
         return ()
@@ -1670,7 +1686,7 @@ def _clean_ports(raw, field: str, maximum: int = 256) -> tuple[int, ...]:
     elif isinstance(raw, int) and not isinstance(raw, bool):
         raw = [raw]
     if not isinstance(raw, (list, tuple)):
-        raise ValueError(f"{field}: portlista kell")
+        raise ValueError(f"{field}: a port list is required")
     intervals: list[tuple[int, int]] = []
     for value in raw:
         if isinstance(value, str):
@@ -1681,8 +1697,8 @@ def _clean_ports(raw, field: str, maximum: int = 256) -> tuple[int, ...]:
         elif isinstance(value, int) and not isinstance(value, bool):
             intervals.append(_parse_port_token(str(value), field))
         else:
-            raise ValueError(f"{field}: érvénytelen port: {value!r}")
-    # Előbb összevonunk, hogy egy átfedő listát ne számoljunk kétszer.
+            raise ValueError(f"{field}: invalid port: {value!r}")
+    # Merge first, so that an overlapping list is not counted twice.
     merged: list[tuple[int, int]] = []
     for low, high in sorted(intervals):
         if merged and low <= merged[-1][1] + 1:
@@ -1691,7 +1707,7 @@ def _clean_ports(raw, field: str, maximum: int = 256) -> tuple[int, ...]:
             merged.append((low, high))
     total = sum(high - low + 1 for low, high in merged)
     if total > maximum:
-        raise ValueError(f"{field}: legfeljebb {maximum} port adható meg")
+        raise ValueError(f"{field}: at most {maximum} ports may be given")
     ports: list[int] = []
     for low, high in merged:
         ports.extend(range(low, high + 1))
@@ -1699,51 +1715,51 @@ def _clean_ports(raw, field: str, maximum: int = 256) -> tuple[int, ...]:
 
 
 def _clean_direction(raw) -> str:
-    """A szabály iránya: ``forward`` (alapértelmezett) vagy ``input``."""
+    """The rule's direction: ``forward`` (default) or ``input``."""
     if raw is None:
         return "forward"
     if not isinstance(raw, str):
-        raise ValueError("direction: forward vagy input érték kell")
+        raise ValueError("direction: must be forward or input")
     value = raw.strip()
     if not value:
         return "forward"
     if value not in ("forward", "input"):
-        raise ValueError("direction: forward vagy input érték kell")
+        raise ValueError("direction: must be forward or input")
     return value
 
 
 def _validate_host_ports(direction: str, ports: Ports) -> None:
-    """Host (input) szabály megkötései; forward szabályt nem érint.
+    """Restrictions of a host (input) rule; forward rules are unaffected.
 
-    A host szabály csak explicit TCP/UDP portot nyithat: teljes hozzáférés,
-    ICMP és szolgáltatáslista nem megengedett. Egyedül a portál (8100)
-    portja fenntartott. A 22-es TCP-port (SSH) közönséges host-portként
-    nyitható meg; ez az egyetlen út a host SSH-hoz, ezért a szabályt
-    adminisztrátor hozza létre és rendeli a felhasználóhoz. Az UDP 22 nem
-    SSH, hanem közönséges host-port.
+    A host rule may open only an explicit TCP/UDP port: full access, ICMP
+    and a service list are not allowed. Only the portal's port (8100) is
+    reserved. TCP port 22 (SSH) may be opened as an ordinary host port;
+    this is the only route to host SSH, therefore an administrator creates
+    the rule and assigns it to the user. UDP 22 is not SSH but an ordinary
+    host port.
     """
     if direction != "input":
         return
     if ports.full:
-        raise ValueError("host szabály nem lehet teljes hozzáférésű")
+        raise ValueError("a host rule cannot have full access")
     if ports.icmp:
-        raise ValueError("host szabály nem tartalmazhat ICMP-t")
+        raise ValueError("a host rule cannot contain ICMP")
     if not (ports.tcp or ports.udp):
         raise ValueError(
-            "host szabályhoz legalább egy TCP vagy UDP port kell"
+            "a host rule requires at least one TCP or UDP port"
         )
     if 8100 in ports.tcp or 8100 in ports.udp:
         raise ValueError(
-            "a 8100-as port (portál) nem nyitható meg host szabállyal"
+            "port 8100 (portal) cannot be opened with a host rule"
         )
 
 
 def _validate_host_payload(data: dict, direction: str) -> None:
-    """A host szabály nyers mezőinek ellenőrzése a portok előállítása előtt.
+    """Validation of the raw fields of a host rule before building the ports.
 
-    Az üres portlista általános hibaüzenete helyett itt a host szabályra
-    vonatkozó üzenetet adjuk, és a teljes/ICMP mezőket is hamarabb
-    utasítjuk el, mint az általános ``_ports_from_payload``.
+    Instead of the generic error message for an empty port list, here we
+    give a message specific to the host rule, and reject the full/ICMP
+    fields earlier than the generic ``_ports_from_payload`` does.
     """
     if direction != "input":
         return
@@ -1752,44 +1768,44 @@ def _validate_host_payload(data: dict, direction: str) -> None:
     icmp = data.get("icmp", False)
     full = data.get("full", False)
     if not isinstance(icmp, bool):
-        raise ValueError("icmp: logikai érték kell")
+        raise ValueError("icmp: a boolean is required")
     if not isinstance(full, bool):
-        raise ValueError("full: logikai érték kell")
+        raise ValueError("full: a boolean is required")
     _validate_host_ports(
         direction, Ports(tcp, udp, icmp, full, direction)
     )
 
 
 def _ports_from_payload(data: dict) -> Ports:
-    """A szabály portmezőinek ellenőrzése és Ports előállítása."""
+    """Validation of the rule's port fields and construction of Ports."""
     tcp = _clean_ports(data.get("tcp"), "tcp")
     udp = _clean_ports(data.get("udp"), "udp")
     icmp = data.get("icmp", False)
     full = data.get("full", False)
     if not isinstance(icmp, bool):
-        raise ValueError("icmp: logikai érték kell")
+        raise ValueError("icmp: a boolean is required")
     if not isinstance(full, bool):
-        raise ValueError("full: logikai érték kell")
+        raise ValueError("full: a boolean is required")
     if full and (tcp or udp or icmp):
         raise ValueError(
-            "teljes hozzáféréshez nem adható meg port vagy ICMP"
+            "full access cannot have a port or ICMP"
         )
     if not (tcp or udp or icmp or full):
         raise ValueError(
-            "legalább egy portot, ICMP-t vagy teljes hozzáférést válassz"
+            "select at least one port, ICMP or full access"
         )
     return Ports(tcp, udp, icmp, full)
 
 
 class RuleStore:
-    """rules.json: admin által létrehozott hozzáférési szabályok.
+    """rules.json: access rules created by an admin.
 
-    A mindenkori szabályok kizárólag a fájlból származnak; nincs beépített
-    vagy szintetikus szabály. A LEGACY_ADMIN_RULE_ID fenntartott, régi
-    azonosító: nem hozható létre, nem rendelhető hozzá, és a betöltés
-    kiszűri a fájlból. Ha a fájl még nem létezik, a services.json
-    scenariói induló szabályokként létrejönnek, így a korábbi telepítés
-    viselkedése megmarad.
+    The rules at any time come exclusively from the file; there is no
+    built-in or synthetic rule. LEGACY_ADMIN_RULE_ID is a reserved legacy
+    identifier: it cannot be created or assigned, and loading filters it
+    out of the file. If the file does not exist yet, the scenarios of
+    services.json are created as initial rules, preserving the behaviour
+    of earlier installations.
     """
 
     def __init__(
@@ -1804,37 +1820,38 @@ class RuleStore:
         self.path = os.path.abspath(path)
         self.catalog = catalog if catalog is not None else ServiceCatalog.load()
         self.log = logger
-        # Visszahívás: a létező proxy-bejegyzések teljes hostnevei. Nélküle
-        # domain szabály nem menthető (fail-closed).
+        # Callback: the full hostnames of the existing proxy entries.
+        # Without it a domain rule cannot be saved (fail-closed).
         self.domain_names = domain_names
-        # Visszahívás: "<ügynök>/<szolgáltatás>" -> {"tcp": (...), "udp": (...)}
-        # vagy None, ha a szolgáltatás hiányzik/le van tiltva. Nélküle a
-        # szolgáltatás-szabály feloldott portjai üresek (fail-closed).
+        # Callback: "<agent>/<service>" -> {"tcp": (...), "udp": (...)}
+        # or None if the service is missing/disabled. Without it the
+        # resolved ports of a service rule are empty (fail-closed).
         self.service_ports = service_ports
-        # Visszahívás: "<ügynök>/<szolgáltatás>" -> feloldott bejegyzés vagy
-        # None (hiányzó/letiltott). A domain-módú szolgáltatások hostnevét
-        # ebből oldjuk fel; nélküle ilyen szolgáltatás nem ad domaint.
+        # Callback: "<agent>/<service>" -> resolved entry or None
+        # (missing/disabled). The hostname of domain-mode services is
+        # resolved from this; without it such a service yields no domain.
         self.service_domains = service_domains
-        # A régi, egyetlen proxy-gyökér: a pont nélküli régi hivatkozások
-        # betöltéskor ez alá kerülnek (lásd _resolve_bare_domains).
+        # The old, single proxy root: old references without a dot are
+        # placed under it on load (see _resolve_bare_domains).
         self.legacy_proxy_domain = ""
-        # RLock: a _locked() ugyanabban a szálban beágyazható (például egy
-        # zárt szakaszból hívott create()), és a _load() is újra beléphet.
+        # RLock: _locked() can be nested within the same thread (for example
+        # a create() called from a locked section), and _load() can also
+        # re-enter.
         self._lock = threading.RLock()
         self._lock_state = threading.local()
         self._rules: dict[str, Rule] = {}
         self._loaded = False
 
-    # -- fájlkezelés -----------------------------------------------------------
+    # -- file handling ---------------------------------------------------------
 
     @contextmanager
     def _locked(self):
-        """Kizárólagos szabálytár-zár (folyamaton belül és fájlszinten).
+        """Exclusive rule store lock (within the process and at file level).
 
-        A belső hívások ugyanazt a zárat használják: a flockot csak a
-        legkülső _locked() nyitja meg, így a beágyazott hívás nem akad meg
-        önmagán. A folyamaton belüli RLock a _load()/_rules konzisztenciáját
-        is biztosítja a fájllock alatt.
+        Nested calls use the same lock: only the outermost _locked() opens
+        the flock, so a nested call does not block on itself. The in-process
+        RLock also ensures the consistency of _load()/_rules under the file
+        lock.
         """
         self._lock.acquire()
         try:
@@ -1870,12 +1887,12 @@ class RuleStore:
         except FileNotFoundError:
             return {}
         except (OSError, ValueError) as exc:
-            raise RuleStoreError(f"a szabálytár nem olvasható: {exc}") from exc
+            raise RuleStoreError(f"the rule store cannot be read: {exc}") from exc
         if not isinstance(data, dict):
-            raise RuleStoreError("a szabálytár formátuma hibás")
+            raise RuleStoreError("the rule store has an invalid format")
         raw_rules = data.get("rules", data)
         if not isinstance(raw_rules, dict):
-            raise RuleStoreError("a szabálytár rules mezője hibás")
+            raise RuleStoreError("the rules field of the rule store is invalid")
         return raw_rules
 
     def _write_raw(self, data: dict) -> None:
@@ -1912,14 +1929,14 @@ class RuleStore:
         target = f"{self.path}.corrupt-{stamp}"
         try:
             os.replace(self.path, target)
-            self.log(f"[szabályok] hibás fájl félretéve: {target} ({why})")
+            self.log(f"[rules] corrupt file set aside: {target} ({why})")
         except OSError as exc:
-            self.log(f"[szabályok] a hibás fájl félretétele nem sikerült: {exc}")
+            self.log(f"[rules] failed to set aside the corrupt file: {exc}")
 
-    # -- betöltés --------------------------------------------------------------
+    # -- loading ---------------------------------------------------------------
 
     def _ports_from_services(self, services) -> Ports:
-        """Régi, szolgáltatás-alapú szabály átalakítása portokra."""
+        """Convert an old, service-based rule into ports."""
         try:
             resolved = self.catalog.resolve(list(services))
         except AccessError as exc:
@@ -1942,10 +1959,11 @@ class RuleStore:
         )
 
     def _resolve_bare_domains(self, rule_id: str, item: dict):
-        """Régi (3.6 előtti) domain szabály pont nélküli bejegyzésnevei.
+        """Dotless entry names of old (pre-3.6) domain rules.
 
-        A név a régi, egyetlen gyökérdomain alá kerül (igaz: átírandó).
-        Gyökér nélkül nem oldható fel: naplózva kimarad, a fájl változatlan.
+        The name is placed under the old, single root domain (true:
+        deprecated). Without a root it cannot be resolved: it is logged and
+        left out, the file stays unchanged.
         """
         raw = item.get("domains")
         if "members" in item or not isinstance(raw, list) or not any(
@@ -1959,8 +1977,8 @@ class RuleStore:
             if isinstance(value, str) and value.strip() and "." not in value:
                 if not root:
                     self.log(
-                        f"[szabályok] {rule_id}: gyökérdomain nélkül fel nem "
-                        f"oldható proxy-bejegyzés elhagyva: {value.strip()}"
+                        f"[rules] {rule_id}: proxy entry without a root "
+                        f"domain cannot be resolved, left out: {value.strip()}"
                     )
                     continue
                 value = f"{value.strip().lower()}.{root}"
@@ -1970,10 +1988,10 @@ class RuleStore:
     def _resolve_service_ports(
         self, refs
     ) -> tuple[tuple[int, ...], tuple[int, ...]]:
-        """Hivatkozások feloldott TCP/UDP hallgató portjainak uniója.
+        """Union of the resolved TCP/UDP listener ports of the references.
 
-        Hiányzó vagy letiltott hivatkozásnál a visszahívás ``None``-t ad:
-        az adott ref kimarad, a szabály viszont megmarad (fail-closed).
+        For a missing or disabled reference the callback returns ``None``:
+        that ref is skipped, but the rule is kept (fail-closed).
         """
         resolver = self.service_ports
         tcp: set[int] = set()
@@ -1983,10 +2001,9 @@ class RuleStore:
         for ref in refs:
             try:
                 resolved = resolver(ref)
-            except Exception as exc:  # a hibás konfiguráció ne nyisson portot
+            except Exception as exc:  # a broken configuration must not open a port
                 self.log(
-                    f"[szabályok] a(z) {ref} szolgáltatás feloldása nem "
-                    f"sikerült: {exc}"
+                    f"[rules] failed to resolve service {ref}: {exc}"
                 )
                 continue
             if not resolved:
@@ -1996,12 +2013,11 @@ class RuleStore:
         return tuple(sorted(tcp)), tuple(sorted(udp))
 
     def _resolve_service_domains(self, refs) -> tuple[str, ...]:
-        """Hivatkozások feloldott proxy-hostnevei.
+        """Proxy hostnames resolved from the references.
 
-        Csak a domain-módú szolgáltatások adnak nevet; a port-szolgáltatás
-        bejegyzésében üres a ``domain``. Hiányzó vagy letiltott
-        hivatkozásnál a visszahívás ``None``-t ad, az adott ref kimarad
-        (fail-closed).
+        Only domain-mode services yield a name; the ``domain`` field is
+        empty in a port service entry. For a missing or disabled reference
+        the callback returns ``None``, that ref is skipped (fail-closed).
         """
         resolver = self.service_domains
         names: list[str] = []
@@ -2010,10 +2026,10 @@ class RuleStore:
         for ref in refs:
             try:
                 resolved = resolver(ref)
-            except Exception as exc:  # a hibás konfiguráció ne adjon domaint
+            except Exception as exc:  # a broken configuration must not yield a domain
                 self.log(
-                    f"[szabályok] a(z) {ref} szolgáltatás domainje nem "
-                    f"oldható fel: {exc}"
+                    f"[rules] the domain of service {ref} cannot be "
+                    f"resolved: {exc}"
                 )
                 continue
             if not resolved:
@@ -2025,12 +2041,12 @@ class RuleStore:
 
     @staticmethod
     def _signature_rows(ref: str, resolved: dict) -> tuple:
-        """Egy feloldott hivatkozás aláírás-sorai.
+        """Signature rows of one resolved reference.
 
-        A ``tunnel_service_index`` a teljes leképezést ``signature``
-        kulcsban adja; a csak portokat ismerő visszahívásoknál (tesztek,
-        régi integrációk) a hallgató portokból és a célhostból képzünk
-        konzervatív, de döntéskor ugyanúgy összevethető sorokat.
+        ``tunnel_service_index`` provides the full mapping in the
+        ``signature`` key; for callbacks that know only ports (tests, old
+        integrations) we build rows from the listener ports and the target
+        host that are conservative but equally comparable at decision time.
         """
         rows = resolved.get("signature")
         if rows is not None:
@@ -2041,9 +2057,9 @@ class RuleStore:
             )
         host = str(resolved.get("target_host", "") or "")
         out = []
-        # A régi/egyszerű visszahívások nem adnak signature-t; a domain-
-        # módú szolgáltatás nevét ilyenkor is a signature részeként
-        # vesszük, hogy az átnevezés érvénytelenítsen.
+        # Old/simple callbacks do not provide a signature; the name of a
+        # domain-mode service is still taken as part of the signature, so
+        # that renaming invalidates it.
         domain = str(resolved.get("domain", "") or "")
         if domain:
             out.append((ref, "domain", 0, domain, 0))
@@ -2054,10 +2070,10 @@ class RuleStore:
         return tuple(out)
 
     def _resolve_service_signature(self, refs) -> tuple:
-        """A hivatkozások feloldott, rendezett leképezés-aláírása.
+        """The resolved, sorted mapping signature of the references.
 
-        Hiányzó/letiltott hivatkozás kimarad; a külön ``service_tcp``/
-        ``service_udp`` ellenőrzés ilyenkor külön fail-closed.
+        A missing/disabled reference is skipped; the separate
+        ``service_tcp``/``service_udp`` check then fails closed separately.
         """
         resolver = self.service_ports
         rows: set[tuple] = set()
@@ -2066,10 +2082,10 @@ class RuleStore:
         for ref in refs:
             try:
                 resolved = resolver(ref)
-            except Exception as exc:  # a hibás konfiguráció ne nyisson portot
+            except Exception as exc:  # a broken configuration must not open a port
                 self.log(
-                    f"[szabályok] a(z) {ref} szolgáltatás aláírása nem "
-                    f"sikerült: {exc}"
+                    f"[rules] failed to compute the signature of service "
+                    f"{ref}: {exc}"
                 )
                 continue
             if not resolved:
@@ -2078,12 +2094,12 @@ class RuleStore:
         return tuple(sorted(rows))
 
     def service_signature(self, refs) -> tuple:
-        """A döntéskori összehasonlításhoz használt nyilvános aláírás."""
+        """The public signature used for comparison at decision time."""
         return self._resolve_service_signature(refs)
 
     def _parse_rule(self, rule_id: str, item: dict) -> Rule:
         if not isinstance(item, dict):
-            raise RuleStoreError(f"{rule_id}: hibás bejegyzés")
+            raise RuleStoreError(f"{rule_id}: invalid entry")
         members: tuple[str, ...] = ()
         domains: tuple[str, ...] = ()
         service_refs: tuple[str, ...] = ()
@@ -2092,10 +2108,11 @@ class RuleStore:
         service_domains: tuple[str, ...] = ()
         service_signature: tuple = ()
         if "members" in item:
-            # A gyűjtőszabály tárolt portmezői és iránya nem mérvadók: a
-            # portokat és az irányokat a tagokból számoljuk. A fájlban csak
-            # a taglista marad meg. Az esetleges elavult direction mezőt
-            # szándékosan nem validáljuk.
+            # The stored port fields and direction of a collection rule are
+            # not authoritative: the ports and directions are computed from
+            # the members. Only the member list is kept in the file. A
+            # possibly obsolete direction field is deliberately not
+            # validated.
             try:
                 members = _clean_rule_members(item.get("members"))
             except ValueError as exc:
@@ -2103,7 +2120,7 @@ class RuleStore:
             ports = Ports()
             direction = "forward"
         elif "domains" in item:
-            # Domain szabály: a tárolt portmezők nem mérvadók.
+            # Domain rule: the stored port fields are not authoritative.
             try:
                 domains = _clean_rule_domains(item.get("domains"))
             except ValueError as exc:
@@ -2111,8 +2128,9 @@ class RuleStore:
             ports = Ports()
             direction = "forward"
         elif "service_refs" in item:
-            # Szolgáltatás-szabály: a tárolt portmezők nem mérvadók; a
-            # portokat a hivatkozott szolgáltatások hallgató portjai adják.
+            # Service rule: the stored port fields are not authoritative;
+            # the ports are given by the listener ports of the referenced
+            # services.
             try:
                 service_refs = _clean_service_refs(item.get("service_refs"))
             except ValueError as exc:
@@ -2130,15 +2148,15 @@ class RuleStore:
             if self._is_legacy(item):
                 if direction == "input":
                     raise RuleStoreError(
-                        f"{rule_id}: host szabály nem használhat "
-                        "szolgáltatáslistát"
+                        f"{rule_id}: a host rule cannot use "
+                        "a service list"
                     )
                 services = _clean_str_list(
                     item.get("services"), f"{rule_id}.services", maximum=32
                 )
                 if not services:
                     raise RuleStoreError(
-                        f"{rule_id}: legalább egy port vagy szolgáltatás kell"
+                        f"{rule_id}: at least one port or service is required"
                     )
                 ports = self._ports_from_services(services)
             else:
@@ -2150,9 +2168,9 @@ class RuleStore:
         default_ttl = item.get("default_ttl", DEFAULT_TTL)
         max_ttl = item.get("max_ttl", MAX_TTL)
         if isinstance(default_ttl, bool) or not isinstance(default_ttl, int):
-            raise RuleStoreError(f"{rule_id}: hibás default_ttl")
+            raise RuleStoreError(f"{rule_id}: invalid default_ttl")
         if isinstance(max_ttl, bool) or not isinstance(max_ttl, int):
-            raise RuleStoreError(f"{rule_id}: hibás max_ttl")
+            raise RuleStoreError(f"{rule_id}: invalid max_ttl")
         if not (MIN_TTL <= default_ttl <= MAX_TTL):
             default_ttl = min(max(default_ttl, MIN_TTL), MAX_TTL)
         if not (MIN_TTL <= max_ttl <= MAX_TTL):
@@ -2187,36 +2205,36 @@ class RuleStore:
     def _collection_issue(
         rule: Rule, rules: dict[str, Rule]
     ) -> str:
-        """A gyűjtőszabály hivatkozási hibája, vagy üres szöveg.
+        """The reference error of a collection rule, or an empty string.
 
-        Egy szintű gyűjtést engedünk: a tagok létező, egyedi, nem teljes
-        hozzáférésű szabályok lehetnek, másik gyűjtő nem. A tagok iránya
-        vegyes is lehet; minden tag a saját irányában ad engedélyt.
-        Szolgáltatás-szabály (service_refs) szándékosan LEHET gyűjtőtag: a
-        feloldott portjai a forward unióba kerülnek.
+        We allow one level of collection: the members may be existing,
+        unique, non-full-access rules, but not another collection. The
+        members' directions may be mixed; each member grants in its own
+        direction. A service rule (service_refs) may deliberately BE a
+        collection member: its resolved ports go into the forward union.
         """
         if not rule.members:
             return ""
         for member_id in rule.members:
             if member_id == rule.id:
-                return "a gyűjtőszabály nem tartalmazhatja önmagát"
+                return "a collection rule cannot contain itself"
             if member_id == LEGACY_ADMIN_RULE_ID:
                 return (
-                    "ez egy fenntartott, régi azonosító, nem lehet "
-                    "gyűjtőszabály tagja"
+                    "this is a reserved, legacy identifier and cannot be "
+                    "a member of a collection rule"
                 )
             member = rules.get(member_id)
             if member is None:
-                return f"ismeretlen szabály a gyűjtőszabályban: {member_id}"
+                return f"unknown rule in the collection rule: {member_id}"
             if member.members:
                 return (
-                    "a gyűjtőszabály nem tartalmazhat másik "
-                    f"gyűjtőszabályt: {member_id}"
+                    "a collection rule cannot contain another "
+                    f"collection rule: {member_id}"
                 )
             if member.full:
                 return (
-                    "a gyűjtőszabály nem tartalmazhat teljes hozzáférésű "
-                    f"szabályt: {member_id}"
+                    "a collection rule cannot contain a full-access "
+                    f"rule: {member_id}"
                 )
         return ""
 
@@ -2227,7 +2245,7 @@ class RuleStore:
             try:
                 ports = self._ports_from_services(scn.services)
             except RuleStoreError as exc:
-                self.log(f"[szabályok] a(z) {sid} kezdő szabály kimaradt: {exc}")
+                self.log(f"[rules] initial rule {sid} left out: {exc}")
                 continue
             seeded[sid] = Rule(
                 id=sid,
@@ -2254,7 +2272,7 @@ class RuleStore:
             try:
                 raw = self._read_raw()
             except RuleStoreError as exc:
-                self.log(f"[szabályok] {exc}")
+                self.log(f"[rules] {exc}")
                 raw = {}
                 self._quarantine(str(exc))
             rules: dict[str, Rule] = {}
@@ -2265,28 +2283,29 @@ class RuleStore:
             seen_ids: set[str] = set()
             for raw_id, item in raw.items():
                 try:
-                    # Az azonosítót a fenntartott azonosító ellenőrzése
-                    # ELŐTT normalizáljuk: a "admin-full " / " admin-full"
-                    # / "admin-full\t" változatok sem kerülhetnek be.
-                    clean_id = _clean_id(raw_id, "szabály-azonosító")
+                    # Normalize the identifier BEFORE checking it against
+                    # the reserved identifier: the "admin-full " /
+                    # " admin-full" / "admin-full\t" variants must not get
+                    # in either.
+                    clean_id = _clean_id(raw_id, "rule identifier")
                 except ValueError as exc:
                     parse_failed = True
-                    self.log(f"[szabályok] kihagyott hibás szabály: {exc}")
+                    self.log(f"[rules] invalid rule skipped: {exc}")
                     continue
                 if clean_id == LEGACY_ADMIN_RULE_ID:
-                    # Fenntartott, régi azonosító (bármilyen whitespace-szel
-                    # is írták): sosem lesz belőle szabály; a fájlból
-                    # lentebb, hiba nélkül kiszűrjük.
+                    # Reserved legacy identifier (however it was written,
+                    # with any whitespace): it never becomes a rule; we
+                    # filter it out of the file below, without error.
                     legacy_admin_found = True
                     continue
                 if clean_id in seen_ids:
-                    # Két különböző nyers kulcs normalizálódott ugyanarra
-                    # az azonosítóra. Nem írjuk felül csendben az első
-                    # bejegyzést: ez ugyanolyan hibás fájl, mint bármely
-                    # más parse hiba, ezért nem írjuk át automatikusan.
+                    # Two different raw keys normalized to the same
+                    # identifier. We do not silently overwrite the first
+                    # entry: this is as invalid a file as any other parse
+                    # error, so we do not rewrite it automatically.
                     parse_failed = True
                     self.log(
-                        "[szabályok] kihagyott ismétlődő szabály-azonosító: "
+                        "[rules] duplicate rule identifier skipped: "
                         f"{raw_id!r} -> {clean_id}"
                     )
                     continue
@@ -2302,22 +2321,22 @@ class RuleStore:
                     rules[clean_id] = self._parse_rule(clean_id, item)
                 except (ValueError, RuleStoreError) as exc:
                     parse_failed = True
-                    self.log(f"[szabályok] kihagyott hibás szabály: {exc}")
-            # A gyűjtőszabályok hivatkozásait csak azután tudjuk ellenőrizni,
-            # hogy az összes szabály beolvasódott. A hibás gyűjtőket kihagyjuk;
-            # így az admin felület és a hozzáférés sem lát csonka uniót.
+                    self.log(f"[rules] invalid rule skipped: {exc}")
+            # The references of collection rules can only be checked after
+            # all rules have been loaded. Invalid collections are left out;
+            # thus neither the admin UI nor access sees a partial union.
             for collection_id in list(rules):
                 issue = self._collection_issue(rules[collection_id], rules)
                 if issue:
                     parse_failed = True
                     self.log(
-                        "[szabályok] kihagyott hibás gyűjtőszabály: "
+                        "[rules] invalid collection rule skipped: "
                         f"{collection_id}: {issue}"
                     )
                     del rules[collection_id]
-            # A gyűjtők feloldott szolgáltatás-portjai a tagokból számolt
-            # értékek (nem perzisztáltak). Erre a reflect_services() és a
-            # döntéskori újraellenőrzés is támaszkodik.
+            # The resolved service ports of collections are values computed
+            # from the members (not persisted). reflect_services() and the
+            # re-check at decision time rely on this too.
             for collection_id, rule in list(rules.items()):
                 if not rule.members:
                     continue
@@ -2337,9 +2356,10 @@ class RuleStore:
                     service_udp=tuple(sorted(udp)),
                     service_signature=tuple(sorted(signature)),
                 )
-            # Csak az első induláskor (amikor még nincs szabályfájl) seedingelünk.
-            # Ha az admin később minden szabályt töröl, az üres fájl megmarad,
-            # és a szabályok nem kelnek újra életre a következő indításnál.
+            # We seed only on the very first start (when there is no rule
+            # file yet). If the admin later deletes all rules, the empty
+            # file remains, and the rules do not come back to life on the
+            # next start.
             if not rules and not existed:
                 rules = self._seed()
                 if rules:
@@ -2348,18 +2368,18 @@ class RuleStore:
                             {rid: self._rule_storage(rule) for rid, rule in rules.items()}
                         )
                         self.log(
-                            f"[szabályok] kezdő szabályok létrehozva: "
+                            f"[rules] initial rules created: "
                             f"{', '.join(rules)}"
                         )
                     except OSError as exc:
-                        self.log(f"[szabályok] a kezdő szabályok mentése nem sikerült: {exc}")
+                        self.log(f"[rules] failed to save the initial rules: {exc}")
             elif existed and not parse_failed and (
                 legacy_admin_found or legacy_found or domains_migrated
             ):
-                # Régi fájl: előbb 0600 biztonsági másolat, majd a
-                # megtisztított, új formátum kiírása. A fenntartott
-                # admin-full kulcs kikerül; ha csak az volt benne, az
-                # eredmény üres szabálytár, és nem seedelünk újra.
+                # Old file: first a 0600 backup, then write the cleaned,
+                # new format. The reserved admin-full key is removed; if it
+                # was the only one, the result is an empty rule store, and
+                # we do not seed again.
                 suffix = (
                     "admin-full-backup" if legacy_admin_found
                     else "services-backup" if legacy_found
@@ -2374,31 +2394,31 @@ class RuleStore:
                     )
                     if legacy_admin_found:
                         self.log(
-                            "[szabályok] a fenntartott, régi admin-full "
-                            "bejegyzés eltávolítva; biztonsági másolat: "
+                            "[rules] reserved legacy admin-full "
+                            "entry removed; backup: "
                             f"{backup}"
                         )
                     if legacy_found:
                         self.log(
-                            "[szabályok] a régi szolgáltatás-alapú szabályok "
-                            f"portokra átalakítva; biztonsági másolat: {backup}"
+                            "[rules] old service-based rules converted "
+                            f"to ports; backup: {backup}"
                         )
                     if domains_migrated:
                         self.log(
-                            "[szabályok] a régi domain szabályok teljes "
-                            f"hostnévre átalakítva; biztonsági másolat: {backup}"
+                            "[rules] old domain rules converted to full "
+                            f"hostnames; backup: {backup}"
                         )
                 except OSError as exc:
                     self.log(
-                        "[szabályok] a régi szabályfájl tisztítása nem "
-                        f"sikerült: {exc}"
+                        "[rules] cleaning up the old rule file failed: "
+                        f"{exc}"
                     )
             elif existed and parse_failed and (
                 legacy_admin_found or legacy_found or domains_migrated
             ):
                 self.log(
-                    "[szabályok] FIGYELEM: a régi szabályfájl hibás bejegyzést "
-                    "tartalmaz, ezért nem írom át automatikusan"
+                    "[rules] WARNING: the old rule file contains an invalid "
+                    "entry, so it is not rewritten automatically"
                 )
             self._rules = rules
             self._loaded = True
@@ -2406,10 +2426,11 @@ class RuleStore:
     @staticmethod
     def _rule_storage(rule: Rule) -> dict:
         if rule.members:
-            # Gyűjtőnél a portok és az irány is számított értékek: soha nem
-            # perzisztáljuk őket, különben a tagok későbbi módosítása
-            # elavult uniót vagy irányt adna. A gyűjtőnek nincs saját
-            # iránya, ezért a direction mező sem kerül a fájlba.
+            # For a collection the ports and the direction are also computed
+            # values: we never persist them, otherwise a later change to the
+            # members would yield a stale union or direction. A collection
+            # has no direction of its own, so the direction field is not
+            # written to the file either.
             return {
                 "label": rule.label,
                 "description": rule.description,
@@ -2428,9 +2449,9 @@ class RuleStore:
                 "created": rule.created,
             }
         if rule.service_refs:
-            # A feloldott portok és az irány számított értékek: nem kerülnek
-            # a fájlba, különben a szolgáltatás későbbi módosítása elavult
-            # engedélyt hagyna hátra.
+            # The resolved ports and the direction are computed values: they
+            # are not written to the file, otherwise a later change to the
+            # service would leave a stale grant behind.
             return {
                 "label": rule.label,
                 "description": rule.description,
@@ -2442,8 +2463,8 @@ class RuleStore:
         return {
             "label": rule.label,
             "description": rule.description,
-            # Az egyes portok változatlan egészek; a tartományokat
-            # visszafelé kompatibilis "lo-hi" szövegként tároljuk.
+            # Individual ports remain whole numbers unchanged; ranges are
+            # stored as backward-compatible "lo-hi" text.
             "tcp": [
                 format_port_interval(low, high)
                 if low != high else low
@@ -2462,10 +2483,10 @@ class RuleStore:
             "created": rule.created,
         }
 
-    # -- konfigurációs csomag --------------------------------------------------
+    # -- configuration bundle --------------------------------------------------
 
     def export_records(self) -> dict:
-        """Az aktuális szabályok tárolási alakja a konfigurációs csomaghoz."""
+        """The storage form of the current rules for the configuration bundle."""
         self._load()
         with self._lock:
             return {
@@ -2474,34 +2495,34 @@ class RuleStore:
             }
 
     def validate_import_records(self, raw) -> dict[str, Rule]:
-        """A rules szakasz szigorú, írás nélküli ellenőrzése."""
+        """Strict, write-free validation of the rules section."""
         if not isinstance(raw, dict):
-            raise RuleStoreError("a rules szakasz JSON-objektum kell")
+            raise RuleStoreError("the rules section must be a JSON object")
         rules: dict[str, Rule] = {}
         for raw_id, item in raw.items():
             if not isinstance(raw_id, str):
-                raise RuleStoreError("érvénytelen szabály-azonosító")
+                raise RuleStoreError("invalid rule identifier")
             try:
-                clean_id = _clean_id(raw_id, "szabály-azonosító")
+                clean_id = _clean_id(raw_id, "rule identifier")
             except ValueError as exc:
                 raise RuleStoreError(str(exc)) from exc
             if clean_id != raw_id:
                 raise RuleStoreError(
-                    f"a szabály-azonosító nem normalizált: {raw_id!r}"
+                    f"the rule identifier is not normalized: {raw_id!r}"
                 )
             if clean_id == LEGACY_ADMIN_RULE_ID:
                 raise RuleStoreError(
-                    "a fenntartott szabály-azonosító nem importálható"
+                    "the reserved rule identifier cannot be imported"
                 )
             if not isinstance(item, dict):
-                raise RuleStoreError(f"{clean_id}: hibás bejegyzés")
+                raise RuleStoreError(f"{clean_id}: invalid entry")
             if self._is_legacy(item):
                 raise RuleStoreError(
-                    f"{clean_id}: a régi szolgáltatáslista nem importálható"
+                    f"{clean_id}: the old service list cannot be imported"
                 )
             if "members" in item and "domains" in item:
                 raise RuleStoreError(
-                    f"{clean_id}: a members és a domains egyszerre nem lehet jelen"
+                    f"{clean_id}: members and domains cannot be present together"
                 )
             if "service_refs" in item:
                 mixed = [
@@ -2511,12 +2532,12 @@ class RuleStore:
                 ]
                 if mixed:
                     raise RuleStoreError(
-                        f"{clean_id}: a service_refs nem kombinálható a "
-                        f"következő mezőkkel: {', '.join(mixed)}"
+                        f"{clean_id}: service_refs cannot be combined with "
+                        f"the following fields: {', '.join(mixed)}"
                     )
-                # Csak az alakot ellenőrizzük: a hivatkozott alagutak
-                # ugyanabban a csomagban is importálhatók, ezért a
-                # létezést itt szándékosan nem követeljük meg.
+                # We validate only the shape: the referenced tunnels may be
+                # imported in the same bundle, so existence is deliberately
+                # not required here.
             rules[clean_id] = self._parse_rule(clean_id, item)
         for rule in rules.values():
             issue = self._collection_issue(rule, rules)
@@ -2525,7 +2546,7 @@ class RuleStore:
         return rules
 
     def replace_all(self, rules: dict[str, Rule]) -> None:
-        """A teljes szabálytár cseréje (a hívó már ellenőrizte)."""
+        """Replacement of the entire rule store (the caller has already validated)."""
         with self._locked():
             self._write_raw({
                 rule_id: self._rule_storage(rule)
@@ -2535,17 +2556,17 @@ class RuleStore:
             self._loaded = True
 
     def reset(self) -> None:
-        """A fájl törlése és a memóriabeli szabálytár ürítése."""
+        """Delete the file and clear the in-memory rule store."""
         with self._locked():
             try:
                 os.unlink(self.path)
             except FileNotFoundError:
                 pass
             self._rules = {}
-            # Ne seedeljünk újra a folyamatban a leállás előtt.
+            # Do not seed again within the process before shutdown.
             self._loaded = True
 
-    # -- olvasás ---------------------------------------------------------------
+    # -- reading ---------------------------------------------------------------
 
     def _resolve_rule(
         self,
@@ -2553,13 +2574,14 @@ class RuleStore:
         _seen: set[str] | None = None,
         _cache: dict[str, Rule] | None = None,
     ) -> Rule:
-        """A gyűjtőszabály feloldott nézete, irányonkénti engedélyekkel.
+        """The resolved view of a collection rule, with per-direction grants.
 
-        A tagok portjai a saját irányuk szerint különülnek el: a forward
-        tagok a forward, a host (input) tagok az input halmazokba kerülnek.
-        A tagok teljes hozzáférését szándékosan nem vesszük át: gyűjtő sosem
-        adhat teljes hozzáférést. Körkörös vagy hiányzó hivatkozás esetén
-        inkább hibát dobunk, mint részleges jogosultságot.
+        The members' ports are split by their own direction: forward
+        members go into the forward sets, host (input) members into the
+        input sets. The members' full access is deliberately not taken
+        over: a collection can never grant full access. On a circular or
+        missing reference we raise an error rather than return a partial
+        grant.
         """
         if not rule.members:
             return rule
@@ -2569,7 +2591,7 @@ class RuleStore:
         seen = set() if _seen is None else set(_seen)
         if rule.id in seen:
             raise RuleStoreError(
-                f"körkörös gyűjtőszabály-hivatkozás: {rule.id}"
+                f"circular collection rule reference: {rule.id}"
             )
         seen.add(rule.id)
         forward_tcp: set[int] = set()
@@ -2587,7 +2609,7 @@ class RuleStore:
             member = self._rules.get(member_id)
             if member is None:
                 raise RuleStoreError(
-                    f"hiányzó gyűjtőszabály-tag: {member_id}"
+                    f"missing collection rule member: {member_id}"
                 )
             resolved = self._resolve_rule(member, seen, cache)
             domains.extend(
@@ -2605,12 +2627,13 @@ class RuleStore:
                 if ref not in service_refs
             )
             for parts in resolved.grants:
-                # Védelmi réteg: a validáció már kizárja a teljes
-                # hozzáférésű tagot, de a feloldás se engedje át.
+                # Defence in depth: validation already excludes a
+                # full-access member, but resolution must not let it
+                # through either.
                 if parts.full:
                     raise RuleStoreError(
-                        "a gyűjtőszabály nem tartalmazhat teljes "
-                        f"hozzáférésű szabályt: {member_id}"
+                        "a collection rule cannot contain a full-"
+                        f"access rule: {member_id}"
                     )
                 if parts.direction == "input":
                     input_tcp.update(parts.tcp)
@@ -2626,7 +2649,7 @@ class RuleStore:
         elif input_tcp or input_udp:
             display_direction = "input"
         else:
-            # Üres gyűjtő: nincs engedély, a megjelenítési irány semleges.
+            # Empty collection: no grant, the display direction is neutral.
             display_direction = "forward"
         resolved_rule = replace(
             rule,
@@ -2642,8 +2665,8 @@ class RuleStore:
             service_udp=tuple(sorted(service_udp)),
             service_domains=tuple(service_domains),
             service_signature=tuple(sorted(service_signature)),
-            # A "mixed" csak megjelenítési/audit érték; a Ports soha nem
-            # kapja meg, a ports property normalizálja.
+            # "mixed" is only a display/audit value; Ports never receives
+            # it, the ports property normalizes it.
             direction=display_direction,
         )
         cache[rule.id] = resolved_rule
@@ -2656,7 +2679,7 @@ class RuleStore:
             return self._resolve_rule(rule, _cache=cache)
         except RuleStoreError as exc:
             self.log(
-                f"[szabályok] a(z) {rule.id} gyűjtőszabály nem oldható fel: "
+                f"[rules] collection rule {rule.id} cannot be resolved: "
                 f"{exc}"
             )
             return None
@@ -2690,16 +2713,16 @@ class RuleStore:
         return resolved
 
     def _can_grant_input(self, rule: Rule) -> bool:
-        """Adhat-e a szabály host (input) hozzáférést?
+        """Can the rule grant host (input) access?
 
-        A régi, kiosztás nélküli (nem admin) fiókok visszafelé
-        kompatibilisen csak a forward szabályokat örökölhetik. Host
-        hozzáféréshez mindig kifejezett kiosztás kell, ezért a fallback
-        kizárja az input irányú szabályokat, és azokat a gyűjtőket is,
-        amelyeknek legalább egy input irányú tagja van. A gyűjtők
-        egy szintűek, ezért a közvetlen tagok vizsgálata elég. A domain
-        szabály (és az azt tartalmazó gyűjtő) is kifejezett kiosztást kér,
-        akárcsak a szolgáltatás-szabály.
+        Old accounts without an assignment (non-admin) may inherit only
+        forward rules, for backward compatibility. Host access always
+        requires an explicit assignment, therefore the fallback excludes
+        input-direction rules and also collections that have at least one
+        input-direction member. Collections are single-level, so checking
+        the direct members is enough. A domain rule (and a collection
+        containing it) also requires an explicit assignment, just like a
+        service rule.
         """
         if rule.direction == "input" or rule.domains or rule.service_refs:
             return True
@@ -2714,19 +2737,19 @@ class RuleStore:
         return False
 
     def domain_references(self) -> set[str]:
-        """A domain szabályok által hivatkozott teljes proxy-hostnevek."""
+        """Full proxy hostnames referenced by the domain rules."""
         self._load()
         return {
             name for rule in self._rules.values() for name in rule.domains
         }
 
     def service_references(self) -> dict[str, tuple[str, ...]]:
-        """Szolgáltatás-hivatkozás -> az őt tartalmazó szabályok azonosítói.
+        """Service reference -> identifiers of the rules containing it.
 
-        A gyűjtőszabályokra is kiterjed: ha egy gyűjtő tagja szolgáltatás-
-        szabály, a gyűjtő azonosítója is szerepel a hivatkozó szabályok
-        között. Így a törlés/letiltás előtti ellenőrzés a közvetett
-        hivatkozásokat is látja.
+        It also covers collection rules: if a collection has a service
+        rule as a member, the collection's identifier is also among the
+        referencing rules. Thus the check before deletion/disable also
+        sees indirect references.
         """
         self._load()
         mapping: dict[str, set[str]] = {}
@@ -2744,18 +2767,18 @@ class RuleStore:
         }
 
     def reflect_services(self) -> tuple[str, ...]:
-        """A feloldott szolgáltatás-portok újraszámítása (fájlírás nélkül).
+        """Recompute the resolved service ports (without writing the file).
 
-        A szolgáltatás-leképezés módosítása után hívjuk: a szolgáltatás-
-        szabályok és az őket tartalmazó gyűjtők feloldott portjai a
-        visszahívásból frissülnek. Visszaadja a megváltozott szabályok
-        rendezett azonosítóit, hogy a hívó a munkameneteiket visszavonhassa.
+        We call it after changing the service mapping: the resolved ports
+        of service rules and of the collections containing them are
+        refreshed from the callback. It returns the sorted identifiers of
+        the changed rules so the caller can revoke their sessions.
         """
         self._load()
         changed: set[str] = set()
         with self._lock:
-            # Először a közvetlen szolgáltatás-szabályok, hogy a gyűjtők
-            # már a friss tagértékekből számoljanak.
+            # First the direct service rules, so that the collections
+            # already compute from the fresh member values.
             for rule_id, rule in list(self._rules.items()):
                 if rule.members or not rule.service_refs:
                     continue
@@ -2813,18 +2836,18 @@ class RuleStore:
         return tuple(sorted(changed))
 
     def effective_for(self, user, groups: list[Group] | tuple[Group, ...]) -> list[Rule]:
-        """A felhasználó által választható szabályok.
+        """The rules the user may choose from.
 
-        Mindenki, az admin is, csak a neki (közvetlenül vagy csoporton
-        keresztül) kiosztott szabályokat kapja. Az admin sem kap beépített
-        vagy szintetikus szabályt: kiosztás nélkül üres listát kap. Ha egy
-        régi, nem admin felhasználóhoz még nem rendeltek szabályt (a
-        users.json-ban nincs rules mező), visszafelé kompatibilisen a
-        forward irányú szabályokat kapja meg. Host (input) szabályt és
-        input tagot tartalmazó gyűjtőt csak kifejezett kiosztással kaphat,
-        mert a host hozzáféréshez mindig kiosztás kell. Új, explicit módon
-        üresre állított felhasználó viszont semmit nem kap, amíg az admin
-        nem rendel hozzá.
+        Everyone, including the admin, receives only the rules assigned to
+        them (directly or through a group). The admin also gets no built-in
+        or synthetic rule: without an assignment they get an empty list. If
+        no rule has yet been assigned to an old, non-admin user (there is
+        no rules field in users.json), they get the forward-direction rules
+        for backward compatibility. A host (input) rule and a collection
+        containing an input member can only be obtained with an explicit
+        assignment, because host access always requires an assignment. A
+        new user explicitly set to empty, however, gets nothing until the
+        admin assigns something.
         """
         self._load()
         if getattr(user, "pending", False):
@@ -2853,10 +2876,10 @@ class RuleStore:
                 if item is not None
             ]
         if not assigned and not getattr(user, "rules_set", False):
-            # Régi, kiosztás nélküli fiók: csak forward szabályokat
-            # örökölhet. Host (input) hozzáféréshez kifejezett kiosztás
-            # kell, ezért az input szabályok és az input tagot tartalmazó
-            # gyűjtők itt nem választhatók.
+            # Old account without an assignment: it may inherit only
+            # forward rules. Host (input) access requires an explicit
+            # assignment, therefore input rules and collections containing
+            # an input member cannot be selected here.
             return [
                 item for item in (
                     self._resolved_or_none(raw, cache)
@@ -2873,28 +2896,28 @@ class RuleStore:
         self, user, groups: list[Group] | tuple[Group, ...], rule_id
     ) -> Rule:
         if not isinstance(rule_id, str) or not rule_id.strip():
-            raise AccessError("válassz hozzáférési szabályt")
+            raise AccessError("select an access rule")
         rule = next(
             (item for item in self.effective_for(user, groups)
              if item.id == rule_id.strip()),
             None,
         )
         if rule is None:
-            raise AccessError("ez a szabály nem tartozik hozzád")
+            raise AccessError("this rule does not belong to you")
         return rule
 
-    # -- írás ------------------------------------------------------------------
+    # -- writing ---------------------------------------------------------------
 
     def _validate_payload(self, data: dict, rule_id: str) -> Rule:
         if not isinstance(data, dict):
-            raise RuleStoreError("hibás szabály-adat")
+            raise RuleStoreError("invalid rule data")
         collection_flag = data.get("collection")
         if collection_flag is not None and not isinstance(collection_flag, bool):
-            raise RuleStoreError("collection: logikai érték kell")
+            raise RuleStoreError("collection: a boolean is required")
         members_raw = data.get("members")
         if "members" in data and not isinstance(members_raw, list):
             raise RuleStoreError(
-                "members: 1–64 szabály-azonosítóból álló lista kell"
+                "members: a list of 1–64 rule identifiers is required"
             )
         is_collection = collection_flag is True or bool(members_raw)
         members: tuple[str, ...] = ()
@@ -2907,24 +2930,24 @@ class RuleStore:
         ports = Ports()
         if "service_refs" in data and is_collection:
             raise RuleStoreError(
-                "a szolgáltatás-szabály nem lehet gyűjtőszabály"
+                "a service rule cannot be a collection rule"
             )
         if is_collection:
-            # A gyűjtőnek nincs saját iránya: a payload direction mezőjét
-            # szándékosan figyelmen kívül hagyjuk (nem is validáljuk).
+            # A collection has no direction of its own: the payload's
+            # direction field is deliberately ignored (and not validated).
             direction = "forward"
             tcp = _clean_ports(data.get("tcp"), "tcp")
             udp = _clean_ports(data.get("udp"), "udp")
             icmp = data.get("icmp", False)
             full = data.get("full", False)
             if not isinstance(icmp, bool):
-                raise RuleStoreError("icmp: logikai érték kell")
+                raise RuleStoreError("icmp: a boolean is required")
             if not isinstance(full, bool):
-                raise RuleStoreError("full: logikai érték kell")
+                raise RuleStoreError("full: a boolean is required")
             if tcp or udp or icmp or full:
                 raise RuleStoreError(
-                    "gyűjtőszabályhoz nem adható meg port, ICMP vagy "
-                    "teljes hozzáférés"
+                    "a collection rule cannot have a port, ICMP or "
+                    "full access"
                 )
             try:
                 members = _clean_rule_members(members_raw)
@@ -2940,12 +2963,12 @@ class RuleStore:
             if issue:
                 raise RuleStoreError(issue)
         elif "domains" in data:
-            # Domain szabály: nincs iránya és portja, csak proxy-bejegyzései.
+            # Domain rule: no direction and no ports, only proxy entries.
             direction = "forward"
             if any(data.get(key) for key in ("tcp", "udp", "icmp", "full")):
                 raise RuleStoreError(
-                    "domain szabályhoz nem adható meg port, ICMP vagy "
-                    "teljes hozzáférés"
+                    "a domain rule cannot have a port, ICMP or "
+                    "full access"
                 )
             known = (
                 set(self.domain_names()) if self.domain_names is not None
@@ -2956,8 +2979,8 @@ class RuleStore:
             except ValueError as exc:
                 raise RuleStoreError(str(exc)) from exc
         elif "service_refs" in data:
-            # Szolgáltatás-szabály: kizárólag a kiválasztott alagút-
-            # szolgáltatások hallgató portjai, forward irányban.
+            # Service rule: exclusively the listener ports of the selected
+            # tunnel services, in the forward direction.
             direction = "forward"
             mixed = [
                 key for key in ("members", "domains", "tcp", "udp",
@@ -2966,7 +2989,7 @@ class RuleStore:
             ]
             if mixed:
                 raise RuleStoreError(
-                    "szolgáltatás-szabályhoz nem adható meg "
+                    "a service rule cannot have "
                     f"{', '.join(mixed)}"
                 )
             try:
@@ -2980,18 +3003,18 @@ class RuleStore:
                 resolved = resolver(ref) if resolver is not None else None
                 if resolved is None:
                     raise RuleStoreError(
-                        f"ismeretlen vagy letiltott szolgáltatás: {ref}"
+                        f"unknown or disabled service: {ref}"
                     )
                 tcp.update(resolved.get("tcp") or ())
                 udp.update(resolved.get("udp") or ())
-            # A domain-módú szolgáltatásnak nincs hallgató portja, de a
-            # proxy-gapun keresztül a domainjét megnyitja; ilyenkor a
-            # szabály portok nélkül is érvényes.
+            # A domain-mode service has no listener port, but it opens its
+            # domain through the proxy gateway; in that case the rule is
+            # valid even without ports.
             service_domains = self._resolve_service_domains(service_refs)
             if not tcp and not udp and not service_domains:
                 raise RuleStoreError(
-                    "a kiválasztott szolgáltatásokhoz nincs elérhető port "
-                    "vagy domain"
+                    "the selected services have no available port "
+                    "or domain"
                 )
             service_tcp = tuple(sorted(tcp))
             service_udp = tuple(sorted(udp))
@@ -3002,16 +3025,16 @@ class RuleStore:
             except ValueError as exc:
                 raise RuleStoreError(str(exc)) from exc
             if self._is_legacy(data):
-                # Régi API-hívók még szolgáltatásneveket küldhetnek.
+                # Old API callers may still send service names.
                 if direction == "input":
                     raise RuleStoreError(
-                        "host szabály nem használhat szolgáltatáslistát"
+                        "a host rule cannot use a service list"
                     )
                 services = _clean_str_list(
                     data.get("services"), "services", maximum=32
                 )
                 if not services:
-                    raise RuleStoreError("legalább egy portot válassz")
+                    raise RuleStoreError("select at least one port")
                 ports = self._ports_from_services(services)
             else:
                 try:
@@ -3023,15 +3046,15 @@ class RuleStore:
         max_ttl = data.get("max_ttl", MAX_TTL)
         for name, value in (("default_ttl", default_ttl), ("max_ttl", max_ttl)):
             if isinstance(value, bool) or not isinstance(value, int):
-                raise RuleStoreError(f"{name}: egész másodperc kell")
+                raise RuleStoreError(f"{name}: a whole number of seconds is required")
             if not (MIN_TTL <= value <= MAX_TTL):
                 raise RuleStoreError(
-                    f"{name}: {format_duration(MIN_TTL)}–"
-                    f"{format_duration(MAX_TTL)} lehet"
+                    f"{name}: must be {format_duration(MIN_TTL)}–"
+                    f"{format_duration(MAX_TTL)}"
                 )
         if default_ttl > max_ttl:
             raise RuleStoreError(
-                "az alapértelmezett idő nem lehet hosszabb a maximumnál"
+                "the default duration cannot be longer than the maximum"
             )
         return Rule(
             id=rule_id,
@@ -3058,19 +3081,19 @@ class RuleStore:
         )
 
     def create(self, rule_id: str, data: dict) -> Rule:
-        rule_id = _clean_id(rule_id, "szabály-azonosító")
+        rule_id = _clean_id(rule_id, "rule identifier")
         if rule_id == LEGACY_ADMIN_RULE_ID:
             raise RuleStoreError(
-                "ez egy fenntartott, régi azonosító, nem használható"
+                "this is a reserved, legacy identifier and cannot be used"
             )
-        # A betöltés, a létezés-ellenőrzés, a taghivatkozások validálása és
-        # a commit ugyanazon zár alatt történik. Így egy párhuzamos
-        # delete()/update() nem teheti érvénytelenné a már validált
-        # gyűjtőszabályt a mentés előtt.
+        # Loading, existence checking, validation of the member references
+        # and the commit happen under the same lock. Thus a concurrent
+        # delete()/update() cannot invalidate an already validated
+        # collection rule before saving.
         with self._locked():
             self._load()
             if rule_id in self._rules:
-                raise RuleStoreError(f"már létezik ilyen szabály: {rule_id}")
+                raise RuleStoreError(f"a rule with this identifier already exists: {rule_id}")
             rule = self._validate_payload(data, rule_id)
             raw = {
                 rid: self._rule_storage(item)
@@ -3081,37 +3104,39 @@ class RuleStore:
             return self._resolve_rule(rule)
 
     def _update_locked(self, rule_id: str, data: dict) -> tuple[Rule, list[str]]:
-        """Módosítás a hívó által tartott _locked() alatt.
+        """Modification under the _locked() held by the caller.
 
-        Visszatérés: (feloldott szabály, a commit pontján függő gyűjtők).
-        A függő gyűjtőket ugyanabban a zárt szakaszban olvassuk, mint a
-        mentést: egy közben létrehozott gyűjtő is belekerül, ezért a
-        munkamenet-visszavonás nem maradhat el.
+        Returns: (resolved rule, collections depending at the commit
+        point). The dependent collections are read in the same locked
+        section as the save: a collection created meanwhile is also
+        included, so the session revocation cannot be skipped.
         """
         self._load()
         existing = self._rules.get(rule_id)
         if existing is None:
-            raise RuleStoreError(f"nincs ilyen szabály: {rule_id}")
+            raise RuleStoreError(f"no such rule: {rule_id}")
         updated = self._validate_payload(data, rule_id)
-        # A szülő gyűjtők listáját a commit pontján, ugyanazon zár alatt
-        # olvassuk. Mivel a create() is a commitig tartja a zárat, a soron
-        # lévő gyűjtő már itt látszik.
+        # We read the list of parent collections at the commit point,
+        # under the same lock. Since create() also holds the lock until
+        # the commit, a collection that is queued up is already visible
+        # here.
         parents = [
             rid for rid, item in self._rules.items()
             if rid != rule_id and rule_id in item.members
         ]
-        # A tag iránya megváltozhat: a gyűjtő a tagok aktuális irányából
-        # számolja az engedélyeket. A függő gyűjtők a visszatérési listában
-        # szerepelnek, így a szerver a munkameneteiket is visszavonja.
+        # The member's direction may change: the collection computes the
+        # grants from the members' current direction. The dependent
+        # collections appear in the returned list, so the server revokes
+        # their sessions too.
         if updated.members or updated.full:
-            # Egy gyűjtő tagja nem válhat gyűjtővé vagy teljes
-            # hozzáférésűvé: azzal a szülő gyűjtő két szintűvé, illetve
-            # érvénytelenné válna. Előbb ki kell venni a szülőkből.
+            # A collection member cannot become a collection or gain full
+            # access: that would make the parent collection two-level or
+            # invalid. It must first be removed from the parents.
             if parents:
                 raise RuleStoreError(
-                    f"a(z) {rule_id} szabály tagja a következő "
-                    f"gyűjtőszabályoknak: {', '.join(parents)}; előbb "
-                    "vedd ki a tagok közül"
+                    f"rule {rule_id} is a member of the following "
+                    f"collection rules: {', '.join(parents)}; first "
+                    "remove it from the members"
                 )
         updated = replace(updated, created=existing.created)
         rules = dict(self._rules)
@@ -3127,10 +3152,10 @@ class RuleStore:
         return self._resolve_rule(updated), dependents
 
     def update(self, rule_id: str, data: dict) -> Rule:
-        rule_id = _clean_id(rule_id, "szabály-azonosító")
+        rule_id = _clean_id(rule_id, "rule identifier")
         if rule_id == LEGACY_ADMIN_RULE_ID:
             raise RuleStoreError(
-                "ez egy fenntartott, régi azonosító, nem módosítható"
+                "this is a reserved, legacy identifier and cannot be modified"
             )
         with self._locked():
             resolved, _ = self._update_locked(rule_id, data)
@@ -3139,17 +3164,18 @@ class RuleStore:
     def update_with_dependents(
         self, rule_id: str, data: dict
     ) -> tuple[Rule, list[str]]:
-        """Szabály módosítása és a tőle függő gyűjtők egy záron belül.
+        """Modify a rule and the collections depending on it under one lock.
 
-        A szervernek a szabály saját és a függő gyűjtők munkameneteit is
-        vissza kell vonnia. Ha a függőlistát a módosítás előtt, külön
-        zárral olvasnánk, egy közben létrehozott gyűjtő kimaradhatna, és a
-        munkamenete a lejáratig a régi portokkal élvezne hozzáférést.
+        The server must revoke the sessions of the rule itself and of the
+        dependent collections as well. If we read the dependent list before
+        the modification, under a separate lock, a collection created
+        meanwhile could be missed, and its session would enjoy access with
+        the old ports until expiry.
         """
-        rule_id = _clean_id(rule_id, "szabály-azonosító")
+        rule_id = _clean_id(rule_id, "rule identifier")
         if rule_id == LEGACY_ADMIN_RULE_ID:
             raise RuleStoreError(
-                "ez egy fenntartott, régi azonosító, nem módosítható"
+                "this is a reserved, legacy identifier and cannot be modified"
             )
         with self._locked():
             return self._update_locked(rule_id, data)
@@ -3160,40 +3186,41 @@ class RuleStore:
         new_id: str | None = None,
         label: str | None = None,
     ) -> Rule:
-        """Meglévő szabály másolása új azonosítóval.
+        """Copy an existing rule under a new identifier.
 
-        A másolat nem ad önmagában hozzáférést: csak a szabálytárba kerül,
-        ugyanúgy, mint bármely új szabály.
+        The copy does not by itself grant access: it only enters the rule
+        store, just like any new rule.
         """
-        source_id = _clean_id(rule_id, "szabály-azonosító")
+        source_id = _clean_id(rule_id, "rule identifier")
         if source_id == LEGACY_ADMIN_RULE_ID:
             raise RuleStoreError(
-                "ez egy fenntartott, régi azonosító, nem duplikálható"
+                "this is a reserved, legacy identifier and cannot be duplicated"
             )
         self._load()
         with self._locked():
             source = self._rules.get(source_id)
             if source is None:
-                raise RuleStoreError(f"nincs ilyen szabály: {source_id}")
+                raise RuleStoreError(f"no such rule: {source_id}")
             if new_id is None:
                 target_id = self._unique_copy_id(source_id)
             else:
-                target_id = _clean_id(new_id, "szabály-azonosító")
+                target_id = _clean_id(new_id, "rule identifier")
                 if target_id == LEGACY_ADMIN_RULE_ID:
                     raise RuleStoreError(
-                        "ez egy fenntartott, régi azonosító, nem használható"
+                        "this is a reserved, legacy identifier and cannot be used"
                     )
                 if target_id in self._rules:
                     raise RuleStoreError(
-                        f"már létezik ilyen szabály: {target_id}"
+                        f"a rule with this identifier already exists: {target_id}"
                     )
-            # Az utótag helyét mindig foglaljuk le: 80 karakteres forrásnév
-            # esetén a puszta végvágás eltüntetné a másolat jelölését, és a
-            # két szabály neve azonos lenne.
+            # Always reserve room for the suffix: with an 80-character source
+            # name, mere truncation would remove the copy marker, and the two
+            # rules would have the same name.
             default_label = _copy_label(source.label)
             raw_label = label if label is not None else default_label
-            # Az explicit címkét a hívó (a felület) már az utótaggal együtt,
-            # a korláton belül küldi; a biztonság kedvéért itt is vágunk.
+            # The explicit label is already sent by the caller (the UI)
+            # together with the suffix, within the limit; we truncate here as
+            # well for safety.
             clean_label = _clean_text(
                 str(raw_label)[:80], "label", 80
             )
@@ -3227,7 +3254,7 @@ class RuleStore:
             counter += 1
 
     def collections_containing(self, rule_id: str) -> list[str]:
-        """Azon gyűjtőszabályok azonosítói, amelyek tagként hivatkoznak rá."""
+        """Identifiers of the collection rules that reference it as a member."""
         self._load()
         return [
             rid for rid, item in self._rules.items()
@@ -3235,25 +3262,25 @@ class RuleStore:
         ]
 
     def delete(self, rule_id: str) -> Rule:
-        rule_id = _clean_id(rule_id, "szabály-azonosító")
+        rule_id = _clean_id(rule_id, "rule identifier")
         if rule_id == LEGACY_ADMIN_RULE_ID:
             raise RuleStoreError(
-                "ez egy fenntartott, régi azonosító, nem törölhető"
+                "this is a reserved, legacy identifier and cannot be deleted"
             )
         self._load()
         with self._locked():
             existing = self._rules.get(rule_id)
             if existing is None:
-                raise RuleStoreError(f"nincs ilyen szabály: {rule_id}")
+                raise RuleStoreError(f"no such rule: {rule_id}")
             parents = [
                 rid for rid, item in self._rules.items()
                 if rule_id in item.members
             ]
             if parents:
                 raise RuleStoreError(
-                    f"a(z) {rule_id} szabály nem törölhető, mert tagja a "
-                    f"következő gyűjtőszabályoknak: {', '.join(parents)}; "
-                    "előbb vedd ki a tagok közül"
+                    f"rule {rule_id} cannot be deleted because it is a member "
+                    f"of the following collection rules: {', '.join(parents)}; "
+                    "first remove it from the members"
                 )
             rules = dict(self._rules)
             del rules[rule_id]
@@ -3265,7 +3292,7 @@ class RuleStore:
 
 
 class GroupStore:
-    """groups.json: csoportok, azok szabályai és tagjai."""
+    """groups.json: groups, their rules and members."""
 
     def __init__(self, path: str = GROUPS_PATH, logger=log) -> None:
         self.path = os.path.abspath(path)
@@ -3294,12 +3321,12 @@ class GroupStore:
         except FileNotFoundError:
             return {}
         except (OSError, ValueError) as exc:
-            raise GroupStoreError(f"a csoporttár nem olvasható: {exc}") from exc
+            raise GroupStoreError(f"the group store cannot be read: {exc}") from exc
         if not isinstance(data, dict):
-            raise GroupStoreError("a csoporttár formátuma hibás")
+            raise GroupStoreError("the group store has an invalid format")
         raw_groups = data.get("groups", data)
         if not isinstance(raw_groups, dict):
-            raise GroupStoreError("a csoporttár groups mezője hibás")
+            raise GroupStoreError("the groups field of the group store is invalid")
         return raw_groups
 
     def _write_raw(self, data: dict) -> None:
@@ -3343,10 +3370,10 @@ class GroupStore:
 
     def _parse(self, group_id: str, item: dict) -> Group:
         if not isinstance(item, dict):
-            raise GroupStoreError(f"{group_id}: hibás bejegyzés")
-        # A fenntartott, régi admin-full azonosítót a csoport szabályai
-        # közül is kiszűrjük, hogy egy régi groups.json ne adjon rejtett
-        # jogosultságot, és a csoport szerkesztése se akadjon el miatta.
+            raise GroupStoreError(f"{group_id}: invalid entry")
+        # We filter the reserved legacy admin-full identifier out of the
+        # group's rules too, so that an old groups.json cannot grant hidden
+        # access and editing the group does not get stuck on it.
         rules = tuple(
             rid for rid in _clean_str_list(
                 item.get("rules"), f"{group_id}.rules", maximum=64
@@ -3376,22 +3403,22 @@ class GroupStore:
             try:
                 raw = self._read_raw()
             except GroupStoreError as exc:
-                self.log(f"[csoportok] {exc}")
+                self.log(f"[groups] {exc}")
                 stamp = int(time.time())
                 target = f"{self.path}.corrupt-{stamp}"
                 try:
                     os.replace(self.path, target)
-                    self.log(f"[csoportok] hibás fájl félretéve: {target}")
+                    self.log(f"[groups] corrupt file set aside: {target}")
                 except OSError:
                     pass
                 raw = {}
             groups: dict[str, Group] = {}
             for group_id, item in raw.items():
                 try:
-                    clean_id = _clean_id(group_id, "csoport-azonosító")
+                    clean_id = _clean_id(group_id, "group identifier")
                     groups[clean_id] = self._parse(clean_id, item)
                 except (ValueError, GroupStoreError) as exc:
-                    self.log(f"[csoportok] kihagyott hibás csoport: {exc}")
+                    self.log(f"[groups] invalid group skipped: {exc}")
             self._groups = groups
             self._loaded = True
 
@@ -3408,12 +3435,12 @@ class GroupStore:
         return [group for group in self._groups.values() if user in group.members]
 
     def create(self, group_id: str, data: dict) -> Group:
-        group_id = _clean_id(group_id, "csoport-azonosító")
+        group_id = _clean_id(group_id, "group identifier")
         group = self._parse(group_id, {**data, "created": int(time.time())})
         self._load()
         with self._locked():
             if group_id in self._groups:
-                raise GroupStoreError(f"már létezik ilyen csoport: {group_id}")
+                raise GroupStoreError(f"a group with this identifier already exists: {group_id}")
             groups = dict(self._groups)
             groups[group_id] = group
             self._write_raw({gid: self._storage(item) for gid, item in groups.items()})
@@ -3421,12 +3448,12 @@ class GroupStore:
         return group
 
     def update(self, group_id: str, data: dict) -> Group:
-        group_id = _clean_id(group_id, "csoport-azonosító")
+        group_id = _clean_id(group_id, "group identifier")
         self._load()
         with self._locked():
             existing = self._groups.get(group_id)
             if existing is None:
-                raise GroupStoreError(f"nincs ilyen csoport: {group_id}")
+                raise GroupStoreError(f"no such group: {group_id}")
             updated = self._parse(group_id, {**data, "created": existing.created})
             groups = dict(self._groups)
             groups[group_id] = updated
@@ -3435,12 +3462,12 @@ class GroupStore:
         return updated
 
     def delete(self, group_id: str) -> Group:
-        group_id = _clean_id(group_id, "csoport-azonosító")
+        group_id = _clean_id(group_id, "group identifier")
         self._load()
         with self._locked():
             existing = self._groups.get(group_id)
             if existing is None:
-                raise GroupStoreError(f"nincs ilyen csoport: {group_id}")
+                raise GroupStoreError(f"no such group: {group_id}")
             groups = dict(self._groups)
             del groups[group_id]
             self._write_raw({gid: self._storage(item) for gid, item in groups.items()})
@@ -3448,9 +3475,9 @@ class GroupStore:
         return existing
 
     def set_memberships(self, user: str, group_ids) -> None:
-        """A felhasználó csoporttagságainak beállítása egy írással."""
+        """Set the user's group memberships with a single write."""
         if not USERNAME_RE.match(user):
-            raise GroupStoreError("érvénytelen felhasználónév")
+            raise GroupStoreError("invalid username")
         wanted = set(_clean_str_list(group_ids, "groups", maximum=64))
         self._load()
         with self._locked():
@@ -3458,7 +3485,7 @@ class GroupStore:
             missing = wanted - known
             if missing:
                 raise GroupStoreError(
-                    f"ismeretlen csoport: {', '.join(sorted(missing))}"
+                    f"unknown group: {', '.join(sorted(missing))}"
                 )
             groups = dict(self._groups)
             changed = False
@@ -3518,18 +3545,18 @@ class GroupStore:
     def set_rule_groups(
         self, rule_id: str, group_ids
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        """A szabály közvetlen csoport-kiosztásainak beállítása egy írással.
+        """Set the rule's direct group assignments with a single write.
 
-        Minden csoportra pontosan akkor kerül bele a szabály, ha a kért
-        halmazban szerepel. A többi szabály és a csoportok tagsága változatlan.
-        Visszatérés: (hozzáadott, eltávolított) csoport-azonosítók.
+        For every group the rule is included exactly when it is in the
+        requested set. Other rules and the groups' memberships stay
+        unchanged. Returns: (added, removed) group identifiers.
         """
         if not isinstance(rule_id, str) or not rule_id.strip():
-            raise GroupStoreError("hiányzó szabály-azonosító")
+            raise GroupStoreError("missing rule identifier")
         rule_id = rule_id.strip()
         if rule_id == LEGACY_ADMIN_RULE_ID:
             raise GroupStoreError(
-                "a fenntartott szabály-azonosító nem rendelhető hozzá"
+                "the reserved rule identifier cannot be assigned"
             )
         wanted = set(_clean_str_list(group_ids, "groups", maximum=64))
         self._load()
@@ -3538,7 +3565,7 @@ class GroupStore:
             missing = wanted - set(groups)
             if missing:
                 raise GroupStoreError(
-                    f"ismeretlen csoport: {', '.join(sorted(missing))}"
+                    f"unknown group: {', '.join(sorted(missing))}"
                 )
             added: list[str] = []
             removed: list[str] = []
@@ -3564,10 +3591,10 @@ class GroupStore:
                 self._groups = groups
             return tuple(sorted(added)), tuple(sorted(removed))
 
-    # -- konfigurációs csomag --------------------------------------------------
+    # -- configuration bundle --------------------------------------------------
 
     def export_records(self) -> dict:
-        """Az aktuális csoportok tárolási alakja a konfigurációs csomaghoz."""
+        """The storage form of the current groups for the configuration bundle."""
         self._load()
         with self._lock:
             return {
@@ -3576,31 +3603,31 @@ class GroupStore:
             }
 
     def validate_import_records(self, raw) -> dict[str, Group]:
-        """A groups szakasz szigorú, írás nélküli ellenőrzése."""
+        """Strict, write-free validation of the groups section."""
         if not isinstance(raw, dict):
-            raise GroupStoreError("a groups szakasz JSON-objektum kell")
+            raise GroupStoreError("the groups section must be a JSON object")
         groups: dict[str, Group] = {}
         for raw_id, item in raw.items():
             if not isinstance(raw_id, str):
-                raise GroupStoreError("érvénytelen csoport-azonosító")
+                raise GroupStoreError("invalid group identifier")
             try:
-                clean_id = _clean_id(raw_id, "csoport-azonosító")
+                clean_id = _clean_id(raw_id, "group identifier")
             except ValueError as exc:
                 raise GroupStoreError(str(exc)) from exc
             if clean_id != raw_id:
                 raise GroupStoreError(
-                    f"a csoport-azonosító nem normalizált: {raw_id!r}"
+                    f"the group identifier is not normalized: {raw_id!r}"
                 )
             raw_rules = item.get("rules") if isinstance(item, dict) else None
             if isinstance(raw_rules, list) and LEGACY_ADMIN_RULE_ID in raw_rules:
                 raise GroupStoreError(
-                    f"{clean_id}: a fenntartott szabály-azonosító nem importálható"
+                    f"{clean_id}: the reserved rule identifier cannot be imported"
                 )
             groups[clean_id] = self._parse(clean_id, item)
         return groups
 
     def replace_all(self, groups: dict[str, Group]) -> None:
-        """A teljes csoporttár cseréje (a hívó már ellenőrizte)."""
+        """Replacement of the entire group store (the caller has already validated)."""
         with self._locked():
             self._write_raw({
                 group_id: self._storage(group)
@@ -3610,7 +3637,7 @@ class GroupStore:
             self._loaded = True
 
     def reset(self) -> None:
-        """A fájl törlése és a memóriabeli csoporttár ürítése."""
+        """Delete the file and clear the in-memory group store."""
         with self._locked():
             try:
                 os.unlink(self.path)
@@ -3620,30 +3647,30 @@ class GroupStore:
             self._loaded = True
 
 
-# --------------------------------------------------------------------- tűzfal
+# --------------------------------------------------------------------- firewall
 
 class FirewallError(RuntimeError):
-    """Az nftables nem tudta végrehajtani a kért műveletet."""
+    """nftables could not perform the requested operation."""
 
 
 class Firewall:
-    """A dinamikus engedélyezőhalmazok kezelése.
+    """Management of the dynamic allow sets.
 
-    A halmazok elemei kerneloldali timeouttal rendelkeznek, így a hozzáférés
-    akkor is lejár, ha ez a folyamat közben leáll.
+    The set elements have a kernel-side timeout, so access expires even if
+    this process stops in the meantime.
 
-    A teljes hozzáférés az allowed_v4 halmazban van (egy IP-elem). A
-    portokhoz kötött hozzáférés két összetett halmazban: allowed_tcp és
-    allowed_udp (IP . DNAT előtti célport), illetve allowed_icmp.
-    A host (input) szabályok külön halmazokba kerülnek (allowed_input_tcp
-    és allowed_input_udp), a munkamenet TTL-jével. A host SSH is ilyen
-    közönséges TCP 22-es host-engedély; nincs külön SSH-halmaz.
+    Full access is in the allowed_v4 set (one IP element). Port-bound
+    access is in two composite sets: allowed_tcp and allowed_udp
+    (IP . pre-DNAT destination port), and allowed_icmp. Host (input) rules
+    go into separate sets (allowed_input_tcp and allowed_input_udp), with
+    the session TTL. Host SSH is also such an ordinary TCP 22 host grant;
+    there is no separate SSH set.
     """
 
-    # A port proxy input céljának felderítése (a tesztek felülírják).
+    # Discovery of the port proxy input destination (tests override it).
     proc_net = "/proc/net"
     sysctl_conf = "/proc/sys/net/ipv4/conf"
-    # Az utoljára telepített port proxy szabályok (None: még semmi).
+    # The last installed port proxy rules (None: nothing yet).
     portproxy_applied: list[str] | None = None
 
     def __init__(
@@ -3662,34 +3689,34 @@ class Firewall:
     ) -> None:
         for name in (table, set_name):
             if not _NFT_NAME_RE.match(name):
-                raise ValueError(f"érvénytelen nftables név: {name!r}")
+                raise ValueError(f"invalid nftables name: {name!r}")
         fwd_mark = str(fwd_mark or "").strip().lower()
         if not re.match(r"^0x[0-9a-f]{1,8}$", fwd_mark):
-            raise ValueError(f"érvénytelen nftables mark: {fwd_mark!r}")
+            raise ValueError(f"invalid nftables mark: {fwd_mark!r}")
         if lan_if and not _LAN_IF_RE.match(lan_if):
-            raise ValueError(f"érvénytelen LAN interfész: {lan_if!r}")
+            raise ValueError(f"invalid LAN interface: {lan_if!r}")
         if wan_if and not _LAN_IF_RE.match(wan_if):
-            raise ValueError(f"érvénytelen WAN interfész: {wan_if!r}")
+            raise ValueError(f"invalid WAN interface: {wan_if!r}")
         self.fwd_mark = fwd_mark
         self.drop_log_group = max(1, min(65535, int(drop_log_group)))
         self.table = table
         self.set_name = set_name
         self.tcp_set = "allowed_tcp"
         self.udp_set = "allowed_udp"
-        # A portálgép saját szolgáltatásai (host/input szabály): csak a
-        # munkamenet IP-jének, a TTL-ig.
+        # The portal machine's own services (host/input rule): only for the
+        # session's IP, until the TTL.
         self.input_tcp_set = "allowed_input_tcp"
         self.input_udp_set = "allowed_input_udp"
-        # A host (input) szabályokban valaha deklarált célportok. Az input
-        # lánc ezekkel vágja el a meglévő kapcsolatokat, ha az engedély
-        # eltűnik; a portál csak hozzáad, ezért egy törölt szabály nem
-        # nyithatja meg újra a folyamatot.
+        # Destination ports ever declared in host (input) rules. The input
+        # chain uses these to cut existing connections when the grant
+        # disappears; the portal only adds, so a deleted rule cannot reopen
+        # the process.
         self.service_tcp_set = "host_service_tcp"
         self.service_udp_set = "host_service_udp"
         self.icmp_set = "allowed_icmp"
         self.mac_set = "client_mac"
         self.ban_set = "banned_v4"
-        # fail2ban proxy-tiltás: csak a host TCP 80/443-át zárja.
+        # fail2ban proxy ban: closes only the host's TCP 80/443.
         self.proxy_ban_set = "proxy_banned_v4"
         self.lan_if = (lan_if or "").strip()
         self.wan_if = (wan_if or "").strip()
@@ -3700,43 +3727,44 @@ class Firewall:
         self.dry_run = dry_run
         self.log = logger
         self._lock = threading.Lock()
-        # IP -> a munkamenet alatt rögzített MAC. A halmaz listázásából is
-        # pótolható, ezért ez csak gyorsítás és pontos törlés.
+        # IP -> MAC recorded during the session. It can also be replenished
+        # from listing the set, so this is only an acceleration and an exact
+        # deletion helper.
         self._macs: dict[str, str] = {}
-        # A host_service_* takarításnál a hiányzó/hibás conntrack eszközt
-        # csak egyszer naplózzuk, ne minden szinkronnál.
+        # On host_service_* cleanup, log the missing/broken conntrack tool
+        # only once, not on every sync.
         self._prune_conntrack_warned = False
 
-    # -- alacsony szintű hívás -------------------------------------------------
+    # -- low-level call --------------------------------------------------------
 
     def _run(self, args: list[str], check: bool = True) -> subprocess.CompletedProcess:
         cmd = [self.binary, *args]
         if self.dry_run:
-            self.log(f"[tűzfal] DRY-RUN: {' '.join(cmd)}")
+            self.log(f"[firewall] DRY-RUN: {' '.join(cmd)}")
             return subprocess.CompletedProcess(cmd, 0, b"", b"")
         try:
             result = subprocess.run(cmd, capture_output=True, timeout=10)
         except FileNotFoundError as exc:
-            raise FirewallError(f"az nft nem található: {self.binary}") from exc
+            raise FirewallError(f"nft not found: {self.binary}") from exc
         except PermissionError as exc:
-            raise FirewallError("nincs jogosultság az nft futtatásához (CAP_NET_ADMIN)") from exc
+            raise FirewallError("no permission to run nft (CAP_NET_ADMIN)") from exc
         except subprocess.TimeoutExpired as exc:
-            raise FirewallError("az nft nem válaszolt időben") from exc
+            raise FirewallError("nft did not respond in time") from exc
         if check and result.returncode != 0:
             detail = result.stderr.decode("utf-8", "replace").strip()
-            raise FirewallError(detail or f"az nft kilépési kódja: {result.returncode}")
+            raise FirewallError(detail or f"nft exit code: {result.returncode}")
         return result
 
     def _run_script(self, script: str) -> None:
-        """Egy nft-parancsfájl futtatása a szabványos bemeneten.
+        """Run an nft script on standard input.
 
-        Az elemhozzáadásokat egy tranzakcióban adjuk át az nft-nek, így nem
-        indul külön folyamat minden egyes porthoz.
+        The element additions are handed to nft in one transaction, so no
+        separate process is started for each port.
         """
         if self.dry_run:
             for line in script.splitlines():
                 if line.strip():
-                    self.log(f"[tűzfal] DRY-RUN: {line}")
+                    self.log(f"[firewall] DRY-RUN: {line}")
             return
         try:
             result = subprocess.run(
@@ -3746,16 +3774,16 @@ class Firewall:
                 timeout=10,
             )
         except FileNotFoundError as exc:
-            raise FirewallError(f"az nft nem található: {self.binary}") from exc
+            raise FirewallError(f"nft not found: {self.binary}") from exc
         except PermissionError as exc:
-            raise FirewallError("nincs jogosultság az nft futtatásához (CAP_NET_ADMIN)") from exc
+            raise FirewallError("no permission to run nft (CAP_NET_ADMIN)") from exc
         except subprocess.TimeoutExpired as exc:
-            raise FirewallError("az nft nem válaszolt időben") from exc
+            raise FirewallError("nft did not respond in time") from exc
         if result.returncode != 0:
             detail = result.stderr.decode("utf-8", "replace").strip()
-            raise FirewallError(detail or f"az nft kilépési kódja: {result.returncode}")
+            raise FirewallError(detail or f"nft exit code: {result.returncode}")
 
-    # -- admin testreszabás ----------------------------------------------------
+    # -- admin customization ---------------------------------------------------
 
     @staticmethod
     def _port_set(ports: list[int]) -> str:
@@ -3766,16 +3794,17 @@ class Firewall:
 
     @staticmethod
     def _custom_ports(entry: dict, kind: str) -> list[int]:
-        """A pre-auth/blokk bejegyzés érvényes, egyedi portjai.
+        """Valid, unique ports of a pre-auth/block entry.
 
-        A korábbi ``int(port)`` konverzió a hibás típusokat ``TypeError``/
-        ``ValueError`` formájában engedte tovább, a ``"80"`` sztringet pedig
-        karakterenként alakította. Minden érvénytelen érték ``FirewallError``,
-        hogy a hívó fail-closed módon elutasíthassa a beállítást.
+        The previous ``int(port)`` conversion let invalid types through as
+        ``TypeError``/``ValueError`` and converted the string ``"80"``
+        character by character. Every invalid value raises
+        ``FirewallError``, so the caller can reject the setting in a
+        fail-closed way.
         """
         raw = entry.get("ports", [])
         if not isinstance(raw, (list, tuple)) or not raw:
-            raise FirewallError(f"érvénytelen {kind}-bejegyzés")
+            raise FirewallError(f"invalid {kind} entry")
         ports: list[int] = []
         for port in raw:
             if (
@@ -3783,39 +3812,39 @@ class Firewall:
                 or not isinstance(port, int)
                 or not 1 <= port <= 65535
             ):
-                raise FirewallError(f"érvénytelen {kind}-port: {port!r}")
+                raise FirewallError(f"invalid {kind} port: {port!r}")
             if port not in ports:
                 ports.append(port)
         return ports
 
     @staticmethod
     def _custom_dst(entry: dict, kind: str) -> str:
-        """Normalizált IPv4 cél; IPv6 a ``ct original ip daddr`` miatt hiba."""
+        """Normalized IPv4 destination; IPv6 is an error due to ``ct original ip daddr``."""
         dst = str(entry.get("dst", "")).strip()
         if not dst:
             return ""
         try:
             network = ipaddress.ip_network(dst, strict=False)
         except ValueError as exc:
-            raise FirewallError(f"érvénytelen {kind}-cél: {dst}") from exc
+            raise FirewallError(f"invalid {kind} destination: {dst}") from exc
         if network.version != 4:
             raise FirewallError(
-                f"a {kind}-cél csak IPv4 lehet: {dst}"
+                f"the {kind} destination can only be IPv4: {dst}"
             )
         return str(network)
 
     def _log_statement(self, reason: str, rate: str = "30/minute") -> str:
-        """Rate-limited NFLOG log kifejezés (önálló, nem eldobó szabályhoz)."""
+        """Rate-limited NFLOG log expression (for a standalone, non-dropping rule)."""
         return (
             f"limit rate {rate} burst 60 packets log prefix "
             f'"dropjak-drop reason={reason} " group {self.drop_log_group}'
         )
 
     def clear_custom(self) -> None:
-        """A pre-auth és blokk láncok ürítése (a láncok létrehozásával).
+        """Flush the pre-auth and block chains (by recreating the chains).
 
-        Külön tranzakcióban fut az alkalmazás előtt: ha az új szabályok
-        érvénytelenek, a régi pre-auth engedélyek nem maradnak életben.
+        It runs in a separate transaction before applying: if the new rules
+        are invalid, the old pre-auth grants do not stay alive.
         """
         lines = [
             f"add chain inet {self.table} {chain}"
@@ -3831,64 +3860,65 @@ class Firewall:
         self, preauth=(), block=(), *, include_block: bool = True,
         tunnel_public=(),
     ) -> list[str]:
-        """A pre-auth és blokk szabályok renderelése (végrehajtás nélkül).
+        """Render the pre-auth and block rules (without executing them).
 
-        A pre-auth cél üresen minden célra érvényes. A ``forward`` irány a
-        LAN felől a megadott célra/portra nyit; a WAN felől csak DNAT-olt
-        (publikált) forgalomra, így nem válik nyílt továbbítóvá. Az ``input``
-        irány a portálgép saját portjait nyitja meg a bejelentkezés előtt,
-        ezért közvetlenül fogadja el a csomagot (nincs forward-jelölés és
-        ``preauth_nat`` sem). A blokk a LAN felől induló forgalmat dobja el,
-        a 80-as TCP-portnál a portál-átirányítás előtt is. A kikapcsolt
-        (``enabled: false``) bejegyzések kimaradnak.
+        An empty pre-auth destination applies to every destination. The
+        ``forward`` direction opens from the LAN to the given
+        destination/port; from the WAN only for DNAT-ed (published)
+        traffic, so it does not become an open forwarder. The ``input``
+        direction opens the portal machine's own ports before login,
+        therefore it accepts the packet directly (no forward mark and no
+        ``preauth_nat`` either). The block drops traffic originating from
+        the LAN, including on TCP port 80 before the portal redirect.
+        Disabled (``enabled: false``) entries are left out.
 
-        ``include_block=False`` esetén a blokk-szabályok nem renderelődnek:
-        a hívó a meglévő block/block_nat láncokat érintetlenül hagyja.
-        Bármely érvénytelen bejegyzés ``FirewallError``, még a végrehajtás
-        előtt; így részleges szabálykészlet nem kerülhet a kernelbe.
+        With ``include_block=False`` the block rules are not rendered: the
+        caller leaves the existing block/block_nat chains untouched. Any
+        invalid entry raises ``FirewallError``, even before execution; thus
+        a partial rule set cannot reach the kernel.
         """
         block = _enabled_custom_entries(block) if include_block else []
         preauth = _enabled_custom_entries(preauth)
         forward_preauth: list[dict] = []
         input_preauth: list[dict] = []
         for entry in preauth:
-            # A régi bejegyzésekben nincs direction: azok forward irányúak.
+            # Old entries have no direction: they are forward-direction.
             direction = str(entry.get("direction") or "forward").strip()
             if direction not in ("forward", "input"):
-                raise FirewallError("érvénytelen pre-auth irány")
+                raise FirewallError("invalid pre-auth direction")
             if direction == "input":
                 input_preauth.append(entry)
             else:
                 forward_preauth.append(entry)
         if forward_preauth and not self.lan_if:
             raise FirewallError(
-                "pre-auth szabály csak ismert LAN interfésszel alkalmazható"
+                "a pre-auth rule can only be applied with a known LAN interface"
             )
-        # Az input irány a host felé menő forgalom: a bejelentkezés előtt
-        # elérhető host-portok a lényeg, ezért a WAN is számít. Ismert
-        # interfész nélkül a szabály nem lenne biztonságosan korlátozható.
+        # The input direction is traffic towards the host: the point is the
+        # host ports reachable before login, so the WAN matters too. Without
+        # a known interface the rule could not be restricted safely.
         input_ifaces: list[str] = []
         for name in (self.lan_if, self.wan_if):
             if name and name not in input_ifaces:
                 input_ifaces.append(name)
         if input_preauth and not input_ifaces:
             raise FirewallError(
-                "input pre-auth szabály csak ismert LAN vagy WAN interfésszel "
-                "alkalmazható"
+                "an input pre-auth rule can only be applied with a known LAN "
+                "or WAN interface"
             )
         lines: list[str] = []
-        # A tiltott forrás a pre-auth lánc első szabályaként is eldobódik.
-        # A base forward láncban a banned_v4 drop már a pre-auth ugrás előtt
-        # fut; ez a szabály akkor is véd, ha a láncok sorrendje később
-        # megváltozik, vagy egy pre-auth bejegyzés established kapcsolatra
-        # illeszkedne. A tiltás ezzel minden engedélyezett/pre-auth portot
-        # felülír; csak a portál és a DHCP marad elérhető.
+        # A banned source is also dropped as the first rule of the pre-auth
+        # chain. In the base forward chain the banned_v4 drop already runs
+        # before the pre-auth jump; this rule protects even if the chain
+        # order later changes or a pre-auth entry would match an established
+        # connection. The ban thus overrides every allowed/pre-auth port;
+        # only the portal and DHCP remain reachable.
         lines.append(
             f"add rule inet {self.table} preauth "
             f"ip saddr @{self.ban_set} drop"
         )
-        # Az input pre-auth lánc első szabálya ugyanígy a tiltott forrásokat
-        # dobja el, hogy a tiltás a host-portokat se nyissa meg.
+        # The first rule of the input pre-auth chain likewise drops the
+        # banned sources, so that the ban does not open host ports either.
         lines.append(
             f"add rule inet {self.table} preauth_input "
             f"ip saddr @{self.ban_set} drop"
@@ -3896,9 +3926,9 @@ class Firewall:
         for entry in block:
             proto = str(entry.get("proto", "")).strip().lower()
             if proto not in ("tcp", "udp"):
-                raise FirewallError("érvénytelen blokk-bejegyzés")
-            ports = self._custom_ports(entry, "blokk")
-            dst = self._custom_dst(entry, "blokk")
+                raise FirewallError("invalid block entry")
+            ports = self._custom_ports(entry, "block")
+            dst = self._custom_dst(entry, "block")
             match = f"meta l4proto {proto}"
             if dst:
                 match += f" ct original ip daddr {dst}"
@@ -3923,16 +3953,17 @@ class Firewall:
         for entry in forward_preauth:
             proto = str(entry.get("proto", "")).strip().lower()
             if proto not in ("tcp", "udp"):
-                raise FirewallError("érvénytelen pre-auth bejegyzés")
+                raise FirewallError("invalid pre-auth entry")
             ports = self._custom_ports(entry, "pre-auth")
             dst = self._custom_dst(entry, "pre-auth")
             match = f"meta l4proto {proto}"
             if dst:
                 match += f" ct original ip daddr {dst}"
             match += f" ct original proto-dst {self._port_set(ports)}"
-            # A LAN felől a pre-auth a megadott célra/portra nyit. A WAN
-            # felől csak DNAT-olt (publikált) forgalomra: így a szabály
-            # nem válik nyílt továbbítóvá tetszőleges külső cél felé.
+            # From the LAN the pre-auth opens to the given destination/port.
+            # From the WAN only for DNAT-ed (published) traffic: thus the
+            # rule does not become an open forwarder towards an arbitrary
+            # external destination.
             interfaces = [(self.lan_if, "")]
             if self.wan_if and self.wan_if != self.lan_if:
                 interfaces.append((self.wan_if, "ct status dnat "))
@@ -3947,19 +3978,20 @@ class Firewall:
                 f"{match} meta mark set {self.fwd_mark} accept"
             )
             if dst:
-                # Cél nélküli pre-auth esetén ezt kihagyjuk: a related
-                # szabály cél nélkül minden kapcsolódó forgalmat átengedne.
+                # We skip this for a destination-less pre-auth: without a
+                # destination the related rule would let every related
+                # traffic through.
                 lines.append(
                     f"add rule inet {self.table} preauth ct state related "
                     f"ct original ip daddr {dst} "
                     f"meta mark set {self.fwd_mark} accept"
                 )
             if proto == "tcp" and 80 in ports:
-                # A prerouting a 80-as TCP-t a portálra irányítja. A
-                # conntrack-jelölés ezt a láncot kikerülteti a base chain
-                # return szabályával; a forward pre-auth szabály továbbra is
-                # külön dönt a csomagról. Cél nélkül ez minden LAN-oldali
-                # HTTP-t kivesz a portál-átirányítás alól.
+                # Prerouting redirects TCP 80 to the portal. The conntrack
+                # mark makes this chain bypass the base chain's return rule;
+                # the forward pre-auth rule still decides about the packet
+                # separately. Without a destination this takes all LAN-side
+                # HTTP out of the portal redirect.
                 nat = "meta l4proto tcp"
                 if dst:
                     nat += f" ct original ip daddr {dst}"
@@ -3968,23 +4000,23 @@ class Firewall:
                     f"add rule inet {self.table} preauth_nat {nat} "
                     f"ct mark set {PREAUTH_CT_MARK}"
                 )
-        # A nyilvános, port-módú alagút-szolgáltatások WAN-only pre-auth
-        # elfogadásai. A bejegyzések minden alkalmazáskor az élő
-        # beállításokból származnak, ezért a szolgáltatás letiltásakor,
-        # törlésekor vagy priváttá válásakor automatikusan eltűnnek. A LAN
-        # irányt szándékosan nem nyitjuk meg, és a ``related`` szabályt
-        # cél nélkül nem tesszük be (az minden kapcsolódó forgalmat
-        # átengedne). A blokk lánc a base chainben előbb fut, ezért a
-        # tiltás továbbra is felülírja ezeket.
+        # WAN-only pre-auth accept rules for the public, port-mode tunnel
+        # services. The entries come from the live settings on every apply,
+        # so they disappear automatically when the service is disabled,
+        # deleted or becomes private. We deliberately do not open the LAN
+        # direction, and we do not insert the ``related`` rule without a
+        # destination (it would let all related traffic through). The block
+        # chain runs earlier in the base chain, so the ban still overrides
+        # these.
         if tunnel_public and not self.wan_if:
             raise FirewallError(
-                "nyilvános alagút-szolgáltatás csak ismert WAN "
-                "interfésszel alkalmazható"
+                "a public tunnel service can only be applied with a known WAN "
+                "interface"
             )
         for proto, port in tunnel_public:
             if proto not in ("tcp", "udp") or isinstance(port, bool) \
                     or not isinstance(port, int) or not 1 <= port <= 65535:
-                raise FirewallError("érvénytelen nyilvános alagút-port")
+                raise FirewallError("invalid public tunnel port")
             match = (
                 f"meta l4proto {proto} "
                 f"ct original proto-dst {port}"
@@ -4001,23 +4033,24 @@ class Firewall:
         for entry in input_preauth:
             proto = str(entry.get("proto", "")).strip().lower()
             if proto not in ("tcp", "udp"):
-                raise FirewallError("érvénytelen pre-auth bejegyzés")
+                raise FirewallError("invalid pre-auth entry")
             ports = self._custom_ports(entry, "pre-auth")
             dst = self._custom_dst(entry, "pre-auth")
             match = f"meta l4proto {proto}"
             if dst:
                 match += f" ct original ip daddr {dst}"
             match += f" ct original proto-dst {self._port_set(ports)}"
-            # A csomag a host felé megy, ezért közvetlen accept kell: nincs
-            # forward-jelölés, és a DNAT-os WAN-feltétel sem értelmezhető.
-            # A forrás a bejelentkezés előtt bármely ismert interfész lehet.
+            # The packet goes towards the host, so a direct accept is needed:
+            # no forward mark, and the DNAT WAN condition is not applicable
+            # either. Before login the source may be any known interface.
             for iface in input_ifaces:
                 lines.append(
                     f'add rule inet {self.table} preauth_input '
                     f'iifname "{iface}" {match} accept'
                 )
-            # A meglévő kapcsolat a szabály élettartama alatt is maradjon
-            # életben (a host_service_* őrök ezt a láncot nem érik el).
+            # The existing connection should stay alive for the lifetime of
+            # the rule as well (the host_service_* guards do not reach this
+            # chain).
             lines.append(
                 f"add rule inet {self.table} preauth_input "
                 f"ct state established {match} accept"
@@ -4025,38 +4058,38 @@ class Firewall:
         return lines
 
     def _portproxy_ifaces(self, value) -> list[str]:
-        """A bejegyzés interfészei; ismeretlen interfész FirewallError."""
+        """The entry's interfaces; an unknown interface raises FirewallError."""
         wanted = {"wan": ("wan",), "lan": ("lan",), "both": ("lan", "wan")}
         if value not in wanted:
-            raise FirewallError("érvénytelen port proxy interfész")
+            raise FirewallError("invalid port proxy interface")
         names: list[str] = []
         for side in wanted[value]:
             name = self.lan_if if side == "lan" else self.wan_if
             if not name:
                 raise FirewallError(
-                    f"port proxy csak ismert {side.upper()} interfésszel "
-                    "alkalmazható"
+                    f"the port proxy can only be applied with a known "
+                    f"{side.upper()} interface"
                 )
             if name not in names:
                 names.append(name)
         return names
 
     def _portproxy_loopback(self, proto: str, port: int, ifaces) -> str | None:
-        """A loopback DNAT címe, ha a cél csak loopbacken figyel."""
+        """The loopback DNAT address if the destination listens only on loopback."""
         address = loopback_target(proto, port, self.proc_net)
         if address and route_localnet(ifaces, self.sysctl_conf):
             return address
         return None
 
     def _portproxy_input_nat(self, proto: str, port: int, ifaces) -> str:
-        """Input proxy NAT: a csak 127.0.0.1-en figyelő célhoz DNAT, különben redirect.
+        """Input proxy NAT: DNAT to a loopback-only destination, otherwise redirect.
 
-        A redirect a bejövő interfész elsődleges címére (WAN/LAN IP) ír át;
-        a csak loopbacken figyelő szolgáltatás (például a Docker
-        127.0.0.1-re publikált portja) ott nem válaszol, a kernel RST-t
-        küld. A 127.0.0.1-es DNAT-hoz a route_localnet kell az
-        interfészeken; a sablon loopback_guard lánca minden más, kívülről
-        érkező 127/8 csomagot eldob.
+        The redirect rewrites to the incoming interface's primary address
+        (WAN/LAN IP); a service listening only on loopback (for example a
+        Docker port published to 127.0.0.1) does not answer there, and the
+        kernel sends an RST. The 127.0.0.1 DNAT requires route_localnet on
+        the interfaces; the template's loopback_guard chain drops every
+        other 127/8 packet arriving from outside.
         """
         address = self._portproxy_loopback(proto, port, ifaces)
         if address:
@@ -4064,7 +4097,7 @@ class Firewall:
         return f"redirect to :{port}"
 
     def portproxy_localnet_blocked(self, entries) -> list[tuple[str, int]]:
-        """(protokoll, hallgató port): loopback cél, de a route_localnet ki van kapcsolva."""
+        """(protocol, listener port): loopback destination, but route_localnet is off."""
         blocked = []
         for entry in _enabled_custom_entries(entries):
             if entry.get("type") != "input":
@@ -4081,17 +4114,18 @@ class Firewall:
         return sorted(blocked)
 
     def _portproxy_rules(self, entries=()) -> list[str]:
-        """A port proxy láncok szabályai (végrehajtás nélkül).
+        """The rules of the port proxy chains (without executing them).
 
-        Csak a hostnak címzett (``fib daddr type local``) forgalom kerül
-        DNAT-ra: egy LAN-kliens külső szerverre menő, azonos portú
-        forgalmát a proxy nem téríti el. A forward engedélyt a forward
-        lánc meglévő ``ct original`` szabálya adja (kliens IP . hallgató
-        port az allowed_tcp/udp halmazban, FWD_MARK-kal); az input proxyt a
-        portproxy_input lánc engedélyezi (kliens IP . hallgató port az
-        allowed_input_* halmazban), és ott a nem engedélyezett folyam
-        csomagonként eldobódik, így a visszavonás a meglévő kapcsolatot is
-        elvágja. Bármely hibás bejegyzés FirewallError a végrehajtás előtt.
+        Only traffic addressed to the host (``fib daddr type local``) is
+        DNAT-ed: the proxy does not divert a LAN client's traffic to an
+        external server on the same port. Forwarding permission is given by
+        the forward chain's existing ``ct original`` rule (client IP .
+        listener port in the allowed_tcp/udp set, with FWD_MARK); the input
+        proxy is allowed by the portproxy_input chain (client IP . listener
+        port in the allowed_input_* set), and there a non-allowed flow is
+        dropped packet by packet, so revocation cuts the existing
+        connection too. Any invalid entry raises FirewallError before
+        execution.
         """
         table = self.table
         lines: list[str] = []
@@ -4106,7 +4140,7 @@ class Firewall:
                         or not 1 <= port <= 65535
                         for port in (listen, target)
                     ):
-                raise FirewallError("érvénytelen port proxy bejegyzés")
+                raise FirewallError("invalid port proxy entry")
             ifaces = self._portproxy_ifaces(entry.get("ifaces"))
             iif = (
                 f'iifname "{ifaces[0]}"' if len(ifaces) == 1
@@ -4120,7 +4154,7 @@ class Firewall:
                 if address is None or not any(
                     address in net for net in settings_store.PROXY_PRIVATE_NETS
                 ):
-                    raise FirewallError("érvénytelen port proxy cél")
+                    raise FirewallError("invalid port proxy destination")
                 nat = f"dnat ip to {address}:{target}"
             for p in (("tcp", "udp") if proto == "both" else (proto,)):
                 if kind == "input":
@@ -4169,12 +4203,12 @@ class Firewall:
         return lines
 
     def _tunnel_snat_rules(self, tunnels=()) -> list[str]:
-        """Az alagút-szolgáltatások forrásmaszkolása a dropjak0 felé.
+        """Source masquerading of tunnel services towards dropjak0.
 
-        A forward engedélyt nem itt adjuk: a szintetikus bejegyzések a
-        forward lánc meglévő ``ct original`` szabályán mennek át, tehát a
-        portál-engedély ugyanúgy kötelező, mint a port proxynál. (Aki
-        nyilvános alagutat akar, explicit pre-auth szabályt ad.)
+        We do not grant forwarding here: the synthetic entries go through
+        the forward chain's existing ``ct original`` rule, so the portal
+        grant is just as mandatory as with the port proxy. (Anyone who wants
+        a public tunnel adds an explicit pre-auth rule.)
         """
         entries = tunnel_proxy_entries(tunnels)
         if not entries:
@@ -4187,9 +4221,10 @@ class Firewall:
                 ("tcp", "udp") if entry.get("proto") == "both"
                 else (entry.get("proto"),)
             ):
-                # Az ügynök allowed-ips-e csak 10.77.0.0/24, ezért a kliens
-                # forrását a szerver címére kell maszkolni, különben a
-                # válasz nem az alagúton jön vissza.
+                # The agent's allowed-ips is only 10.77.0.0/24, so the
+                # client's source must be masqueraded to the server's
+                # address, otherwise the response does not come back over
+                # the tunnel.
                 lines.append(
                     f"add rule inet {self.table} portproxy_snat "
                     f"meta l4proto {proto} ct status dnat "
@@ -4199,12 +4234,12 @@ class Firewall:
         return lines
 
     def _tunnel_rules(self, tunnels=()) -> list[str]:
-        """Az alagút fogadó szabályai, ha van bekapcsolt ügynök.
+        """The tunnel receive rules, if there is an enabled agent.
 
-        A WireGuard UDP-port mellett a portál szinkron-végpontja is
-        elérhető az alagútból; a portál input lánca egyébként csak a LAN és
-        a portál-hálózat felől engedné, ezért az ügynök nem tudna
-        szolgáltatáslistát frissíteni.
+        Besides the WireGuard UDP port, the portal's sync endpoint is also
+        reachable from the tunnel; the portal's input chain would otherwise
+        allow it only from the LAN and the portal network, so the agent
+        could not refresh its service list.
         """
         if not isinstance(tunnels, dict):
             return []
@@ -4214,12 +4249,12 @@ class Firewall:
             return []
         if not self.wan_if:
             raise FirewallError(
-                "alagút csak ismert WAN interfésszel alkalmazható"
+                "a tunnel can only be applied with a known WAN interface"
             )
         port = tunnels.get("port")
         if isinstance(port, bool) or not isinstance(port, int) \
                 or not 1 <= port <= 65535:
-            raise FirewallError("érvénytelen WireGuard port")
+            raise FirewallError("invalid WireGuard port")
         return [
             f"add rule inet {self.table} {TUNNEL_CHAIN} "
             f'iifname "{self.wan_if}" '
@@ -4231,7 +4266,7 @@ class Firewall:
         ]
 
     def docker_published_ports(self) -> set[tuple[str, int]]:
-        """A Docker által DNAT-olt (publikált) host portok; hiba: üres."""
+        """Host ports DNAT-ed (published) by Docker; on error: empty."""
         try:
             with self._lock:
                 result = self._run(
@@ -4248,10 +4283,10 @@ class Firewall:
         }
 
     def apply_custom(self, preauth=(), block=()) -> None:
-        """A pre-auth és blokk szabályok telepítése ürítés nélkül.
+        """Install the pre-auth and block rules without flushing.
 
-        Ez a láncok tartalmát hozzáadja a meglévőkhöz; a teljes, atomikus
-        cseréhez a :meth:`replace_custom` használatos.
+        This adds to the chains' contents; for a full, atomic replacement
+        use :meth:`replace_custom`.
         """
         lines = self._custom_rules(preauth, block)
         self._run_script("\n".join(lines) + ("\n" if lines else ""))
@@ -4260,21 +4295,21 @@ class Firewall:
         self, preauth=(), block=(), *, keep_block: bool = False,
         port_proxies=(), tunnels=None,
     ) -> None:
-        """A pre-auth/blokk láncok cseréje egyetlen nft-tranzakcióban.
+        """Replace the pre-auth/block chains in a single nft transaction.
 
-        A láncok létrehozása, ürítése és az új szabályok telepítése egy
-        ``nft -f -`` bemenetben történik, ezért nincs olyan köztes állapot,
-        amelyben a régi blokk már nincs, az új pedig még nem érvényes. A
-        renderelés a végrehajtás előtt megtörténik; érvénytelen bejegyzés
-        esetén a kernel állapota változatlan marad.
+        Creating the chains, flushing them and installing the new rules
+        happen in one ``nft -f -`` input, therefore there is no intermediate
+        state in which the old block is already gone and the new one is not
+        yet in effect. Rendering happens before execution; on an invalid
+        entry the kernel state stays unchanged.
 
-        ``keep_block=True`` esetén csak a pre-auth láncokat cseréli: a
-        block/block_nat láncok érintetlenek maradnak (hibás beállításfájl
-        esetén az utolsó ismert jó blokkolás nem tűnhet el).
+        With ``keep_block=True`` it replaces only the pre-auth chains: the
+        block/block_nat chains stay untouched (on a broken settings file the
+        last known good blocking must not disappear).
 
-        A port proxy láncok ugyanebben a tranzakcióban cserélődnek. Az
-        alagút-szolgáltatások szintetikus forward bejegyzésként kerülnek a
-        port proxy szabályok közé; a WireGuard UDP-port külön láncba.
+        The port proxy chains are replaced in the same transaction. The
+        tunnel services are added among the port proxy rules as synthetic
+        forward entries; the WireGuard UDP port goes into a separate chain.
         """
         tunnels = tunnels or {}
         synthetic = tunnel_proxy_entries(tunnels)
@@ -4305,7 +4340,7 @@ class Firewall:
         self.portproxy_applied = proxy_rules
 
     def _delete_quiet(self, set_name: str, element: str) -> None:
-        """Nem létező elem törlése nem hiba (a kernel már lejárattathatta)."""
+        """Deleting a nonexistent element is not an error (the kernel may have expired it)."""
         result = self._run(
             ["delete", "element", "inet", self.table, set_name, "{", element, "}"],
             check=False,
@@ -4315,29 +4350,29 @@ class Firewall:
         detail = result.stderr.decode("utf-8", "replace")
         if "No such file or directory" in detail or "does not exist" in detail:
             return
-        raise FirewallError(detail.strip() or "az nft törlés sikertelen")
+        raise FirewallError(detail.strip() or "nft deletion failed")
 
     def _elements(
         self, address: str, ports: Ports
     ) -> list[tuple[str, str]]:
-        """(halmaz, elem) párok a kért portokhoz.
+        """(set, element) pairs for the requested ports.
 
-        A host (input) szabály a portálgép saját szolgáltatásait nyitja
-        meg, ezért külön halmazba kerül; sosem az ``allowed_tcp``/
-        ``allowed_udp`` forward halmazokba.
+        A host (input) rule opens the portal machine's own services,
+        therefore it goes into a separate set; never into the
+        ``allowed_tcp``/``allowed_udp`` forward sets.
         """
         direction = ports.direction
         if direction not in ("forward", "input"):
-            # Belső hiba: ismeretlen irányhoz nem rendelünk halmazt.
+            # Internal error: no set is assigned to an unknown direction.
             raise FirewallError(
-                f"érvénytelen szabályirány: {direction!r}"
+                f"invalid rule direction: {direction!r}"
             )
         if ports.full:
             if direction == "input":
                 raise FirewallError(
-                    "host szabály nem lehet teljes hozzáférésű"
+                    "a host rule cannot have full access"
                 )
-            # A teljes hozzáférés minden mást magába foglal.
+            # Full access includes everything else.
             return [(self.set_name, address)]
         tcp_set = (
             self.input_tcp_set if direction == "input" else self.tcp_set
@@ -4346,8 +4381,8 @@ class Firewall:
             self.input_udp_set if direction == "input" else self.udp_set
         )
         elements: list[tuple[str, str]] = []
-        # Az nft interval halmazban a szomszédos portok egy tartományként
-        # kerülnek be; így egy 8000-8100 szabály egyetlen elemet ad.
+        # In an nft interval set adjacent ports are entered as one range;
+        # thus an 8000-8100 rule yields a single element.
         for set_name, values in ((tcp_set, ports.tcp), (udp_set, ports.udp)):
             for low, high in merge_port_intervals(values):
                 elements.append(
@@ -4356,15 +4391,15 @@ class Firewall:
         if ports.icmp:
             if direction == "input":
                 raise FirewallError(
-                    "host szabály nem tartalmazhat ICMP-t"
+                    "a host rule cannot contain ICMP"
                 )
             elements.append((self.icmp_set, address))
         return list(dict.fromkeys(elements))
 
-    # -- MAC-kötés -------------------------------------------------------------
+    # -- MAC binding -----------------------------------------------------------
 
     def binds_mac(self, address: str) -> bool:
-        """Kell-e ehhez az IP-hez MAC-kötés (LAN-kliens esetén igen)."""
+        """Whether a MAC binding is needed for this IP (yes for a LAN client)."""
         if not self.mac_binding:
             return False
         try:
@@ -4374,33 +4409,34 @@ class Firewall:
 
     @staticmethod
     def parse_mac_json(raw: bytes | str, address: str) -> list[str]:
-        """A ``client_mac`` halmaz JSON-jéből az adott IP-hez tartozó MAC-ek.
+        """The MACs belonging to the given IP from the ``client_mac`` set's JSON.
 
-        A hibás vagy hiányos kimenet ``FirewallError``, nem üres lista: egy
-        listázási hiba nem jelentheti azt, hogy nincs MAC-kötés, különben a
-        kötés/oldás a valós kernelállapot ismerete nélkül futna.
+        Invalid or incomplete output raises ``FirewallError``, not an empty
+        list: a listing error must not mean that there is no MAC binding,
+        otherwise binding/unbinding would run without knowing the real
+        kernel state.
         """
         if isinstance(raw, bytes):
             try:
                 raw = raw.decode("utf-8")
             except UnicodeDecodeError as exc:
                 raise FirewallError(
-                    "a client_mac halmaz kimenete nem UTF-8"
+                    "the output of the client_mac set is not UTF-8"
                 ) from exc
         try:
             payload = json.loads(raw)
         except ValueError as exc:
             raise FirewallError(
-                "a client_mac halmaz kimenete érvénytelen JSON"
+                "the output of the client_mac set is invalid JSON"
             ) from exc
         if not isinstance(payload, dict):
             raise FirewallError(
-                "a client_mac halmaz kimenete nem JSON-objektum"
+                "the output of the client_mac set is not a JSON object"
             )
         raw_items = payload.get("nftables")
         if not isinstance(raw_items, list):
             raise FirewallError(
-                "a client_mac halmaz kimenetéből hiányzik az nftables lista"
+                "the nftables list is missing from the output of the client_mac set"
             )
         macs: list[str] = []
         for top in raw_items:
@@ -4439,12 +4475,12 @@ class Firewall:
     def _mac_values_locked(
         self, address: str, *, strict: bool = False
     ) -> list[str]:
-        """Az adott IP-hez tartozó ``ip . mac`` elemek a kernelből.
+        """The ``ip . mac`` elements belonging to the given IP from the kernel.
 
-        ``strict=True`` esetén a listázás bármilyen hibája ``FirewallError``
-        (a MAC-kötést igénylő engedélyezés így fail-closed marad). Az
-        oldás/takarítás nem szakadhat meg egy listázási hiba miatt, ezért
-        ott a memóriabeli ismert értékekkel dolgozunk és naplózunk.
+        With ``strict=True`` any listing error raises ``FirewallError`` (so
+        a grant requiring a MAC binding stays fail-closed). Unbinding/cleanup
+        must not be interrupted by a listing error, so there we work with
+        the known in-memory values and log.
         """
         values: list[str] = []
         known = self._macs.get(address)
@@ -4458,7 +4494,7 @@ class Firewall:
             if strict:
                 detail = result.stderr.decode("utf-8", "replace").strip()
                 raise FirewallError(
-                    detail or "a client_mac halmaz listázása nem sikerült"
+                    detail or "listing the client_mac set failed"
                 )
             return values
         try:
@@ -4467,7 +4503,7 @@ class Firewall:
             if strict:
                 raise
             self.log(
-                f"[tűzfal] a client_mac halmaz listázása nem sikerült: {exc}"
+                f"[firewall] listing the client_mac set failed: {exc}"
             )
             return values
         for mac in macs:
@@ -4477,15 +4513,15 @@ class Firewall:
         return values
 
     def _bind_mac_locked(self, address: str, ttl: int) -> str:
-        """A kliens MAC-címének rögzítése; ha nem tudható, hiba (fail-closed)."""
+        """Record the client's MAC address; if it cannot be determined, error (fail-closed)."""
         mac = arp_mac(address, self.lan_if, self.arp_path)
         if mac is None:
             raise FirewallError(
-                f"a(z) {address} kliens MAC-címe nem állapítható meg az "
-                "ARP-táblából; a hozzáférés biztonsági okból nem engedélyezhető"
+                f"the MAC address of client {address} cannot be determined "
+                "from the ARP table; access cannot be granted for security reasons"
             )
-        # A korábbi, esetleg kézzel vagy összeomlás után maradt bejegyzéseket
-        # is töröljük, hogy egy IP-hez egyszerre csak egy MAC tartozzon.
+        # We also delete earlier entries possibly left by hand or after a
+        # crash, so that an IP belongs to only one MAC at a time.
         for value in self._mac_values_locked(address, strict=True):
             self._delete_quiet(self.mac_set, value)
         self._run_script(
@@ -4496,28 +4532,29 @@ class Firewall:
         return mac
 
     def _unbind_mac_locked(self, address: str) -> None:
-        """Az IP-hez tartozó, esetleg maradt MAC-bejegyzés törlése.
+        """Delete a possibly remaining MAC entry belonging to the IP.
 
-        Akkor is törlünk, ha az IP jelenleg nem LAN-kliens: a MAC-kötés
-        beállítása vagy a hálózat változhatott, és a régi elem a TTL-ig
-        másként maradhatna a kernelben.
+        We delete even if the IP is currently not a LAN client: the MAC
+        binding's configuration or the network may have changed, and the
+        old element could otherwise remain in the kernel differently until
+        the TTL.
         """
         for value in self._mac_values_locked(address):
             self._delete_quiet(self.mac_set, value)
         self._macs.pop(address, None)
 
     def _mac_delete_elements(self, address: str) -> list[tuple[str, str]]:
-        """A tiltandó IP MAC-elemei; nem-LAN címnél is kitakarít."""
+        """The MAC elements of the IP to be banned; cleans up even for a non-LAN address."""
         with self._lock:
             values = self._mac_values_locked(address)
         return [(self.mac_set, value) for value in values]
 
     def _port_set_values_locked(self, set_name: str, address: str) -> list[str]:
-        """Az adott IP ``ip . port`` elemei egy portos halmazból.
+        """The given IP's ``ip . port`` elements from a port set.
 
-        A MAC-listázáshoz hasonlóan a kernel JSON-kimenetét dolgozza fel. A
-        listázás hibája nem akaszthatja meg a tiltást: ilyenkor üres listát
-        adunk, a többi halmaz törlése így is megtörténik.
+        Like the MAC listing, it processes the kernel's JSON output. A
+        listing error must not interrupt the ban: in that case we return an
+        empty list, and the other sets are still deleted.
         """
         result = self._run(
             ["-j", "list", "set", "inet", self.table, set_name],
@@ -4529,7 +4566,7 @@ class Firewall:
             entries = self.parse_set_json(result.stdout, set_name)
         except FirewallError as exc:
             self.log(
-                f"[tűzfal] a(z) {set_name} halmaz listázása nem sikerült: {exc}"
+                f"[firewall] listing the {set_name} set failed: {exc}"
             )
             return []
         values: list[str] = []
@@ -4552,10 +4589,10 @@ class Firewall:
     def _list_port_elements_locked(
         self, set_name: str, address: str
     ) -> list[tuple[int, int, int]] | None:
-        """Az IP élő ``(lo, hi, hátralévő)`` portintervallumai.
+        """The IP's live ``(lo, hi, remaining)`` port intervals.
 
-        Listázási vagy értelmezési hiba esetén ``None``; ilyenkor a hívó a
-        régi, pontos elemtörlésre esik vissza. A hiányzó halmaz üres.
+        ``None`` on a listing or parsing error; the caller then falls back
+        to the old, exact element deletion. A missing set is empty.
         """
         result = self._run(
             ["-j", "list", "set", "inet", self.table, set_name],
@@ -4570,7 +4607,7 @@ class Firewall:
             entries = self.parse_set_json(result.stdout, set_name)
         except FirewallError as exc:
             self.log(
-                f"[tűzfal] a(z) {set_name} halmaz listázása nem sikerült: {exc}"
+                f"[firewall] listing the {set_name} set failed: {exc}"
             )
             return None
         intervals: list[tuple[int, int, int]] = []
@@ -4599,28 +4636,29 @@ class Firewall:
         desired: list[tuple[int, int]],
         ttl: int,
     ) -> None:
-        """Portintervallumok kiadása átfedésbiztos módon.
+        """Emit port intervals without overlap.
 
-        A meglévő elemhez nem nyúlunk vakon: csak a még nem fedett részeket
-        adjuk hozzá, az átfedő meglévő elem timeoutját pedig a hosszabbikra
-        állítjuk. Így egy szűkebb új grant nem törli a nagyobb, aktív
-        tartományt, és nem rövidíti le a hosszabb élettartamot.
+        We do not blindly touch the existing element: we add only the
+        still-uncovered parts, and set the timeout of the overlapping
+        existing element to the longer one. Thus a narrower new grant does
+        not delete the larger active range and does not shorten the longer
+        lifetime.
         """
         existing = self._list_port_elements_locked(set_name, address)
         if existing is None:
-            # Listázási hiba: nem törhetünk vakon, mert az egy nagyobb,
-            # aktív tartományt is elvenne. Az új elem hozzáadása biztonságos
-            # (az átfedő intervallumot a kernel kezeli); ha nem sikerül, a
-            # grant hibát ad, de a meglévő hozzáférés megmarad.
+            # Listing error: we must not delete blindly, because that would
+            # also remove a larger active range. Adding the new element is
+            # safe (the kernel handles the overlapping interval); if it
+            # fails, the grant reports an error, but the existing access
+            # remains.
             self.log(
-                f"[tűzfal] a(z) {set_name} halmaz listázása nem sikerült; "
-                "a meglévő elemek érintetlenek maradnak"
+                f"[firewall] listing the {set_name} set failed; "
+                "the existing elements remain untouched"
             )
             existing = []
         elif not existing:
-            # Nincs mit egyeztetni: a régi viselkedés (törlés, majd
-            # hozzáadás) indítja újra a timeoutot, és a tesztek is ezt
-            # várják.
+            # Nothing to reconcile: the old behaviour (delete, then add)
+            # restarts the timeout, and the tests also expect this.
             for low, high in desired:
                 self._delete_quiet(
                     set_name, f"{address} . {format_port_interval(low, high)}"
@@ -4633,10 +4671,11 @@ class Firewall:
             ]
             self._run_script("".join(lines))
             return
-        # Csak az átfedő elemeket írjuk újra. A fedetlen részeket a
-        # korábbi, rövidebb timeoutjukkal tartjuk meg; az új grant csak a
-        # saját tartományában hosszabbít. Így egy szűkebb grant nem ad
-        # hosszabb élettartamot a nagyobb, régi tartomány többi portjának.
+        # We rewrite only the overlapping elements. The uncovered parts
+        # are kept with their previous, shorter timeout; the new grant
+        # extends only within its own range. Thus a narrower grant does
+        # not give a longer lifetime to the other ports of the larger old
+        # range.
         affected = [
             (low, high, remaining)
             for low, high, remaining in existing
@@ -4653,8 +4692,8 @@ class Firewall:
             if lines:
                 self._run_script("".join(lines))
             return
-        # Az érintett elemek határait és az új tartomány határait
-        # szegmenshatárokká alakítjuk.
+        # We turn the boundaries of the affected elements and of the new
+        # range into segment boundaries.
         points: set[int] = set()
         for low, high in desired:
             points.update((low, high + 1))
@@ -4733,7 +4772,7 @@ class Firewall:
         return result
 
     def _input_delete_elements(self, address: str) -> list[tuple[str, str]]:
-        """A tiltandó IP összes host (input) halmazeleme."""
+        """All host (input) set elements of the IP to ban."""
         elements: list[tuple[str, str]] = []
         with self._lock:
             for set_name in (self.input_tcp_set, self.input_udp_set):
@@ -4744,13 +4783,13 @@ class Firewall:
         return elements
 
     def _forward_delete_elements(self, address: str) -> list[tuple[str, str]]:
-        """A tiltandó IP összes forward (``ip . port``) halmazeleme.
+        """All forward (``ip . port``) set elements of the IP to ban.
 
-        Csak akkor használjuk, ha az IP-hez nem tartozik munkamenet. A
-        portál egy IP-hez egyszerre egy munkamenetet tart nyilván, ezért a
-        kernelben talált, ehhez az IP-hez tartozó dinamikus elemek a mi
-        korábbi engedélyeink (esetleg összeomlás után árva elemek). A
-        listázás IP szerint szűr, más kliens elemét nem érinti.
+        We use it only if no session belongs to the IP. The portal keeps
+        one session per IP, therefore the dynamic elements found in the
+        kernel for this IP are our own earlier grants (possibly orphaned
+        elements after a crash). The listing filters by IP, so it does not
+        touch another client's elements.
         """
         elements: list[tuple[str, str]] = []
         with self._lock:
@@ -4761,26 +4800,26 @@ class Firewall:
                 )
         return elements
 
-    # -- nyilvános műveletek ---------------------------------------------------
+    # -- public operations -----------------------------------------------------
 
     def allow(self, ip: str, ttl: int) -> None:
-        """Visszafelé kompatibilis belépési pont: teljes hozzáférés."""
+        """Backward-compatible entry point: full access."""
         self.grant(ip, Ports(full=True), ttl)
 
     def grant(self, ip: str, ports: Ports, ttl: int) -> None:
-        """Egyetlen engedély kiadása; visszafelé kompatibilis burkoló."""
+        """Issue a single grant; backward-compatible wrapper."""
         self.grant_all(ip, (ports,), ttl)
 
     def grant_all(self, ip: str, grants, ttl: int) -> None:
-        """Több, akár eltérő irányú engedély kiadása egy tranzakcióban.
+        """Issue several grants, possibly in different directions, in one transaction.
 
-        A gyűjtőszabály egyszerre forward és host (input) engedélyt is
-        adhat; a halmazelemeket irányonként állítjuk elő, majd
-        deduplikáljuk. Üres engedélyhalmaz esetén nincs teendő (és MAC-kötés
-        sem történik).
+        A collection rule may grant both forward and host (input) access;
+        the set elements are produced per direction, then deduplicated.
+        With an empty grant set there is nothing to do (and no MAC binding
+        happens either).
         """
         if not is_ipv4(ip):
-            raise FirewallError("csak IPv4-cím engedélyezhető")
+            raise FirewallError("only an IPv4 address can be allowed")
         address = normalize_ip(ip)
         ttl = max(1, int(ttl))
         elements = list(dict.fromkeys(
@@ -4791,8 +4830,8 @@ class Firewall:
         if not elements:
             return
         with self._lock:
-            # A MAC-kötés a portok előtt történik: ha a kliens MAC-címe nem
-            # állapítható meg, semmilyen engedély nem kerül a kernelbe.
+            # The MAC binding happens before the ports: if the client's MAC
+            # address cannot be determined, no grant reaches the kernel.
             if self.binds_mac(address):
                 self._bind_mac_locked(address, ttl)
             else:
@@ -4810,8 +4849,8 @@ class Firewall:
                     grouped.setdefault(set_name, []).append((low, high))
                 else:
                     simple.append((set_name, element))
-            # A teljes és ICMP elemeknél marad a törlés + hozzáadás, mert
-            # azoknak nincs átfedő tartományuk.
+            # For full and ICMP elements, delete + add remains, because
+            # they have no overlapping range.
             for set_name, element in simple:
                 self._delete_quiet(set_name, element)
             if simple:
@@ -4830,13 +4869,13 @@ class Firewall:
                 )
 
     def ban(self, ip: str, ttl: int, set_name: str = "") -> None:
-        """Forrás-IP felvétele a ``banned_v4`` (vagy a megadott) halmazba.
+        """Add a source IP to the ``banned_v4`` (or the given) set.
 
-        A tiltás kerneloldali timeouttal rendelkezik. Újra hozzáadás előtt
-        töröljük, így a tiltás meghosszabbításakor a timeout újraindul.
+        The ban has a kernel-side timeout. We delete before adding again,
+        so extending a ban restarts the timeout.
         """
         if not is_ipv4(ip):
-            raise FirewallError("csak IPv4-cím tiltható le")
+            raise FirewallError("only an IPv4 address can be banned")
         set_name = set_name or self.ban_set
         address = normalize_ip(ip)
         ttl = max(1, int(ttl))
@@ -4848,19 +4887,19 @@ class Firewall:
             )
 
     def unban(self, ip: str, set_name: str = "") -> None:
-        """Forrás-IP törlése a ``banned_v4`` (vagy a megadott) halmazból.
+        """Delete a source IP from the ``banned_v4`` (or the given) set.
 
-        A hiányzó elem nem hiba.
+        A missing element is not an error.
         """
         if not is_ipv4(ip):
             return
         self._delete_elements([(set_name or self.ban_set, normalize_ip(ip))])
 
     def sync_bans(self, elements, set_name: str = "") -> None:
-        """A tiltott IP-k és hátralévő idejük betöltése a halmazba.
+        """Load the banned IPs and their remaining time into the set.
 
-        Induláskor hívjuk a dinamikus halmazok ürítése után. A halmazt előbb
-        kiürítjük, hogy a kernel és a mentett nyilvántartás biztosan egyezzen.
+        We call it at startup after flushing the dynamic sets. We empty the
+        set first so that the kernel and the saved record definitely agree.
         """
         set_name = set_name or self.ban_set
         lines = [f"flush set inet {self.table} {set_name}"]
@@ -4873,7 +4912,7 @@ class Firewall:
             )
         self._run_script("\n".join(lines) + "\n")
 
-    # A proxy-tiltás (TCP 80/443) ugyanígy, a proxy_banned_v4 halmazzal.
+    # The proxy ban (TCP 80/443) works the same way, with the proxy_banned_v4 set.
     def proxy_ban(self, ip: str, ttl: int) -> None:
         self.ban(ip, ttl, self.proxy_ban_set)
 
@@ -4884,13 +4923,13 @@ class Firewall:
         self.sync_bans(elements, self.proxy_ban_set)
 
     def _delete_elements(self, elements: list[tuple[str, str]]) -> None:
-        """Elemek törlése; a nem létező elem nem hiba.
+        """Delete elements; a nonexistent element is not an error.
 
-        A portos halmazokban a törlés intervallumtudatos: ha egy kért
-        tartomány csak részben fed egy meglévő elemet, az elemet kivágjuk,
-        és a megmaradó részt a hátralévő timeouttal visszatesszük. Így egy
-        részleges visszavonás nem törli a másik aktív szabály nagyobb
-        tartományát. Listázási hiba esetén a régi, pontos törlés fut.
+        In port sets deletion is interval-aware: if a requested range only
+        partially covers an existing element, we cut out the element and
+        put the remaining part back with the remaining timeout. Thus a
+        partial revocation does not delete the larger range of another
+        active rule. On a listing error the old, exact deletion runs.
         """
         errors: list[str] = []
         port_sets = {
@@ -4938,7 +4977,7 @@ class Firewall:
         address: str,
         cuts: list[tuple[int, int]],
     ) -> None:
-        """Portintervallumok törlése, a részben fedett elemek megőrzésével."""
+        """Delete port intervals while preserving partially covered elements."""
         existing = self._list_port_elements_locked(set_name, address)
         if existing is None or not existing:
             for low, high in self._merge_interval_list(cuts):
@@ -4978,16 +5017,16 @@ class Firewall:
         if not is_ipv4(ip):
             return
         address = normalize_ip(ip)
-        # A teljes és az ICMP halmazból mindenképpen törlünk; a portokat a
-        # megadott engedélyből tudjuk.
+        # We always delete from the full and ICMP sets; the ports are known
+        # from the given grant.
         elements: list[tuple[str, str]] = [
             (self.set_name, address),
             (self.icmp_set, address),
         ]
         if ports is not None:
             elements.extend(self._elements(address, ports))
-        # A port megadása nélküli tiltás a host (input) halmazokból is
-        # töröljön minden elemet, ne csak a forward halmazokból.
+        # A ban without ports should also delete every element from the
+        # host (input) sets, not only from the forward sets.
         elements.extend(self._input_delete_elements(address))
         elements.extend(self._mac_delete_elements(address))
         self._delete_elements(list(dict.fromkeys(elements)))
@@ -4999,30 +5038,28 @@ class Firewall:
         discover: bool = False,
         only_grants: bool = False,
     ) -> None:
-        """A kliens engedélyeinek törlése.
+        """Revoke a client's grants.
 
-        A teljes és az ICMP halmazból mindig törlünk. A portokat a megadott
-        engedélyekből (Ports) vesszük: a szabályok tetszőleges portokat
-        tartalmazhatnak, ezért nem lehet a katalógusból kiolvasni őket. A
-        hívók a munkamenetből ismerik a kiadott engedélyt. A host TCP 22
-        engedély is a grantokból, az ``allowed_input_tcp`` halmazból
-        törlődik.
+        We always delete from the full and ICMP sets. The ports are taken
+        from the given grants (Ports): rules may contain arbitrary ports,
+        therefore they cannot be read out of the catalog. Callers know the
+        issued grant from the session. The host TCP 22 grant is also
+        deleted from the grants, from the ``allowed_input_tcp`` set.
 
-        ``only_grants=True`` esetén kizárólag a megadott grantokhoz tartozó
-        elemeket töröljük; a teljes (``allowed_v4``), ICMP és MAC elemekhez
-        nem nyúlunk. Ezt akkor használjuk, amikor ugyanahhoz az IP-hez aktív
-        munkamenet tartozik, és csak a régi, nem átfedő grantokat szabad
-        eltávolítani.
+        With ``only_grants=True`` we delete exclusively the elements
+        belonging to the given grants; we do not touch the full
+        (``allowed_v4``), ICMP and MAC elements. We use this when an active
+        session belongs to the same IP, and only the old, non-overlapping
+        grants may be removed.
 
-        A host (input) engedélyek a grantokból törlődnek (a TCP 22 is az
-        ``allowed_input_tcp`` halmazból). ``discover=True`` esetén az IP-hez
-        tartozó összes host és forward ``ip . port`` elemet felderítjük,
-        így egy hiányos grantlista vagy egy korábbi összeomlás árva elemét
-        is eltávolítjuk. Ezt a felderítő utat csak akkor szabad használni,
-        ha az IP-hez nem tartozik munkamenet (a SessionManager egy-IP-egy-
-        munkamenet szabálya miatt az IP-hez tartozó dinamikus elemek
-        biztonságosan a mieink); a normál visszavonás a pontos grantokat
-        használja.
+        Host (input) grants are deleted from the grants (TCP 22 too, from
+        the ``allowed_input_tcp`` set). With ``discover=True`` we discover
+        all host and forward ``ip . port`` elements belonging to the IP,
+        thus we also remove the orphaned element of an incomplete grant
+        list or an earlier crash. This discovery path must only be used
+        when no session belongs to the IP (because of the SessionManager's
+        one-session-per-IP rule, the dynamic elements belonging to the IP
+        are safely ours); normal revocation uses the exact grants.
         """
         if not is_ipv4(ip):
             return
@@ -5042,14 +5079,14 @@ class Firewall:
         self._delete_elements(list(dict.fromkeys(elements)))
 
     def revoke_exact(self, ip: str, grants) -> None:
-        """Pontosan a megadott grantokhoz tartozó elemek törlése.
+        """Delete exactly the elements belonging to the given grants.
 
-        A ``revoke_all(..., only_grants=True)`` csak a port- és ICMP-
-        elemeket törli; ez a művelet a ``full`` engedélyhez tartozó
-        ``allowed_v4`` elemet is eltávolítja, ha a grant azt tartalmazza.
-        A MAC-kötéshez soha nem nyúl, mert ugyanahhoz az IP-hez tartozó,
-        továbbra is aktív munkamenetnek szüksége lehet rá. Nem IPv4-cím
-        esetén nincs teendő.
+        ``revoke_all(..., only_grants=True)`` deletes only the port and
+        ICMP elements; this operation also removes the ``allowed_v4``
+        element belonging to the ``full`` grant if the grant contains it.
+        It never touches the MAC binding, because a still active session
+        belonging to the same IP may need it. For a non-IPv4 address there
+        is nothing to do.
         """
         if not is_ipv4(ip):
             return
@@ -5064,17 +5101,17 @@ class Firewall:
         self._delete_elements(elements)
 
     def sync_host_ports(self, tcp_ports, udp_ports) -> None:
-        """A host (input) szabályok portjainak betöltése a kernelbe.
+        """Load the ports of the host (input) rules into the kernel.
 
-        A ``host_service_tcp``/``host_service_udp`` halmazok a valaha
-        deklarált host portokat tartalmazzák; az input lánc ezekkel vágja el
-        a meglévő kapcsolatokat, ha az engedély eltűnik. A normál szinkron
-        csak hozzáad, soha nem ürít: egy szabály törlése így nem nyithatja
-        meg újra a már meglévő kapcsolatot. Az elavult portok ártalmatlanok,
-        mert csak szigorúbbá teszik az established forgalom ellenőrzését; a
-        feleslegeseket külön, biztonságos takarítás
-        (:meth:`prune_host_service_ports`) törli, csak hivatkozás és élő
-        conntrack nélküli portot.
+        The ``host_service_tcp``/``host_service_udp`` sets contain every
+        host port ever declared; the input chain uses them to cut existing
+        connections when the grant disappears. Normal sync only adds,
+        never flushes: thus deleting a rule cannot reopen an already
+        existing connection. Stale ports are harmless, because they only
+        make the check of established traffic stricter; the unnecessary
+        ones are removed by a separate, safe cleanup
+        (:meth:`prune_host_service_ports`), only a port without a
+        reference and live conntrack.
         """
         def clean(values) -> list[int]:
             ports: list[int] = []
@@ -5100,8 +5137,8 @@ class Firewall:
             for set_name, intervals in desired.items():
                 if not intervals:
                     continue
-                # Az interval halmazban az átfedő hozzáadás hibát ad, ezért
-                # csak a még nem fedett részeket adjuk hozzá.
+                # In an interval set overlapping additions raise an error,
+                # so we add only the still-uncovered parts.
                 existing = self._list_service_ranges_locked(set_name)
                 additions = list(intervals)
                 if existing is not None:
@@ -5120,7 +5157,7 @@ class Firewall:
 
     @staticmethod
     def _service_interval(raw_element) -> tuple[int, int] | None:
-        """Egy ``inet_service`` halmazelem ``(lo, hi)`` párja."""
+        """The ``(lo, hi)`` pair of an ``inet_service`` set element."""
         value = raw_element
         for _unused in range(3):
             if not isinstance(value, dict):
@@ -5159,29 +5196,29 @@ class Firewall:
 
     @staticmethod
     def parse_service_set_json(raw: bytes | str, set_name: str) -> set[int]:
-        """Egy ``inet_service`` halmaz (host_service_*) portjainak kiolvasása.
+        """Read the ports of an ``inet_service`` set (host_service_*).
 
-        A :meth:`parse_set_json` csak ``ipv4_addr`` és
-        ``ipv4_addr . inet_service`` elemeket ismer, ezért a sima
-        portszámokat külön dolgozzuk fel. Az értelmezhetetlen elemeket
-        csendben kihagyjuk: takarításkor soha nem törölünk azért, mert egy
-        idegen formátumú elemet nem értünk.
+        :meth:`parse_set_json` recognises only ``ipv4_addr`` and
+        ``ipv4_addr . inet_service`` elements, therefore plain port numbers
+        are processed separately. Unparseable elements are silently
+        skipped: during cleanup we never delete just because we do not
+        understand an element of a foreign format.
         """
         if isinstance(raw, bytes):
             try:
                 raw = raw.decode("utf-8")
             except UnicodeDecodeError as exc:
                 raise FirewallError(
-                    f"a(z) {set_name} halmaz kimenete nem UTF-8"
+                    f"the output of the {set_name} set is not UTF-8"
                 ) from exc
         try:
             payload = json.loads(raw)
         except ValueError as exc:
             raise FirewallError(
-                f"a(z) {set_name} halmaz JSON-kimenete hibás: {exc}"
+                f"the JSON output of the {set_name} set is invalid: {exc}"
             ) from exc
         if not isinstance(payload, dict):
-            raise FirewallError(f"a(z) {set_name} halmaz kimenete hibás")
+            raise FirewallError(f"the output of the {set_name} set is invalid")
         ports: set[int] = set()
         for top in payload.get("nftables", []):
             if not isinstance(top, dict):
@@ -5204,17 +5241,18 @@ class Firewall:
     def parse_service_set_intervals_json(
         raw: bytes | str, set_name: str
     ) -> list[tuple[int, int]]:
-        """Egy ``inet_service`` halmaz intervallumai, összevonva."""
+        """The intervals of an ``inet_service`` set, merged."""
         ports = Firewall.parse_service_set_json(raw, set_name)
         return Firewall._merge_interval_list(
             [(port, port) for port in sorted(ports)]
         )
 
     def _list_service_ports_locked(self, set_name: str) -> set[int] | None:
-        """A host_service_* halmaz elemei; listázási hiba esetén ``None``.
+        """The elements of the host_service_* set; ``None`` on a listing error.
 
-        A hiányzó tábla/halmaz üres halmaznak számít (a telepítés előtt is
-        működik). Minden más hiba ``None``: ilyenkor a hívó nem töröl.
+        A missing table/set counts as an empty set (it also works before
+        installation). Every other error is ``None``: the caller then does
+        not delete.
         """
         try:
             result = self._run(
@@ -5222,9 +5260,9 @@ class Firewall:
                 check=False,
             )
         except FirewallError as exc:
-            # Hiányzó nft, jogosultság vagy időtúllépés: nem törlünk.
+            # Missing nft, permission or timeout: we do not delete.
             self.log(
-                f"[tűzfal] a(z) {set_name} halmaz listázása nem sikerült: "
+                f"[firewall] listing the {set_name} set failed: "
                 f"{exc}"
             )
             return None
@@ -5236,7 +5274,7 @@ class Firewall:
             ):
                 return set()
             self.log(
-                f"[tűzfal] a(z) {set_name} halmaz listázása nem sikerült: "
+                f"[firewall] listing the {set_name} set failed: "
                 f"{detail or result.returncode}"
             )
             return None
@@ -5244,7 +5282,7 @@ class Firewall:
             return self.parse_service_set_json(result.stdout, set_name)
         except FirewallError as exc:
             self.log(
-                f"[tűzfal] a(z) {set_name} halmaz kimenete nem értelmezhető: "
+                f"[firewall] the output of the {set_name} set is not parseable: "
                 f"{exc}"
             )
             return None
@@ -5252,7 +5290,7 @@ class Firewall:
     def _list_service_ranges_locked(
         self, set_name: str
     ) -> list[tuple[int, int]] | None:
-        """A host_service_* halmaz intervallumai; hiba esetén ``None``."""
+        """The intervals of the host_service_* set; ``None`` on error."""
         try:
             result = self._run(
                 ["-j", "list", "set", "inet", self.table, set_name],
@@ -5260,7 +5298,7 @@ class Firewall:
             )
         except FirewallError as exc:
             self.log(
-                f"[tűzfal] a(z) {set_name} halmaz listázása nem sikerült: "
+                f"[firewall] listing the {set_name} set failed: "
                 f"{exc}"
             )
             return None
@@ -5272,7 +5310,7 @@ class Firewall:
             ):
                 return []
             self.log(
-                f"[tűzfal] a(z) {set_name} halmaz listázása nem sikerült: "
+                f"[firewall] listing the {set_name} set failed: "
                 f"{detail or result.returncode}"
             )
             return None
@@ -5282,28 +5320,28 @@ class Firewall:
             )
         except FirewallError as exc:
             self.log(
-                f"[tűzfal] a(z) {set_name} halmaz kimenete nem értelmezhető: "
+                f"[firewall] the output of the {set_name} set is not parseable: "
                 f"{exc}"
             )
             return None
 
     def _warn_prune_conntrack(self, reason: str) -> None:
-        """A conntrack hiányát/hibáját csak egyszer naplózza."""
+        """Log the absence/failure of conntrack only once."""
         if self._prune_conntrack_warned:
             return
         self._prune_conntrack_warned = True
-        self.log(f"[tűzfal] host port takarítás kihagyva: {reason}")
+        self.log(f"[firewall] host port pruning skipped: {reason}")
 
     def _live_conntrack_ports(self, candidates: set[int]) -> set[int] | None:
-        """A jelöltek közül az élő conntrack-bejegyzésekben szereplő portok.
+        """Among the candidates, the ports present in live conntrack entries.
 
-        ``None`` azt jelenti, hogy a conntrack nem listázható, ezért a hívó
-        egyetlen portot sem törölhet. A keresés szándékosan konzervatív:
-        bármely ``dport=<port>`` vagy ``sport=<port>`` találat megtartja a
-        portot, akár a kliens, akár a host oldalán szerepel.
+        ``None`` means that conntrack cannot be listed, so the caller must
+        not delete any port. The search is deliberately conservative: any
+        ``dport=<port>`` or ``sport=<port>`` match keeps the port, whether
+        it appears on the client or the host side.
         """
         if not CONNTRACK_BIN:
-            self._warn_prune_conntrack("a conntrack eszköz nem érhető el")
+            self._warn_prune_conntrack("the conntrack tool is not available")
             return None
         try:
             result = subprocess.run(
@@ -5311,13 +5349,13 @@ class Firewall:
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             self._warn_prune_conntrack(
-                f"a conntrack listázása nem sikerült: {exc}"
+                f"listing conntrack failed: {exc}"
             )
             return None
         if result.returncode != 0:
             detail = result.stderr.decode("utf-8", "replace").strip()
             self._warn_prune_conntrack(
-                "a conntrack listázása hibakóddal tért vissza "
+                "listing conntrack returned an error code "
                 f"({result.returncode}): {detail}".strip()
             )
             return None
@@ -5332,7 +5370,7 @@ class Firewall:
     def _delete_service_ports_locked(
         self, set_name: str, ports: set[int]
     ) -> tuple[list[int], list[str]]:
-        """Portok törlése a halmazból; a már eltűnt elem nem hiba."""
+        """Delete ports from the set; an element already gone is not an error."""
         if not ports:
             return [], []
         ordered = sorted(ports)
@@ -5344,8 +5382,9 @@ class Firewall:
             return ordered, []
         except FirewallError as exc:
             detail = str(exc)
-            # Csak a közben eltűnt elemeket toleráljuk egyenként; tartós
-            # nft-hiba esetén nem indítunk ezernyi külön folyamatot.
+            # We tolerate only elements that disappeared in the meantime,
+            # one by one; on a persistent nft error we do not start
+            # thousands of separate processes.
             if not (
                 "No such file or directory" in detail
                 or "does not exist" in detail
@@ -5371,29 +5410,29 @@ class Firewall:
                 operation="host_ports_prune",
                 reason=str(reason),
             )
-        except Exception as exc:  # a naplózás soha ne blokkoljon
+        except Exception as exc:  # logging should never block
             self.log(
-                f"[napló] host_ports_prune írása nem sikerült: {exc}"
+                f"[audit] writing host_ports_prune failed: {exc}"
             )
 
     def prune_host_service_ports(
         self, referenced_tcp, referenced_udp, audit=None
     ) -> dict:
-        """A host_service_* halmazok biztonságos takarítása.
+        """Safe cleanup of the host_service_* sets.
 
-        Portot csak akkor törlünk, ha (a) egyetlen perzisztált szabály
-        sem hivatkozik rá (bármely irányú vagy gyűjtőtag portja véd), és
-        (b) nincs hozzá élő conntrack-bejegyzés. Ha a
-        conntrack eszköz hiányzik vagy nem listázható, egyetlen portot sem
-        törlünk: a megmaradó őrök csak szigorúbbá teszik az ellenőrzést.
-        Ugyanígy járunk el, ha az nft halmazlistázás nem sikerül; a
-        takarítás hibája soha nem akaszthatja meg az engedélyezést.
+        We delete a port only if (a) no persisted rule references it (a
+        port of any direction or collection member protects it), and (b)
+        there is no live conntrack entry for it. If the conntrack tool is
+        missing or cannot be listed, we delete no port at all: the
+        remaining guards only make the check stricter. We do the same if
+        listing the nft set fails; a cleanup failure must never block
+        granting.
 
-        A normál szinkron továbbra is add-only; egyedül ez az út töröl, a
-        fenti két feltétellel. Induláskor a halmazok szándékosan nem
-        ürülnek, hogy a törölt portok régi folyamai továbbra is el legyenek
-        vágva. A 65536-os halmazméret miatt a portok száma legfeljebb
-        65535 lehet, ezért a halmaz nem telhet meg.
+        Normal sync remains add-only; this is the only path that deletes,
+        with the two conditions above. At startup the sets are deliberately
+        not flushed, so that the old flows of deleted ports remain cut off.
+        Because of the 65536 set size, the number of ports can be at most
+        65535, so the set cannot overflow.
         """
         summary = {
             "dry_run": bool(self.dry_run),
@@ -5416,16 +5455,17 @@ class Firewall:
             )
             if ranges_tcp is None or ranges_udp is None:
                 reason = (
-                    "a host_service_* halmaz listázása nem sikerült, "
-                    "a takarítás kimaradt"
+                    "listing the host_service_* sets failed, "
+                    "cleanup skipped"
                 )
                 summary["errors"].append(reason)
-                self.log(f"[tűzfal] {reason}")
+                self.log(f"[firewall] {reason}")
                 self._audit_prune(audit, reason)
                 return summary
-            # Csak az egyportos elemeket takarítjuk: egy tartomány részleges
-            # törlése a teljes elemet vinné, ezért azok biztonságosan
-            # megmaradnak (ez csak szigorúbb, nem nyit hozzáférést).
+            # We clean up only single-port elements: partially deleting a
+            # range would remove the whole element, so those remain safely
+            # in place (this only makes the check stricter, it does not open
+            # access).
             members_tcp = {low for low, high in ranges_tcp if low == high}
             members_udp = {low for low, high in ranges_udp if low == high}
             candidates_tcp = members_tcp - ref_tcp
@@ -5433,11 +5473,12 @@ class Firewall:
             candidates = candidates_tcp | candidates_udp
             if not candidates:
                 return summary
-            # A conntrack listázása a tűzfal-zár alatt fut, hogy a
-            # döntés és a törlés közé ne ékelődhessen párhuzamos grant.
+            # Listing conntrack runs under the firewall lock, so that a
+            # parallel grant cannot slip between the decision and the
+            # deletion.
             live = self._live_conntrack_ports(candidates)
             if live is None:
-                # Nincs conntrack-információ: egyetlen jelölt sem törölhető.
+                # No conntrack information: no candidate may be deleted.
                 summary["skipped"] = "conntrack"
                 return summary
             summary["live_kept"] = sorted(candidates & live)
@@ -5453,15 +5494,15 @@ class Firewall:
             if summary["errors"]:
                 reason = "; ".join(summary["errors"])
                 self.log(
-                    "[tűzfal] a host port takarítás részben nem sikerült: "
+                    "[firewall] host port cleanup partially failed: "
                     f"{reason}"
                 )
                 self._audit_prune(audit, reason)
         if summary["removed_tcp"] or summary["removed_udp"]:
             self.log(
-                "[tűzfal] host port őrök takarítva: "
+                "[firewall] host port guards cleaned up: "
                 f"TCP {summary['removed_tcp']}, UDP {summary['removed_udp']}; "
-                f"élő conntrack miatt megtartva: {summary['live_kept']}"
+                f"kept because of live conntrack: {summary['live_kept']}"
             )
         return summary
 
@@ -5483,7 +5524,7 @@ class Firewall:
                 if "No such file or directory" in detail or "does not exist" in detail:
                     continue
                 errors.append(
-                    detail.strip() or f"a(z) {set_name} halmaz ürítése sikertelen"
+                    detail.strip() or f"flushing the {set_name} set failed"
                 )
             if not errors:
                 self._macs.clear()
@@ -5492,33 +5533,33 @@ class Firewall:
 
     @staticmethod
     def parse_set_json(raw: bytes | str, set_name: str) -> list[dict]:
-        """Egy ``nft -j list set`` kimenetének feldolgozása.
+        """Process the output of ``nft -j list set``.
 
-        Az nft JSON-ben a timeoutos elem így néz ki::
+        In nft JSON an element with a timeout looks like this::
 
             {"elem": {"val": {"concat": ["192.0.2.5", 80]},
                       "timeout": 90, "expires": 89}}
 
-        Az időértékek másodpercek. A ``timeout`` az eredeti élettartam, az
-        ``expires`` a hátralévő idő. A visszaadott lista elemei:
-        ``{"address", "port", "expires_in", "timeout"}``; a port csak az
-        összetett (IP . port) halmazoknál szerepel.
+        The time values are in seconds. ``timeout`` is the original
+        lifetime, ``expires`` is the remaining time. The returned list's
+        elements are ``{"address", "port", "expires_in", "timeout"}``; the
+        port is present only for composite (IP . port) sets.
         """
         if isinstance(raw, bytes):
             try:
                 raw = raw.decode("utf-8")
             except UnicodeDecodeError as exc:
                 raise FirewallError(
-                    f"a(z) {set_name} halmaz kimenete nem UTF-8"
+                    f"the output of the {set_name} set is not UTF-8"
                 ) from exc
         try:
             payload = json.loads(raw)
         except ValueError as exc:
             raise FirewallError(
-                f"a(z) {set_name} halmaz JSON-kimenete hibás: {exc}"
+                f"the JSON output of the {set_name} set is invalid: {exc}"
             ) from exc
         if not isinstance(payload, dict):
-            raise FirewallError(f"a(z) {set_name} halmaz kimenete hibás")
+            raise FirewallError(f"the output of the {set_name} set is invalid")
         entries: list[dict] = []
         for top in payload.get("nftables", []):
             if not isinstance(top, dict):
@@ -5626,10 +5667,10 @@ class Firewall:
         return entry
 
     def snapshot(self) -> dict:
-        """A dinamikus halmazok pillanatképe, a hátralévő időkkel.
+        """A snapshot of the dynamic sets, with the remaining times.
 
-        Csak olvas, ezért az admin Tűzfal nézet biztonságosan hívhatja.
-        A nem létező halmaz üresnek számít (a telepítés előtt is működik).
+        Read-only, so the admin Firewall view can safely call it. A
+        nonexistent set counts as empty (it also works before installation).
         """
         names = (
             self.set_name, self.tcp_set, self.udp_set,
@@ -5653,7 +5694,7 @@ class Firewall:
                         ):
                             errors.append(
                                 f"{set_name}: "
-                                f"{detail or 'az nft nem tudta listázni a halmazt'}"
+                                f"{detail or 'nft could not list the set'}"
                             )
                         continue
                     try:
@@ -5671,13 +5712,13 @@ class Firewall:
         }
 
     def ruleset(self) -> dict:
-        """A láncok nyers nftables kiírása az admin Tűzfal nézethez.
+        """Raw nftables output of the chains for the admin Firewall view.
 
-        Csak olvas, ezért az admin nézet biztonságosan hívhatja. A dinamikus
-        halmazok tartalmát szándékosan nem tartalmazza (azokat a snapshot()
-        mutatja); így a kimenet az ``iptables -L -n``-hez hasonló, rövid
-        szabálylista marad. A hiányzó lánc nem hiba: a tábla a telepítés
-        előtt még nem létezhet.
+        Read-only, so the admin view can safely call it. It deliberately
+        does not include the contents of the dynamic sets (snapshot() shows
+        those); thus the output remains a short rule list similar to
+        ``iptables -L -n``. A missing chain is not an error: the table may
+        not exist yet before installation.
         """
         if self.dry_run:
             return {
@@ -5709,7 +5750,7 @@ class Firewall:
                     else:
                         errors.append(
                             f"{chain}: "
-                            f"{detail or 'az nft nem tudta listázni a láncot'}"
+                            f"{detail or 'nft could not list the chain'}"
                         )
                     continue
                 text = self._strip_chain_wrapper(
@@ -5730,11 +5771,12 @@ class Firewall:
 
     @staticmethod
     def _strip_chain_wrapper(text: str) -> str:
-        """Eltávolítja az ``nft list chain`` körüli tábla-burkot.
+        """Remove the table wrapper around ``nft list chain``.
 
-        Az újabb nft verziók a láncot is ``table inet <név> { ... }`` blokkba
-        ágyazva írják ki. A nézetben a tábla csak egyszer szerepeljen, ezért
-        a burkot levágjuk, és a plusz behúzást is megszüntetjük.
+        Newer nft versions print the chain wrapped in a
+        ``table inet <name> { ... }`` block too. The view should show the
+        table only once, so we cut off the wrapper and also remove the
+        extra indentation.
         """
         lines = text.splitlines()
         if (
@@ -5769,7 +5811,7 @@ class Firewall:
 def _audit_conntrack_failure(
     audit, ip: str, returncode: int, detail: str, operation: str = "flush"
 ) -> None:
-    """A conntrack-törlés hibája (nem kötelező, nem blokkoló naplózás)."""
+    """A conntrack deletion failure (optional, non-blocking logging)."""
     if audit is None:
         return
     try:
@@ -5781,16 +5823,16 @@ def _audit_conntrack_failure(
             detail=str(detail)[:500],
         )
     except Exception as exc:
-        log(f"[napló] conntrack_failed írása nem sikerült: {exc}")
+        log(f"[audit] writing conntrack_failed failed: {exc}")
 
 
 def conntrack_flush(ip: str, audit=None) -> bool:
-    """Megszünteti az adott kliens meglévő kapcsolatait.
+    """Tear down the given client's existing connections.
 
-    A visszatérési érték jelzi, hogy a törlés ténylegesen lefutott-e. A
-    hívók ezt naplózzák; a tűzfalhalmazok lejárata ettől függetlenül
-    érvényesül az új kapcsolatokra. Valódi hiba esetén opcionális
-    auditnapló-bejegyzés is készül (soha nem blokkol).
+    The return value indicates whether the deletion actually ran. Callers
+    log it; expiry of the firewall sets applies to new connections
+    independently of this. On a real error an optional audit log entry is
+    also written (it never blocks).
     """
     if DRY_RUN or not CONNTRACK_BIN or not is_ipv4(ip):
         return False
@@ -5801,16 +5843,16 @@ def conntrack_flush(ip: str, audit=None) -> bool:
             timeout=10,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        log(f"[tűzfal] conntrack törlés nem sikerült ({ip}): {exc}")
+        log(f"[firewall] conntrack deletion failed ({ip}): {exc}")
         _audit_conntrack_failure(audit, ip, -1, str(exc))
         return False
     if result.returncode != 0:
         detail = result.stderr.decode("utf-8", "replace").strip()
-        # Az 1-es kód a conntrack esetében gyakran "nincs ilyen bejegyzés";
-        # ez nem hiba, ilyenkor nincs mit törölni.
+        # Exit code 1 in conntrack often means "no such entry"; that is not
+        # an error, there is nothing to delete then.
         if result.returncode != 1 or detail:
             log(
-                f"[tűzfal] conntrack törlés hibakóddal tért vissza "
+                f"[firewall] conntrack deletion returned an error code "
                 f"({ip}): {result.returncode} {detail}".strip()
             )
             _audit_conntrack_failure(audit, ip, result.returncode, detail)
@@ -5818,41 +5860,44 @@ def conntrack_flush(ip: str, audit=None) -> bool:
     return True
 
 
-# Egyszerre legfeljebb ennyi célzott conntrack-törlést indítunk. Afölött a
-# teljes IP-s ürítés olcsóbb és megbízhatóbb, mint több tucat folyamat.
+# We start at most this many targeted conntrack deletions at a time. Above
+# that, a full per-IP flush is cheaper and more reliable than dozens of
+# processes.
 CONNTRACK_REMOVED_LIMIT = 16
 
 
 def conntrack_flush_removed(
     ip: str, removed, remaining=(), audit=None
 ) -> bool:
-    """Csak az eltávolított engedélyekhez tartozó kapcsolatok törlése.
+    """Delete only the connections belonging to removed grants.
 
-    ``removed`` a távozó, ``remaining`` a továbbra is érvényes grantok
-    (jellemzően a munkamenet új uniója). A conntrack nem tud irány szerint
-    szűrni, ezért a döntés az összes irány együttes unióján alapul:
+    ``removed`` are the departing grants, ``remaining`` the still valid
+    ones (typically the session's new union). Conntrack cannot filter by
+    direction, so the decision is based on the combined union of all
+    directions:
 
-    * Egy eltávolított ``full`` engedélyhez csak akkor végzünk teljes IP-s
-      ürítést, ha ``remaining`` üres (semmi nem maradt engedélyezve). Ha
-      maradt még engedély, a csomagszintű nft-szabályok állítják meg a
-      távozó forgalmat; a teljes ürítés a maradó engedély élő kapcsolatait
-      is megszakítaná (például a 22-es input SSH-t, amikor egy teljes
-      forward hozzáférést input-22 vált fel).
-    * Ha bármely maradó rész ``full`` (bármely irányban), célzott
-      port/ICMP törlést egyáltalán nem indítunk: a conntrack irányvak, és
-      a parancs a maradó teljes hozzáférés kapcsolatait is megszakítaná.
-    * Egyébként a maradó TCP/UDP portok és az ICMP az összes irány
-      uniójaként számítanak, mert a ``conntrack -D -s IP -p tcp --dport N``
-      iránytól függetlenül töröl. Egy másik irányban még engedélyezett
-      port kapcsolatai így érintetlenek maradnak.
+    * For a removed ``full`` grant we perform a full per-IP flush only if
+      ``remaining`` is empty (nothing remains allowed). If some grant
+      remains, the packet-level nft rules stop the departing traffic; a
+      full flush would also break the live connections of the remaining
+      grant (for example input SSH on port 22, when input-22 replaces a
+      full forward access).
+    * If any remaining part is ``full`` (in any direction), we do not
+      start targeted port/ICMP deletion at all: conntrack is
+      direction-blind, and the command would break the remaining full
+      access's connections too.
+    * Otherwise the remaining TCP/UDP ports and ICMP count as the union of
+      all directions, because ``conntrack -D -s IP -p tcp --dport N``
+      deletes regardless of direction. Thus the connections of a port
+      still allowed in another direction remain untouched.
 
-    A művelet legfeljebb :data:`CONNTRACK_REMOVED_LIMIT` egyedi parancsot
-    indít. Ennél több parancs esetén csak akkor váltunk teljes IP-s
-    ürítésre, ha ``remaining`` üres; különben a maradó engedélyek védelme
-    miatt kihagyjuk a tisztítást és ``False``-t adunk vissza. A
-    ``DRY_RUN``/``CONNTRACK_BIN``/IPv4 feltételek ugyanazok, mint a
-    :func:`conntrack_flush` esetében. A függvény soha nem dob kivételt;
-    a hibák opcionális auditbejegyzést kapnak.
+    The operation starts at most :data:`CONNTRACK_REMOVED_LIMIT` unique
+    commands. Beyond that we switch to a full per-IP flush only if
+    ``remaining`` is empty; otherwise, to protect the remaining grants, we
+    skip the cleanup and return ``False``. The
+    ``DRY_RUN``/``CONNTRACK_BIN``/IPv4 conditions are the same as in
+    :func:`conntrack_flush`. The function never raises; errors get an
+    optional audit entry.
     """
 
     if DRY_RUN or not CONNTRACK_BIN or not is_ipv4(ip):
@@ -5861,17 +5906,17 @@ def conntrack_flush_removed(
     removed = tuple(removed or ())
     remaining = tuple(remaining or ())
     if not remaining and any(part.full for part in removed):
-        # Eltávolított teljes hozzáférés, és semmi nem maradt engedélyezve:
-        # a legbiztosabb teljes IP-s ürítés.
+        # Removed full access, and nothing remains allowed: a full per-IP
+        # flush is the safest.
         return conntrack_flush(ip, audit)
     if any(part.full for part in remaining):
-        # A maradó teljes hozzáférés (bármely irányban) minden portot és
-        # ICMP-t lefed. A conntrack nem tud irány szerint szűrni, ezért
-        # bármely célzott törlés az ő élő kapcsolatait is megszakítaná.
+        # The remaining full access (in any direction) covers every port
+        # and ICMP. Conntrack cannot filter by direction, so any targeted
+        # deletion would also break its live connections.
         return False
 
-    # A conntrack -D -s feltétel irányvak: a maradó portokat az összes
-    # irány uniójaként kell számítani.
+    # conntrack -D -s is direction-blind: the remaining ports must count
+    # as the union of all directions.
     covered_tcp = {port for part in remaining for port in part.tcp}
     covered_udp = {port for part in remaining for port in part.udp}
     covered_icmp = any(part.icmp for part in remaining)
@@ -5890,8 +5935,8 @@ def conntrack_flush_removed(
     removed_icmp = False
     for part in removed:
         if part.full:
-            # A távozó full elemét a fenti ág kezeli; maradó engedély
-            # mellett szándékosan nem törlünk rá semmit.
+            # The departing full element is handled by the branch above;
+            # with a remaining grant we deliberately delete nothing for it.
             continue
         removed_tcp.update(part.tcp)
         removed_udp.update(part.udp)
@@ -5906,9 +5951,9 @@ def conntrack_flush_removed(
     if len(commands) > CONNTRACK_REMOVED_LIMIT:
         if remaining:
             log(
-                f"[tűzfal] a(z) {ip} célzott conntrack törlése "
-                f"{len(commands)} parancsot igényelne; a maradó "
-                "engedélyek védelme miatt kihagyjuk"
+                f"[firewall] targeted conntrack deletion for {ip} "
+                f"would require {len(commands)} commands; skipping "
+                "to protect the remaining grants"
             )
             return False
         return conntrack_flush(ip, audit)
@@ -5926,7 +5971,7 @@ def conntrack_flush_removed(
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             log(
-                f"[tűzfal] célzott conntrack törlés nem sikerült "
+                f"[firewall] targeted conntrack deletion failed "
                 f"({ip}, {proto}"
                 + (f"/{port}" if port is not None else "")
                 + f"): {exc}"
@@ -5938,12 +5983,12 @@ def conntrack_flush_removed(
             continue
         if result.returncode != 0:
             detail = result.stderr.decode("utf-8", "replace").strip()
-            # Az 1-es kód gyakran "nincs ilyen bejegyzés"; ilyenkor nincs
-            # mit törölni, de a hívás nem tekinthető sikeresnek.
+            # Exit code 1 often means "no such entry"; there is nothing to
+            # delete then, but the call cannot be considered successful.
             if result.returncode != 1 or detail:
                 log(
-                    f"[tűzfal] célzott conntrack törlés hibakóddal tért "
-                    f"vissza ({ip}, {proto}"
+                    f"[firewall] targeted conntrack deletion returned "
+                    f"an error code ({ip}, {proto}"
                     + (f"/{port}" if port is not None else "")
                     + f"): {result.returncode} {detail}".strip()
                 )
@@ -5959,10 +6004,10 @@ def conntrack_flush_removed(
 
 
 def _port_proxy_keys(entries) -> dict[tuple[str, int], tuple]:
-    """Bekapcsolt bejegyzések: (protokoll, hallgató port) -> a hatásuk.
+    """Enabled entries: (protocol, listening port) -> their effect.
 
-    A szintetikus alagút-bejegyzések kimaradnak: nem felhasználói port
-    proxyk, ezért nem adnak figyelmeztetést és conntrack-törlést sem.
+    Synthetic tunnel entries are omitted: they are not user port proxies,
+    so they produce neither a warning nor a conntrack deletion.
     """
     keys: dict[tuple[str, int], tuple] = {}
     for entry in _enabled_custom_entries(entries):
@@ -5979,11 +6024,11 @@ def _port_proxy_keys(entries) -> dict[tuple[str, int], tuple]:
 
 
 def port_proxy_changes(old_entries, new_entries) -> list[tuple[str, int]]:
-    """Azok a (protokoll, port) párok, amelyek NAT-célja megváltozott.
+    """The (protocol, port) pairs whose NAT target has changed.
 
-    A conntrack a régi NAT-kötést a folyam végéig megtartja, ezért ezek
-    meglévő kapcsolatait törölni kell (új, eltávolított vagy módosított
-    bejegyzés egyaránt).
+    Conntrack keeps the old NAT binding until the end of the flow,
+    therefore their existing connections must be deleted (for an added,
+    removed or modified entry alike).
     """
     old = _port_proxy_keys(old_entries)
     new = _port_proxy_keys(new_entries)
@@ -5993,7 +6038,7 @@ def port_proxy_changes(old_entries, new_entries) -> list[tuple[str, int]]:
 
 
 def conntrack_flush_port(proto: str, port: int, audit=None) -> bool:
-    """A megadott eredeti célportú (DNAT előtti) kapcsolatok törlése."""
+    """Delete the connections with the given original destination port (pre-DNAT)."""
     if DRY_RUN or not CONNTRACK_BIN:
         return False
     target = f"{proto}/{port}"
@@ -6004,17 +6049,17 @@ def conntrack_flush_port(proto: str, port: int, audit=None) -> bool:
             timeout=10,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        log(f"[tűzfal] conntrack törlés nem sikerült ({target}): {exc}")
+        log(f"[firewall] conntrack deletion failed ({target}): {exc}")
         _audit_conntrack_failure(
             audit, target, -1, str(exc), operation="flush_port"
         )
         return False
     if result.returncode != 0:
         detail = result.stderr.decode("utf-8", "replace").strip()
-        # Az 1-es kód üres hibaszöveggel: nincs ilyen bejegyzés.
+        # Exit code 1 with empty error text: no such entry.
         if result.returncode != 1 or detail:
             log(
-                f"[tűzfal] conntrack törlés hibakóddal tért vissza "
+                f"[firewall] conntrack deletion returned an error code "
                 f"({target}): {result.returncode} {detail}".strip()
             )
             _audit_conntrack_failure(
@@ -6026,11 +6071,11 @@ def conntrack_flush_port(proto: str, port: int, audit=None) -> bool:
 
 
 def _proc_sockets(proc_dir: str = "/proc/net"):
-    """(protokoll, helyi cím, port) a hoston figyelő TCP / kötött UDP socketekre.
+    """(protocol, local address, port) for listening TCP / bound UDP sockets on the host.
 
-    A portál host-hálózaton fut, ezért a /proc/net a host socketjeit
-    mutatja (például a docker-proxy publikált portjait is). A cím
-    ``ipaddress`` objektum; a v4-leképezett IPv6 cím IPv4-ként jön.
+    The portal runs on the host network, therefore /proc/net shows the
+    host's sockets (including docker-proxy's published ports). The address
+    is an ``ipaddress`` object; a v4-mapped IPv6 address comes out as IPv4.
     """
     for proto in ("tcp", "udp"):
         for name in (proto, proto + "6"):
@@ -6041,13 +6086,13 @@ def _proc_sockets(proc_dir: str = "/proc/net"):
                         fields = line.split()
                         if len(fields) < 4:
                             continue
-                        # TCP-nél csak a LISTEN (0A), UDP-nél a kötött (07).
+                        # For TCP only LISTEN (0A), for UDP bound (07).
                         if fields[3] != ("0A" if proto == "tcp" else "07"):
                             continue
                         try:
                             raw, port = fields[1].rsplit(":", 1)
-                            # A kernel a címet 32 bites, natív sorrendű
-                            # szavakként írja ki.
+                            # The kernel prints the address as 32-bit words
+                            # in native order.
                             packed = b"".join(
                                 struct.pack("=I", int(raw[i:i + 8], 16))
                                 for i in range(0, len(raw), 8)
@@ -6064,19 +6109,20 @@ def _proc_sockets(proc_dir: str = "/proc/net"):
 
 
 def listening_ports(proc_dir: str = "/proc/net") -> set[tuple[str, int]]:
-    """A hoston figyelő TCP (LISTEN) és kötött UDP portok."""
+    """Listening TCP (LISTEN) and bound UDP ports on the host."""
     return {(proto, port) for proto, _, port in _proc_sockets(proc_dir)}
 
 
 def loopback_target(proto: str, port: int, proc_dir: str = "/proc/net") -> str | None:
-    """A csak loopbacken figyelő célport címe, egyébként None.
+    """The address of a target port listening only on loopback, otherwise None.
 
-    Ha a porton csak 127.0.0.0/8 címre kötött socket van, a ``redirect``
-    (a bejövő interfész elsődleges címe) üres portra érkezne: ilyenkor a
-    DNAT célja ez a loopback cím. Wildcard (0.0.0.0 / ::) vagy más
-    címre kötött socket mellett marad a redirect: a wildcard UDP-szerver
-    a válasz forráscímét az útvonalból választja (az interfész címe), ezért
-    127.0.0.1-re DNAT-olva a válasz nem illeszkedne a conntrackre.
+    If the port has only a socket bound to a 127.0.0.0/8 address, the
+    ``redirect`` (the incoming interface's primary address) would reach an
+    empty port: in that case the DNAT target is this loopback address.
+    With a wildcard (0.0.0.0 / ::) or otherwise bound socket the redirect
+    remains: a wildcard UDP server chooses the reply's source address from
+    the route (the interface address), so DNAT-ing to 127.0.0.1 would make
+    the reply not match conntrack.
     """
     addresses = set()
     for sock_proto, address, sock_port in _proc_sockets(proc_dir):
@@ -6084,8 +6130,8 @@ def loopback_target(proto: str, port: int, proc_dir: str = "/proc/net") -> str |
             continue
         if address.version == 6:
             if address.is_unspecified:
-                return None  # a dual-stack [::] az IPv4-et is fogadja
-            continue  # a ::1 / más IPv6 cím az IPv4 proxyt nem érinti
+                return None  # a dual-stack [::] accepts IPv4 too
+            continue  # ::1 / another IPv6 address does not affect the IPv4 proxy
         addresses.add(address)
     if not addresses or not all(address.is_loopback for address in addresses):
         return None
@@ -6094,11 +6140,11 @@ def loopback_target(proto: str, port: int, proc_dir: str = "/proc/net") -> str |
 
 
 def route_localnet(ifaces, conf_dir: str = "/proc/sys/net/ipv4/conf") -> bool:
-    """Engedi-e a kernel a 127/8 célt a megadott interfészeken.
+    """Whether the kernel allows a 127/8 destination on the given interfaces.
 
-    A kernel az ``all`` és az interfész értékét VAGY-kapcsolattal veszi.
-    A portál konténerében a /proc/sys csak olvasható; a hoston a
-    docker/setup-host.sh állítja be.
+    The kernel ORs the ``all`` and per-interface values. In the portal
+    container /proc/sys is read-only; on the host docker/setup-host.sh sets
+    it.
     """
     def enabled(name: str) -> bool:
         try:
@@ -6112,13 +6158,14 @@ def route_localnet(ifaces, conf_dir: str = "/proc/sys/net/ipv4/conf") -> bool:
 
 
 def port_proxy_warnings(entries, listening, published, localnet=()) -> list[dict]:
-    """Figyelmeztetés a bekapcsolt bejegyzések már foglalt hallgató portjaira.
+    """Warnings for already occupied listening ports of enabled entries.
 
-    Nem tiltás: a proxy DNAT-je (-101) a Docker DNAT-je (-100) előtt fut,
-    ezért a beállított interfészeken a proxy nyer, és a helyi socket / a
-    Docker-publikálás onnan nem érhető el. A ``localnet`` (protokoll,
-    hallgató port) párjainál a cél csak loopbacken figyel, de a hoston ki
-    van kapcsolva a route_localnet, ezért a proxy nem érheti el.
+    Not a prohibition: the proxy's DNAT (-101) runs before Docker's DNAT
+    (-100), therefore on the configured interfaces the proxy wins, and the
+    local socket / the Docker publication is not reachable from there. For
+    a ``localnet`` (protocol, listening port) pair the target listens only
+    on loopback, but route_localnet is off on the host, so the proxy
+    cannot reach it.
     """
     warnings: list[dict] = []
     for proto, port in sorted(_port_proxy_keys(entries)):
@@ -6144,12 +6191,12 @@ def _ip_sort_key(ip: str):
 def group_firewall_snapshot(
     snapshot: dict, sessions: list[dict]
 ) -> dict:
-    """A kerneloldali halmazok és a portál-munkamenetek összefésülése.
+    """Merge the kernel-side sets with the portal sessions.
 
-    Egy IP-címhez egy csoport tartozik, benne a tényleges (kernelben lévő)
-    engedélyekkel, a hozzájuk tartozó munkamenetekkel és a hátralévő
-    időkkel. Az ``in_sync`` jelzi, ha a kernel és a munkamenet nyilvántartása
-    eltér (például egy port nem került be, vagy kézzel bekerült egy másik).
+    One group belongs to an IP address, containing the actual (in-kernel)
+    grants, the sessions belonging to them and the remaining times.
+    ``in_sync`` signals when the kernel and the session records differ
+    (for example a port did not get in, or another got in by hand).
     """
     raw_sets = snapshot.get("sets")
     sets = raw_sets if isinstance(raw_sets, dict) else {}
@@ -6191,9 +6238,9 @@ def group_firewall_snapshot(
     for set_name, field, direction in (
         ("allowed_tcp", "tcp", "forward"),
         ("allowed_udp", "udp", "forward"),
-        # A host (input) engedélyek ugyanabba a megjelenítési listába
-        # kerülnek, irányjelöléssel; így egy IP csoportjában látszik minden
-        # kerneloldali engedély, és az irány szerinti összevetés is helyes.
+        # Host (input) grants go into the same display list, with direction
+        # indicated; thus every kernel-side grant is visible in an IP's
+        # group, and the per-direction comparison is also correct.
         ("allowed_input_tcp", "tcp", "input"),
         ("allowed_input_udp", "udp", "input"),
     ):
@@ -6235,8 +6282,8 @@ def group_firewall_snapshot(
 
     rows: list[dict] = []
     for ip, item in grouped.items():
-        # Elsődlegesen port szerint rendezünk; azonos portnál a forward
-        # bejegyzés előrébb kerül, hogy a megjelenítés stabil legyen.
+        # We sort primarily by port; for the same port the forward entry
+        # comes first so that the display stays stable.
         item["tcp"].sort(
             key=lambda entry: (entry["port"], entry.get("direction") == "input")
         )
@@ -6267,11 +6314,11 @@ def group_firewall_snapshot(
         expected_icmp = False
         expected_full = False
         for row in item["sessions"]:
-            # A host (input) munkamenet portjait a host halmazokhoz kell
-            # hasonlítani, különben egy engedélyezett host szabály téves
-            # „hiányzó TCP” eltérést adna. A gyűjtőszabály munkamenete
-            # irányonként több engedélyt is tartalmazhat: ilyenkor a
-            # snapshot "grants" listája adja a pontos bontást.
+            # A host (input) session's ports must be compared against the
+            # host sets, otherwise an allowed host rule would produce a
+            # false "missing TCP" mismatch. A collection rule's session may
+            # contain several grants per direction: in that case the
+            # snapshot's "grants" list gives the exact breakdown.
             row_grants = row.get("grants")
             if isinstance(row_grants, list) and row_grants:
                 for part in row_grants:
@@ -6318,17 +6365,17 @@ def group_firewall_snapshot(
             ("host UDP", expected_udp["input"], actual_udp["input"]),
         ):
             for port in sorted(expected - actual):
-                mismatch.append(f"hiányzó {label} {port}")
+                mismatch.append(f"missing {label} {port}")
             for port in sorted(actual - expected):
-                mismatch.append(f"váratlan {label} {port}")
+                mismatch.append(f"unexpected {label} {port}")
         if expected_full and not actual_full:
-            mismatch.append("hiányzó teljes hozzáférés")
+            mismatch.append("missing full access")
         if actual_full and not expected_full:
-            mismatch.append("váratlan teljes hozzáférés")
+            mismatch.append("unexpected full access")
         if expected_icmp and not actual_icmp:
-            mismatch.append("hiányzó ICMP")
+            mismatch.append("missing ICMP")
         if actual_icmp and not expected_icmp:
-            mismatch.append("váratlan ICMP")
+            mismatch.append("unexpected ICMP")
 
         users = sorted({
             row.get("user") for row in item["sessions"]
@@ -6354,9 +6401,9 @@ def group_firewall_snapshot(
         if actual_full:
             ports_label = "Minden port"
         else:
-            # A host (input) portokat „Host” előtaggal jelöljük, hogy a
-            # forward és a host engedély azonos portszám mellett is
-            # megkülönböztethető legyen.
+            # Host (input) ports are marked with a "Host" prefix, so that
+            # forward and host grants with the same port number remain
+            # distinguishable.
             parts: list[str] = []
             for direction, prefix in (("forward", ""), ("input", "Host ")):
                 for field, proto in (("tcp", "TCP"), ("udp", "UDP")):
@@ -6424,43 +6471,43 @@ def group_firewall_snapshot(
 
 # ------------------------------------------------------------------------ TOTP
 
-# A base32 ábécé a helyreállítási kódokhoz (nincs 0/1/8/9, hogy ne
-# lehessen összetéveszteni őket betűkkel).
+# The base32 alphabet for recovery codes (no 0/1/8/9, so they cannot be
+# confused with letters).
 _BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
 _RECOVERY_CODE_LENGTH = 10
 
 
 def generate_totp_secret() -> str:
-    """20 bájtos, padding nélküli base32 TOTP-titok (32 nagybetű)."""
+    """A 20-byte, unpadded base32 TOTP secret (32 uppercase letters)."""
     return base64.b32encode(secrets.token_bytes(20)).decode("ascii").rstrip("=")
 
 
 def _totp_key(secret: str) -> bytes:
-    """A base32 titokból képzett HMAC-kulcs; hibás titoknál ValueError."""
+    """The HMAC key derived from the base32 secret; ValueError on a bad secret."""
     if not isinstance(secret, str):
-        raise ValueError("érvénytelen TOTP-titok")
+        raise ValueError("invalid TOTP secret")
     raw = secret.strip().replace(" ", "").upper()
     if not raw:
-        raise ValueError("üres TOTP-titok")
+        raise ValueError("empty TOTP secret")
     padding = "=" * ((8 - len(raw) % 8) % 8)
     try:
         key = base64.b32decode(raw + padding, casefold=True)
     except (ValueError, TypeError) as exc:
-        raise ValueError("érvénytelen TOTP-titok") from exc
+        raise ValueError("invalid TOTP secret") from exc
     if not key:
-        raise ValueError("üres TOTP-titok")
+        raise ValueError("empty TOTP secret")
     return key
 
 
 def hotp_code(secret: str, counter: int) -> str:
-    """RFC 4226 HOTP-kód (HMAC-SHA1, 6 számjegy, nullával kipótolva)."""
+    """RFC 4226 HOTP code (HMAC-SHA1, 6 digits, zero-padded)."""
     key = _totp_key(secret)
     try:
         counter = int(counter)
     except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError("érvénytelen számláló") from exc
+        raise ValueError("invalid counter") from exc
     if counter < 0:
-        raise ValueError("érvénytelen számláló")
+        raise ValueError("invalid counter")
     digest = hmac.new(key, counter.to_bytes(8, "big"), hashlib.sha1).digest()
     offset = digest[-1] & 0x0F
     value = int.from_bytes(digest[offset:offset + 4], "big") & 0x7FFFFFFF
@@ -6468,18 +6515,18 @@ def hotp_code(secret: str, counter: int) -> str:
 
 
 def totp_code(secret: str, now: float | None = None) -> str:
-    """Az aktuális (vagy megadott időponthoz tartozó) TOTP-kód."""
+    """The current TOTP code (or the one belonging to the given time)."""
     current = time.time() if now is None else float(now)
     return hotp_code(secret, int(current // TOTP_PERIOD))
 
 
 def totp_match(secret: str, code: str, now: float | None = None) -> int | None:
-    """A kódhoz tartozó számláló, ha érvényes; különben ``None``.
+    """The counter belonging to the code if valid; otherwise ``None``.
 
-    Pontosan 6 ASCII számjegyet fogad el, és a ``TOTP_WINDOW`` szerinti
-    szomszédos lépéseket is ellenőrzi (óra-eltérés miatt). A visszatérési
-    érték a ténylegesen egyező számláló, amit a hívó a visszajátszás
-    kiszűrésére használhat.
+    It accepts exactly 6 ASCII digits and also checks the neighbouring
+    steps per ``TOTP_WINDOW`` (because of clock skew). The return value is
+    the counter that actually matched, which the caller can use to filter
+    out replay.
     """
     if (
         not isinstance(code, str)
@@ -6504,10 +6551,10 @@ def totp_match(secret: str, code: str, now: float | None = None) -> int | None:
 def build_otpauth_uri(
     username: str, secret: str, issuer: str | None = None
 ) -> str:
-    """Authentikátor-alkalmazásnak átadható ``otpauth://`` URI.
+    """An ``otpauth://`` URI that can be handed to an authenticator app.
 
-    Az ``issuer`` a címkében és a query paraméterben is megjelenik; üresen
-    a beépített :data:`TOTP_ISSUER` értékre esik vissza.
+    ``issuer`` appears in the label and in the query parameter; if empty,
+    it falls back to the built-in :data:`TOTP_ISSUER` value.
     """
     effective_issuer = (issuer or "").strip() or TOTP_ISSUER
     label = urllib.parse.quote(f"{effective_issuer}:{username}", safe="")
@@ -6524,20 +6571,20 @@ def build_otpauth_uri(
 
 
 def normalize_recovery_code(code: str) -> str:
-    """A helyreállítási kód egységes alakja: nagybetű, szóköz/kötőjel nélkül."""
+    """The canonical form of a recovery code: uppercase, no spaces/hyphens."""
     if not isinstance(code, str):
         return ""
     return code.upper().replace(" ", "").replace("\t", "").replace("-", "")
 
 
 def hash_recovery_code(code: str) -> str:
-    """A helyreállítási kód SHA-256 hash-e (kisbetűs hex)."""
+    """The SHA-256 hash of a recovery code (lowercase hex)."""
     normalized = normalize_recovery_code(code)
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def generate_recovery_codes(count: int = 10) -> list[str]:
-    """Egyszer használatos, egyedi helyreállítási kódok listája."""
+    """A list of single-use, unique recovery codes."""
     codes: list[str] = []
     seen: set[str] = set()
     while len(codes) < max(0, int(count)):
@@ -6551,10 +6598,10 @@ def generate_recovery_codes(count: int = 10) -> list[str]:
     return codes
 
 
-# --------------------------------------------------------------- felhasználók
+# --------------------------------------------------------------- users
 
 class UserStoreError(RuntimeError):
-    """A felhasználói adatbázis hibás vagy nem írható."""
+    """The user database is corrupt or not writable."""
 
 
 @dataclass(frozen=True)
@@ -6582,7 +6629,7 @@ class UserRecord:
 
     @property
     def totp_enrolled(self) -> bool:
-        """Van-e beállított TOTP-titok (a kötelező jelzőtől függetlenül)."""
+        """Whether a TOTP secret is configured (regardless of the required flag)."""
         return bool(self.totp_secret)
 
     def public(self, groups: list[str] | tuple[str, ...] = ()) -> dict:
@@ -6603,7 +6650,7 @@ class UserRecord:
 
 
 class UserStore:
-    """users.json: jelszó-hashek PBKDF2-HMAC-SHA256-tal, atomikus írással."""
+    """users.json: password hashes with PBKDF2-HMAC-SHA256, atomic writes."""
 
     MIN_PASSWORD = 8
     MAX_PASSWORD = 1024
@@ -6614,13 +6661,13 @@ class UserStore:
         self._lock = threading.Lock()
         self._cache: dict[str, UserRecord] | None = None
         self._cache_key: tuple[int, int, int] | None = None
-        # Ismeretlen felhasználónál is ugyanannyi munkát végzünk.
+        # We do the same amount of work even for an unknown user.
         self._dummy_salt = b"\x00" * 16
         self._dummy_digest = hashlib.pbkdf2_hmac(
             "sha256", b"hatarvedelem-dummy", self._dummy_salt, self.iterations
         )
 
-    # -- olvasás ---------------------------------------------------------------
+    # -- reading ---------------------------------------------------------------
 
     def _read_raw(self) -> dict:
         try:
@@ -6629,17 +6676,17 @@ class UserStore:
         except FileNotFoundError:
             return {}
         except (OSError, ValueError) as exc:
-            raise UserStoreError(f"a felhasználói adatbázis nem olvasható: {exc}") from exc
+            raise UserStoreError(f"the user database cannot be read: {exc}") from exc
         if not isinstance(data, dict):
-            raise UserStoreError("a felhasználói adatbázis formátuma hibás")
+            raise UserStoreError("the user database has an invalid format")
         return data
 
     def _load(self) -> dict[str, UserRecord]:
         try:
             stat = os.stat(self.path)
-            # Az inode is kell: egy atomikus os.replace ugyanazzal a
-            # mérettel és mtime-mal új fájlt hoz létre, amit a régi
-            # kulcs nem vett észre.
+            # The inode is also needed: an atomic os.replace creates a new
+            # file with the same size and mtime that the old key would not
+            # have noticed.
             key = (stat.st_ino, stat.st_mtime_ns, stat.st_size)
         except FileNotFoundError:
             return {}
@@ -6661,9 +6708,9 @@ class UserStore:
                 must_change = item.get("must_change_password", False)
                 if not isinstance(must_change, bool):
                     must_change = bool(must_change)
-                # Hiányzó kulcs = örökölt, nem kötelező beállítás. Bármilyen
-                # hibás érték viszont kötelezővé tesz (fail closed), hogy egy
-                # elrontott fájl ne kapcsolhassa ki észrevétlenül a 2FA-t.
+                # Missing key = inherited, not required setting. Any invalid
+                # value, however, makes it required (fail closed), so that a
+                # corrupted file cannot silently disable 2FA.
                 if "totp_required" not in item:
                     totp_required = False
                 else:
@@ -6689,9 +6736,9 @@ class UserStore:
                     )
                 else:
                     totp_recovery = ()
-                # Hiányzó kulcs = nem függő fiók. Bármilyen hibás érték
-                # viszont függőnek számít (fail closed), akárcsak a
-                # totp_required esetében.
+                # Missing key = not a pending account. Any invalid value,
+                # however, counts as pending (fail closed), as with
+                # totp_required.
                 if "pending" not in item:
                     pending = False
                 else:
@@ -6727,7 +6774,7 @@ class UserStore:
                     email=email,
                 )
             except (KeyError, TypeError, ValueError):
-                log(f"[felhasználók] kihagyott hibás bejegyzés: {name!r}")
+                log(f"[users] skipped invalid entry: {name!r}")
         with self._lock:
             self._cache = records
             self._cache_key = key
@@ -6737,10 +6784,10 @@ class UserStore:
         try:
             record = self._load().get(name)
         except UserStoreError as exc:
-            log(f"[felhasználók] {exc}")
+            log(f"[users] {exc}")
             return False
-        # A függő fiók is bizonyíthassa a jelszavát, hogy a HTTP-réteg
-        # megkülönböztetett választ adhasson neki.
+        # A pending account must also be able to prove its password, so
+        # that the HTTP layer can give it a distinct response.
         if record is None or (not record.enabled and not record.pending):
             digest = hashlib.pbkdf2_hmac(
                 "sha256", password.encode("utf-8"), self._dummy_salt, self.iterations
@@ -6759,7 +6806,7 @@ class UserStore:
         return self._load().get(name)
 
     def provisioned_from(self, name: str) -> str:
-        """A Compose-ból származó jelszó determinisztikus jelölője."""
+        """The deterministic marker of a password originating from Compose."""
         try:
             data = self._read_raw()
         except UserStoreError:
@@ -6780,13 +6827,13 @@ class UserStore:
         )
 
     def pending_records(self) -> list[UserRecord]:
-        """A jóváhagyásra váró fiókok névsor szerint."""
+        """The accounts waiting for approval, by name."""
         return sorted(
             (rec for rec in self._load().values() if rec.pending),
             key=lambda rec: rec.name,
         )
 
-    # -- írás ------------------------------------------------------------------
+    # -- writing ---------------------------------------------------------------
 
     @contextmanager
     def _locked(self):
@@ -6816,8 +6863,8 @@ class UserStore:
                 fh.flush()
                 os.fsync(fh.fileno())
             os.chmod(tmp, 0o600)
-            # A CLI rootként is futtatható: őrizzük meg a fájl tulajdonosát,
-            # különben a szolgáltatás a következő belépésnél nem tudná olvasni.
+            # The CLI may also run as root: preserve the file's owner,
+            # otherwise the service could not read it on the next sign-in.
             if previous is not None and (
                 previous.st_uid, previous.st_gid
             ) != (os.geteuid(), os.getegid()):
@@ -6833,13 +6880,13 @@ class UserStore:
     def _check_credentials(self, name: str, password: str) -> None:
         if not isinstance(name, str) or not USERNAME_RE.match(name):
             raise UserStoreError(
-                "a felhasználónév 1–32 karakter lehet: betű, szám, pont, kötőjel, aláhúzás"
+                "the username must be 1–32 characters: letter, digit, dot, hyphen, underscore"
             )
         if not isinstance(password, str) or not (
             self.MIN_PASSWORD <= len(password) <= self.MAX_PASSWORD
         ):
             raise UserStoreError(
-                f"a jelszó {self.MIN_PASSWORD}–{self.MAX_PASSWORD} karakter legyen"
+                f"the password must be {self.MIN_PASSWORD}–{self.MAX_PASSWORD} characters"
             )
 
     def _new_record(
@@ -6890,22 +6937,22 @@ class UserStore:
         self._check_credentials(name, password)
         normalized_email = normalize_email(email, strict=False)
         if pending:
-            # A függő fiók jóváhagyásig nem aktív, és nem kap szabályokat;
-            # a hívó által esetleg átadott értékektől függetlenül.
+            # A pending account is not active until approval, and gets no
+            # rules, regardless of values the caller may have passed.
             role = ROLE_USER
             enabled = False
             rules = ()
             must_change_password = False
             if not normalized_email:
                 raise UserStoreError(
-                    "a függő fiókhoz e-mail-cím kötelező"
+                    "an e-mail address is required for a pending account"
                 )
         if role not in (ROLE_USER, ROLE_ADMIN):
-            raise UserStoreError("érvénytelen szerepkör")
+            raise UserStoreError("invalid role")
         with self._locked():
             data = self._read_raw()
             if name in data:
-                raise UserStoreError(f"már létezik ilyen felhasználó: {name}")
+                raise UserStoreError(f"a user with this name already exists: {name}")
             data[name] = self._new_record(
                 name, password, role=role, enabled=enabled, rules=rules,
                 must_change_password=must_change_password,
@@ -6914,11 +6961,11 @@ class UserStore:
             self._write_raw(data)
 
     def approve_user(self, name: str) -> bool:
-        """Függő fiók aktiválása.
+        """Activate a pending account.
 
-        A jelszó-hash, a szabályok, az e-mail, a szerepkör és a létrehozási
-        idő változatlan marad; szabályt ez a metódus nem rendel. Ismeretlen
-        felhasználónál ``False``.
+        The password hash, rules, e-mail, role and creation time remain
+        unchanged; this method does not assign rules. ``False`` for an
+        unknown user.
         """
         if not isinstance(name, str):
             return False
@@ -6934,9 +6981,9 @@ class UserStore:
             return True
 
     def reject_user(self, name: str) -> bool:
-        """Függő fiók elutasítása: a bejegyzés törlése.
+        """Reject a pending account: delete the entry.
 
-        Ismeretlen felhasználónál ``False``.
+        ``False`` for an unknown user.
         """
         if not isinstance(name, str):
             return False
@@ -6959,13 +7006,13 @@ class UserStore:
         with self._locked():
             data = self._read_raw()
             if name not in data:
-                raise UserStoreError(f"nincs ilyen felhasználó: {name}")
+                raise UserStoreError(f"no such user: {name}")
             salt = secrets.token_bytes(16)
             digest = hashlib.pbkdf2_hmac(
                 "sha256", password.encode("utf-8"), salt, self.iterations
             )
-            # Helyben frissítünk, hogy a jelszótól független mezők
-            # (szerepkör, csoportok, provisioning-jelölő) megmaradjanak.
+            # We update in place so that fields independent of the password
+            # (role, groups, provisioning marker) are preserved.
             item = data[name]
             item["salt"] = salt.hex()
             item["hash"] = digest.hex()
@@ -6978,19 +7025,19 @@ class UserStore:
             self._write_raw(data)
 
     def restore_password(self, name: str, record: UserRecord) -> None:
-        """Egy korábban kiolvasott jelszó-állapot visszaállítása.
+        """Restore a previously read password state.
 
-        Kizárólag arra szolgál, hogy egy több lépéses admin-módosítás
-        közbeni hiba után a jelszó-hash és a ``must_change_password`` jelző
-        pontosan az eredeti értékre térjen vissza. Új jelszót a
-        :meth:`set_password` állít be; ez a metódus nem fogad el nyílt
-        jelszót, ezért a naplóba sem kerülhet titok.
+        It serves solely to return the password hash and the
+        ``must_change_password`` flag exactly to their original values
+        after an error during a multi-step admin change. A new password is
+        set by :meth:`set_password`; this method does not accept a
+        plaintext password, so a secret cannot get into the log either.
         """
         with self._locked():
             data = self._read_raw()
             item = data.get(name)
             if not isinstance(item, dict):
-                raise UserStoreError(f"nincs ilyen felhasználó: {name}")
+                raise UserStoreError(f"no such user: {name}")
             item["salt"] = record.salt.hex()
             item["hash"] = record.digest.hex()
             item["iterations"] = int(record.iterations)
@@ -7011,11 +7058,11 @@ class UserStore:
         totp_required: bool | None = None,
     ) -> None:
         if role is not None and role not in (ROLE_USER, ROLE_ADMIN):
-            raise UserStoreError("érvénytelen szerepkör")
+            raise UserStoreError("invalid role")
         with self._locked():
             data = self._read_raw()
             if name not in data:
-                raise UserStoreError(f"nincs ilyen felhasználó: {name}")
+                raise UserStoreError(f"no such user: {name}")
             item = data[name]
             if role is not None:
                 item["role"] = role
@@ -7026,14 +7073,14 @@ class UserStore:
             if provisioned_from is not None:
                 item["provisioned_from"] = str(provisioned_from)
             if totp_required is not None:
-                # Csak a jelzőt írjuk: a titokhoz és a helyreállítási
-                # kódokhoz kizárólag a dedikált metódusok nyúlnak.
+                # We write only the flag: the secret and the recovery codes
+                # are touched exclusively by the dedicated methods.
                 item["totp_required"] = bool(totp_required)
             if rules is not None:
                 clean: list[str] = []
                 for value in rules:
                     if not isinstance(value, str) or not value.strip():
-                        raise UserStoreError("érvénytelen szabály-azonosító")
+                        raise UserStoreError("invalid rule identifier")
                     value = value.strip()
                     if value not in clean:
                         clean.append(value)
@@ -7041,13 +7088,13 @@ class UserStore:
             data[name] = item
             self._write_raw(data)
 
-    # -- kétfaktoros azonosítás ------------------------------------------------
+    # -- two-factor authentication ---------------------------------------------
 
     def set_totp_required(self, name: str, required: bool) -> bool:
-        """A kétfaktoros belépés kötelezővé tétele vagy feloldása.
+        """Require or release two-factor sign-in.
 
-        A titkot, a számlálót és a helyreállítási kódokat nem érinti.
-        Ismeretlen felhasználónál ``False``, egyébként ``True``.
+        It does not touch the secret, the counter or the recovery codes.
+        ``False`` for an unknown user, otherwise ``True``.
         """
         with self._lock, self._locked():
             data = self._read_raw()
@@ -7066,14 +7113,14 @@ class UserStore:
         recovery_hashes: list[str] | tuple[str, ...],
         last_step: int | None = None,
     ) -> bool:
-        """TOTP-titok és helyreállítási kód-hashek rögzítése.
+        """Record the TOTP secret and the recovery code hashes.
 
-        A korábbi ``totp_required`` jelzőt megtartja. Érvényes, nem negatív
-        egész ``last_step`` esetén a belépéskor már elfogadott időlépést
-        rögzíti, így a beiratkozást megerősítő kód később nem játszható
-        vissza; egyébként a számláló -1 lesz. A helyreállítási hasheket
-        kanonikus (kisbetűs, 64 hex) alakban tároljuk; a nem megfelelő
-        elemek kimaradnak. Ismeretlen felhasználónál ``False``.
+        It keeps the previous ``totp_required`` flag. With a valid,
+        non-negative integer ``last_step`` it records the time step
+        already accepted at sign-in, so the code confirming enrollment
+        cannot be replayed later; otherwise the counter becomes -1. The
+        recovery hashes are stored in canonical (lowercase, 64 hex) form;
+        invalid elements are skipped. ``False`` for an unknown user.
         """
         if not isinstance(secret, str) or not secret:
             return False
@@ -7105,13 +7152,13 @@ class UserStore:
     def verify_totp(
         self, name: str, code: str, now: float | None = None
     ) -> bool:
-        """TOTP-kód ellenőrzése visszajátszás elleni védelemmel.
+        """Verify a TOTP code with replay protection.
 
-        Az olvasás, az ellenőrzés és az írás egyetlen zárolt szakaszban fut,
-        így két párhuzamos kérés közül legfeljebb az egyik fogadhatja el
-        ugyanazt az időlépést. A meglévőnél nem nagyobb lépés érvénytelen.
-        A ``totp_required`` jelzőt ez a metódus nem vizsgálja; azt a hívó
-        (a HTTP-réteg) kényszeríti ki.
+        Reading, checking and writing run in a single locked section, so
+        of two parallel requests at most one can accept the same time
+        step. A step not greater than the existing one is invalid. This
+        method does not check the ``totp_required`` flag; the caller (the
+        HTTP layer) enforces it.
         """
         try:
             with self._lock, self._locked():
@@ -7136,15 +7183,15 @@ class UserStore:
                 self._write_raw(data)
                 return True
         except UserStoreError as exc:
-            log(f"[felhasználók] {exc}")
+            log(f"[users] {exc}")
             return False
 
     def verify_recovery(self, name: str, code: str) -> bool:
-        """Helyreállítási kód ellenőrzése és egyszer használatos törlése.
+        """Verify and single-use delete a recovery code.
 
-        A kódot normalizáljuk, hash-eljük, majd állandó idejű összehasonlítással
-        keressük a tárolt hashek között. Sikertelen kísérlet nem fogyasztja
-        a kódot. Ismeretlen vagy kikapcsolt felhasználónál ``False``.
+        We normalize the code, hash it, then search the stored hashes with
+        a constant-time comparison. A failed attempt does not consume the
+        code. ``False`` for an unknown or disabled user.
         """
         digest = hash_recovery_code(code)
         try:
@@ -7157,8 +7204,8 @@ class UserStore:
                 if not isinstance(stored, list):
                     return False
                 matched = -1
-                # Végigmegyünk az összes elemen, hogy a futásidő ne árulja
-                # el, hányadik hash egyezett (a törlés a végén történik).
+                # We go through every element so that the runtime does not
+                # reveal which hash matched (deletion happens at the end).
                 for index, value in enumerate(stored):
                     if (
                         isinstance(value, str)
@@ -7174,15 +7221,15 @@ class UserStore:
                 self._write_raw(data)
                 return True
         except UserStoreError as exc:
-            log(f"[felhasználók] {exc}")
+            log(f"[users] {exc}")
             return False
 
     def reset_totp(self, name: str) -> bool:
-        """A TOTP-titok, a számláló és a helyreállítási kódok törlése.
+        """Delete the TOTP secret, the counter and the recovery codes.
 
-        A ``totp_required`` jelzőt szándékosan megtartja: az admin döntése
-        arról, hogy a belépéshez kétfaktoros azonosítás kell, nem változik.
-        Ismeretlen felhasználónál ``False``.
+        It deliberately keeps the ``totp_required`` flag: the admin's
+        decision that sign-in requires two-factor authentication does not
+        change. ``False`` for an unknown user.
         """
         with self._lock, self._locked():
             data = self._read_raw()
@@ -7213,19 +7260,19 @@ class UserStore:
     def set_rule_membership(
         self, rule_id: str, user_ids
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        """A szabály közvetlen felhasználói kiosztásainak beállítása.
+        """Set the rule's direct user assignments.
 
-        Minden users.json-beli felhasználónál pontosan akkor szerepel a
-        szabály, ha a kért halmazban van. A többi szabály, a csoporttagság
-        és a többi mező változatlan. Egyetlen atomikus fájlírással dolgozik
-        (0600), és (hozzáadott, eltávolított) felhasználóneveket ad vissza.
+        For every user in users.json the rule is present exactly when it
+        is in the requested set. Other rules, group memberships and other
+        fields are unchanged. It works with a single atomic file write
+        (0600), and returns the (added, removed) usernames.
         """
         if not isinstance(rule_id, str) or not rule_id.strip():
-            raise UserStoreError("hiányzó szabály-azonosító")
+            raise UserStoreError("missing rule identifier")
         rule_id = rule_id.strip()
         if rule_id == LEGACY_ADMIN_RULE_ID:
             raise UserStoreError(
-                "a fenntartott szabály-azonosító nem rendelhető hozzá"
+                "the reserved rule identifier cannot be assigned"
             )
         wanted = set(_clean_str_list(user_ids, "users", maximum=512))
         with self._locked():
@@ -7236,7 +7283,7 @@ class UserStore:
             }
             if missing:
                 raise UserStoreError(
-                    f"ismeretlen felhasználó: {', '.join(sorted(missing))}"
+                    f"unknown user: {', '.join(sorted(missing))}"
                 )
             added: list[str] = []
             removed: list[str] = []
@@ -7272,79 +7319,80 @@ class UserStore:
             self._write_raw(data)
             return True
 
-    # -- konfigurációs csomag --------------------------------------------------
+    # -- configuration bundle --------------------------------------------------
 
     @staticmethod
     def _clean_import_records(raw) -> dict:
-        """A users szakasz szigorú, írás nélküli ellenőrzése."""
+        """Strict, write-free validation of the users section."""
         if not isinstance(raw, dict):
-            raise UserStoreError("a users szakasz JSON-objektum kell")
+            raise UserStoreError("the users section must be a JSON object")
         clean: dict[str, dict] = {}
         for name, item in raw.items():
             if not isinstance(name, str) or not USERNAME_RE.match(name):
-                raise UserStoreError(f"érvénytelen felhasználónév: {name!r}")
+                raise UserStoreError(f"invalid username: {name!r}")
             if not isinstance(item, dict):
-                raise UserStoreError(f"{name}: hibás felhasználói bejegyzés")
+                raise UserStoreError(f"{name}: invalid user entry")
             try:
                 salt = bytes.fromhex(str(item["salt"]))
                 digest = bytes.fromhex(str(item["hash"]))
                 iterations = int(item.get("iterations", PBKDF2_ITERATIONS))
                 created = int(item.get("created", 0) or 0)
             except (KeyError, TypeError, ValueError) as exc:
-                raise UserStoreError(f"{name}: hibás jelszó-adat") from exc
-            # 5 millió feletti iteráció már szolgáltatásmegtagadás lenne.
+                raise UserStoreError(f"{name}: invalid password data") from exc
+            # More than 5 million iterations would already be a denial of
+            # service.
             if len(salt) != 16 or len(digest) != 32 or not 1 <= iterations <= 5_000_000:
-                raise UserStoreError(f"{name}: hibás jelszó-adat")
+                raise UserStoreError(f"{name}: invalid password data")
             if created < 0:
-                raise UserStoreError(f"{name}: hibás létrehozási idő")
+                raise UserStoreError(f"{name}: invalid creation time")
             role = item.get("role", ROLE_USER)
             if role not in (ROLE_USER, ROLE_ADMIN):
-                raise UserStoreError(f"{name}: érvénytelen szerepkör")
+                raise UserStoreError(f"{name}: invalid role")
             flags = {}
             for key in ("enabled", "must_change_password", "pending"):
                 value = item.get(key, False)
                 if not isinstance(value, bool):
-                    raise UserStoreError(f"{name}: a(z) {key} mező igaz/hamis kell")
+                    raise UserStoreError(f"{name}: the {key} field must be true/false")
                 flags[key] = value
             if "totp_required" in item:
                 if not isinstance(item["totp_required"], bool):
                     raise UserStoreError(
-                        f"{name}: a totp_required mező igaz/hamis kell"
+                        f"{name}: the totp_required field must be true/false"
                     )
             secret = item.get("totp_secret", "")
             if not isinstance(secret, str):
-                raise UserStoreError(f"{name}: hibás TOTP-titok")
+                raise UserStoreError(f"{name}: invalid TOTP secret")
             if secret:
                 try:
                     _totp_key(secret)
                 except ValueError as exc:
-                    raise UserStoreError(f"{name}: hibás TOTP-titok") from exc
+                    raise UserStoreError(f"{name}: invalid TOTP secret") from exc
             try:
                 last_step = int(item.get("totp_last_step", -1))
             except (TypeError, ValueError, OverflowError) as exc:
-                raise UserStoreError(f"{name}: hibás TOTP-lépés") from exc
+                raise UserStoreError(f"{name}: invalid TOTP step") from exc
             if last_step < -1:
-                raise UserStoreError(f"{name}: hibás TOTP-lépés")
+                raise UserStoreError(f"{name}: invalid TOTP step")
             recovery_raw = item.get("totp_recovery", [])
             if not isinstance(recovery_raw, list) or any(
                 not isinstance(value, str) or not _TOTP_RECOVERY_RE.match(value)
                 for value in recovery_raw
             ):
-                raise UserStoreError(f"{name}: hibás helyreállítási kód")
+                raise UserStoreError(f"{name}: invalid recovery code")
             email_raw = item.get("email", "")
             email = normalize_email(email_raw, strict=False)
             if email_raw and not email:
-                raise UserStoreError(f"{name}: érvénytelen e-mail-cím")
+                raise UserStoreError(f"{name}: invalid e-mail address")
             if flags["pending"] and (
                 role != ROLE_USER or flags["enabled"] or flags["must_change_password"]
             ):
                 raise UserStoreError(
-                    f"{name}: a függő fiók nem lehet aktív admin"
+                    f"{name}: a pending account cannot be an active admin"
                 )
             rules = item.get("rules")
             if rules is not None:
                 if not isinstance(rules, list):
-                    raise UserStoreError(f"{name}: a rules mező lista kell")
+                    raise UserStoreError(f"{name}: the rules field must be a list")
                 try:
                     rules = list(_clean_str_list(
                         rules, f"{name}.rules", _SERVICE_ID_RE, maximum=64
@@ -7353,7 +7401,7 @@ class UserStore:
                     raise UserStoreError(f"{name}: {exc}") from exc
                 if LEGACY_ADMIN_RULE_ID in rules:
                     raise UserStoreError(
-                        f"{name}: a fenntartott szabály-azonosító nem importálható"
+                        f"{name}: the reserved rule identifier cannot be imported"
                     )
             record = {
                 "salt": salt.hex(),
@@ -7380,20 +7428,20 @@ class UserStore:
             provisioned = item.get("provisioned_from", "")
             if provisioned:
                 if not isinstance(provisioned, str) or len(provisioned) > 128:
-                    raise UserStoreError(f"{name}: hibás provisioning-jelölő")
+                    raise UserStoreError(f"{name}: invalid provisioning marker")
                 record["provisioned_from"] = provisioned
             clean[name] = record
         return clean
 
     def export_records(self) -> dict:
-        """Az aktuális felhasználói rekordok a konfigurációs csomaghoz."""
+        """The current user records for the configuration bundle."""
         return self._clean_import_records(self._read_raw())
 
     def validate_import_records(self, raw) -> dict:
         return self._clean_import_records(raw)
 
     def replace_all(self, raw) -> None:
-        """A teljes felhasználói nyilvántartás cseréje."""
+        """Replace the entire user registry."""
         clean = self._clean_import_records(raw)
         with self._locked():
             self._write_raw(clean)
@@ -7402,7 +7450,7 @@ class UserStore:
             self._cache_key = None
 
     def reset(self) -> None:
-        """A fájl törlése és a memóriabeli állapot ürítése (factory reset)."""
+        """Delete the file and clear the in-memory state (factory reset)."""
         with self._lock, self._locked():
             try:
                 os.unlink(self.path)
@@ -7416,10 +7464,10 @@ _PROVISION_SALT = b"hatarvedelem-provision-v1"
 
 
 def provision_marker(password: str, iterations: int = PBKDF2_ITERATIONS) -> str:
-    """Jelölő, amivel felismerjük, hogy a .env-ből származó jelszó változatlan.
+    """Marker for recognising that the password from .env is unchanged.
 
-    Így a felületen át történt jelszócsere nem „áll vissza” a következő
-    konténer-indításnál, viszont a .env-ben megadott új jelszó érvényesül.
+    Thus a password change made through the UI does not "revert" on the
+    next container start, while a new password given in .env takes effect.
     """
     digest = hashlib.pbkdf2_hmac(
         "sha256", password.encode("utf-8"), _PROVISION_SALT,
@@ -7429,18 +7477,18 @@ def provision_marker(password: str, iterations: int = PBKDF2_ITERATIONS) -> str:
 
 
 def provision_admin(store: UserStore) -> str:
-    """A Compose-ból beállított admin fiók létrehozása vagy frissítése.
+    """Create or update the admin account configured from Compose.
 
-    Visszatérési érték: ``disabled``, ``created``, ``updated`` vagy
-    ``unchanged``. Kikapcsolt állapotban szándékosan nem töröl felhasználót:
-    a korábban létrehozott fiók megmarad, és a CLI-vel kezelhető tovább.
+    Return value: ``disabled``, ``created``, ``updated`` or ``unchanged``.
+    In the disabled state it deliberately does not delete a user: the
+    previously created account remains and can be managed with the CLI.
     """
     if not ADMIN_ENABLED:
         return "disabled"
     if not ADMIN_USER or not ADMIN_PASSWORD:
         raise UserStoreError(
-            "a HV_ADMIN_ENABLED be van kapcsolva, de a HV_ADMIN_USER és a "
-            "HV_ADMIN_PASSWORD közül valamelyik hiányzik"
+            "HV_ADMIN_ENABLED is on, but one of HV_ADMIN_USER and "
+            "HV_ADMIN_PASSWORD is missing"
         )
     marker = provision_marker(ADMIN_PASSWORD, store.iterations)
     if ADMIN_USER not in store.names():
@@ -7453,9 +7501,9 @@ def provision_admin(store: UserStore) -> str:
     record = store.record(ADMIN_USER)
     stored_marker = store.provisioned_from(ADMIN_USER)
     if not stored_marker:
-        # Régi (jelölő nélküli) bejegyzés. Ha még a seed-jelszó van érvényben,
-        # azt első belépéskor kötelező lecserélni; ha nem, akkor a .env-ben
-        # megadott jelszó az irányadó.
+        # Old (marker-less) entry. If the seed password is still in effect,
+        # it must be changed on first sign-in; if not, the password given
+        # in .env is authoritative.
         if store.verify(ADMIN_USER, ADMIN_PASSWORD):
             store.set_metadata(
                 ADMIN_USER, role=ROLE_ADMIN, enabled=True,
@@ -7475,8 +7523,8 @@ def provision_admin(store: UserStore) -> str:
         store.set_metadata(ADMIN_USER, role=ROLE_ADMIN, enabled=True)
         changed = True
     if stored_marker != marker:
-        # A .env-ben megváltozott a jelszó: az az irányadó, és első
-        # belépéskor ezt is le kell cserélni.
+        # The password changed in .env: that is authoritative, and it must
+        # also be changed on first sign-in.
         store.set_password(ADMIN_USER, ADMIN_PASSWORD, must_change_password=True)
         store.set_metadata(ADMIN_USER, role=ROLE_ADMIN, enabled=True,
                            provisioned_from=marker)
@@ -7484,9 +7532,9 @@ def provision_admin(store: UserStore) -> str:
     return "updated" if changed else "unchanged"
 
 
-# ---------------------------------------------------------------- munkamenetek
+# ---------------------------------------------------------------- sessions
 
-# A munkamenet lezárásának okai és a felhasználónak mutatott magyarázat.
+# The session termination reasons and the explanation shown to the user.
 END_REASONS: dict[str, str] = {
     "logout": "Kiléptél a portálról.",
     "expired": "Lejárt a munkamenet ideje.",
@@ -7530,16 +7578,17 @@ class Session:
     logged_in: float = 0.0
     ua: str = ""
     sid: str = ""
-    # A visszavonáskor a megfelelő (forward vagy input) halmazokból kell
-    # törölni, ezért a munkamenet megőrzi az engedély irányát. Gyűjtőszabály
-    # esetén ez "mixed" is lehet: a tényleges, irányonkénti bontást a
-    # grant_parts tartalmazza, a direction csak megjelenítési/audit érték.
+    # On revocation the matching (forward or input) sets must be cleaned
+    # up, therefore the session keeps the grant's direction. For a
+    # collection rule this may also be "mixed": the actual per-direction
+    # breakdown is in grant_parts, direction is only a display/audit value.
     direction: str = "forward"
-    # Az engedélyezéskor kiadott Ports-részek irányonként. Üres esetén a
-    # régi viselkedés érvényes: egyetlen engedély a ports mezőkből.
+    # The Ports parts issued at grant time, per direction. If empty, the
+    # old behaviour applies: a single grant from the ports fields.
     grant_parts: tuple[Ports, ...] = ()
-    # A kiválasztott szabályok azonosítói, illetve a teljes választás. A
-    # ``rule``/``rule_label`` az első választás kompatibilitási nézete.
+    # The identifiers of the selected rules and the full selection. The
+    # ``rule``/``rule_label`` are the compatibility view of the first
+    # selection.
     rules: tuple[str, ...] = ()
     rule_parts: tuple[RuleSelection, ...] = ()
 
@@ -7553,11 +7602,11 @@ class Session:
 
     @property
     def grants(self) -> tuple[Ports, ...]:
-        """A visszavonáshoz szükséges, irányonkénti engedélyek."""
+        """The per-direction grants needed for revocation."""
         return self.grant_parts or (self.ports,)
 
     def selections(self) -> tuple[RuleSelection, ...]:
-        """A munkamenet választásai; a régi, egy-szabályos alak is támogatott."""
+        """The session's selections; the old, single-rule form is also supported."""
         if self.rule_parts:
             return self.rule_parts
         if self.rule:
@@ -7568,15 +7617,15 @@ class Session:
 
     @property
     def ports(self) -> Ports:
-        # A "mixed" csak megjelenítési érték; a Ports mindig egyetlen
-        # irányt ismer. Az uniót a megjelenítéshez forwardként adjuk át.
+        # "mixed" is only a display value; Ports always knows a single
+        # direction. For display we pass the union as forward.
         direction = "input" if self.direction == "input" else "forward"
         return Ports(
             self.tcp, self.udp, self.icmp, self.full, direction
         )
 
     def snapshot(self) -> dict:
-        """Adminlistához: nyers adatok, a felület számol vele."""
+        """For the admin list: raw data, the UI computes with it."""
         if self.rules:
             selected_rules = list(self.rules)
         elif self.rule:
@@ -7629,7 +7678,7 @@ class Session:
 
 @dataclass
 class _PendingRevocation:
-    """Egy sikertelen tűzfal-visszavonás a korlátozott újrapróbálkozó sorban."""
+    """A failed firewall revocation in the bounded retry queue."""
 
     ip: str
     grants: tuple[Ports, ...]
@@ -7642,31 +7691,33 @@ class _PendingRevocation:
 
 
 class SessionManager:
-    """IP-hez kötött, memóriabeli munkamenetek + tűzfalengedély.
+    """IP-bound, in-memory sessions + firewall grants.
 
-    A belépés két lépcsős: a jelszó ellenőrzése után a munkamenet még nem
-    ad hálózati hozzáférést. A kliens ezután szabályt és időtartamot választ;
-    a forward-lánc csak ekkor nyílik meg, a szabály portjaira. A host SSH
-    (TCP 22) is csak akkor nyílik meg, ha a választott, felhasználóhoz
-    rendelt host (input) szabály kifejezetten tartalmazza a TCP 22-t; a
-    teljes hozzáférésű és a gyűjtőszabályok ezt nem adják meg külön.
+    Sign-in is two-step: after checking the password the session still
+    grants no network access. The client then selects a rule and a
+    duration; only then does the forward chain open, to the rule's ports.
+    Host SSH (TCP 22) opens only if the selected host (input) rule assigned
+    to the user explicitly contains TCP 22; full-access and collection
+    rules do not grant it separately.
 
-    A munkamenet lejárta és az nftables-elemek timeoutja ugyanaz az érték.
-    Ha a folyamat leáll, a kernel a timeoutnál magától törli az engedélyt.
+    Session expiry and the nftables element timeout are the same value. If
+    the process stops, the kernel deletes the grant by itself at the
+    timeout.
 
-    A tűzfal-visszavonás hiba esetén nem vész el: egy korlátozott méretű,
-    szálbiztos sorba kerül, és a takarítószál növekvő várakozással próbálja
-    újra. A munkamenet ilyenkor is azonnal megszűnik; a sor csak a kernelben
-    maradt engedélyt takarítja.
+    On failure a firewall revocation is not lost: it goes into a
+    bounded-size, thread-safe queue, and the cleaner thread retries it
+    with increasing delay. The session ends immediately in this case too;
+    the queue only cleans up the grant left in the kernel.
     """
 
-    # Első hiba után 5 mp, majd 15, 60, 300, végül legfeljebb 600 mp.
+    # After the first failure 5 s, then 15, 60, 300, and at most 600 s.
     PENDING_BACKOFF = (5, 15, 60, 300, 600)
-    # A sor mérete korlátozott; beteltekor hangos napló/audit mellett sem
-    # nőhet tovább (a hiba továbbra is hiba marad, nem jelentünk sikert).
+    # The queue size is bounded; when full it cannot grow further even with
+    # loud logging/audit (the failure remains a failure, we do not report
+    # success).
     PENDING_LIMIT = 4096
-    # Az első hibát mindig naplózzuk; az újrapróbálkozások közül csak minden
-    # tizediket, hogy egy tartós nft-hiba ne árassza el a naplót 5 mp-enként.
+    # The first failure is always logged; of the retries only every tenth,
+    # so that a persistent nft error does not flood the log every 5 s.
     PENDING_AUDIT_EVERY = 10
 
     def __init__(
@@ -7682,21 +7733,23 @@ class SessionManager:
         self.ttl = max(MIN_TTL, min(int(ttl), MAX_TTL))
         self.pending_ttl = max(1, int(pending_ttl))
         self.audit = audit
-        # Visszahívás: a szabály a döntés pillanatában is a felhasználóé-e.
-        # Ezzel zárjuk be azt a versenyhelyzetet, amikor az admin a szabály
-        # törlése után, de a grant előtt érkező kérést engedélyezne.
+        # Callback: whether the rule still belongs to the user at the moment
+        # of the decision. This closes the race where the admin would allow
+        # a request arriving after deleting the rule but before the grant.
         self.rule_check = rule_check
-        # Visszahívás: a host (input) portőr-halmaz egészséges-e. Ha a
-        # hívó megadja, input irányú engedély csak akkor adható, ha ez
-        # igazat ad. A None (alapértelmezés) a korábbi viselkedést tartja
-        # meg azoknak a hívóknak, amelyek nem használnak portőrt.
+        # Callback: whether the host (input) port guard set is healthy. If
+        # the caller supplies it, an input-direction grant may be issued
+        # only if this returns true. The default None keeps the previous
+        # behaviour for callers that do not use a port guard.
         self.guard_check = guard_check
         self._lock = threading.Lock()
         self._sessions: dict[str, Session] = {}
-        # IP -> (időbélyeg, ok): a legutóbb lezárult munkamenet magyarázata.
+        # IP -> (timestamp, reason): the explanation of the most recently
+        # ended session.
         self._last_end: dict[str, tuple[float, str]] = {}
-        # (IP, pontos grant-tuple) -> függő visszavonás. Külön zár: a
-        # _revoke_access() a munkamenet-zár alatt is hívható (authorize).
+        # (IP, exact grant tuple) -> pending revocation. Separate lock:
+        # _revoke_access() is also callable under the session lock
+        # (authorize).
         self._pending_lock = threading.Lock()
         self._pending_revocations: dict[
             tuple[str, tuple[Ports, ...]], _PendingRevocation
@@ -7704,11 +7757,11 @@ class SessionManager:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
-    # -- belső -----------------------------------------------------------------
+    # -- internal --------------------------------------------------------------
 
     def _remember_end_locked(self, ip: str, reason: str, now: float | None = None) -> None:
         self._last_end[ip] = (time.time() if now is None else now, reason)
-        # Ne hízzon korlátlanul: a legrégebbi bejegyzéseket eldobjuk.
+        # Do not grow without bound: we drop the oldest entries.
         if len(self._last_end) > 2048:
             cutoff = time.time() - 86400
             for key, (when, _) in list(self._last_end.items()):
@@ -7716,13 +7769,13 @@ class SessionManager:
                     del self._last_end[key]
 
     def _write_audit(self, event: str, **fields) -> None:
-        """Nem kötelező naplóírás: hiba esetén sem akaszthatja meg a műveletet."""
+        """Optional logging: a failure must not block the operation either."""
         if self.audit is None:
             return
         try:
             self.audit.write(event, **fields)
-        except Exception as exc:  # a naplózás soha ne blokkoljon
-            log(f"[napló] {event} írása nem sikerült: {exc}")
+        except Exception as exc:  # logging should never block
+            log(f"[audit] writing {event} failed: {exc}")
 
     def _drop_ip_locked(self, ip: str, reason: str = "replaced") -> list[Session]:
         dropped: list[Session] = []
@@ -7735,7 +7788,7 @@ class SessionManager:
         return dropped
 
     def last_end(self, ip: str) -> dict | None:
-        """A legutóbb lezárult munkamenet oka az adott IP-hez (ha van)."""
+        """The reason of the most recently ended session for the given IP (if any)."""
         try:
             ip = normalize_ip(ip)
         except ValueError:
@@ -7752,7 +7805,7 @@ class SessionManager:
         }
 
     def active_sessions(self) -> list[dict]:
-        """Az összes élő munkamenet pillanatképe (admin felülethez)."""
+        """A snapshot of every live session (for the admin UI)."""
         now = time.time()
         with self._lock:
             current = [
@@ -7763,15 +7816,15 @@ class SessionManager:
         return [session.snapshot() for session in current]
 
     def allows_domain(self, ip: str, name: str) -> bool:
-        """Engedi-e az IP élő munkamenete a proxy-bejegyzést (proxy-kapu).
+        """Whether the IP's live session allows the proxy entry (proxy gate).
 
-        Csak kifejezetten választott domain szabály számít: a teljes
-        hozzáférés és az admin szerepkör sem nyit domaint.
+        Only an explicitly selected domain rule counts: full access and the
+        admin role do not open a domain either.
         """
         return self.domain_user(ip, name) is not None
 
     def domain_user(self, ip: str, name: str) -> str | None:
-        """Az allows_domain() munkamenetének felhasználója (vagy None)."""
+        """The user of allows_domain()'s session (or None)."""
         now = time.time()
         with self._lock:
             return next(
@@ -7795,16 +7848,16 @@ class SessionManager:
 
     @staticmethod
     def _grant_tuple(grants) -> tuple[Ports, ...]:
-        """A visszavonás pontos azonosítója; az ismétlődések kimaradnak."""
+        """The exact identifier of the revocation; duplicates are dropped."""
         return tuple(dict.fromkeys(grants or ()))
 
     def pending_count(self) -> int:
-        """A függő (még sikertelen) visszavonások száma."""
+        """The number of pending (still failed) revocations."""
         with self._pending_lock:
             return len(self._pending_revocations)
 
     def _pending_delay(self, attempts: int) -> int:
-        """Következő újrapróbálkozás késleltetése másodpercben."""
+        """The delay of the next retry in seconds."""
         index = max(0, min(int(attempts), len(self.PENDING_BACKOFF) - 1))
         return self.PENDING_BACKOFF[index]
 
@@ -7816,11 +7869,11 @@ class SessionManager:
         now: float,
         error: Exception,
     ) -> tuple[_PendingRevocation | None, bool, bool]:
-        """Egy sikertelen visszavonás felvétele a sorból.
+        """Add a failed revocation to the queue.
 
-        Visszatérés: (bejegyzés, új-e, tele-van-e). Meglévő (IP, grant)
-        kulcsnál csak frissítjük az utolsó hibát és a discovery igényt; így
-        egy ismételt hívás nem növeli a sort és nem naplóz újra.
+        Return: (entry, is-new, is-full). For an existing (IP, grant) key we
+        only update the last error and the discovery need; thus a repeated
+        call neither grows the queue nor logs again.
         """
         key = (ip, grants)
         entry = self._pending_revocations.get(key)
@@ -7853,12 +7906,12 @@ class SessionManager:
                 ip, grants, discover, time.time(), error
             )
         if result[2]:
-            # Fail-closed: a visszavonás nem sikerült, és a sor is tele van.
-            # Nem állítjuk, hogy sikerült; hangosan naplózunk és auditálunk.
+            # Fail-closed: the revocation failed and the queue is also full.
+            # We do not claim success; we log and audit loudly.
             log(
-                f"[tűzfal] HIBA: a függő visszavonások sora tele van "
-                f"({self.PENDING_LIMIT}); a(z) {ip} engedélye a kernel TTL-ig "
-                "érvényben maradhat"
+                f"[firewall] ERROR: the pending revocations queue is full "
+                f"({self.PENDING_LIMIT}); the grant of {ip} may remain in "
+                "effect until the kernel TTL"
             )
             self._write_audit(
                 "firewall_error",
@@ -7891,12 +7944,12 @@ class SessionManager:
     def _clear_pending_after_success(
         self, ip: str, grants: tuple[Ports, ...], discover: bool
     ) -> None:
-        """Sikeres visszavonás után a lefedett függő bejegyzés törlése.
+        """Delete the covered pending entry after a successful revocation.
 
-        Ha a függő bejegyzés forward-felderítést is kért, egy grant-alapú
-        (nem felderítő) sikeres törlés nem feltétlenül fedi le az összes
-        árva elemet; ilyenkor a bejegyzés marad, és később a teljes
-        felderítéssel tisztul.
+        If the pending entry also requested forward discovery, a grant-based
+        (non-discovering) successful deletion does not necessarily cover all
+        orphaned elements; in that case the entry remains and is cleaned up
+        later by a full discovery.
         """
         with self._pending_lock:
             entry = self._pending_revocations.get((ip, grants))
@@ -7904,12 +7957,12 @@ class SessionManager:
                 del self._pending_revocations[(ip, grants)]
 
     def _revoke_exact(self, ip: str, grants) -> None:
-        """Pontos elemszintű törlés, a régi tűzfal-hamisítók kompatibilitásával.
+        """Exact element-level deletion, compatible with the old firewall fakes.
 
-        A valódi :class:`Firewall` ``revoke_exact`` metódusát használjuk,
-        amely a ``full`` és ICMP elemeket is törli. A régi tesztek egyszerű
-        hamis tűzfalai csak ``revoke_all``-t ismernek; náluk az
-        ``only_grants=True`` a legközelebbi kompatibilis művelet.
+        We use the real :class:`Firewall`'s ``revoke_exact`` method, which
+        also deletes the ``full`` and ICMP elements. The old tests' simple
+        fake firewalls only know ``revoke_all``; for them ``only_grants=True``
+        is the closest compatible operation.
         """
         revoke_exact = getattr(self.firewall, "revoke_exact", None)
         if revoke_exact is None:
@@ -7926,26 +7979,25 @@ class SessionManager:
         exact: bool = False,
         only_grants: bool = False,
     ) -> bool:
-        """Hozzáférés visszavonása; hiba esetén a sorból újrapróbáljuk.
+        """Revoke access; on failure we retry from the queue.
 
-        A visszatérési érték a tűzfal-művelet sikerét jelzi. A munkamenet
-        eltávolítása a hívók dolga és hiba esetén is megtörténik; így nem
-        marad munkamenet olyan engedélyre hivatkozva, amelyet egy későbbi
-        újrapróbálkozás eltávolíthat. A conntrack-törlést hiba esetén is
-        elvégezzük, mert a meglévő kapcsolatokat azonnal meg kell szakítani.
+        The return value indicates the success of the firewall operation.
+        Removing the session is the caller's job and happens on failure too;
+        thus no session remains referring to a grant that a later retry may
+        remove. We perform the conntrack deletion on failure too, because
+        existing connections must be torn down immediately.
 
-        ``only_grants=True`` esetén kizárólag a megadott grant-elemeket
-        töröljük (lásd :meth:`Firewall.revoke_all`), és conntrack-ürítést
-        sem siker, sem hiba esetén nem végzünk. Ilyenkor ugyanis az IP-hez
-        aktív munkamenet tartozik, amely osztozhat a conntrack-bejegyzéseken;
-        az ürítés az ő élő kapcsolatait is megszakítaná.
+        With ``only_grants=True`` we delete only the given grant elements
+        (see :meth:`Firewall.revoke_all`), and we perform no conntrack flush
+        on success or failure either. In that case an active session belongs
+        to the IP, which may share the conntrack entries; the flush would
+        also break its live connections.
 
-        ``exact=True`` esetén :meth:`Firewall.revoke_exact` fut, amely a
-        ``full`` és ICMP elemeket is pontosan a megadott grantok szerint
-        törli. Conntrack-ürítés ilyenkor sem siker, sem hiba esetén nem
-        történik: a hívó dönti el, milyen (részleges) kapcsolattisztítás
-        szükséges. A hibakezelés és a függő sorba állítás azonos a többi
-        úttal.
+        With ``exact=True`` :meth:`Firewall.revoke_exact` runs, which deletes
+        the ``full`` and ICMP elements exactly according to the given grants
+        too. No conntrack flush happens then on success or failure either:
+        the caller decides what (partial) connection cleanup is needed. Error
+        handling and enqueueing are the same as on the other paths.
         """
         grants = self._grant_tuple(grants)
         try:
@@ -7958,13 +8010,13 @@ class SessionManager:
             else:
                 self.firewall.revoke_all(ip, grants)
         except FirewallError as exc:
-            log(f"[tűzfal] a(z) {ip} visszavonása nem sikerült: {exc}")
+            log(f"[firewall] revoking {ip} failed: {exc}")
             _entry, is_new, _overflow = self._queue_pending(
                 ip, grants, discover, exc
             )
             if is_new:
-                # Az első hibát azonnal auditáljuk; az újrapróbálkozások
-                # közül csak minden PENDING_AUDIT_EVERY. ediket.
+                # We audit the first failure immediately; of the retries only
+                # every PENDING_AUDIT_EVERY-th.
                 self._write_audit(
                     "firewall_error",
                     ip=ip,
@@ -7973,11 +8025,11 @@ class SessionManager:
                     pending=True,
                     attempts=0,
                 )
-            # only_grants/exact esetén szándékosan NINCS conntrack-ürítés:
-            # az IP-hez tartozó aktív munkamenet kapcsolatai is
-            # megszakadnának. A függő bejegyzés csak a pontos, nem átfedő
-            # grantokat tartalmazza, így az újrapróbálkozás sem nyúl az
-            # aktív munkamenethez.
+            # With only_grants/exact there is deliberately NO conntrack flush:
+            # the connections of the active session belonging to the IP would
+            # also break. The pending entry contains only the exact,
+            # non-overlapping grants, so the retry does not touch the active
+            # session either.
             if not only_grants and not exact:
                 conntrack_flush(ip, self.audit)
             return False
@@ -7990,29 +8042,29 @@ class SessionManager:
     def _subtract_grants(
         grants: tuple[Ports, ...], covered: tuple[Ports, ...]
     ) -> tuple[Ports, ...]:
-        """A visszavonandó grantok mínusz az aktív munkamenetek grantjai.
+        """The grants to revoke minus the grants of the active sessions.
 
-        A ``covered`` az ugyanahhoz az IP-hez tartozó aktív, engedélyezett
-        munkamenetek grantjainak uniója. Csak azok az elemek maradnak a
-        maradékban, amelyeket egyetlen aktív munkamenet sem igényel. A
-        számítás kernel-elem szintű: a ``full`` engedély az ``allowed_v4``
-        egyetlen elemét használja, a portos engedélyek pedig az
-        ``allowed_tcp``/``allowed_udp`` elemeit. Ezért egy régi ``full``
-        grant csak akkor marad meg, ha egy aktív munkamenet szintén teljes
-        hozzáférésű ugyanabban az irányban; ha az aktív munkamenet csak
-        portokat engedélyez, a régi ``allowed_v4`` elem törölhető anélkül,
-        hogy az aktív munkamenet hozzáférését érintenénk.
+        ``covered`` is the union of the grants of the active, authorized
+        sessions belonging to the same IP. Only elements that no active
+        session needs remain in the remainder. The computation is at
+        kernel-element level: a ``full`` grant uses the single element of
+        ``allowed_v4``, and port grants use the elements of
+        ``allowed_tcp``/``allowed_udp``. Therefore an old ``full`` grant
+        remains only if an active session is also full-access in the same
+        direction; if the active session allows only ports, the old
+        ``allowed_v4`` element can be deleted without affecting the active
+        session's access.
 
-        Az aktív ``full`` engedély az adott irányban lefedi a portos és
-        ICMP-hozzáférést, de nem pótolja a kernel-elemek előzményét: a
-        távozó nem ``full`` részhez tartozó ``allowed_tcp``/``allowed_udp``/
-        ``allowed_icmp`` elem továbbra is létezik, miközben a munkamenet
-        összevont ``grant_parts``-ában már nem szerepel. Ezért az ilyen
-        részt a maradékban meg kell tartani, hogy a pontos törlés
-        (``revoke_exact``) eltávolítsa; különben később, a teljes
-        hozzáférés visszavonásakor újra előbukkanhat. Csak a távozó
-        ``full`` rész hagyható ki, ha ugyanabban az irányban aktív
-        ``full`` fedi.
+        An active ``full`` grant covers port and ICMP access in that
+        direction, but does not replace the history of kernel elements: the
+        departing ``allowed_tcp``/``allowed_udp``/``allowed_icmp`` element
+        belonging to a non-``full`` part still exists, while it no longer
+        appears in the session's merged ``grant_parts``. Therefore such a
+        part must be kept in the remainder so that the exact deletion
+        (``revoke_exact``) removes it; otherwise it could surface again
+        later, when the full access is revoked. Only the departing ``full``
+        part can be omitted if an active ``full`` covers it in the same
+        direction.
         """
         active_tcp: dict[str, set[int]] = {}
         active_udp: dict[str, set[int]] = {}
@@ -8031,10 +8083,11 @@ class SessionManager:
         for part in grants:
             direction = part.direction
             if direction in active_full and part.full:
-                # Az aktív teljes hozzáférés ugyanabban az irányban a
-                # távozó teljes hozzáférés kernel-elemét (allowed_v4) fedi,
-                # ezért azt nem kell külön törölni. A nem teljes részeket
-                # viszont a fenti docstring szerint meg kell tartani.
+                # The active full access in the same direction covers the
+                # departing full access's kernel element (allowed_v4),
+                # therefore it does not need separate deletion. Non-full
+                # parts, however, must be kept according to the docstring
+                # above.
                 continue
             if part.full:
                 remainder.append(part)
@@ -8059,22 +8112,22 @@ class SessionManager:
     def _revoke_access_locked(
         self, ip: str, grants, now: float | None = None
     ) -> bool:
-        """Hozzáférés visszavonása a munkamenet-zár tartása mellett.
+        """Revoke access while holding the session lock.
 
-        A hívónak a ``self._lock`` zárat kell tartania. A tűzfal-mutáció
-        ugyanazon zár alatt fut, mint a munkamenet eltávolítása, ezért egy
-        párhuzamos ``authorize()`` nem tud az eltávolítás és a visszavonás
-        közé ékelődni, és nem veszítheti el az új engedélyét.
+        The caller must hold the ``self._lock`` lock. The firewall mutation
+        runs under the same lock as session removal, so a parallel
+        ``authorize()`` cannot slip between removal and revocation, and
+        cannot lose its new grant.
 
-        Ha az IP-hez a visszavonás után is tartozik aktív, engedélyezett
-        munkamenet, csak a régi grantok azon részeit töröljük, amelyeket az
-        aktív munkamenet nem igényel (``_subtract_grants``). Ilyen részleges
-        törlésnél a conntrack-ot nem ürítjük, mert az az aktív munkamenet
-        élő kapcsolatait is megszakítaná. Ha a maradó munkamenet minden
-        elemet lefed, a tűzfalhoz egyáltalán nem megy hívás.
+        If an active, authorized session still belongs to the IP after the
+        revocation, we delete only those parts of the old grants that the
+        active session does not need (``_subtract_grants``). With such a
+        partial deletion we do not flush conntrack, because that would also
+        break the active session's live connections. If the remaining
+        session covers every element, no firewall call is made at all.
 
-        Zárolási invariáns: ``self._lock`` -> tűzfal -> ``_pending_lock``
-        (levélzár); a fordított sorrend tilos.
+        Locking invariant: ``self._lock`` -> firewall -> ``_pending_lock``
+        (leaf lock); the reverse order is forbidden.
         """
         if now is None:
             now = time.time()
@@ -8090,39 +8143,39 @@ class SessionManager:
         if active_grants:
             remainder = self._subtract_grants(grants, active_grants)
             if not remainder:
-                # A maradó munkamenet minden érintett elemet igényel; nincs
-                # mit törölni, és a conntrack-hoz sem szabad nyúlni.
+                # The remaining session needs every affected element; there
+                # is nothing to delete, and conntrack must not be touched
+                # either.
                 return True
-            # Pontos elemszintű törlés: a teljes (allowed_v4) és ICMP
-            # elemek is eltűnnek, ha a távozó grant tartalmazta őket,
-            # miközben a maradó portos engedélyek érintetlenek maradnak.
+            # Exact element-level deletion: the full (allowed_v4) and ICMP
+            # elements also disappear if the departing grant contained them,
+            # while the remaining port grants stay untouched.
             return self._revoke_access(ip, remainder, exact=True)
         return self._revoke_access(ip, grants)
 
     def _remove_selections_locked(
         self, sessions, rule_ids, reason: str, now: float
     ) -> int:
-        """A megadott szabályválasztások eltávolítása a munkamenetekből.
+        """Remove the given rule selections from the sessions.
 
-        A hívónak a ``self._lock`` zárat kell tartania. Egy munkamenetből
-        csak a ``rule_ids`` közé tartozó választások tűnnek el; a többi
-        választás grantjei érvényben maradnak. Ha nem marad választás, a
-        munkamenet teljesen megszűnik. Részleges eltávolításnál a távozó
-        választás által hozott, más választással nem fedett elemeket
-        ``revoke_exact`` törli, majd a conntrackból is csak a távozó
-        portokhoz tartozó bejegyzések tűnnek el.
+        The caller must hold the ``self._lock`` lock. Only the selections
+        among ``rule_ids`` disappear from a session; the other selections'
+        grants remain in effect. If no selection remains, the session ends
+        completely. With a partial removal, the elements brought by the
+        departing selection and not covered by another selection are deleted
+        by ``revoke_exact``, and then only the entries belonging to the
+        departing ports disappear from conntrack too.
 
-        Tűzfalhiba esetén fail-closed: a munkamenet megszűnik, és a teljes
-        régi unió visszavonása (szükség esetén a függő sorba állítva)
-        megtörténik. Minden érintett (részben vagy teljesen eltávolított)
-        munkamenet számít a visszatérési értékben.
+        On a firewall error, fail-closed: the session ends, and the full old
+        union is revoked (enqueued if necessary). Every affected (partially
+        or fully removed) session counts in the return value.
 
-        A lejárt munkamenetet nem frissítjük részlegesen: a maradó
-        választások grantjeinek újrakiadása egy másodpercre visszaadná a
-        lejárt hozzáférést. Helyette a teljes eltávolítás útjára kerül.
+        We do not partially refresh an expired session: reissuing the
+        remaining selections' grants would give the expired access back for
+        a second. Instead it goes down the full-removal path.
 
-        ``sessions`` elemei ``(token, session)`` párok vagy ``Session``
-        objektumok lehetnek.
+        The elements of ``sessions`` may be ``(token, session)`` pairs or
+        ``Session`` objects.
         """
         wanted = (
             {rule_ids} if isinstance(rule_ids, str) else set(rule_ids or ())
@@ -8148,10 +8201,10 @@ class SessionManager:
                 for grant in selection.grants
             )
             if session.expires <= now:
-                # A lejárt munkamenet nem kaphat vissza semmit: a részleges
-                # frissítés a maradó választások grantjeit újra kiadná,
-                # vagyis a lejárt hozzáférés egy másodpercig még élne.
-                # Helyette teljes eltávolítás, mint a ``kept`` üres esetben.
+                # An expired session must not get anything back: a partial
+                # refresh would reissue the remaining selections' grants, so
+                # the expired access would live for one more second. Instead,
+                # full removal, as in the empty ``kept`` case.
                 del self._sessions[token]
                 self._remember_end_locked(session.ip, reason, now)
                 self._revoke_access_locked(
@@ -8171,8 +8224,8 @@ class SessionManager:
                 for grant in selection.grants
             )
             removed = self._subtract_grants(old_union, new_union)
-            # A dataclass szándékosan módosítható: a lejárat változatlan,
-            # csak a választások és a belőlük származtatott mezők frissülnek.
+            # The dataclass is deliberately mutable: expiry stays unchanged,
+            # only the selections and the fields derived from them refresh.
             session.rule_parts = kept
             session.rules = tuple(part.rule_id for part in kept)
             session.rule = kept[0].rule_id
@@ -8196,19 +8249,19 @@ class SessionManager:
             remaining_ttl = max(1, int(session.expires - now))
             try:
                 self._revoke_exact(session.ip, removed)
-                # Ha a távozó választás egy teljes hozzáférést adott, a
-                # maradó portok eddig nem feltétlenül voltak külön
-                # kernel-elemek (az allowed_v4 fedte őket). A távozó
-                # allowed_v4 törlése után ezért a maradó uniót újra ki kell
-                # adni, különben a munkamenet a papíron élne, de a portjai
-                # nem lennének engedélyezve.
+                # If the departing selection granted full access, the
+                # remaining ports were not necessarily separate kernel
+                # elements until now (allowed_v4 covered them). After
+                # deleting the departing allowed_v4, the remaining union must
+                # therefore be reissued, otherwise the session would live on
+                # paper, but its ports would not be allowed.
                 self.firewall.grant_all(
                     session.ip, new_union, remaining_ttl
                 )
             except FirewallError as exc:
                 log(
-                    f"[tűzfal] a(z) {session.ip} kiválasztás "
-                    f"visszavonása nem sikerült: {exc}"
+                    f"[firewall] revoking the selection of {session.ip} "
+                    f"failed: {exc}"
                 )
                 del self._sessions[token]
                 self._remember_end_locked(
@@ -8230,29 +8283,27 @@ class SessionManager:
         return touched
 
     def _retry_pending_revocations(self, now: float) -> int:
-        """A lejárt visszavonások újrapróbálása; a sikereseket törli.
+        """Retry expired revocations; delete the successful ones.
 
-        A tűzfal-hívást a munkamenet-zár alatt végezzük, hogy egy
-        párhuzamos authorize() ne adhasson új engedélyt ugyanarra az IP-re
-        a visszavonás közben.
+        We perform the firewall call under the session lock, so that a
+        parallel authorize() cannot issue a new grant for the same IP during
+        the revocation.
 
-        Ha az IP-hez aktív, engedélyezett munkamenet tartozik, nem
-        halasztjuk el a teljes bejegyzést: kiszámítjuk az aktív
-        munkamenetek grantjainak unióját, és csak a régi grantok azon
-        elemeit töröljük, amelyeket az új munkamenet nem igényel
-        (``_subtract_grants``). Az átfedő elemek az új munkamenet
-        életciklusához tartoznak, azokat annak visszavonása törli. Ha a
-        maradék üres, a bejegyzés törlődik. Ilyen részleges törlésnél a
-        conntrack-ot nem ürítjük, mert az az új munkamenet élő
-        kapcsolatait is megszakítaná.
+        If an active, authorized session belongs to the IP, we do not
+        postpone the whole entry: we compute the union of the active
+        sessions' grants, and delete only those elements of the old grants
+        that the new session does not need (``_subtract_grants``). The
+        overlapping elements belong to the new session's lifecycle; its
+        revocation deletes them. If the remainder is empty, the entry is
+        deleted. With such a partial deletion we do not flush conntrack,
+        because that would also break the new session's live connections.
 
-        A ``discover=True`` bejegyzés (a ``revoke_ip``/fail2ban út) csak
-        akkor futtat teljes felderítést, ha nincs aktív munkamenet az
-        IP-hez. Aktív munkamenet mellett a felderítés az ő elemeit is
-        törölné, ezért csak a nem átfedő pontos grantokat töröljük, és a
-        bejegyzés ``discover=True`` jelöléssel a sorban marad. Amikor a
-        munkamenet megszűnik, a felderítés újra lefut, és az árva elemeket
-        is eltakarítja.
+        The ``discover=True`` entry (the ``revoke_ip``/fail2ban path) runs a
+        full discovery only if there is no active session for the IP. With
+        an active session, discovery would delete its elements too, so we
+        delete only the non-overlapping exact grants, and the entry stays in
+        the queue marked ``discover=True``. When the session ends, discovery
+        runs again and cleans up the orphaned elements too.
         """
         due: list[
             tuple[tuple[str, tuple[Ports, ...]], _PendingRevocation]
@@ -8269,15 +8320,15 @@ class SessionManager:
         for key, entry in due:
             retried += 1
             retry_audit = False
-            # Zárolási invariáns: a grant-unió kiszámítása, a
-            # firewall.revoke_all() mutáció ÉS a conntrack_flush() is a
-            # munkamenet-zár alatt fut. Így egy párhuzamos authorize() nem
-            # tud a döntés és a törlés közé ékelődni: nem kaphat olyan
-            # grantot, amelyet a részleges törlés vagy a discovery azonnal
-            # eltávolítana. A conntrack-ürítés szándékosan a zár alatt
-            # marad, hogy a mutáció után engedélyező új munkamenet
-            # kapcsolatait ne szakítsuk meg. A _pending_lock levélzár:
-            # soha nem szerezzük meg a _lock után fordított sorrendben.
+            # Locking invariant: computing the grant union, the
+            # firewall.revoke_all() mutation AND conntrack_flush() all run
+            # under the session lock. Thus a parallel authorize() cannot slip
+            # between the decision and the deletion: it cannot get a grant
+            # that the partial deletion or the discovery would immediately
+            # remove. The conntrack flush deliberately stays under the lock,
+            # so that we do not break the connections of a new session
+            # authorizing after the mutation. _pending_lock is a leaf lock:
+            # we never acquire it in reverse order after _lock.
             with self._lock:
                 active_grants = tuple(
                     part
@@ -8299,14 +8350,14 @@ class SessionManager:
                 if not revoke_grants and not discover_now and (
                     entry.discover or partial
                 ):
-                    # Nincs nem átfedő elem. Nem felderítő bejegyzésnél az
-                    # átfedő elemeket az aktív munkamenet életciklusa
-                    # törli, ezért a bejegyzés megszűnik. Felderítő
-                    # bejegyzésnél a teljes felderítés még hátravan, ezért
-                    # az a munkamenet végéig a sorban marad. Ha nincs
-                    # aktív munkamenet és a grantlista üres, a hívás alább
-                    # lefut: a teljes/ICMP/MAC elemek törlését is újra kell
-                    # próbálni.
+                    # There is no non-overlapping element. For a
+                    # non-discovering entry the overlapping elements are
+                    # deleted by the active session's lifecycle, so the entry
+                    # ends. For a discovering entry the full discovery is
+                    # still pending, so it stays in the queue until the
+                    # session ends. If there is no active session and the
+                    # grant list is empty, the call below runs: deletion of
+                    # the full/ICMP/MAC elements must also be retried.
                     with self._pending_lock:
                         current = self._pending_revocations.get(key)
                         if current is entry:
@@ -8324,11 +8375,11 @@ class SessionManager:
                             entry.ip, revoke_grants, discover=True
                         )
                     elif partial:
-                        # Csak a régi, nem átfedő elemeket töröljük pontos,
-                        # elemszintű törléssel. A maradó aktív grantok által
-                        # fedett portokhoz és a MAC-kötéshez nem nyúlunk;
-                        # a távozó full/ICMP elem viszont így nem marad a
-                        # kernelben.
+                        # We delete only the old, non-overlapping elements
+                        # with an exact, element-level deletion. We do not
+                        # touch the ports covered by the remaining active
+                        # grants or the MAC binding; the departing full/ICMP
+                        # element, however, thus does not stay in the kernel.
                         self._revoke_exact(entry.ip, revoke_grants)
                     else:
                         self.firewall.revoke_all(entry.ip, revoke_grants)
@@ -8363,8 +8414,8 @@ class SessionManager:
                         current = self._pending_revocations.get(key)
                         if current is entry:
                             if entry.discover and partial:
-                                # A pontos grantok törölve; a teljes
-                                # felderítés a munkamenet végére vár.
+                                # The exact grants are deleted; the full
+                                # discovery waits for the end of the session.
                                 entry.in_flight = False
                                 entry.next_at = now + self._pending_delay(
                                     entry.attempts
@@ -8374,20 +8425,20 @@ class SessionManager:
                     if not partial:
                         conntrack_flush(entry.ip, self.audit)
                         log(
-                            f"[tűzfal] a(z) {entry.ip} függő visszavonása "
-                            "végül sikerült"
+                            f"[firewall] the pending revocation of {entry.ip} "
+                            "finally succeeded"
                         )
         return retried
 
-    # -- nyilvános műveletek ---------------------------------------------------
+    # -- public operations -----------------------------------------------------
 
     def login(
         self, user: str, ip: str, role: str = ROLE_USER, ua: str = ""
     ) -> Session:
-        """Jelszó után: még NINCS hálózati hozzáférés, csak választás."""
+        """After the password: NO network access yet, only a selection."""
         ip = normalize_ip(ip)
         if not is_ipv4(ip):
-            raise FirewallError("csak IPv4-címről lehet belépni")
+            raise FirewallError("sign-in is possible only from an IPv4 address")
         if role not in (ROLE_USER, ROLE_ADMIN):
             role = ROLE_USER
         now = time.time()
@@ -8405,19 +8456,19 @@ class SessionManager:
                 for part in session.grants
             ]
             if previous_grants:
-                # A régi hozzáférést előbb visszavonjuk. Ha ez nem sikerül,
-                # a visszavonás a sorból később lefuthat, ezért a régi
-                # munkamenet nem maradhat engedélyre hivatkozva: eldobjuk,
-                # és az új belépés sem jön létre (fail-closed).
+                # We revoke the old access first. If this fails, the
+                # revocation may run later from the queue, therefore the old
+                # session must not remain referring to a grant: we drop it,
+                # and the new sign-in is not created either (fail-closed).
                 if not self._revoke_access(ip, previous_grants):
                     self._drop_ip_locked(ip, "revoke_failed")
                     raise FirewallError(
-                        "a korábbi hozzáférés visszavonása nem sikerült; "
-                        "jelentkezz be újra"
+                        "revoking the previous access failed; "
+                        "sign in again"
                     )
                 revoked_access = True
-            # Egy IP-hez egyszerre egy munkamenet tartozzon. A korábbi
-            # munkamenet lezárásának okát megjegyezzük a felületnek.
+            # There should be one session per IP. We remember the previous
+            # session's termination reason for the UI.
             dropped = self._drop_ip_locked(ip, "replaced")
             session = Session(
                 token=secrets.token_urlsafe(32),
@@ -8432,9 +8483,9 @@ class SessionManager:
                 sid=secrets.token_hex(8),
             )
             self._sessions[session.token] = session
-        # Minden ugyanerről az IP-ről leváltott munkamenet (a függőben lévő
-        # is) külön eseményt kap; az engedély-visszavonás ténye marad az
-        # összesített access_revoked esemény.
+        # Every session displaced from the same IP (including the pending
+        # one) gets a separate event; the fact of the access revocation
+        # remains the aggregated access_revoked event.
         for old in dropped:
             self._write_audit(
                 "session_replaced",
@@ -8447,12 +8498,12 @@ class SessionManager:
                 reason="new_login_same_ip",
             )
         if revoked_access:
-            # A conntrack-törlést a _revoke_access már elvégezte.
+            # _revoke_access has already performed the conntrack deletion.
             self._write_audit(
                 "access_revoked",
                 user=user,
                 ip=ip,
-                reason="új belépés ugyanerről az IP-ről",
+                reason="new sign-in from the same IP",
             )
         return session
 
@@ -8472,9 +8523,9 @@ class SessionManager:
             if session is None:
                 return None
             if session.ip != ip:
-                # A cookie másik IP-ről érkezett: a munkamenet IP-hez kötött.
-                # A munkamenetet és a hozzá tartozó tűzfalengedélyt is
-                # megszüntetjük, nem hagyjuk a TTL-ig érvényben.
+                # The cookie arrived from another IP: the session is IP-bound.
+                # We also terminate the session and its firewall grant; we do
+                # not leave it in effect until the TTL.
                 del self._sessions[token]
                 self._remember_end_locked(session.ip, "ip_changed", now)
                 ip_changed = session
@@ -8489,10 +8540,10 @@ class SessionManager:
             else:
                 return session
             if revoke is not None:
-                # A visszavonás ugyanazon zár alatt fut, mint a munkamenet
-                # törlése, hogy egy párhuzamos, ugyanerről az IP-ről induló
-                # authorize() ne tudjon a kettő közé ékelődni és elveszíteni
-                # a frissen kiadott engedélyét.
+                # The revocation runs under the same lock as session
+                # deletion, so that a parallel authorize() starting from the
+                # same IP cannot slip between the two and lose its freshly
+                # issued grant.
                 self._revoke_access_locked(
                     revoke.ip, revoke.grants, now=now
                 )
@@ -8524,30 +8575,30 @@ class SessionManager:
     def authorize(
         self, token: str, ip: str, rules, ttl: int
     ) -> Session:
-        """A kiválasztott szabály(ok) és időtartam érvényesítése.
+        """Validate the selected rule(s) and duration.
 
-        ``rules`` egyetlen :class:`Rule` (a régi hívók kompatibilitása) vagy
-        nem üres szabálysorozat lehet. A munkamenet a választott szabályok
-        grantjeinek unióját kapja; az azonosítók szerinti ismétlődések
-        kimaradnak.
+        ``rules`` may be a single :class:`Rule` (compatibility for old
+        callers) or a non-empty sequence of rules. The session receives the
+        union of the selected rules' grants; duplicates by identifier are
+        dropped.
         """
         ip = normalize_ip(ip)
         if not is_ipv4(ip):
-            raise AccessError("csak IPv4-címről lehet hozzáférést kérni")
+            raise AccessError("access can be requested only from an IPv4 address")
         if isinstance(rules, Rule):
             candidates = [rules]
         elif rules is None or isinstance(rules, (str, bytes)):
-            raise AccessError("érvénytelen hozzáférési szabály")
+            raise AccessError("invalid access rule")
         else:
             try:
                 candidates = list(rules)
             except TypeError:
-                raise AccessError("érvénytelen hozzáférési szabály")
+                raise AccessError("invalid access rule")
         if not candidates or not all(
             isinstance(rule, Rule) for rule in candidates
         ):
-            raise AccessError("érvénytelen hozzáférési szabály")
-        # Deduplikáció az azonosító szerint, az első előfordulás sorrendjében.
+            raise AccessError("invalid access rule")
+        # Deduplication by identifier, in order of first occurrence.
         selected: list[Rule] = []
         seen_ids: set[str] = set()
         for rule in candidates:
@@ -8557,31 +8608,30 @@ class SessionManager:
             selected.append(rule)
         rules = tuple(selected)
 
-        # Minden választott szabálynak adnia kell hozzáférést
-        # (fail-closed), és a kért TTL nem haladhatja meg a legszigorúbb
-        # szabály max_ttl értékét. V1: egyetlen munkamenet-TTL, a kérést
-        # elutasítjuk a csonkítás helyett.
+        # Every selected rule must grant access (fail-closed), and the
+        # requested TTL must not exceed the strictest rule's max_ttl. V1: a
+        # single session TTL, we reject the request instead of truncating.
         for rule in rules:
             grants = rule.grants
             if not rule.session_domains and (not grants or all(
                 not (part.tcp or part.udp or part.icmp or part.full)
                 for part in grants
             )):
-                raise AccessError("ez a szabály nem ad hozzáférést")
+                raise AccessError("this rule does not grant access")
         ttl = validate_ttl(ttl)
         if len(rules) == 1:
             rule = rules[0]
             if ttl > rule.max_ttl:
                 raise AccessError(
-                    f"ez a szabály legfeljebb "
+                    f"this rule allows at most "
                     f"{format_duration(rule.max_ttl)} "
-                    "időtartamra engedélyez"
+                    "of access"
                 )
         else:
             strictest = min(rules, key=lambda rule: rule.max_ttl)
             if ttl > strictest.max_ttl:
                 raise AccessError(
-                    f"a(z) {strictest.label} szabály miatt legfeljebb "
+                    f"because of the {strictest.label} rule, at most "
                     f"{format_duration(strictest.max_ttl)}"
                 )
 
@@ -8597,8 +8647,8 @@ class SessionManager:
             for selection in rule_parts
             for grant in selection.grants
         )
-        # A megjelenítéshez a munkamenet az engedélyek unióját tárolja; a
-        # tényleges, irányonkénti bontás a grant_parts mezőben van.
+        # For display the session stores the union of the grants; the
+        # actual per-direction breakdown is in the grant_parts field.
         tcp = tuple(
             sorted({port for part in new_union for port in part.tcp})
         )
@@ -8608,7 +8658,7 @@ class SessionManager:
         icmp = any(part.icmp for part in new_union)
         full = any(part.full for part in new_union)
         directions = {part.direction for part in new_union}
-        # Csak domain szabály esetén nincs engedély, így irány sem.
+        # Only a domain rule has no grant, hence no direction either.
         direction = (
             next(iter(directions)) if len(directions) == 1
             else ("mixed" if directions else "forward")
@@ -8617,7 +8667,7 @@ class SessionManager:
         with self._lock:
             session = self._sessions.get(token)
             if session is None or session.ip != ip:
-                raise AccessError("érvénytelen vagy lejárt munkamenet")
+                raise AccessError("invalid or expired session")
             if session.expires <= now:
                 del self._sessions[token]
                 self._remember_end_locked(ip, "expired", now)
@@ -8634,25 +8684,25 @@ class SessionManager:
                     reason="expired",
                 )
                 if session.authorized:
-                    # A lejárt munkamenet engedélyét is azonnal vonjuk
-                    # vissza, ne várjunk a takarítószálra.
+                    # We revoke the expired session's grant immediately too;
+                    # do not wait for the cleaner thread.
                     self._revoke_access(ip, session.grants)
-                raise AccessError("lejárt a munkamenet")
+                raise AccessError("the session has expired")
 
             for rule in rules:
                 if self.rule_check is not None and not self.rule_check(
                     session.user, rule
                 ):
-                    raise AccessError("ez a szabály már nem elérhető")
+                    raise AccessError("this rule is no longer available")
 
-            # A host (input) portőr-halmaz nélkül egy későbbi visszavonás
-            # után az established kapcsolat életben maradhatna, ezért az
-            # ilyen engedélyt a védőhalmaz egészsége nélkül nem adjuk ki
-            # (fail-closed). A visszahívás csak a szabálytár/tűzfal zárait
-            # szerzi meg, a munkamenet-zárat soha; mivel itt a
-            # munkamenet-zár alatt futunk, a zársorrend mindig
-            # SessionManager -> RuleStore/Firewall, fordított sorrend nem
-            # alakulhat ki.
+            # Without the host (input) port guard set, an established
+            # connection could survive a later revocation, therefore we do
+            # not issue such a grant without the guard set being healthy
+            # (fail-closed). The callback acquires only the rule store's and
+            # the firewall's locks, never the session lock; since we are
+            # running under the session lock here, the lock order is always
+            # SessionManager -> RuleStore/Firewall, a reverse order cannot
+            # arise.
             if any(
                 part.direction == "input" for part in new_union
             ) and (self.guard_check is not None):
@@ -8662,25 +8712,25 @@ class SessionManager:
                     raise
                 except Exception as exc:
                     raise FirewallError(
-                        "a host-port védőhalmaz állapota nem ellenőrizhető; "
-                        "a host-hozzáférés biztonságosan le van tiltva"
+                        "the state of the host-port guard set cannot be checked; "
+                        "host access is safely disabled"
                     ) from exc
                 if not guard_ok:
                     raise FirewallError(
-                        "a host-port védőhalmaz nem épült fel; "
-                        "a host-hozzáférés biztonságosan le van tiltva"
+                        "the host-port guard set was not built; "
+                        "host access is safely disabled"
                     )
 
             old_union = self._grant_tuple(session.grants)
             removed: tuple[Ports, ...] = ()
             if session.authorized:
-                # Módosításnál csak a távozó elemeket töröljük, a közös
-                # portok az új grant életciklusához tartoznak. Ha a pontos
-                # törlés nem sikerül, a régi munkamenet NEM maradhat
-                # engedélyre hivatkozva: a visszavonás a sorból később is
-                # lefuthat, ezért a munkamenetet eldobjuk, és a
-                # felhasználónak újra kell engedélyeznie. Új engedélyt
-                # ilyenkor nem adunk (fail-closed).
+                # On modification we delete only the departing elements; the
+                # common ports belong to the new grant's lifecycle. If the
+                # exact deletion fails, the old session must NOT remain
+                # referring to a grant: the revocation may run later from
+                # the queue, therefore we drop the session, and the user must
+                # authorize again. We issue no new grant in this case
+                # (fail-closed).
                 removed = self._subtract_grants(old_union, new_union)
                 if removed:
                     try:
@@ -8688,39 +8738,39 @@ class SessionManager:
                     except FirewallError as exc:
                         self._sessions.pop(token, None)
                         self._remember_end_locked(ip, "revoke_failed", now)
-                        # A _revoke_access már auditál, de a
-                        # re-authorization kontextusát külön esemény
-                        # rögzíti (nem tartalmaz titkot).
+                        # _revoke_access already audits, but it records the
+                        # context of the re-authorization separately (it
+                        # contains no secret).
                         self._write_audit(
                             "firewall_error",
                             ip=ip,
                             operation="authorize_revoke",
                             reason=(
-                                "a korábbi hozzáférés visszavonása nem "
-                                "sikerült; a munkamenet megszűnt, újra kell "
-                                f"engedélyezni ({exc})"
+                                "revoking the previous access failed; the "
+                                "session ended, authorization must be "
+                                f"repeated ({exc})"
                             ),
                             pending=True,
                         )
-                        # A régi és az új grant uniója: mivel új
-                        # engedélyt nem adunk, minden elem törölhető.
+                        # The union of the old and the new grant: since we
+                        # issue no new grant, every element may be deleted.
                         self._revoke_access(
                             ip, (*old_union, *new_union)
                         )
-                        # A visszavonás tűzfalhiba, nem klienshiba: a
-                        # szerver ilyenkor 503-mal válaszol, nem 400-zal.
+                        # The revocation is a firewall failure, not a client
+                        # error: the server responds with 503, not 400.
                         raise FirewallError(
-                            "a korábbi hozzáférés visszavonása nem sikerült; "
-                            "a munkamenet megszűnt, jelentkezz be újra"
+                            "revoking the earlier access failed; "
+                            "the session ended, sign in again"
                         )
 
             try:
-                # Sikeres módosításnál is újraadjuk: a kerneloldali timeout
-                # így az új munkamenet-TTL-re frissül.
+                # We reissue even on a successful modification: thus the
+                # kernel-side timeout refreshes to the new session TTL.
                 self.firewall.grant_all(ip, new_union, ttl)
             except FirewallError:
-                # Részleges engedély ne maradjon. A takarítás hibája is a
-                # újrapróbálkozó sorba kerül, nem vész el.
+                # No partial grant may remain. A cleanup failure also goes
+                # into the retry queue; it is not lost.
                 self._revoke_access(ip, (*old_union, *new_union))
                 self._sessions[token] = Session(
                     token=session.token,
@@ -8736,8 +8786,9 @@ class SessionManager:
                 )
                 raise
 
-            # Csak a távozó portok kapcsolatait szakítjuk meg; az új
-            # engedélyhez tartozó, közös portok élő kapcsolatai maradnak.
+            # We tear down only the departing ports' connections; the live
+            # connections of the common ports belonging to the new grant
+            # remain.
             conntrack_flush_removed(
                 ip, removed, new_union, self.audit
             )
@@ -8782,14 +8833,14 @@ class SessionManager:
             self._remember_end_locked(ip, reason)
             was_authorized = session.authorized
             if was_authorized:
-                # A tűzfal-mutáció ugyanazon zár alatt fut, mint az
-                # eltávolítás: egy párhuzamos authorize() így nem kaphat
-                # olyan grantot, amelyet ez a visszavonás azonnal törölne.
+                # The firewall mutation runs under the same lock as removal:
+                # thus a parallel authorize() cannot get a grant that this
+                # revocation would immediately delete.
                 self._revoke_access_locked(ip, session.grants)
         return session
 
     def terminate(self, sid: str, reason: str = "admin_terminated") -> Session | None:
-        """Egy konkrét munkamenet lezárása az admin felületről."""
+        """Terminate a specific session from the admin UI."""
         if not sid:
             return None
         found: Session | None = None
@@ -8800,8 +8851,8 @@ class SessionManager:
                     self._remember_end_locked(session.ip, reason)
                     found = session
                     if found.authorized:
-                        # A tűzfal-hívás a munkamenet-zár alatt fut (lásd
-                        # a logout() megjegyzését).
+                        # The firewall call runs under the session lock (see
+                        # the comment in logout()).
                         self._revoke_access_locked(found.ip, found.grants)
                     break
         return found
@@ -8813,12 +8864,12 @@ class SessionManager:
         except_token: str | None = None,
         reason: str = "revoked",
     ) -> int:
-        """Egy felhasználó összes munkamenetének és engedélyének bontása.
+        """Tear down all sessions and grants of a user.
 
-        Szándékosan nem írunk munkamenetenkénti eseményt: a kiváltó
-        művelet (admin módosítás/törlés, jelszócsere, fail2ban-tiltás)
-        összesített eseménye már tartalmazza a bontott munkamenetek
-        számát. Így a napló nem duzzad fel tömeges visszavonáskor.
+        We deliberately write no per-session event: the aggregate event of
+        the triggering operation (admin change/deletion, password change,
+        fail2ban ban) already contains the number of terminated sessions.
+        Thus the log does not swell on a mass revocation.
         """
         revoked: list[Session] = []
         with self._lock:
@@ -8833,20 +8884,19 @@ class SessionManager:
                 if session.authorized:
                     grants.setdefault(session.ip, []).extend(session.grants)
             for ip, ports in grants.items():
-                # A tűzfal-hívás ugyanazon zár alatt fut, mint az
-                # eltávolítás; így a párhuzamos authorize() nem tud a kettő
-                # közé ékelődni.
+                # The firewall call runs under the same lock as removal;
+                # thus a parallel authorize() cannot slip between the two.
                 self._revoke_access_locked(ip, ports)
         return len(revoked)
 
     def revoke_user_rules(
         self, user: str, rule_ids, reason: str = "revoked"
     ) -> int:
-        """A felhasználó munkameneteiből csak a megadott választások bontása.
+        """Tear down only the given selections from the user's sessions.
 
-        Egy szabály módosításakor így a többi kiválasztott szabály
-        hozzáférése érvényben marad. A visszatérési érték az érintett
-        (részben vagy teljesen eltávolított) munkamenetek száma.
+        Thus when a rule is modified, the other selected rules' access
+        remains in effect. The return value is the number of affected
+        (partially or fully removed) sessions.
         """
         with self._lock:
             affected = [
@@ -8859,15 +8909,15 @@ class SessionManager:
             )
 
     def revoke_rule(self, rule_id: str, reason: str = "revoked") -> int:
-        """A megadott szabályválasztás eltávolítása az érintett munkamenetekből.
+        """Remove the given rule selection from the affected sessions.
 
-        Ha a munkamenet csak ezt a szabályt választotta (a régi, egy-
-        szabályos munkamenetek mindig ilyenek), a teljes munkamenet
-        megszűnik. Több választás esetén csak a szabály grantjei tűnnek
-        el, a munkamenet és a többi választás megmarad.
+        If the session selected only this rule (the old single-rule
+        sessions always do), the whole session ends. With several
+        selections only the rule's grants disappear; the session and the
+        other selections remain.
 
-        A revoke_user()hoz hasonlóan nem írunk munkamenetenkénti eseményt:
-        az admin szabály-módosítás/törlés összesített eseménye fedi le.
+        Like revoke_user(), we write no per-session event: the aggregate
+        event of the admin rule change/deletion covers it.
         """
         with self._lock:
             affected = [
@@ -8880,14 +8930,14 @@ class SessionManager:
             )
 
     def revoke_rules(self, rule_ids, reason: str = "revoked") -> int:
-        """Több szabályválasztás eltávolítása egyetlen zárolás alatt.
+        """Remove several rule selections under a single lock.
 
-        Egy szabály és az őt tartalmazó gyűjtők egyidejű módosításakor a
-        külön ``revoke_rule()`` hívások két lépésben frissítenék ugyanazt a
-        munkamenetet: az első lépés részleges állapotot hozna létre, és a
-        köztes maradó grantot újra kiadná, mielőtt a második lépés
-        eltávolítja. Itt a teljes halmaz egyszerre tűnik el. A visszatérési
-        érték az érintett munkamenetek száma.
+        When a rule and the collections containing it are modified at the
+        same time, separate ``revoke_rule()`` calls would refresh the same
+        session in two steps: the first step would create a partial state
+        and reissue the intermediate remaining grant before the second step
+        removes it. Here the whole set disappears at once. The return value
+        is the number of affected sessions.
         """
         wanted = (
             {rule_ids} if isinstance(rule_ids, str) else set(rule_ids or ())
@@ -8904,20 +8954,21 @@ class SessionManager:
             )
 
     def revoke_ip(self, ip: str, reason: str = "fail2ban") -> int:
-        """Egy forrás-IP összes munkamenetének és engedélyének bontása.
+        """Tear down all sessions and grants of a source IP.
 
-        Fail2ban-tiltáskor hívjuk: a tiltott kliens ne használhassa a már
-        megnyitott hozzáférést, és a meglévő kapcsolatai is szakadjanak meg.
+        We call it on a fail2ban ban: the banned client must not be able to
+        use the access already opened, and its existing connections must
+        also be broken.
 
-        Az összes, ehhez az IP-hez tartozó munkamenetet eldobjuk, majd a
-        nemrég sikertelen visszavonások grantjait is a törléshez adjuk. Mivel
-        a zárolás alatt az IP-hez nem marad munkamenet (és az
-        egy-IP-egy-munkamenet szabály miatt más munkamenet sem örökölhette
-        ezeket az elemeket), az IP-hez tartozó host (input) és forward
-        ``ip . port`` elemek biztonságosan felderíthetők és törölhetők; így
-        az összeomlás vagy korábbi hiba után árva engedélyek sem maradnak a
-        kernelben. A listázás pontos IP-egyezést használ, más kliens elemét
-        nem érinti.
+        We drop every session belonging to this IP, then add the grants of
+        recently failed revocations to the deletion too. Since no session
+        remains for the IP under the lock (and because of the
+        one-session-per-IP rule no other session could have inherited these
+        elements), the host (input) and forward ``ip . port`` elements
+        belonging to the IP can be safely discovered and deleted; thus no
+        orphaned grants remain in the kernel after a crash or earlier
+        failure either. The listing uses an exact IP match, so it does not
+        affect another client's elements.
         """
         try:
             ip = normalize_ip(ip)
@@ -8932,18 +8983,18 @@ class SessionManager:
             grants.extend(
                 part for _key, entry in pending for part in entry.grants
             )
-            # A tűzfal-hívás a munkamenet-zár alatt fut, hogy egy
-            # párhuzamos authorize() ne adjon új engedélyt az IP-re a
-            # felderítés és a törlés között.
+            # The firewall call runs under the session lock, so that a
+            # parallel authorize() cannot issue a new grant for the IP
+            # between discovery and deletion.
             ok = self._revoke_access(ip, grants, discover=True)
             if ok:
                 self._clear_pending_keys([key for key, _entry in pending])
-        # A conntrack-t akkor is ürítjük, ha nem volt portál-munkamenet:
-        # egy pre-auth vagy korábbi kapcsolat is élhet a tiltás pillanatában.
+        # We flush conntrack even if there was no portal session: a pre-auth
+        # or earlier connection may also be alive at the moment of the ban.
         return len(revoked)
 
     def reap_once(self, now: float | None = None) -> int:
-        """Lejárt munkamenetek törlése; a megüresedett IP-k tiltása."""
+        """Delete expired sessions; ban the IPs that became empty."""
         now = time.time() if now is None else now
         expired_authorized: dict[str, list[Ports]] = {}
         expired_sessions: list[Session] = []
@@ -8959,15 +9010,15 @@ class SessionManager:
                         ).extend(session.grants)
             active_ips = self._active_authorized_ips_locked()
             for ip, grants in expired_authorized.items():
-                # A tűzfal-hívás ugyanazon zár alatt fut, mint a lejárt
-                # munkamenet eltávolítása. A helper a maradó aktív
-                # munkamenetek grantjaihoz igazítja a törlést, és szükség
-                # esetén conntrack-ürítés nélkül csak a nem átfedő
-                # elemeket törli.
+                # The firewall call runs under the same lock as removal of
+                # the expired session. The helper aligns the deletion with
+                # the remaining active sessions' grants, and if needed
+                # deletes only the non-overlapping elements without a
+                # conntrack flush.
                 self._revoke_access_locked(ip, grants, now=now)
         to_revoke = len(set(expired_authorized) - active_ips)
-        # A validate()/authorize() már eltávolított munkamenetek nincsenek a
-        # listában, így azokra nem íródik második esemény.
+        # Sessions already removed by validate()/authorize() are not in the
+        # list, so no second event is written for them.
         for session in expired_sessions:
             self._write_audit(
                 "session_expired",
@@ -8981,10 +9032,9 @@ class SessionManager:
                 duration=max(0, int(now - session.created)),
                 reason="expired",
             )
-        # A korábban sikertelen tűzfal-visszavonások újrapróbálása. Ez a
-        # takarítószálban fut, ezért a hívóknál nem kell külön szálat
-        # indítani; a visszavonás így sem vész el, ha az nft átmenetileg
-        # hibázott.
+        # Retry earlier failed firewall revocations. This runs in the
+        # cleaner thread, so callers need not start a separate thread; thus
+        # the revocation is not lost if nft failed temporarily either.
         self._retry_pending_revocations(now)
         return to_revoke
 
@@ -8997,8 +9047,8 @@ class SessionManager:
             while not self._stop.wait(5):
                 try:
                     self.reap_once()
-                except Exception as exc:  # a reaper soha ne haljon meg
-                    log(f"[munkamenet] takarítási hiba: {exc}")
+                except Exception as exc:  # the reaper must never die
+                    log(f"[session] cleanup error: {exc}")
                     self._write_audit(
                         "session_reaper_error", reason=str(exc)
                     )
@@ -9013,10 +9063,10 @@ class SessionManager:
             self._thread = None
 
     def shutdown(self, reason: str = "service_stop") -> int:
-        """Minden munkamenet és tűzfalengedély azonnali visszavonása.
+        """Immediately revoke every session and firewall grant.
 
-        Leállítás előtt hívjuk, hogy a leállás ne hagyja a TTL-ig nyitva a
-        hozzáféréseket. Összeomlás esetén a kerneloldali timeout véd.
+        We call it before shutdown, so that stopping does not leave access
+        open until the TTL. On a crash the kernel-side timeout protects.
         """
         with self._lock:
             sessions = list(self._sessions.values())
@@ -9044,7 +9094,7 @@ class SessionManager:
 # ---------------------------------------------------------------- rate limit
 
 class RateLimiter:
-    """Csúszóablakos korlát (IP-nként)."""
+    """A sliding-window limit (per IP)."""
 
     def __init__(self, window: int = RATE_WINDOW, maximum: int = RATE_MAX) -> None:
         self.window = max(1, int(window))
@@ -9076,7 +9126,7 @@ class RateLimiter:
 
 # ------------------------------------------------------------------- captcha
 
-# Folyamatonkénti kulcs: újraindítás után a régi feladványok érvénytelenek.
+# Process-wide key: after a restart the old challenges are invalid.
 _POW_SECRET = secrets.token_bytes(32)
 _seen_lock = threading.Lock()
 _seen: dict[str, int] = {}
@@ -9107,7 +9157,7 @@ def issue_challenge(difficulty: int | None = None) -> dict:
 
 def verify_pow(payload: dict) -> tuple[bool, str]:
     if not isinstance(payload, dict):
-        return False, "hibás captcha-csomag"
+        return False, "invalid captcha package"
     try:
         challenge = str(payload["challenge"])
         salt = str(payload["salt"])
@@ -9117,24 +9167,24 @@ def verify_pow(payload: dict) -> tuple[bool, str]:
         signature = str(payload["signature"])
         number = int(payload["number"])
     except (KeyError, TypeError, ValueError):
-        return False, "hibás captcha-csomag"
+        return False, "invalid captcha package"
 
     if not (0 <= number < 2 ** 64):
-        return False, "hibás megoldás"
+        return False, "invalid solution"
 
-    # A kliens nem írhatta át a nehézséget / lejáratot.
+    # The client could not have altered the difficulty / expiry.
     expected = hmac.new(
         _POW_SECRET, _canon(challenge, salt, algorithm, difficulty, expires), hashlib.sha256
     ).hexdigest()
     if not hmac.compare_digest(expected, signature):
-        return False, "érvénytelen aláírás"
+        return False, "invalid signature"
 
     if time.time() > expires:
-        return False, "lejárt captcha"
+        return False, "expired captcha"
 
     digest = hashlib.sha256(f"{salt}{number}".encode()).hexdigest()
     if not digest.startswith("0" * difficulty):
-        return False, "rossz megoldás"
+        return False, "wrong solution"
 
     now = time.time()
     with _seen_lock:
@@ -9142,7 +9192,7 @@ def verify_pow(payload: dict) -> tuple[bool, str]:
             if exp < now:
                 _seen.pop(key, None)
         if challenge in _seen:
-            return False, "a captcha már fel volt használva"
+            return False, "the captcha was already used"
         _seen[challenge] = expires
 
     return True, "ok"
@@ -9150,29 +9200,30 @@ def verify_pow(payload: dict) -> tuple[bool, str]:
 
 def verify_turnstile(token: str, remote_ip: str) -> tuple[bool, str]:
     if not TURNSTILE_ON:
-        return False, "a Turnstile nincs bekapcsolva"
+        return False, "Turnstile is not enabled"
     if not token:
-        return False, "hiányzó token"
+        return False, "missing token"
     data = urllib.parse.urlencode(
         {"secret": TURNSTILE_SECRET, "response": token, "remoteip": remote_ip}
     ).encode()
     try:
         with urllib.request.urlopen(TURNSTILE_VERIFY_URL, data=data, timeout=10) as resp:
             body = json.loads(resp.read().decode("utf-8"))
-    except Exception as exc:  # hálózati hiba = biztonságos elutasítás
-        return False, f"ellenőrzés nem elérhető ({type(exc).__name__})"
+    except Exception as exc:  # network error = safe rejection
+        return False, f"verification unavailable ({type(exc).__name__})"
     if body.get("success") is True:
         return True, "ok"
-    return False, "a captcha érvénytelen"
+    return False, "the captcha is invalid"
 
 
-# ------------------------------------------------------------------- gyökér
+# ------------------------------------------------------------------- root
 
 class Gateway:
-    """A HTTP-réteg által használt komponensek egy csomagban."""
+    """The components used by the HTTP layer in one package."""
 
-    # A beállítás-telepítés és a port proxy frissítő sorosítása: a frissítő
-    # ne írhassa vissza egy régi snapshot szabályait egy admin mentés után.
+    # Serialization of settings deployment and the port proxy refresh: the
+    # refresher must not write back an old snapshot's rules after an admin
+    # save.
     _custom_lock = threading.RLock()
     PORTPROXY_REFRESH_SECONDS = 10
 
@@ -9206,7 +9257,7 @@ class Gateway:
             if settings is not None
             else settings_store.SettingsStore()
         )
-        # A feltöltött tanúsítványok a beállításfájl mellett, a certs/ alatt.
+        # Uploaded certificates live next to the settings file, under certs/.
         self.certs = certs if certs is not None else settings_store.CertStore(
             os.path.join(
                 os.path.dirname(
@@ -9215,38 +9266,38 @@ class Gateway:
                 "certs",
             )
         )
-        # A WireGuard-alagút (dropjak0) a host hálózati névterében; a
-        # beállításváltozás után a signature egyezése esetén nem nyúl hozzá.
+        # The WireGuard tunnel (dropjak0) runs in the host network namespace;
+        # after a settings change it is left alone if the signature matches.
         self.tunnels = tunnel_mod.TunnelManager(logger=log)
-        # Az ügynök-szinkron (GET /api/tunnel/config) ügynökönkénti
-        # minimális időköze; a token soha nem kerül ide vagy a naplóba.
+        # The minimum per-agent interval of the agent sync
+        # (GET /api/tunnel/config); the token never gets here or into the log.
         self.tunnel_sync_times: dict[str, float] = {}
         self.tunnel_sync_lock = threading.Lock()
-        # A domain szabály csak létező proxy-bejegyzésre vagy domaines
-        # alagút-szolgáltatásra hivatkozhat.
+        # A domain rule may refer only to an existing proxy entry or a
+        # domain-mode tunnel service.
         if getattr(self.rules, "domain_names", False) is None:
             self.rules.domain_names = self._domain_names
             self.rules.legacy_proxy_domain = getattr(
                 self.settings, "legacy_proxy_domain", ""
             )
-        # A szolgáltatás-szabály hivatkozásait a beállításokból oldjuk fel
-        # minden híváskor, hogy a leképzés módosítása azonnal érvényesüljön.
-        # A visszahívás kötése az első lusta _load() előtt történik.
+        # We resolve the service rule's references from the settings on every
+        # call, so that a mapping change takes effect immediately. The
+        # callback is bound before the first lazy _load().
         self.rules.service_ports = self._service_ports_for
-        # A domain-módú szolgáltatások hostnevét ugyanebből az indexből
-        # oldjuk fel; a szolgáltatás-szabály így domain-hozzáférést is adhat.
+        # We resolve the hostnames of domain-mode services from the same
+        # index; thus a service rule can also grant domain access.
         self.rules.service_domains = self._service_domains_for
         self.drops = (
             drops if drops is not None else droplog.DropLogService()
         )
-        # A host (input) portőr-halmaz állapota. Konzervatívan hamis, amíg
-        # az első sikeres sync_host_ports() be nem állítja: a host
-        # engedélyek így akkor sem adhatók ki, ha a szinkron még nem futott
-        # le (fail-closed). A prepare() a kiszolgálás előtt szinkronizál.
+        # The state of the host (input) port guard set. Conservatively false
+        # until the first successful sync_host_ports() sets it: thus host
+        # grants cannot be issued even if the sync has not run yet
+        # (fail-closed). prepare() synchronizes before serving.
         self._host_ports_ok = False
-        # A szinkron+ takarítás egy zár alatt fut: egy elavult
-        # hivatkozáslistával induló takarítás ne törölhesse egy közben
-        # létrehozott szabály frissen hozzáadott portját.
+        # Sync + cleanup run under one lock: a cleanup starting with a stale
+        # reference list must not delete a freshly added port of a rule
+        # created in the meantime.
         self._host_ports_lock = threading.Lock()
         self.sessions = (
             sessions
@@ -9274,46 +9325,47 @@ class Gateway:
         )
         if self.fail2ban.audit is None:
             self.fail2ban.audit = self.audit
-        # Az automatikus (login/drop) tiltások is jussanak el a közös
-        # utókezeléshez, ha a példányt kívülről adták át.
+        # Automatic (login/drop) bans must also reach the common
+        # post-processing if the instance was passed in from outside.
         if getattr(self.fail2ban, "_on_ban", None) is None:
             self.fail2ban._on_ban = self._on_fail2ban_ban
-        # A drop log minden rögzített csomagját átadjuk a fail2bannak; az
-        # dönti el, hogy az adott ok/protokoll alapján tiltás jár-e.
+        # We pass every recorded packet of the drop log to fail2ban; it
+        # decides whether the given reason/protocol warrants a ban.
         setter = getattr(self.drops, "set_on_drop", None)
         if setter is not None:
             setter(self._on_drop)
         self.login_rate = (
             rate_limiter if rate_limiter is not None else RateLimiter()
         )
-        # A fiók-kérések saját korlátja: a belépési keretet ne fogyassza.
+        # Account requests have their own limit: they must not consume the
+        # sign-in budget.
         self.register_rate = RateLimiter(window=600, maximum=3)
-        # A proxy 401-ek drop log sorai az nft log-szabályok mintájára
-        # (30/perc) korlátozva, globálisan.
+        # Proxy 401 drop log lines are rate-limited like the nft log rules
+        # (30/minute), globally.
         self.proxy_drop_rate = RateLimiter(window=60, maximum=30)
-        # Külön korlát a jelszóváltásnak, hogy a belépési próbákat ne
-        # fogyassza, és fordítva.
+        # A separate limit for password changes, so that they do not consume
+        # sign-in attempts, and vice versa.
         self.password_rate = RateLimiter(window=300, maximum=10)
-        # A hozzáférés-módosítás nft-tranzakciókat indít; a sűrű váltogatás
-        # ne terhelhesse a tűzfalat és ne fogyassza a belépési keretet.
+        # Access changes start nft transactions; frequent switching must not
+        # burden the firewall or consume the sign-in budget.
         self.access_rate = RateLimiter(window=60, maximum=20)
-        # Az admin-módosítások (utolsó admin ellenőrzése + írás) sorosítása.
+        # Serialization of admin changes (checking the last admin + write).
         self.admin_lock = threading.Lock()
 
     def _write_audit(self, event: str, **fields) -> None:
-        """Nem kötelező naplóírás a portál életciklus-eseményeihez."""
+        """Optional logging for the portal's lifecycle events."""
         try:
             self.audit.write(event, **fields)
-        except Exception as exc:  # a naplózás soha ne blokkoljon
-            log(f"[napló] {event} írása nem sikerült: {exc}")
+        except Exception as exc:  # logging should never block
+            log(f"[audit] writing {event} failed: {exc}")
 
     def _domain_names(self) -> set[str]:
-        """A domain szabály által hivatkozható teljes hostnevek.
+        """The full hostnames a domain rule may reference.
 
-        A proxy-bejegyzések mellett az engedélyezett alagút-ügynökök domaines
-        szolgáltatásai is ide tartoznak, hogy hozzájuk privát domain szabály
-        készülhessen. A letiltott szolgáltatás domainje is látszik: a
-        törlés/letiltás életciklus-korlátja így tud rá hivatkozni.
+        Besides the proxy entries, the domain-mode services of authorized
+        tunnel agents also belong here, so that a private domain rule can be
+        created for them. The domain of a disabled service is also visible:
+        the lifecycle limit of deletion/disablement can thus reference it.
         """
         settings = self.settings.snapshot()
         names = {
@@ -9334,11 +9386,11 @@ class Gateway:
         return names
 
     def _service_entry_for(self, ref: str):
-        """Egy szolgáltatás-hivatkozás index-bejegyzése a beállításokból.
+        """The index entry of a service reference from the settings.
 
-        ``None``, ha a hivatkozás ismeretlen vagy a szolgáltatás/ügynök le
-        van tiltva. Így a szabály mentése és a döntéskori ellenőrzés is
-        fail-closed módon viselkedik.
+        ``None`` if the reference is unknown or the service/agent is
+        disabled. Thus both saving a rule and checking at decision time
+        behave in a fail-closed way.
         """
         tunnels = self.settings.snapshot().get("tunnels")
         if not isinstance(tunnels, dict):
@@ -9346,14 +9398,14 @@ class Gateway:
         return settings_store.tunnel_service_index(tunnels).get(ref)
 
     def _service_ports_for(self, ref: str):
-        """Egy szolgáltatás-hivatkozás feloldott portjai a beállításokból."""
+        """The resolved ports of a service reference from the settings."""
         return self._service_entry_for(ref)
 
     def _service_domains_for(self, ref: str):
-        """Egy szolgáltatás-hivatkozás feloldott domainje.
+        """The resolved domain of a service reference.
 
-        Ugyanaz az index-bejegyzés, mint a portoknál; a ``domain`` mező
-        csak domain-módú szolgáltatásnál nem üres.
+        The same index entry as for the ports; the ``domain`` field is
+        non-empty only for a domain-mode service.
         """
         return self._service_entry_for(ref)
 
@@ -9366,7 +9418,7 @@ class Gateway:
         )
 
     def _rule_available(self, user_name: str, rule: Rule) -> bool:
-        """A szabály a döntés pillanatában is a felhasználóhoz tartozik-e."""
+        """Whether the rule still belongs to the user at the moment of the decision."""
         record = self.users.record(user_name)
         if record is None or not record.enabled or record.pending:
             return False
@@ -9377,10 +9429,10 @@ class Gateway:
         except (AccessError, KeyError, ValueError):
             return False
         if rule.service_refs:
-            # A szolgáltatás-szabály (vagy az ilyet tartalmazó gyűjtő)
-            # engedélye a döntés pillanatában is a jelenlegi alagút-
-            # leképzésből számoljon. Hiányzó/letiltott hivatkozás vagy
-            # eltérő portok esetén a munkamenet nem maradhat érvényben.
+            # A service rule (or a collection containing one) should have its
+            # permission computed from the current tunnel mapping at the
+            # moment of the decision too. With a missing/disabled reference or
+            # different ports, the session must not remain valid.
             resolver = getattr(self.rules, "service_ports", None)
             tcp: set[int] = set()
             udp: set[int] = set()
@@ -9394,9 +9446,9 @@ class Gateway:
                 rule.service_tcp, rule.service_udp
             ):
                 return False
-            # A hallgató portok változatlanok lehetnek, miközben a célhost
-            # vagy a célport átirányítása más engedélyt jelentene: a teljes
-            # leképezés-aláírást is össze kell vetni (fail-closed).
+            # The listening ports may be unchanged while the target host
+            # or target port redirection would mean a different permission:
+            # the full mapping signature must also be compared (fail-closed).
             if self.rules.service_signature(rule.service_refs) != (
                 rule.service_signature
             ):
@@ -9407,57 +9459,56 @@ class Gateway:
         )
 
     def _host_ports_healthy(self) -> bool:
-        """A host-port őrhalmaz állapota; hiba után egyszer újrapróbál.
+        """The state of the host-port guard set; retries once after a failure.
 
-        Ezt a ``SessionManager.authorize()`` hívja a munkamenet-zár alatt,
-        input irányú engedély kiadása előtt. A ``sync_host_ports()`` a
-        Gateway host-port zárát, valamint a RuleStore és a Firewall zárait
-        szerzi meg, a munkamenet-zárat soha, ezért a zársorrend mindig
-        SessionManager -> Gateway -> RuleStore/Firewall, és nem alakulhat
-        ki holtpont. A hamis állapot egyetlen retry-val gyógyulhat, hogy
-        egy átmeneti nft-hiba ne blokkolja a további belépéseket.
+        This is called by ``SessionManager.authorize()`` under the session
+        lock, before issuing an input direction permission. ``sync_host_ports()``
+        acquires the Gateway host-port lock as well as the RuleStore and
+        Firewall locks, never the session lock, so the lock order is always
+        SessionManager -> Gateway -> RuleStore/Firewall, and no deadlock can
+        arise. The false state can be healed by a single retry, so that a
+        transient nft error does not block further sign-ins.
         """
         if not self._host_ports_ok:
             self.sync_host_ports()
         return self._host_ports_ok
 
     def sync_host_ports(self) -> None:
-        """A host (input) szabályok portjainak átvezetése a kernelbe.
+        """Carrying the ports of the host (input) rules through to the kernel.
 
-        A teljes szabálytárból gyűjtjük a feloldott portokat, ezért egy
-        gyűjtőszabály módosítása után is helyes a halmaz tartalma. A
-        ``host_service_*`` halmazok normál szinkronnál csak bővülnek (a
-        Firewall add-only módon tölti fel őket), így egy törölt szabály nem
-        nyitja meg újra a meglévő kapcsolatokat. Sikeres feltöltés után a
-        Firewall biztonságos takarítást futtat: csak olyan portot töröl,
-        amelyre egyetlen perzisztált szabály sem hivatkozik, és amelyhez
-        nem tartozik élő conntrack-bejegyzés.
+        We collect the resolved ports from the whole rule store, so the set
+        content is correct after modifying a collection rule too. During a
+        normal sync the ``host_service_*`` sets only grow (the Firewall fills
+        them in an add-only way), so a deleted rule does not reopen existing
+        connections. After a successful fill, the Firewall performs a safe
+        cleanup: it deletes only a port that no persisted rule references and
+        to which no live conntrack entry belongs.
 
-        Hiba esetén a ``_host_ports_ok`` hamis marad, és a hiba naplózva,
-        auditálva van. A host (input) engedélyek ilyenkor 503-mal
-        elutasításra kerülnek (fail-closed); a csak forward irányú
-        engedélyezés továbbra is működik, mert azt nem ez a halmaz védi.
+        On error ``_host_ports_ok`` remains false and the error is logged and
+        audited. Host (input) permissions are then rejected with 503
+        (fail-closed); forward-only authorization keeps working, because it
+        is not protected by this set.
 
-        Induláskor a halmazok szándékosan nem ürülnek: a törölt portok régi
-        folyamai így továbbra is el vannak vágva. A 65536-os méret miatt a
-        legfeljebb 65535 érvényes port mind elfér, ezért a halmaz nem
-        telhet meg, és nem veszhet el csendben egy őrelem.
+        At startup the sets are deliberately not cleared: old flows of
+        deleted ports thus remain cut off. Because of the 65536 size, all
+        65535 valid ports fit, so the set cannot fill up and no guard element
+        can be silently lost.
         """
-        # A szabálytár olvasása, a portok hozzáadása és a takarítás egy
-        # zár alatt fut. Enélkül egy korábbi, elavult hivatkozáslistával
-        # induló takarítás törölhetné egy közben létrehozott szabály
-        # frissen hozzáadott portját (a takarítás csak töröl, nem pótol).
+        # Reading the rule store, adding the ports and the cleanup run under
+        # one lock. Without that, a cleanup starting with a stale reference
+        # list could delete a freshly added port of a rule created in the
+        # meantime (the cleanup only deletes, it does not replace).
         with self._host_ports_lock:
             self._sync_host_ports_locked()
 
     def _sync_host_ports_locked(self) -> None:
-        # Konzervatív: bármely hiba (vagy nem várt kivétel) után hamis
-        # marad, és a host engedélyek zárva lesznek.
+        # Conservative: after any error (or unexpected exception) it remains
+        # false and host permissions stay closed.
         self._host_ports_ok = False
         try:
             rules = self.rules.persisted_rules()
         except RuleStoreError as exc:
-            log(f"[tűzfal] a host portok gyűjtése nem sikerült: {exc}")
+            log(f"[firewall] collecting host ports failed: {exc}")
             self._write_audit(
                 "firewall_error",
                 operation="host_ports",
@@ -9467,15 +9518,16 @@ class Gateway:
             return
         host_tcp: set[int] = set()
         host_udp: set[int] = set()
-        # A takarítás hivatkozáslistája szándékosan szélesebb, mint a
-        # szinkroné: bármely perzisztált szabály bármely portja véd, nem
-        # csak az input részeké. Így egy forward szabály portja sem
-        # törlődhet ki az őrhalmazból.
+        # The cleanup's reference list is deliberately wider than the sync's:
+        # any port of any persisted rule protects, not only those of the input
+        # parts. Thus the port of a forward rule cannot be deleted from the
+        # guard set either.
         referenced_tcp: set[int] = set()
         referenced_udp: set[int] = set()
         for rule in rules:
-            # A gyűjtőszabály engedélyei irányonként külön részek; a
-            # host_service_* halmazba csak az input részek portjai kellenek.
+            # A collection rule's permissions are separate parts per
+            # direction; only the ports of the input parts are needed in the
+            # host_service_* set.
             for part in rule.grants:
                 referenced_tcp.update(part.tcp)
                 referenced_udp.update(part.udp)
@@ -9488,7 +9540,7 @@ class Gateway:
                 sorted(host_tcp), sorted(host_udp)
             )
         except FirewallError as exc:
-            log(f"[tűzfal] a host portok szinkronizálása nem sikerült: {exc}")
+            log(f"[firewall] synchronizing host ports failed: {exc}")
             self._write_audit(
                 "firewall_error",
                 operation="host_ports",
@@ -9497,16 +9549,16 @@ class Gateway:
             )
             return
         self._host_ports_ok = True
-        # A takarítás csak a teljes, sikeres feltöltés után fut, és a hibája
-        # nem ronthatja el az egészséget: a védőhalmaz ekkor már teljes.
+        # The cleanup runs only after the complete, successful fill, and its
+        # failure cannot spoil the health: the guard set is already complete.
         prune = getattr(self.firewall, "prune_host_service_ports", None)
         if prune is None:
             return
         try:
             prune(sorted(referenced_tcp), sorted(referenced_udp),
                   audit=self.audit)
-        except Exception as exc:  # a takarítás soha ne akassza meg a grantet
-            log(f"[tűzfal] a host port takarítás nem sikerült: {exc}")
+        except Exception as exc:  # the cleanup must never block the grant
+            log(f"[firewall] host port cleanup failed: {exc}")
             self._write_audit(
                 "firewall_error",
                 operation="host_ports_prune",
@@ -9521,12 +9573,12 @@ class Gateway:
         return record.public(groups)
 
     def _on_drop(self, record: dict) -> None:
-        """Egy eldobott csomag átadása a fail2bannak.
+        """Passing a dropped packet to fail2ban.
 
-        Csak az engedély nélküli TCP-forgalmat számoljuk. A portszkennerek
-        és botok jellemzően TCP-n próbálkoznak; a szabályos kliens UDP-
-        háttérzaja (mDNS, LLMNR, NetBIOS, DNS) nem eredményez tiltást.
-        A DNS és a portál saját portja kimarad.
+        Only unauthorized TCP traffic is counted. Port scanners and bots
+        typically try TCP; the legitimate client's UDP background noise
+        (mDNS, LLMNR, NetBIOS, DNS) does not result in a ban. DNS and the
+        portal's own port are excluded.
         """
         reason = str(record.get("reason") or "").strip()
         if reason not in DROP_BAN_REASONS:
@@ -9543,21 +9595,22 @@ class Gateway:
         if not src:
             return
         try:
-            # A WAN-felőli forgalom számít a csomagszám-küszöbhöz is; a
-            # LAN-felőli no-grant/input-lan csak a portdiverzitáshoz, mert
-            # egy kijelentkezett böngésző is sok TCP-próbát indít.
+            # Traffic from the WAN also counts toward the packet threshold;
+            # LAN-side no-grant/input-lan only toward port diversity, because
+            # a signed-out browser also starts many TCP attempts.
             self.fail2ban.record_drop(
                 src, proto="tcp", dport=dport, reason=reason,
                 count_total=reason in ("wan-drop", "input-wan"),
             )
         except Exception as exc:
-            log(f"[fail2ban] a(z) {src} drop-alapú tiltása nem sikerült: {exc}")
+            log(f"[fail2ban] drop-based ban of {src} failed: {exc}")
 
     def record_proxy_drop(self, ip: str, host: str, path: str) -> None:
-        """Egy proxy 401 (tiltóoldal) sora a drop logban.
+        """A proxy 401 (block page) line in the drop log.
 
-        Közvetlenül a tárba ír, nem az NFLOG-visszahíváson át: a drop- és
-        portszám-jelzést nem táplálja (a 401-eket a proxy-jelzés számolja).
+        Writes directly to the store, not through the NFLOG callback: it
+        does not feed the drop and port count signals (401s are counted by
+        the proxy signal).
         """
         if not self.proxy_drop_rate.allow("proxy"):
             return
@@ -9574,14 +9627,14 @@ class Gateway:
                 }
             )
         except Exception as exc:
-            log(f"[proxy] a drop log bejegyzés nem sikerült: {exc}")
+            log(f"[proxy] writing the drop log entry failed: {exc}")
 
     def _on_fail2ban_ban(self, record: dict) -> None:
-        """Egy friss tiltás utókezelése.
+        """Post-processing of a fresh ban.
 
-        A tűzfalban már érvényes a tiltás; itt bontjuk a kliens meglévő
-        munkameneteit és kapcsolatait, naplózzuk az eseményt, és beírjuk a
-        drop logba a tiltás tényét. A hibák nem vonják vissza a tiltást.
+        The firewall already enforces the ban; here we tear down the client's
+        existing sessions and connections, log the event, and write the fact
+        of the ban into the drop log. Errors do not revoke the ban.
         """
         ip = str(record.get("ip", "")).strip()
         if not ip:
@@ -9595,12 +9648,13 @@ class Gateway:
             source = "manual" if manual else "login"
         detail = str(record.get("detail") or "")[:64]
         if source == "proxy":
-            # A proxy-tiltás csak a TCP 80/443-at zárja: a munkamenet és a
-            # többi kapcsolat marad, a sima portál elérhető. A meglévő
-            # 80/443 kapcsolatokat az input lánc állapotfüggetlen dropja
-            # vágja el, ezért conntrack-ürítés sem kell (az irányvak lenne,
-            # és a kliens továbbított webforgalmát is bontaná). A drop log
-            # tiltás-eseménye a teljes tiltásé, ide nem írjuk.
+            # A proxy ban only closes TCP 80/443: the session and the other
+            # connections remain, and the plain portal stays reachable. The
+            # existing 80/443 connections are cut by the state-independent
+            # drop of the input chain, so no conntrack flush is needed either
+            # (it would be direction-blind and would also tear down the
+            # client's forwarded web traffic). The drop log ban event belongs
+            # to a full ban, we do not write it here.
             self.audit.write(
                 "fail2ban_ban",
                 ip=ip,
@@ -9613,15 +9667,15 @@ class Gateway:
                 sessions_revoked=0,
             )
             log(
-                f"[fail2ban] proxy-tiltás (csak HTTP/HTTPS): {ip} "
-                f"({attempts} jogosulatlan proxykérés)"
+                f"[fail2ban] proxy ban (HTTP/HTTPS only): {ip} "
+                f"({attempts} unauthorized proxy requests)"
             )
             return
         revoked = 0
         try:
             revoked = self.sessions.revoke_ip(ip, reason="fail2ban")
         except Exception as exc:
-            log(f"[fail2ban] a(z) {ip} munkameneteinek bontása nem sikerült: {exc}")
+            log(f"[fail2ban] tearing down the sessions of {ip} failed: {exc}")
         self.audit.write(
             "fail2ban_ban",
             ip=ip,
@@ -9650,54 +9704,54 @@ class Gateway:
                 }
             )
         except Exception as exc:
-            log(f"[fail2ban] a drop log bejegyzés nem sikerült: {exc}")
+            log(f"[fail2ban] writing the drop log entry failed: {exc}")
         if source == "manual":
-            log(f"[fail2ban] kézi tiltás: {ip} ({until - int(time.time())} mp)")
+            log(f"[fail2ban] manual ban: {ip} ({until - int(time.time())} s)")
         elif source == "drop":
             log(
-                f"[fail2ban] automatikus tiltás: {ip} "
-                f"({attempts} eldobott csomag, ok={detail or 'drop'})"
+                f"[fail2ban] automatic ban: {ip} "
+                f"({attempts} dropped packets, reason={detail or 'drop'})"
             )
         else:
             log(
-                f"[fail2ban] automatikus tiltás: {ip} "
-                f"({attempts} sikertelen belépés, {user!r})"
+                f"[fail2ban] automatic ban: {ip} "
+                f"({attempts} failed sign-ins, {user!r})"
             )
 
     def _startup_flush(self) -> None:
-        """Induláskori ürítés/egyeztetés az effektív környezeti érték szerint.
+        """Startup flush/reconciliation according to the effective env value.
 
-        A ``HV_FLUSH_ON_START`` ugyanazt az igaz/hamis értelmezést használja,
-        mint a többi logikai változó (1/true/yes/on). Ha kikapcsolták, az
-        alapértelmezett (biztonságos) viselkedés az árva engedélyek
-        egyeztetése: a dinamikus halmazok a memóriabeli, üres
-        munkamenet-táblához igazodnak. Csak a kifejezett, nem biztonságos
-        ``HV_ALLOW_STALE_GRANTS_ON_START=1`` opt-in engedi, hogy a korábbi
-        engedélyek a kernel TTL-ig életben maradjanak; ezt hangosan
-        naplózzuk. A ``host_service_*`` halmazokhoz nem nyúlunk.
+        ``HV_FLUSH_ON_START`` uses the same truthy/falsy interpretation as
+        the other boolean variables (1/true/yes/on). If it is disabled, the
+        default (safe) behaviour is reconciling orphaned grants: the dynamic
+        sets are aligned with the in-memory, empty session table. Only the
+        explicit, unsafe ``HV_ALLOW_STALE_GRANTS_ON_START=1`` opt-in lets
+        earlier grants stay alive until the kernel TTL; we log that loudly.
+        The ``host_service_*`` sets are not touched.
         """
         mode = _startup_flush_mode(
             FLUSH_ON_START, ALLOW_STALE_GRANTS_ON_START
         )
         effective = "1" if FLUSH_ON_START else "0"
-        log(f"[tűzfal] HV_FLUSH_ON_START hatásos értéke: {effective}")
+        log(f"[firewall] effective value of HV_FLUSH_ON_START: {effective}")
         if mode == "stale_allowed":
             log(
-                "[tűzfal] FIGYELEM: HV_FLUSH_ON_START ki van kapcsolva, és "
-                "HV_ALLOW_STALE_GRANTS_ON_START=1 van beállítva. A korábbi "
-                "folyamat kernelben maradt engedélyei a TTL-ig (akár 30 "
-                "napig) érvényben maradhatnak, munkamenet nélkül!"
+                "[firewall] WARNING: HV_FLUSH_ON_START is disabled and "
+                "HV_ALLOW_STALE_GRANTS_ON_START=1 is set. Earlier "
+                "grants left in the kernel by the previous process may "
+                "remain valid until the TTL (up to 30 days), without a "
+                "session!"
             )
             return
         try:
             self.firewall.flush()
         except FirewallError as exc:
-            # Egy sikertelen induláskori ürítés azt jelentheti, hogy a
-            # korábbi folyamat engedélyei tovább élnének. Ilyenkor nem
-            # indulunk el: a fail-closed elv fontosabb az elérhetőségnél.
+            # A failed startup flush may mean that the previous process's
+            # grants would keep living. In that case we do not start: the
+            # fail-closed principle matters more than availability.
             log(
-                "[tűzfal] HIBA: a korábbi engedélyek törlése nem "
-                f"sikerült, az indulás leáll: {exc}"
+                "[firewall] ERROR: deleting earlier grants failed, "
+                f"startup aborted: {exc}"
             )
             self._write_audit(
                 "firewall_error",
@@ -9708,48 +9762,47 @@ class Gateway:
             raise
         if mode == "reconcile":
             log(
-                "[tűzfal] FIGYELEM: HV_FLUSH_ON_START ki van kapcsolva, de "
-                "az árva engedélyek nem maradhatnak a kernelben; a dinamikus "
-                "halmazok a memóriabeli (üres) munkamenet-táblához igazítva."
+                "[firewall] WARNING: HV_FLUSH_ON_START is disabled, but "
+                "orphaned grants must not remain in the kernel; the dynamic "
+                "sets are aligned with the in-memory (empty) session table."
             )
         else:
-            log("[tűzfal] a korábbi engedélyek törölve (tiszta indulás)")
+            log("[firewall] earlier grants deleted (clean start)")
 
     def prepare(self) -> None:
-        """Induláskori tűzfal-ellenőrzés és a régi engedélyek törlése."""
+        """Startup firewall check and deletion of old grants."""
         self.rules.all_rules()
         log(
-            f"[katalógus] {len(self.catalog.service_order)} szolgáltatás, "
-            f"{len(self.catalog.scenario_order)} forgatókönyv "
+            f"[catalog] {len(self.catalog.service_order)} services, "
+            f"{len(self.catalog.scenario_order)} scenarios "
             f"({self.catalog.source})"
         )
         log(
-            f"[szabályok] {len(self.rules.persisted_rules())} admin szabály, "
-            f"{len(self.groups.all_groups())} csoport"
+            f"[rules] {len(self.rules.persisted_rules())} admin rules, "
+            f"{len(self.groups.all_groups())} groups"
         )
         log(
-            "[hozzáférés] választható idő: "
+            "[access] selectable duration: "
             f"{format_duration(MIN_TTL)}–{format_duration(MAX_TTL)}; "
-            f"alapértelmezett: {format_duration(self.sessions.ttl)}"
+            f"default: {format_duration(self.sessions.ttl)}"
         )
-        # Tiszta indulás, vagy ha az ürítés ki van kapcsolva, biztonságos
-        # egyeztetés a memóriabeli (üres) munkamenet-táblához. Az árva
-        # engedélyek csak kifejezett, nem biztonságos opt-innal maradhatnak
-        # életben; erről a _startup_flush dönt és naplóz.
+        # Clean start, or if the flush is disabled, a safe reconciliation with
+        # the in-memory (empty) session table. Orphaned grants may survive only
+        # with an explicit, unsafe opt-in; _startup_flush decides and logs this.
         self._startup_flush()
-        # A host szabályokban deklarált portok betöltése az established
-        # forgalmat vágó host_service_* halmazokba. Az induláskori ürítés
-        # ezeket szándékosan nem érinti (a törölt portok régi folyamai
-        # maradjanak elvágva), ezért itt pótoljuk a tartalmukat. Ez még a
-        # kiszolgálás és a health check előtt fut, így a _host_ports_ok
-        # állapota már a valós induláskori sync eredményét tükrözi: ha az
-        # nem sikerült, a host engedélyek az első authorize-nál egyszer
-        # újrapróbálnak, és továbbra is fail-closed módon zárva maradnak.
+        # Loading the ports declared in host rules into the host_service_*
+        # sets that cut established traffic. The startup flush deliberately
+        # does not touch these (old flows of deleted ports should stay cut
+        # off), so we replenish their content here. This still runs before
+        # serving and the health check, so the _host_ports_ok state already
+        # reflects the real startup sync result: if it failed, host
+        # permissions retry once at the first authorize and remain closed in a
+        # fail-closed manner.
         self.sync_host_ports()
         ok, why = self.firewall.healthy()
         if ok:
             log(
-                f"[tűzfal] rendben: inet {self.firewall.table} "
+                f"[firewall] healthy: inet {self.firewall.table} "
                 f"/ {self.firewall.set_name}, {self.firewall.tcp_set}, "
                 f"{self.firewall.udp_set}, {self.firewall.icmp_set}, "
                 f"{self.firewall.input_tcp_set}, "
@@ -9758,64 +9811,64 @@ class Gateway:
             )
         else:
             log(
-                "[tűzfal] FIGYELEM: a dinamikus halmazok nem érhetők el "
-                f"({why}). A belépések a hiba elhárításáig nem fognak működni."
+                "[firewall] WARNING: dynamic sets are unreachable "
+                f"({why}). Sign-ins will not work until the error is fixed."
             )
             self._write_audit(
                 "firewall_error", operation="health", reason=str(why)
             )
-        # A felületen beállított tiltások visszatöltése az esetleges
-        # induláskori ürítés után. Ha ez nem sikerül, a portál elindul, de
-        # a védelem gyengébb; az admin a felületen látja a hibát.
+        # Reloading the bans configured in the UI after a possible startup
+        # flush. If this fails, the portal still starts but protection is
+        # weaker; the admin sees the error in the UI.
         if self.fail2ban.sync():
             status = self.fail2ban.status()
             log(
-                "[fail2ban] belépés-figyelés: "
-                f"{'aktív' if status['enabled'] else 'kikapcsolva'}; "
-                f"drop-mérőszámok: "
-                f"csomagszám={'be' if status['drop_count_enabled'] else 'ki'}, "
-                f"portok={'be' if status['drop_ports_enabled'] else 'ki'}, "
-                f"proxy={'be' if status['proxy_enabled'] else 'ki'}; "
-                f"{status['banned']} tiltott IP, küszöb: "
-                f"{status['max_attempts']} próbálkozás / "
-                f"{status['window_seconds']} mp, tiltás: "
-                f"{status['ban_seconds']} mp"
+                "[fail2ban] sign-in monitoring: "
+                f"{'active' if status['enabled'] else 'disabled'}; "
+                f"drop metrics: "
+                f"packet count={'on' if status['drop_count_enabled'] else 'off'}, "
+                f"ports={'on' if status['drop_ports_enabled'] else 'off'}, "
+                f"proxy={'on' if status['proxy_enabled'] else 'off'}; "
+                f"{status['banned']} banned IPs, threshold: "
+                f"{status['max_attempts']} attempts / "
+                f"{status['window_seconds']} s, ban: "
+                f"{status['ban_seconds']} s"
             )
         else:
             log(
-                "[fail2ban] FIGYELEM: a mentett tiltásokat nem sikerült "
-                "visszatölteni a tűzfalba"
+                "[fail2ban] WARNING: saved bans could not be "
+                "reloaded into the firewall"
             )
             status = self.fail2ban.status()
             self._write_audit(
                 "fail2ban_sync_failed",
-                reason=str(status.get("error") or "a visszatöltés nem sikerült"),
+                reason=str(status.get("error") or "reload failed"),
             )
-        # A settings-fájl pre-auth és blokk szabályainak telepítése.
+        # Installing the settings file's pre-auth and block rules.
         self._apply_custom_settings()
 
     def _apply_custom_settings(self, snapshot: dict | None = None) -> None:
-        """A pre-auth és blokk szabályok telepítése az nftables-be.
+        """Installing the pre-auth and block rules into nftables.
 
-        Előbb ürítünk, aztán alkalmazunk. Ha az alkalmazás nem sikerül, a
-        pre-auth engedélyek nem maradnak életben (fail-closed).
+        We flush first, then apply. If the apply fails, the pre-auth
+        permissions do not remain alive (fail-closed).
         """
         with Gateway._custom_lock:
             snapshot = snapshot if snapshot is not None else self.settings.snapshot()
             invalid = bool(snapshot.get("error"))
             if invalid:
                 log(
-                    "[beállítások] FIGYELEM: a beállításfájl hibás; a pre-auth "
-                    "lista ürül, a blokk láncok utolsó ismert jó tartalma "
-                    f"változatlan marad: {snapshot['error']}"
+                    "[settings] WARNING: the settings file is invalid; the "
+                    "pre-auth list is cleared, the last known good content of "
+                    f"the block chains stays unchanged: {snapshot['error']}"
                 )
                 self._write_audit(
                     "settings_invalid", reason=str(snapshot["error"])
                 )
             try:
                 if invalid:
-                    # Fail-closed: a pre-auth engedélyek nem maradhatnak életben
-                    # egy hibás fájlból, de a blokkolás nem tűnhet el.
+                    # Fail-closed: pre-auth permissions must not stay alive from
+                    # an invalid file, but blocking must not disappear either.
                     self.firewall.replace_custom((), (), keep_block=True)
                 else:
                     self.firewall.replace_custom(
@@ -9825,8 +9878,8 @@ class Gateway:
                     )
             except FirewallError as exc:
                 log(
-                    "[beállítások] HIBA: a testreszabott szabályok telepítése "
-                    f"nem sikerült: {exc}"
+                    "[settings] ERROR: installing the customized rules "
+                    f"failed: {exc}"
                 )
                 self._write_audit(
                     "firewall_error", operation="apply_custom", reason=str(exc)
@@ -9848,16 +9901,16 @@ class Gateway:
                 )
             )
             log(
-                f"[beállítások] {len(active_preauth)} pre-auth, "
-                f"{len(active_block)} blokk, {len(active_proxies)} port proxy "
-                "bejegyzés"
+                f"[settings] {len(active_preauth)} pre-auth, "
+                f"{len(active_block)} block, {len(active_proxies)} port proxy "
+                "entries"
             )
 
     def _restore_custom_settings(self, old: dict) -> None:
-        """A korábbi pre-auth/blokk állapot visszaállítása egy tranzakcióban."""
+        """Restoring the earlier pre-auth/block state in one transaction."""
         if old.get("error"):
-            # A régi snapshot hibás, ezért a blokk láncok utolsó ismert jó
-            # tartalmát nem ismerjük; azokat érintetlenül hagyjuk.
+            # The old snapshot is invalid, so we do not know the last known
+            # good content of the block chains; we leave those untouched.
             self.firewall.replace_custom((), (), keep_block=True)
         else:
             self.firewall.replace_custom(
@@ -9867,10 +9920,10 @@ class Gateway:
             )
 
     def apply_settings(self, new_data: dict) -> None:
-        """Az admin által előkészített beállítások telepítése és mentése.
+        """Installing and saving the settings prepared by the admin.
 
-        Sorrend: nft alkalmazás -> atomi fájlírás. Ha a mentés nem sikerül,
-        a korábbi nft-szabályokat visszaállítjuk.
+        Order: nft apply -> atomic file write. If the save fails, we restore
+        the earlier nft rules.
         """
         with Gateway._custom_lock:
             old = self.settings.snapshot()
@@ -9886,8 +9939,8 @@ class Gateway:
                     self._restore_custom_settings(old)
                 except FirewallError as rollback_exc:
                     log(
-                        "[beállítások] a korábbi szabályok visszaállítása sem "
-                        f"sikerült: {rollback_exc}"
+                        "[settings] restoring the earlier rules also "
+                        f"failed: {rollback_exc}"
                     )
                     self._write_audit(
                         "firewall_error",
@@ -9902,8 +9955,8 @@ class Gateway:
                     self._restore_custom_settings(old)
                 except FirewallError as rollback_exc:
                     log(
-                        "[beállítások] mentési hiba után a korábbi szabályok "
-                        f"visszaállítása nem sikerült: {rollback_exc}"
+                        "[settings] restoring the earlier rules after a save "
+                        f"error failed: {rollback_exc}"
                     )
                     self._write_audit(
                         "firewall_error",
@@ -9911,21 +9964,21 @@ class Gateway:
                         reason=str(rollback_exc),
                     )
                 raise
-            # A WireGuard-szinkron a mentés után fut; hibája csak az
-            # állapotban látszik, a beállításmentést nem rontja el.
+            # The WireGuard sync runs after the save; its failure only shows
+            # up in the state and does not spoil saving the settings.
             try:
                 self.tunnels.reconcile(tunnels)
             except Exception as exc:
-                log(f"[alagút] a WireGuard szinkron nem sikerült: {exc}")
+                log(f"[tunnel] WireGuard sync failed: {exc}")
 
     def refresh_port_proxies(self) -> list[tuple[str, int]]:
-        """Újrarenderelés, ha egy input cél kötése vagy a route_localnet változott.
+        """Re-render if an input target's port binding or route_localnet changed.
 
-        A loopback / redirect döntés a cél socketjétől függ, amely a portál
-        után is elindulhat (bootkor a Docker később publikál). Változásnál a
-        láncok atomikusan cserélődnek, és az érintett hallgató portok
-        conntrack-bejegyzései törlődnek (a régi NAT-kötésű UDP-folyam
-        különben a kliens forgalmával életben maradna).
+        The loopback / redirect decision depends on the target's socket, which
+        may also start after the portal (at boot, Docker publishes later). On
+        change the chains are replaced atomically, and the conntrack entries
+        of the affected listening ports are deleted (otherwise the old
+        NAT-bound UDP flow would stay alive with the client's traffic).
         """
         with Gateway._custom_lock:
             old = self.firewall.portproxy_applied
@@ -9948,7 +10001,7 @@ class Gateway:
             for match in [re.search(r" (tcp|udp) dport (\d+) ", line)] if match
         })
         log(
-            "[port proxy] a cél kötése változott, szabályok frissítve: "
+            "[port proxy] target binding changed, rules refreshed: "
             + ", ".join(f"{p}/{n}" for p, n in changed)
         )
         for proto, port in changed:
@@ -9959,19 +10012,19 @@ class Gateway:
         while not self._portproxy_stop.wait(self.PORTPROXY_REFRESH_SECONDS):
             try:
                 self.refresh_port_proxies()
-            except Exception as exc:  # a szál soha ne haljon meg
-                log(f"[port proxy] frissítési hiba: {exc}")
+            except Exception as exc:  # the thread must never die
+                log(f"[port proxy] refresh error: {exc}")
 
     def start(self) -> None:
         self.sessions.start_reaper()
-        # A WireGuard-interfész és a peerek szinkronja induláskor. A hiba
-        # csak a státuszban látszik; a portál elindul.
+        # The WireGuard interface and the peers are synced at startup. The
+        # error only shows in the status; the portal starts.
         try:
             self.tunnels.reconcile(
                 self.settings.snapshot().get("tunnels", {})
             )
         except Exception as exc:
-            log(f"[alagút] az induló WireGuard szinkron nem sikerült: {exc}")
+            log(f"[tunnel] startup WireGuard sync failed: {exc}")
         self._portproxy_stop = threading.Event()
         threading.Thread(
             target=self._portproxy_loop, name="hv-portproxy", daemon=True
@@ -9982,7 +10035,7 @@ class Gateway:
             fail2ban_enabled = False
         self._write_audit(
             "service_start",
-            reason="portál folyamat elindult",
+            reason="portal process started",
             users_count=len(self.users.names()),
             rules_count=len(self.rules.persisted_rules()),
             groups_count=len(self.groups.all_groups()),
@@ -9992,7 +10045,7 @@ class Gateway:
         )
         if not self.drops.start():
             status = self.drops.status()
-            log(f"[drop log] nem aktív: {status.get('error') or 'ismeretlen ok'}")
+            log(f"[drop log] inactive: {status.get('error') or 'unknown reason'}")
 
     def stop(self) -> None:
         stop_event = getattr(self, "_portproxy_stop", None)
@@ -10000,23 +10053,23 @@ class Gateway:
             stop_event.set()
         try:
             self.drops.stop()
-        except Exception as exc:  # a leállás ne akadjon el a naplózón
-            log(f"[drop log] leállítási hiba: {exc}")
+        except Exception as exc:  # shutdown must not get stuck on logging
+            log(f"[drop log] shutdown error: {exc}")
         self.sessions.stop_reaper()
-        # Leállításkor ne maradjon nyitva egyetlen engedély sem a TTL-ig.
+        # On shutdown, no permission should stay open until the TTL.
         before_shutdown = self.sessions.count()
         try:
             revoked = self.sessions.shutdown()
-        except Exception as exc:  # a leállás ne akadjon el a takarításon
-            log(f"[tűzfal] leálláskori visszavonás nem sikerült: {exc}")
+        except Exception as exc:  # shutdown must not get stuck on cleanup
+            log(f"[firewall] shutdown revocation failed: {exc}")
             self._write_audit(
                 "session_shutdown_error", reason=str(exc)
             )
-            # A shutdown a munkameneteket már a tűzfal-műveletek előtt
-            # törli, ezért a valóságos darabszám a hívás előtti érték.
+            # shutdown deletes the sessions before the firewall operations,
+            # so the real count is the value before the call.
             revoked = before_shutdown
         self._write_audit(
             "service_stop",
-            reason="portál folyamat leállt",
+            reason="portal process stopped",
             sessions_revoked=revoked,
         )

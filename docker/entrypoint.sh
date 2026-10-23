@@ -1,16 +1,16 @@
 #!/bin/sh
-# Dropjak — konténer belépési pont
+# Dropjak — container entrypoint
 #
-# A konténer a HOST hálózati névterében fut (network_mode: host), ezért az itt
-# betöltött nftables-szabályok a VM forward-láncára vonatkoznak. A sorrend:
+# The container runs in the HOST network namespace (network_mode: host), so the
+# nftables rules loaded here apply to the VM's forward chain. The order:
 #
-#   1. a deploy/hatarvedelem.nft sablon kitöltése a HV_* változókkal,
-#   2. a szabályok ellenőrzése és betöltése (idempotens),
-#   3. a korai boot-védelmet adó hatarvedelem_boot tábla eltávolítása,
-#   4. a portál indítása korlátozott jogosultságú felhasználóként.
+#   1. fill in the deploy/hatarvedelem.nft template with the HV_* variables,
+#   2. validate and load the rules (idempotent),
+#   3. remove the hatarvedelem_boot table providing early boot protection,
+#   4. start the portal as a restricted-privilege user.
 #
-# A szkript rootként fut, mert az nft a host hálózatához nyúl. A portál már a
-# hatarvedelem felhasználóként indul, csak a szükséges képességekkel.
+# The script runs as root because nft touches the host network. The portal is
+# already started as the hatarvedelem user, with only the necessary capabilities.
 set -eu
 
 APP_DIR=${HV_APP_DIR:-/opt/hatarvedelem}
@@ -20,9 +20,9 @@ STATE_DIR=${HV_STATE_DIR:-/var/lib/hatarvedelem}
 PYTHON=${HV_PYTHON:-python3}
 APP_USER=hatarvedelem
 
-# A régi host_service_* halmaz elemeit "22, 80, 8000-8100" alakban írja ki
-# a tábla újraépítése előtt. Csak számokat ad ki, ezért shell-változóba
-# tehető; hibás vagy ismeretlen JSON esetén üresen marad.
+# Prints the elements of the old host_service_* sets in "22, 80, 8000-8100" form
+# before rebuilding the table. It outputs only numbers, so it can be placed
+# in a shell variable; on invalid or unknown JSON it stays empty.
 HOST_PORTS_JSON='
 import json, sys
 try:
@@ -50,13 +50,13 @@ print(", ".join(parts))
 '
 
 log() { printf '[hatarvedelem] %s\n' "$*"; }
-die() { printf '[hatarvedelem] HIBA: %s\n' "$*" >&2; exit 1; }
+die() { printf '[hatarvedelem] ERROR: %s\n' "$*" >&2; exit 1; }
 
-# A gateway.py _env_bool() függvényével azonos logika: 1/true/yes/on igaz,
-# 0/false/no/off hamis, üres vagy ismeretlen értéknél az alapértelmezés.
-# Kis/nagybetűtől és környező szóköztől független.
+# Same logic as gateway.py's _env_bool(): 1/true/yes/on is true,
+# 0/false/no/off is false, empty or unknown value uses the default.
+# Independent of case and surrounding whitespace.
 env_bool() {
-    # $1: környezeti változó neve, $2: alapértelmezés (1 vagy 0)
+    # $1: environment variable name, $2: default (1 or 0)
     _value=$(printenv "$1" 2>/dev/null || true)
     _value=$(
         printf '%s' "$_value" \
@@ -70,11 +70,11 @@ env_bool() {
     esac
 }
 
-# ---------------------------------------------------------------- ellenőrzés
+# ---------------------------------------------------------------- validation
 
 valid_ifname() {
-    # Linux interfésznév: legfeljebb 15 karakter; a sablonba kerül, ezért
-    # csak biztonságos karaktereket engedünk meg.
+    # Linux interface name: at most 15 characters; it goes into the template, so
+    # we allow only safe characters.
     [ -n "$1" ] || return 1
     [ "${#1}" -le 15 ] || return 1
     case "$1" in
@@ -88,7 +88,7 @@ valid_ifname() {
 }
 
 valid_network() {
-    # $1: 4 vagy 6 (várt IP-verzió), $2: hálózat CIDR formában.
+    # $1: 4 or 6 (expected IP version), $2: network in CIDR form.
     "$PYTHON" - "$1" "$2" <<'PY'
 import ipaddress
 import sys
@@ -110,56 +110,56 @@ valid_port() {
 
 require_env() {
     value=$(printenv "$1" 2>/dev/null || true)
-    [ -n "$value" ] || die "hiányzó környezeti változó: $1"
+    [ -n "$value" ] || die "missing environment variable: $1"
 }
 
-# ------------------------------------------------------------------ felkészítés
+# ------------------------------------------------------------------ preparation
 
 ensure_state_dir() {
-    mkdir -p "$STATE_DIR" || die "az állapotkönyvtár nem hozható létre: $STATE_DIR"
+    mkdir -p "$STATE_DIR" || die "cannot create the state directory: $STATE_DIR"
     if [ "$(id -u)" -eq 0 ]; then
-        # A kötet első induláskor root tulajdonú lehet. A CLI és a portál is
-        # a hatarvedelem felhasználóként ír, ezért itt rendezzük a jogokat.
+        # The volume may be root-owned on first start. Both the CLI and the portal
+        # write as the hatarvedelem user, so we fix the permissions here.
         chown -R "$APP_USER:$APP_USER" "$STATE_DIR" \
-            || die "az állapotkönyvtár tulajdonosa nem állítható be: $STATE_DIR"
+            || die "cannot set the owner of the state directory: $STATE_DIR"
         chmod 0750 "$STATE_DIR" || true
     fi
 }
 
 ensure_tunnel_run_dir() {
-    # A WireGuard-kulcsok 0600-os ideiglenes fájljai ide kerülnek; a portál
-    # nem rootként fut, ezért a könyvtárat itt hozzuk létre a jogával.
+    # The 0600 temporary WireGuard key files go here; the portal does not
+    # run as root, so we create the directory here with its privileges.
     _dir=${HV_TUNNEL_RUN_DIR:-/run/dropjak}
     if [ "$(id -u)" -eq 0 ]; then
         mkdir -p "$_dir" \
-            || die "az alagút kulcskönyvtára nem hozható létre: $_dir"
+            || die "cannot create the tunnel key directory: $_dir"
         chown "$APP_USER:$APP_USER" "$_dir" \
-            || die "az alagút kulcskönyvtárának tulajdonosa nem állítható be: $_dir"
+            || die "cannot set the owner of the tunnel key directory: $_dir"
         chmod 0700 "$_dir" || true
     fi
 }
 
 ensure_caddy_admin_dir() {
-    # A Caddy admin socketjének könyvtára (közös kötet a caddy konténerrel).
-    # A rootként, de DAC_OVERRIDE nélkül futó Caddy tulajdonosként hozza
-    # létre benne a socketet; a portál a csoporton át éri el, más senki.
+    # The directory for Caddy's admin socket (a shared volume with the caddy container).
+    # Caddy, running as root but without DAC_OVERRIDE, creates the socket in it
+    # as the owner; the portal accesses it through the group, no one else.
     _sock=${HV_CADDY_ADMIN:-}
     [ -n "$_sock" ] && [ "$(id -u)" -eq 0 ] || return 0
     _dir=$(dirname "$_sock")
     [ -d "$_dir" ] || return 0
     chown "0:$APP_USER" "$_dir" && chmod 0750 "$_dir" \
-        || log "FIGYELEM: a Caddy admin könyvtár jogai nem állíthatók be: $_dir"
+        || log "WARNING: cannot set the permissions of the Caddy admin directory: $_dir"
 }
 
 run_as_app() {
-    # A logikai kapcsolókat az env_bool() értelmezi (1/true/yes/on).
+    # The boolean switches are interpreted by env_bool() (1/true/yes/on).
     if [ "$(id -u)" -ne 0 ] || [ "$(env_bool HV_RUN_AS_ROOT 0)" = "1" ]; then
         exec "$@"
     fi
     command -v setpriv >/dev/null 2>&1 \
-        || die "a setpriv nem található (util-linux csomag szükséges)"
-    # A setpriv ambient képességekkel adja tovább a NET_ADMIN-t, mert a
-    # konténerben nem root felhasználó alapból nem kaphat képességet.
+        || die "setpriv not found (util-linux package required)"
+    # setpriv passes NET_ADMIN with ambient capabilities, because a non-root
+    # user cannot get capabilities by default in the container.
     exec setpriv \
         --reuid="$APP_USER" --regid="$APP_USER" --init-groups \
         --inh-caps=+net_admin,+net_bind_service \
@@ -167,10 +167,10 @@ run_as_app() {
         -- "$@"
 }
 
-# --------------------------------------------------------------------- tűzfal
+# --------------------------------------------------------------------- firewall
 
 render_ruleset() {
-    [ -r "$TEMPLATE" ] || die "hiányzó sablon: $TEMPLATE"
+    [ -r "$TEMPLATE" ] || die "missing template: $TEMPLATE"
 
     HV_LAN_IF=${HV_LAN_IF:-}
     HV_WAN_IF=${HV_WAN_IF:-}
@@ -186,37 +186,37 @@ render_ruleset() {
     require_env HV_LAN_NET
     require_env HV_PORTAL_NET
 
-    valid_ifname "$HV_LAN_IF" || die "érvénytelen HV_LAN_IF: $HV_LAN_IF"
-    valid_ifname "$HV_WAN_IF" || die "érvénytelen HV_WAN_IF: $HV_WAN_IF"
+    valid_ifname "$HV_LAN_IF" || die "invalid HV_LAN_IF: $HV_LAN_IF"
+    valid_ifname "$HV_WAN_IF" || die "invalid HV_WAN_IF: $HV_WAN_IF"
     valid_network 4 "$HV_LAN_NET" \
-        || die "érvénytelen HV_LAN_NET (hálózati cím kell, pl. 192.168.10.0/24): $HV_LAN_NET"
+        || die "invalid HV_LAN_NET (a network address is required, e.g. 192.168.10.0/24): $HV_LAN_NET"
     valid_network 4 "$HV_PORTAL_NET" \
-        || die "érvénytelen HV_PORTAL_NET (IPv4 CIDR kell, pl. 0.0.0.0/0): $HV_PORTAL_NET"
-    valid_port "$PORT" || die "érvénytelen PORT: $PORT"
+        || die "invalid HV_PORTAL_NET (an IPv4 CIDR is required, e.g. 0.0.0.0/0): $HV_PORTAL_NET"
+    valid_port "$PORT" || die "invalid PORT: $PORT"
     valid_port "$HV_DROP_LOG_GROUP" \
-        || die "érvénytelen HV_DROP_LOG_GROUP (1–65535): $HV_DROP_LOG_GROUP"
+        || die "invalid HV_DROP_LOG_GROUP (1–65535): $HV_DROP_LOG_GROUP"
     case "$HV_FWD_MARK" in
         0x[0-9A-Fa-f]*) ;;
-        *) die "érvénytelen HV_FWD_MARK (0x kezdetű hex szám kell): $HV_FWD_MARK" ;;
+        *) die "invalid HV_FWD_MARK (expected a hex number starting with 0x): $HV_FWD_MARK" ;;
     esac
     [ "${#HV_FWD_MARK}" -le 10 ] \
-        || die "érvénytelen HV_FWD_MARK (32 bites hex szám lehet): $HV_FWD_MARK"
+        || die "invalid HV_FWD_MARK (must be a 32-bit hex number): $HV_FWD_MARK"
     [ "$HV_LAN_IF" != "$HV_WAN_IF" ] \
-        || die "a HV_LAN_IF és a HV_WAN_IF nem lehet ugyanaz"
+        || die "HV_LAN_IF and HV_WAN_IF cannot be the same"
 
-    # A portál és a drop-log figyelő ugyanezt az értéket olvassa.
+    # The portal and the drop-log listener read the same value.
     export HV_FWD_MARK HV_DROP_LOG_GROUP
 
-    # A proxy 80/443 elfogadó szabályai csak HV_PROXY=1 mellett élnek;
-    # különben megjegyzésként maradnak a kitöltött fájlban.
+    # The proxy 80/443 accept rules only live when HV_PROXY=1;
+    # otherwise they remain as comments in the filled-in file.
     if [ "$(env_bool HV_PROXY 0)" = "1" ]; then
         HV_PROXY_PREFIX=""
     else
         HV_PROXY_PREFIX="# "
     fi
 
-    # Ha a /run nem írható (pl. read-only gyökér, tmpfs nélkül), a /tmp a
-    # tartalék. A compose konfiguráció mindkettőt tmpfs-ként biztosítja.
+    # If /run is not writable (e.g. read-only root without tmpfs), /tmp is
+    # the fallback. The compose configuration provides both as tmpfs.
     RENDERED=${HV_NFT_FILE:-/run/hatarvedelem.nft}
     if ! ( : >"$RENDERED" ) 2>/dev/null; then
         RENDERED=/tmp/hatarvedelem.nft
@@ -231,59 +231,59 @@ render_ruleset() {
         -e "s|__FWD_MARK__|$HV_FWD_MARK|g" \
         -e "s|__DROP_LOG_GROUP__|$HV_DROP_LOG_GROUP|g" \
         -e "s|__PROXY__|$HV_PROXY_PREFIX|g" \
-        "$TEMPLATE" >"$RENDERED" || die "a szabálysablon nem tölthető ki"
+        "$TEMPLATE" >"$RENDERED" || die "cannot fill in the rule template"
 
     chmod 0600 "$RENDERED" || true
     if grep -Eq '__[A-Z0-9_]+__' "$RENDERED"; then
-        die "a kitöltött szabályfájlban helyőrző maradt"
+        die "a placeholder remained in the filled-in rule file"
     fi
-    log "szabályfájl elkészült: $RENDERED"
+    log "rule file ready: $RENDERED"
 }
 
 docker_forward_guard() {
-    # A Docker ip filter FORWARD lánca a saját szabályaival (például a
-    # publikált konténerportokkal) akkor is átengedné a forgalmat, ha a mi
-    # inet táblánk eltűnne. A hivatalos DOCKER-USER láncon ezért MINDEN
-    # forwardolt csomagot eldobunk, kivéve azt, amelyiket az inet
-    # hatarvedelem forward lánca megjelölt. A jelölés csak akkor kerül a
-    # csomagra, ha a mi szabályaink tényleg lefutottak és engedélyeztek.
+    # Docker's ip filter FORWARD chain would pass traffic with its own rules
+    # (for example the published container ports) even if our inet table
+    # disappeared. Therefore on the official DOCKER-USER chain we drop EVERY
+    # forwarded packet except the one marked by the inet hatarvedelem forward
+    # chain. The mark is only put on the packet if our rules actually ran and
+    # permitted it.
     DOCKER_USER=$("$NFT_BIN" list chain ip filter DOCKER-USER 2>/dev/null || true)
     if [ -z "$DOCKER_USER" ]; then
-        log "Docker DOCKER-USER lánc nincs; nincs szükség Docker-forward-védelemre"
+        log "Docker DOCKER-USER chain is absent; no Docker forward protection needed"
         return 0
     fi
-    # A régi szabályok listája még a beszúrás előtt készül; a handle-ök a
-    # beszúrás után is érvényesek maradnak.
+    # The list of old rules is taken before insertion; the handles remain valid
+    # after insertion.
     OLD_RULES=$("$NFT_BIN" -a list chain ip filter DOCKER-USER 2>/dev/null || true)
 
-    # A guard a lehető leghamarabb kerül a láncra: a régi széles acceptek
-    # utána már csak a megjelölt csomagokra illeszkedhetnek.
+    # The guard is added to the chain as early as possible: the old broad accepts
+    # can then only match the marked packets.
     if ! "$NFT_BIN" insert rule ip filter DOCKER-USER \
             meta mark != "$HV_FWD_MARK" drop \
             comment '"hv-docker-fwd-guard"'; then
-        log "HIBA: a Docker forward-védelme nem állítható be (DOCKER-USER drop)"
+        log "ERROR: cannot set up Docker forward protection (DOCKER-USER drop)"
         return 1
     fi
     if ! "$NFT_BIN" insert rule ip filter DOCKER-USER \
             meta mark "$HV_FWD_MARK" accept \
             comment '"hv-docker-fwd-mark"'; then
-        log "HIBA: a Docker forward-engedélye nem állítható be (DOCKER-USER accept)"
+        log "ERROR: cannot set up Docker forward permission (DOCKER-USER accept)"
         return 1
     fi
-    # Csak a naplózás: a jelöletlen (tehát eldobásra kerülő) csomagokat
-    # NFLOG-ra küldi. Ha a naplózás nem állítható be, a védelem akkor is
-    # működik, ezért ez nem végzetes hiba.
+    # Logging only: sends unmarked (i.e. to-be-dropped) packets
+    # to NFLOG. If logging cannot be set up, protection still
+    # works, so this is not a fatal error.
     if ! "$NFT_BIN" insert rule ip filter DOCKER-USER \
             meta mark != "$HV_FWD_MARK" \
             limit rate 30/minute burst 60 packets \
             log prefix '"dropjak-drop reason=docker-guard "' \
             group "$HV_DROP_LOG_GROUP" \
             comment '"hv-docker-fwd-log"'; then
-        log "FIGYELEM: a Docker-guard drop naplózása nem állítható be"
+        log "WARNING: cannot set up logging of the Docker guard drop"
     fi
 
-    # A korábbi (széles) áthidaló szabályokat most már biztonságosan
-    # eldobhatjuk.
+    # The previous (broad) bridging rules can now be safely
+    # dropped.
     while IFS= read -r line; do
         case "$line" in
             *hv-docker-fwd-*)
@@ -295,12 +295,12 @@ docker_forward_guard() {
     done <<EOF
 $OLD_RULES
 EOF
-    # A policy drop a második védvonal arra az esetre, ha a DOCKER-USER
-    # lánc valamilyen okból kimaradna a forgalom útjából.
+    # The policy drop is the second line of defense in case the DOCKER-USER
+    # chain is left out of the traffic path for some reason.
     if ! "$NFT_BIN" add chain ip filter FORWARD '{ policy drop; }'; then
-        log "FIGYELEM: a Docker FORWARD lánc policy drop beállítása nem sikerült"
+        log "WARNING: failed to set policy drop on the Docker FORWARD chain"
     fi
-    log "Docker forward-védelem beállítva (csak jelölt csomag mehet át)"
+    log "Docker forward protection configured (only marked packets may pass)"
     return 0
 }
 
@@ -315,34 +315,33 @@ start_firewall_watchdog() {
                 *) forward="" ;;
             esac
             if [ -z "$forward" ] || ! printf '%s' "$forward" | grep -q '@client_mac'; then
-                log "FIGYELEM: a hatarvedelem forward lánc hiányos; újratöltés"
+                log "WARNING: the hatarvedelem forward chain is incomplete; reloading"
                 if "$NFT_BIN" -c -f "$RENDERED" && "$NFT_BIN" -f "$RENDERED"; then
-                    log "a tűzfal újratöltve"
+                    log "firewall reloaded"
                 else
-                    log "HIBA: a tűzfal újratöltése nem sikerült"
+                    log "ERROR: firewall reload failed"
                 fi
                 docker_forward_guard || true
             elif ! "$NFT_BIN" list chain ip filter DOCKER-USER 2>/dev/null \
                     | grep -q 'hv-docker-fwd-guard'; then
-                log "FIGYELEM: a Docker forward-védelme hiányzik; újra beállítás"
+                log "WARNING: Docker forward protection is missing; reconfiguring"
                 docker_forward_guard || true
             fi
         done
     ) &
-    log "tűzfal-figyelő elindítva (5 másodperc)"
+    log "firewall watchdog started (5 seconds)"
 }
 
 warn_lockout() {
-    # A tűzfal betöltése azonnal életbe lép: a host SSH csak ugyanarról a
-    # forrás IP-ről marad elérhető, ahol aktív, engedélyezett portál-
-    # munkamenet van, és a munkamenet egy, a felhasználóhoz rendelt, a
-    # 22-es TCP-portot kifejezetten engedélyező host (input) szabályt
-    # használ. Nincs beépített admin szabály.
-    log "FIGYELEM: a tűzfal betöltése után a host SSH (22/TCP) csak ugyanarról a forrás IP-ről érhető el, ahol aktív, engedélyezett portál-munkamenet és egy a felhasználóhoz rendelt, a 22-es TCP-portot kifejezetten engedélyező host szabály van."
-    log "FIGYELEM: ha SSH-n keresztül indítod a Dropjakot, a tűzfal betöltése megszakíthatja a jelenlegi SSH-kapcsolatot."
-    log "FIGYELEM: tartsd nyitva a szolgáltatói (out-of-band) konzolt, hogy kizárás esetén helyreállíthasd a hozzáférést."
-    # Ugyanazokat az igaz értékeket fogadjuk el, mint a gateway.py
-    # _env_bool() függvénye (1, true, yes, on; kis/nagybetűtől függetlenül).
+    # Loading the firewall takes effect immediately: host SSH remains reachable only
+    # from the same source IP that has an active, authorized portal session, and the
+    # session uses a host (input) rule assigned to the user that explicitly allows
+    # TCP port 22. There is no built-in admin rule.
+    log "WARNING: after loading the firewall, host SSH (22/TCP) is reachable only from the same source IP that has an active, authorized portal session and a host rule assigned to the user that explicitly allows TCP port 22."
+    log "WARNING: if you start Dropjak over SSH, loading the firewall may drop the current SSH connection."
+    log "WARNING: keep the provider (out-of-band) console open so you can restore access if you are locked out."
+    # We accept the same true values as gateway.py's
+    # _env_bool() function (1, true, yes, on; case-insensitive).
     admin_enabled=$(
         printf '%s' "${HV_ADMIN_ENABLED:-}" \
             | tr '[:upper:]' '[:lower:]' \
@@ -355,32 +354,32 @@ warn_lockout() {
     if [ "$admin_enabled" -ne 1 ] \
             || { [ -z "${HV_ADMIN_PASSWORD:-}" ] \
                  && [ -z "${HV_ADMIN_PASSWORD_FILE:-}" ]; }; then
-        log "FIGYELEM: nincs beállított induláskori admin hitelesítő adat (HV_ADMIN_ENABLED=1/true/yes/on és HV_ADMIN_PASSWORD vagy HV_ADMIN_PASSWORD_FILE szükséges)."
-        log "FIGYELEM: ha emellett még admin fiók sem létezik, a portálra nem lehet belépni, és a host SSH zárva marad. Előbb állítsd be ezeket a .env fájlban, vagy hozz létre admin fiókot a CLI-vel."
+        log "WARNING: no startup admin credentials are configured (HV_ADMIN_ENABLED=1/true/yes/on and HV_ADMIN_PASSWORD or HV_ADMIN_PASSWORD_FILE are required)."
+        log "WARNING: if, in addition, no admin account exists, you cannot log in to the portal, and host SSH stays closed. Set these in the .env file first, or create an admin account with the CLI."
     fi
 }
 
 ensure_boot_guard() {
-    # A régi tábla törlése és az új betöltése közötti időben a host csak a
-    # korai boot-védelem (fail-closed) alatt maradhat.
+    # Between deleting the old table and loading the new one, the host may only be
+    # under the early boot protection (fail-closed).
     if "$NFT_BIN" list table inet hatarvedelem_boot >/dev/null 2>&1; then
         return 0
     fi
     [ -r "$BOOT_NFT" ] \
-        || die "a korai boot-védelem nem található ($BOOT_NFT); a régi nft tábla nem törölhető biztonságosan"
+        || die "early boot protection not found ($BOOT_NFT); the old nft table cannot be deleted safely"
     "$NFT_BIN" -f "$BOOT_NFT" \
-        || die "a korai boot-védelem betöltése nem sikerült: $BOOT_NFT"
-    log "korai boot-védelem betöltve a régi nft tábla újraépítéséhez"
+        || die "loading the early boot protection failed: $BOOT_NFT"
+    log "early boot protection loaded for rebuilding the old nft table"
 }
 
-# A 3.14.0 interval flagjei miatt a régi halmazok nem frissíthetők helyben
-# (a meglévő set flagje nem változtatható, a hivatkozott set pedig nem
-# törölhető). Ezért a meglévő táblát a korai boot-védelem alatt töröljük,
-# MIELŐTT a szabályfájlt ellenőriznénk: a régi set-ek mellett az `nft -c`
-# "existing set lacks interval flag" hibával elbukna, a konténer pedig
-# crash-loopba kerülne, miközben az input lánc szabályok nélkül, policy
-# dropdal áll. A host_service_* őrportokat előbb kimentjük, hogy a meglévő
-# host-kapcsolatok ne maradjanak nyitva a frissítés után.
+# Because of the 3.14.0 interval flags, the old sets cannot be updated in place
+# (the flag of an existing set cannot be changed, and the referenced set cannot
+# be deleted). Therefore we delete the existing table under the early boot
+# protection BEFORE validating the rule file: with the old sets `nft -c`
+# would fail with an "existing set lacks interval flag" error, and the container
+# would enter a crash loop while the input chain stands without rules, with a
+# policy drop. The host_service_* guard ports are saved first, so that existing
+# host connections do not stay open after the upgrade.
 migrate_interval_sets() {
     migrated=0
     saved_tcp=""
@@ -401,9 +400,9 @@ migrate_interval_sets() {
         2>/dev/null | "$PYTHON" -c "$HOST_PORTS_JSON" 2>/dev/null || true)
     saved_udp=$("$NFT_BIN" -j list set inet hatarvedelem host_service_udp \
         2>/dev/null | "$PYTHON" -c "$HOST_PORTS_JSON" 2>/dev/null || true)
-    log "a régi nft set-flagek miatt a hatarvedelem tábla újraépül"
+    log "due to the old nft set flags, the hatarvedelem table is rebuilt"
     "$NFT_BIN" delete table inet hatarvedelem \
-        || die "a régi nft tábla törlése nem sikerült; a korai boot-védelem érvényben maradt"
+        || die "deleting the old nft table failed; the early boot protection remained in effect"
 }
 
 load_firewall() {
@@ -412,102 +411,102 @@ load_firewall() {
         NFT_BIN=$(command -v nft 2>/dev/null || true)
     fi
     [ -n "$NFT_BIN" ] || NFT_BIN=/usr/sbin/nft
-    [ -x "$NFT_BIN" ] || die "az nft nem található (HV_NFT_BIN=$NFT_BIN)"
+    [ -x "$NFT_BIN" ] || die "nft not found (HV_NFT_BIN=$NFT_BIN)"
     export HV_NFT_BIN="$NFT_BIN"
 
     render_ruleset
 
-    # A migráció ellenőrzése és a régi tábla törlése az `nft -c` ELŐTT fut,
-    # különben a régi set-flagek miatt a validálás elbukna.
+    # The migration check and deletion of the old table run BEFORE `nft -c`,
+    # otherwise validation would fail because of the old set flags.
     migrate_interval_sets
 
-    log "szabályok ellenőrzése"
+    log "validating rules"
     if ! "$NFT_BIN" -c -f "$RENDERED"; then
         if [ "$migrated" = "1" ]; then
-            die "az nftables szabályok érvénytelenek; a régi tábla már törölve, a korai boot-védelem érvényben maradt (fail-closed)"
+            die "the nftables rules are invalid; the old table has already been deleted, the early boot protection remained in effect (fail-closed)"
         fi
-        die "az nftables szabályok érvénytelenek"
+        die "the nftables rules are invalid"
     fi
 
-    log "szabályok betöltése (host hálózati névtér)"
+    log "loading rules (host network namespace)"
     if ! "$NFT_BIN" -f "$RENDERED"; then
         if [ "$migrated" = "1" ]; then
-            die "a szabályok betöltése sikertelen; a korai boot-védelem érvényben maradt (fail-closed)"
+            die "loading the rules failed; the early boot protection remained in effect (fail-closed)"
         fi
-        die "a szabályok betöltése sikertelen"
+        die "loading the rules failed"
     fi
     if [ -n "$saved_tcp" ]; then
         "$NFT_BIN" add element inet hatarvedelem host_service_tcp \
             "{ $saved_tcp }" \
-            || log "FIGYELEM: a régi host_service_tcp portok visszatöltése nem sikerült"
+            || log "WARNING: restoring the old host_service_tcp ports failed"
     fi
     if [ -n "$saved_udp" ]; then
         "$NFT_BIN" add element inet hatarvedelem host_service_udp \
             "{ $saved_udp }" \
-            || log "FIGYELEM: a régi host_service_udp portok visszatöltése nem sikerült"
+            || log "WARNING: restoring the old host_service_udp ports failed"
     fi
     "$NFT_BIN" list table inet hatarvedelem >/dev/null 2>&1 \
-        || die "a hatarvedelem tábla nem jött létre"
+        || die "the hatarvedelem table was not created"
 
-    # Újraindításnál a kernelben maradt engedélyek ne maradjanak érvényben
-    # a boot-védelem eltávolítása után. A portál is kiüríti a halmazt, de
-    # így a rövid átadási időben sem marad nyitva senki.
+    # On restart, permissions left in the kernel must not remain in effect
+    # after the boot protection is removed. The portal also clears the set, but
+    # this way no one stays open during the short handover window either.
     #
-    # A HV_FLUSH_ON_START ugyanazt az értelmezést használja, mint a
-    # gateway.py (1/true/yes/on). Ha kikapcsolták, az alapértelmezett
-    # biztonságos viselkedés az árva engedélyek egyeztetése (ürítés); csak
-    # a kifejezett, nem biztonságos HV_ALLOW_STALE_GRANTS_ON_START=1 opt-in
-    # engedi, hogy a korábbi engedélyek a kernel TTL-ig életben maradjanak.
+    # HV_FLUSH_ON_START uses the same interpretation as
+    # gateway.py (1/true/yes/on). If disabled, the default safe
+    # behavior is to reconcile (flush) orphaned grants; only the explicit,
+    # unsafe HV_ALLOW_STALE_GRANTS_ON_START=1 opt-in
+    # allows the previous grants to stay alive until the kernel TTL.
     flush_on_start=$(env_bool HV_FLUSH_ON_START 1)
     allow_stale_grants=$(env_bool HV_ALLOW_STALE_GRANTS_ON_START 0)
-    log "HV_FLUSH_ON_START hatásos értéke: $flush_on_start"
+    log "effective value of HV_FLUSH_ON_START: $flush_on_start"
     if [ "$flush_on_start" != "1" ] && [ "$allow_stale_grants" = "1" ]; then
-        log "FIGYELEM: HV_FLUSH_ON_START ki van kapcsolva, és HV_ALLOW_STALE_GRANTS_ON_START=1 van beállítva. A korábbi folyamat kernelben maradt engedélyei a TTL-ig (akár 30 napig) érvényben maradhatnak, munkamenet nélkül!"
+        log "WARNING: HV_FLUSH_ON_START is disabled, and HV_ALLOW_STALE_GRANTS_ON_START=1 is set. The previous process's permissions left in the kernel may remain in effect until the TTL (up to 30 days), without a session!"
     else
         if [ "$flush_on_start" != "1" ]; then
-            log "FIGYELEM: HV_FLUSH_ON_START ki van kapcsolva, de az árva engedélyek nem maradhatnak a kernelben; a dinamikus halmazok a memóriabeli (üres) munkamenet-táblához igazítva."
+            log "WARNING: HV_FLUSH_ON_START is disabled, but orphaned grants must not remain in the kernel; the dynamic sets are aligned to the in-memory (empty) session table."
         fi
         for hv_set in allowed_v4 allowed_tcp allowed_udp \
                 allowed_input_tcp allowed_input_udp allowed_icmp \
                 client_mac banned_v4; do
             "$NFT_BIN" flush set inet hatarvedelem "$hv_set" \
-                || die "a(z) $hv_set halmaz ürítése nem sikerült"
+                || die "failed to flush set $hv_set"
         done
-        log "a dinamikus halmazok kiürítve (HV_FLUSH_ON_START=$flush_on_start)"
+        log "dynamic sets flushed (HV_FLUSH_ON_START=$flush_on_start)"
     fi
 
-    # A korábbi verziók host_ssh_v4 halmaza már nem része a sablonnak. A
-    # régi elfogadó szabályt a sablon input-láncának újratöltése (flush
-    # chain input) eltávolítja, ezért a megmaradt halmaz ártalmatlan; a
-    # higiénia kedvéért mégis töröljük. A hiánya nem hiba.
+    # The host_ssh_v4 set from earlier versions is no longer part of the template.
+    # The old accept rule is removed by reloading the template's input chain (flush
+    # chain input), so the remaining set is harmless; still, we delete it
+    # for hygiene. Its absence is not an error.
     if "$NFT_BIN" list set inet hatarvedelem host_ssh_v4 >/dev/null 2>&1; then
         if "$NFT_BIN" delete set inet hatarvedelem host_ssh_v4; then
-            log "a régi host_ssh_v4 halmaz törölve"
+            log "old host_ssh_v4 set deleted"
         else
-            # Az új szabálykészlet már betöltődött, a grantok kiürültek:
-            # itt nem állhat le az indulás, különben a tűzfal élne, de a
-            # portál nem indulna el, és az SSH kívülről zárva maradna.
-            # A halmaz az új input-lánc mellett már nem ad hozzáférést.
-            log "FIGYELEM: a régi host_ssh_v4 halmaz törlése nem sikerült; a halmaz a betöltött input-lánc mellett már nem ad hozzáférést, a portál indul tovább."
+            # The new rule set is already loaded and the grants are flushed:
+            # startup must not stop here, otherwise the firewall would be live but the
+            # portal would not start, and SSH would stay closed from outside.
+            # The set no longer grants access alongside the new input chain.
+            log "WARNING: deleting the old host_ssh_v4 set failed; alongside the loaded input chain the set no longer grants access, the portal continues to start."
         fi
     fi
 
-    # A hoston korán betöltött tartalék tábla már nem kell: a végleges
-    # szabályok védik a forward-láncot. Ha nincs ilyen, ez nem hiba.
+    # The fallback table loaded early on the host is no longer needed: the final
+    # rules protect the forward chain. If there is none, this is not an error.
     if "$NFT_BIN" list table inet hatarvedelem_boot >/dev/null 2>&1; then
         "$NFT_BIN" delete table inet hatarvedelem_boot
-        log "a korai boot-védelem átadta a helyét a végleges szabályoknak"
+        log "the early boot protection has handed over to the final rules"
     fi
 
     docker_forward_guard \
-        || die "a Docker forward-védelme nélkül a tűzfal kikerülhető; indulás leállítva"
+        || die "without Docker forward protection the firewall can be bypassed; startup stopped"
 
     if [ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo 0)" != "1" ]; then
         if (echo 1 >/proc/sys/net/ipv4/ip_forward) 2>/dev/null; then
-            log "net.ipv4.ip_forward bekapcsolva"
+            log "net.ipv4.ip_forward enabled"
         else
-            log "FIGYELEM: a net.ipv4.ip_forward nincs bekapcsolva."
-            log "         A hoston: sysctl -w net.ipv4.ip_forward=1"
+            log "WARNING: net.ipv4.ip_forward is not enabled."
+            log "         On the host: sysctl -w net.ipv4.ip_forward=1"
         fi
     fi
 }
@@ -519,14 +518,14 @@ ensure_tunnel_run_dir
 ensure_caddy_admin_dir
 export HV_STATE_DIR="$STATE_DIR"
 
-# Egyedi parancs (pl. felhasználókezelés): a tűzfalhoz nem nyúlunk.
+# Custom command (e.g. user management): we do not touch the firewall.
 if [ "$#" -gt 0 ]; then
     run_as_app "$@"
 fi
 
 skip_firewall=$(env_bool HV_SKIP_FIREWALL 0)
 if [ "$skip_firewall" = "1" ]; then
-    log "FIGYELEM: a tűzfalszabályok betöltése kihagyva (HV_SKIP_FIREWALL=$skip_firewall)"
+    log "WARNING: loading the firewall rules skipped (HV_SKIP_FIREWALL=$skip_firewall)"
 else
     warn_lockout
     load_firewall
@@ -538,5 +537,5 @@ if [ -z "${HV_CONNTRACK_BIN:-}" ]; then
     [ -n "$CONNTRACK" ] && export HV_CONNTRACK_BIN="$CONNTRACK"
 fi
 
-log "portál indítása a ${PORT:-8100}-as porton"
+log "starting portal on port ${PORT:-8100}"
 run_as_app "$PYTHON" "$APP_DIR/server.py"

@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""WireGuard-alagút (dropjak0) kezelése a felhő oldalon.
+"""WireGuard tunnel (dropjak0) management on the cloud side.
 
-A portál konténer a host hálózati névterében fut, ezért a WireGuard
-interfész a hoston jön létre. A titkos kulcsok soha nem kerülnek
-parancssorba: a ``wg`` mindig 0600-os, /run alatti (tmpfs) ideiglenes
-fájlból olvassa őket, amelyek a művelet után azonnal törlődnek.
+The portal container runs in the host network namespace, so the WireGuard
+interface is created on the host. Private keys never appear on the command
+line: ``wg`` always reads them from a 0600 temporary file under /run (tmpfs),
+which is deleted immediately after the operation.
 
-A modul minden hibát elnyel és az ``error`` mezőben tesz elérhetővé: egy
-WireGuard-hiba soha nem akaszthatja meg a portált. Az ``allowed-ips``
-ügynökönként csak a saját /32 cím, ezért egy ügynök a felhő más címeit nem
-érheti el.
+The module swallows every error and exposes it in the ``error`` field: a
+WireGuard failure can never block the portal. ``allowed-ips`` is only the
+agent's own /32 address, so an agent cannot reach other addresses in the
+cloud.
 """
 
 from __future__ import annotations
@@ -29,11 +29,11 @@ _RUN_DIR = os.environ.get("HV_TUNNEL_RUN_DIR", "").strip() or "/run/dropjak"
 
 
 class TunnelError(RuntimeError):
-    """A WireGuard-művelet nem sikerült."""
+    """The WireGuard operation failed."""
 
 
 class TunnelManager:
-    """A dropjak0 interfész, a kulcsok és az ügynök-peerek szinkronja."""
+    """Synchronization of the dropjak0 interface, keys and agent peers."""
 
     def __init__(
         self,
@@ -54,7 +54,7 @@ class TunnelManager:
         self._signature: str | None = None
         self._lock = threading.Lock()
 
-    # -- segédek ---------------------------------------------------------------
+    # -- helpers ---------------------------------------------------------------
 
     def _run(self, args, input_text: str | None = None, check: bool = True):
         try:
@@ -63,7 +63,7 @@ class TunnelManager:
                 timeout=15,
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            raise TunnelError(f"{args[0]} nem futtatható: {exc}") from exc
+            raise TunnelError(f"{args[0]} cannot be executed: {exc}") from exc
         if check and result.returncode != 0:
             detail = (result.stderr or "").strip()[:300]
             raise TunnelError(
@@ -73,14 +73,14 @@ class TunnelManager:
 
     @contextmanager
     def _key_file(self, content: str):
-        """0600-os ideiglenes kulcsfájl a tmpfs-en; a blokk után törölve."""
+        """0600 temporary key file on tmpfs; deleted after the block."""
         try:
             os.makedirs(self.run_dir, exist_ok=True)
             fd, path = tempfile.mkstemp(
                 dir=self.run_dir, prefix="dropjak-wg-", suffix=".key"
             )
         except OSError as exc:
-            raise TunnelError(f"a kulcsfájl nem hozható létre: {exc}") from exc
+            raise TunnelError(f"cannot create key file: {exc}") from exc
         try:
             os.fchmod(fd, 0o600)
             with os.fdopen(fd, "w", encoding="ascii") as fh:
@@ -94,7 +94,7 @@ class TunnelManager:
 
     @staticmethod
     def signature(tunnels: dict) -> str:
-        """Csak az interfész beállításait fedi: más mentés nem konfigurál."""
+        """Covers only the interface settings: saving anything else does not reconfigure."""
         agents = [
             [
                 agent.get("id"), agent.get("address"), agent.get("public_key"),
@@ -111,21 +111,21 @@ class TunnelManager:
         )
 
     def generate_keys(self) -> dict:
-        """Ügynök kulcspár és megosztott kulcs (a privát kulcs stdin-en megy)."""
+        """Agent key pair and preshared key (the private key goes over stdin)."""
         private_key = self._run([self.wg_bin, "genkey"]).stdout.strip()
         public_key = self._run(
             [self.wg_bin, "pubkey"], private_key + "\n"
         ).stdout.strip()
         preshared_key = self._run([self.wg_bin, "genpsk"]).stdout.strip()
         if not private_key or not public_key or not preshared_key:
-            raise TunnelError("a wg kulcsgenerálás üres kimenetet adott")
+            raise TunnelError("wg key generation produced empty output")
         return {
             "private_key": private_key,
             "public_key": public_key,
             "preshared_key": preshared_key,
         }
 
-    # -- interfész és peerek ---------------------------------------------------
+    # -- interface and peers ---------------------------------------------------
 
     def _ensure_link(self) -> None:
         result = self._run(
@@ -135,10 +135,10 @@ class TunnelManager:
         if result.returncode != 0 and "File exists" not in (result.stderr or ""):
             raise TunnelError(
                 (result.stderr or "").strip()
-                or "a WireGuard interfész nem hozható létre"
+                or "cannot create WireGuard interface"
             )
-        # replace: újraindított konténerben (megtartott hálózati névtérben)
-        # a cím már bent lehet, az add ilyenkor "Address already assigned".
+        # replace: in a restarted container (preserved network namespace)
+        # the address may already exist; add then says "Address already assigned".
         result = self._run(
             [
                 self.ip_bin, "addr", "replace", f"{SERVER_ADDRESS}/24",
@@ -149,7 +149,7 @@ class TunnelManager:
         if result.returncode != 0 and "File exists" not in (result.stderr or ""):
             raise TunnelError(
                 (result.stderr or "").strip()
-                or "a WireGuard cím nem állítható be"
+                or "cannot set WireGuard address"
             )
         self._run(
             [
@@ -178,14 +178,14 @@ class TunnelManager:
             )
 
     def remove_all(self) -> None:
-        """Minden peer törlése (gyári visszaállítás); hiba nem dob."""
+        """Remove all peers (factory reset); never raises."""
         with self._lock:
             try:
                 self._remove_peers()
                 self.error = ""
             except Exception as exc:
                 self.error = str(exc)
-                self.log(f"[alagút] a peerek törlése nem sikerült: {exc}")
+                self.log(f"[tunnel] failed to remove peers: {exc}")
             self._signature = None
 
     def _apply(self, tunnels: dict) -> None:
@@ -208,7 +208,7 @@ class TunnelManager:
                     "preshared-key", psk_path,
                     "allowed-ips", f"{agent['address']}/32",
                 ])
-        # A kikapcsolt vagy törölt ügynök peerje nem maradhat a kernelben.
+        # A disabled or deleted agent's peer must not remain in the kernel.
         for public_key in sorted(set(self._peers()) - set(desired)):
             self._run([
                 self.wg_bin, "set", self.interface,
@@ -216,11 +216,11 @@ class TunnelManager:
             ], check=False)
 
     def reconcile(self, tunnels: dict) -> bool:
-        """Az interfész és a peerek szinkronja; True, ha futott a művelet.
+        """Synchronize the interface and peers; True if the operation ran.
 
-        Azonos aláírásnál (és hibamentes állapotnál) nem nyúl a kernelhez,
-        így egy port proxy vagy más beállítás mentése nem konfigurálja újra
-        a WireGuardot.
+        With an identical signature (and a clean state) it leaves the kernel
+        alone, so saving a port proxy or any other setting does not
+        reconfigure WireGuard.
         """
         with self._lock:
             signature = self.signature(tunnels)
@@ -233,13 +233,13 @@ class TunnelManager:
                     self._remove_peers()
             except Exception as exc:
                 self.error = str(exc)
-                self.log(f"[alagút] WireGuard beállítás nem sikerült: {exc}")
+                self.log(f"[tunnel] WireGuard configuration failed: {exc}")
                 return False
             self.error = ""
             self._signature = signature
             return True
 
-    # -- állapot ---------------------------------------------------------------
+    # -- status ----------------------------------------------------------------
 
     def _show(self, command: str) -> dict:
         result = self._run(
@@ -259,7 +259,7 @@ class TunnelManager:
         return values
 
     def status(self, tunnels: dict, now: float | None = None) -> dict:
-        """(id -> online/kézbesítés/forgalom) és a hiba; soha nem dob."""
+        """(id -> online/handshake/traffic) and the error; never raises."""
         now = time.time() if now is None else now
         agents = tunnels.get("agents", [])
         rows = {

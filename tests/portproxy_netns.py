@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Csomagszintű port proxy teszt egy user+net névtérben (root nélkül).
+"""Packet-level port proxy test in a user+net namespace (without root).
 
-Futtatás:  unshare -rn python3 tests/portproxy_netns.py
+Run:  unshare -rn python3 tests/portproxy_netns.py
 
-A külső névtér a portálgép: eth0 = WAN (198.51.100.1), eth1 = LAN
-(192.168.10.1), eth2 = konténer-híd (172.19.0.1). Három gyermek-névtér: WAN
-kliens (198.51.100.2), LAN kliens (192.168.10.2) és a forward cél
-(172.19.0.2). A valódi, renderelt sablon és a Firewall által generált port
-proxy szabályok töltődnek be; a cél szolgáltatások CSAK a 127.0.0.1-en
-figyelnek (TCP és UDP), mint a Docker 127.0.0.1-re publikált portja.
+The outer namespace is the portal host: eth0 = WAN (198.51.100.1), eth1 = LAN
+(192.168.10.1), eth2 = container bridge (172.19.0.1). Three child namespaces:
+WAN client (198.51.100.2), LAN client (192.168.10.2) and the forward target
+(172.19.0.2). The real, rendered template and the port proxy rules generated
+by Firewall are loaded; the target services listen ONLY on 127.0.0.1 (TCP and
+UDP), like Docker's port published on 127.0.0.1.
 
-Kimenet: JSON a vizsgálatokkal; a kilépési kód 0, ha minden rendben.
+Output: JSON with the checks; exit code 0 if everything is fine.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 T = "inet hatarvedelem"
 GW = {"eth0": "198.51.100.1/24", "eth1": "192.168.10.1/24", "eth2": "172.19.0.1/24"}
-NETS = {  # gyermek: (portálgép interfész, saját cím, átjáró)
+NETS = {  # child: (portal host interface, own address, gateway)
     "wan": ("eth0", "198.51.100.2/24", "198.51.100.1"),
     "lan": ("eth1", "192.168.10.2/24", "192.168.10.1"),
     "tgt": ("eth2", "172.19.0.2/24", "172.19.0.1"),
@@ -71,7 +71,7 @@ threading.Thread(target=udp, daemon=True).start()
 time.sleep(600)
 '''
 
-# Hallgató port -> (protokoll, típus, célport, várt válasz előtag)
+# Listen port -> (protocol, type, target port, expected response prefix)
 ENTRIES = {
     18084: ("tcp", "input", 8081, "lo-tcp"),
     18086: ("udp", "input", 9001, "lo-udp"),
@@ -106,7 +106,7 @@ def serve() -> None:
             conn.close()
 
     def udp(addr: str, port: int, tag: str) -> None:
-        # Szándékosan "naiv" szerver (nincs IP_PKTINFO), mint a Java/docker-proxy.
+        # Deliberately "naive" server (no IP_PKTINFO), like Java/docker-proxy.
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.bind((addr, port))
         while True:
@@ -123,7 +123,7 @@ def serve() -> None:
 
 
 def spoof_frame(pid: int, gw_mac: str, payload: bytes) -> None:
-    """Nyers Ethernet-keret a LAN kliensből: 192.168.10.2 -> 127.0.0.1:9001 UDP."""
+    """Raw Ethernet frame from the LAN client: 192.168.10.2 -> 127.0.0.1:9001 UDP."""
     code = r'''
 import socket, struct, sys
 gw_mac, payload = bytes.fromhex(sys.argv[1].replace(":", "")), sys.argv[2].encode()
@@ -178,7 +178,7 @@ def _main(spawned: list) -> int:
                                sys.executable, "-c", TARGET],
                               stdout=subprocess.DEVNULL)
     spawned.append(target)
-    step("névterek kész")
+    step("namespaces ready")
     serve()
     for key in ("ip_forward", "conf/all/route_localnet"):
         Path(f"/proc/sys/net/ipv4/{key}").write_text("1\n")
@@ -195,12 +195,12 @@ def _main(spawned: list) -> int:
     ]
     template = tpp.render_template()
     run("nft", "-f", "-", input=template)
-    step("sablon betöltve")
+    step("template loaded")
     fw.replace_custom(port_proxies=entries)
-    step("port proxy szabályok betöltve")
+    step("port proxy rules loaded")
     nat_rules = run("nft", "list", "chain", *T.split(), "portproxy_nat").stdout
 
-    time.sleep(1.0)  # IPv6 DAD / ARP rendeződése
+    time.sleep(1.0)  # IPv6 DAD / ARP settling
     lan_mac = json.loads(ns(pids["lan"], "ip", "-j", "link", "show", "c0").stdout)[0]["address"]
     gw_lan_mac = json.loads(run("ip", "-j", "link", "show", "eth1").stdout)[0]["address"]
     checks: dict[str, object] = {"nat_rules": nat_rules.strip().splitlines()}
@@ -228,7 +228,7 @@ def _main(spawned: list) -> int:
 
     for client in ("wan", "lan"):
         ip = NETS[client][1].split("/")[0]
-        step(f"{client} kliens")
+        step(f"{client} client")
         before = {port: probe(client, port) for port in ENTRIES}
         expect(f"{client}_blocked_before_grant",
                all(v.startswith("ERR") for v in before.values()), before)
@@ -246,10 +246,11 @@ def _main(spawned: list) -> int:
     expect("loopback_targets_use_dnat", "dnat ip to 127.0.0.1:8081" in nat_rules
            and "dnat ip to 127.0.0.1:9001" in nat_rules
            and "redirect to :8090" in nat_rules and "redirect to :9002" in nat_rules,
-           "lásd nat_rules")
+           "see nat_rules")
 
-    # Az élő hiba reprodukciója: redirect (route_localnet nélküli ág) esetén a
-    # csak loopbacken figyelő cél nem érhető el, a wildcard igen.
+    # Reproduction of the live bug: with redirect (the branch without
+    # route_localnet) the loopback-only target is unreachable, the wildcard
+    # target is reachable.
     Path("/proc/sys/net/ipv4/conf/all/route_localnet").write_text("0\n")
     fw.replace_custom(port_proxies=entries)
     grant("add", "wan")
@@ -262,8 +263,9 @@ def _main(spawned: list) -> int:
     Path("/proc/sys/net/ipv4/conf/all/route_localnet").write_text("1\n")
     fw.replace_custom(port_proxies=entries)
 
-    # Loopback-őr: a LAN kliens közvetlenül 127.0.0.1:9001-re küld (nyers
-    # keret), host engedéllyel a 9001-re. Őr nélkül ez eljutna a szerverhez.
+    # Loopback guard: the LAN client sends directly to 127.0.0.1:9001 (raw
+    # frame), with a host grant for 9001. Without the guard this would reach
+    # the server.
     lan_ip = NETS["lan"][1].split("/")[0]
     run("nft", "add", "element", *T.split(), "allowed_input_udp", "{", f"{lan_ip} . 9001", "}")
     run("nft", "add", "element", *T.split(), "client_mac", "{", f"{lan_ip} . {lan_mac}", "}")

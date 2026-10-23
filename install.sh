@@ -1,23 +1,22 @@
 #!/usr/bin/env bash
 #
-# Dropjak — telepítő
+# Dropjak — installer
 #
-# Támogatott rendszerek: RHEL / AlmaLinux / Rocky Linux / Oracle Linux 8+,
-# Fedora, Debian 11+, Ubuntu 20.04+, SLES/openSUSE Leap (Python 3.8+ és
-# nftables szükséges). A telepítő felismeri a csomagkezelőt
-# (dnf/yum/apt-get/zypper), és felajánlja a hiányzó csomagok telepítését.
+# Supported systems: RHEL / AlmaLinux / Rocky Linux / Oracle Linux 8+,
+# Fedora, Debian 11+, Ubuntu 20.04+, SLES/openSUSE Leap (Python 3.8+ and
+# nftables required). The installer detects the package manager
+# (dnf/yum/apt-get/zypper) and offers to install missing packages.
 #
-# rootként futtatandó. A tűzfal-szabályokat csak a végén, ellenőrzés után
-# teszi élesbe. FIGYELEM: az első szabálybetöltés megszakítja az SSH-t, ha
-# a forrás IP-hez még nincs hozzárendelt, TCP 22-t engedélyező host (input)
-# szabály. A meglévő SSH-kapcsolatot a conntrack önmagában NEM tartja
-# életben: a sablon SSH-őre a visszavont kapcsolatot is lezárja. ÚJ SSH
-# csak akkor jön létre, ha ugyanarról az IP-ről belépsz a portálon, és egy
-# hozzárendelt host szabályban engedélyezed a TCP 22-t. Tartsd nyitva a
-# szolgáltatói konzolt, vagy az első indítást HV_SKIP_FIREWALL=1 értékkel
-# végezd, majd a szabály beállítása után indíts újra normálisan.
+# Must be run as root. It only puts the firewall rules into effect at the end,
+# after verification. WARNING: the first rule load drops SSH if there is no
+# assigned host (input) rule allowing TCP 22 for the source IP yet. The
+# existing SSH connection is NOT kept alive by conntrack alone: the template's
+# SSH guard also closes a revoked connection. A NEW SSH connection is only
+# created if you log in to the portal from the same IP and allow TCP 22 in an
+# assigned host rule. Keep the provider console open, or perform the first
+# start with HV_SKIP_FIREWALL=1, then restart normally after setting the rule.
 #
-# Példa:
+# Example:
 #   sudo ./install.sh --wan-if eth0 --lan-if eth1
 #   sudo ./install.sh --wan-if eth0 --lan-if eth1 \
 #        --portal-net 192.168.1.50/32 --portal-url http://192.168.50.1
@@ -36,8 +35,8 @@ FIREWALL_UNIT="${SYSTEMD_DIR}/${FIREWALL_SERVICE}.service"
 SYSCTL_FILE="/etc/sysctl.d/90-hatarvedelem.conf"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# A sablon rendereléséhez használt értékek. Ugyanazok az alapértékek, mint a
-# docker/entrypoint.sh-ban és a docker-compose.yml-ben.
+# Values used for rendering the template. The same defaults as in
+# docker/entrypoint.sh and docker-compose.yml.
 FWD_MARK="${HV_FWD_MARK:-0x44524a4b}"
 DROP_LOG_GROUP="${HV_DROP_LOG_GROUP:-5}"
 
@@ -65,48 +64,48 @@ PKG_CT=""
 DISTRO_NAME=""
 DISTRO_VERSION=""
 
-die()  { printf 'HIBA: %s\n' "$*" >&2; exit 1; }
+die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 note() { printf '\n\033[1m%s\033[0m\n' "$*"; }
-warn() { printf 'FIGYELEM: %s\n' "$*" >&2; }
+warn() { printf 'WARNING: %s\n' "$*" >&2; }
 
-# A rendereléshez ugyanazokat az értékeket fogadjuk el, mint a Dockeres
-# belépési pont, hogy a nftables mark és a drop-log csoport ne csússzon el.
+# For rendering we accept the same values as the Docker entrypoint,
+# so the nftables mark and the drop-log group do not drift.
 [[ "$FWD_MARK" =~ ^0x[0-9A-Fa-f]{1,8}$ ]] \
-  || die "érvénytelen HV_FWD_MARK (0x kezdetű, legfeljebb 8 jegyű hex szám kell): $FWD_MARK"
+  || die "invalid HV_FWD_MARK (expected a hex number starting with 0x, at most 8 digits): $FWD_MARK"
 [[ "$DROP_LOG_GROUP" =~ ^[0-9]+$ ]] \
   && (( 10#$DROP_LOG_GROUP >= 1 && 10#$DROP_LOG_GROUP <= 65535 )) \
-  || die "érvénytelen HV_DROP_LOG_GROUP (1-65535): $DROP_LOG_GROUP"
+  || die "invalid HV_DROP_LOG_GROUP (1-65535): $DROP_LOG_GROUP"
 
 usage() {
   cat <<'EOF'
-Használat: sudo ./install.sh [opciók]
+Usage: sudo ./install.sh [options]
 
-  --wan-if IF          a felfelé (internet) irányú interfész
-  --lan-if IF          a belső (kliens) interfész
-  --lan-net CIDR       belső hálózat, pl. 192.168.50.0/24
-  --gateway-ip IP      a kapu címe a belső hálózaton, pl. 192.168.50.1
-  --portal-net CIDR    ahonnan a portál elérhető (alap: az SSH forrása vagy
-                       a LAN hálózat). Nyilvános portálhoz: 0.0.0.0/0.
-                       A host SSH-t nem ez szabályozza: az csak aktív portál-
-                       munkamenettel és a felhasználóhoz rendelt, TCP 22-t
-                       engedélyező host (input) szabállyal nyílik meg.
-  --port PORT          a portál portja (alap: 80)
-  --portal-url URL     a portál kanonikus címe (alap: http://<gateway-ip>)
-  --yes                nem kérdez; a hiányzó csomagokat is telepíti, és a
-                       firewalld/ufw-t is kikapcsolja
-  --skip-user          nem hoz létre felhasználót
-  -h, --help           ez a súgó
+  --wan-if IF          the upstream (internet) interface
+  --lan-if IF          the internal (client) interface
+  --lan-net CIDR       internal network, e.g. 192.168.50.0/24
+  --gateway-ip IP      the gateway address on the internal network, e.g. 192.168.50.1
+  --portal-net CIDR    where the portal is reachable from (default: the SSH source or
+                       the LAN network). For a public portal: 0.0.0.0/0.
+                       This does not control host SSH: it only opens with an active portal
+                       session and a host (input) rule assigned to the user that
+                       allows TCP 22.
+  --port PORT          the portal port (default: 80)
+  --portal-url URL     the canonical portal address (default: http://<gateway-ip>)
+  --yes                do not ask; installs missing packages too, and disables
+                       firewalld/ufw as well
+  --skip-user          do not create a user
+  -h, --help           this help
 
-A telepítő dnf/yum/apt-get/zypper alatt működik. Python 3.8 vagy újabb
-szükséges; RHEL 8-on ehhez automatikusan a python39 csomagot ajánlja fel.
+The installer works under dnf/yum/apt-get/zypper. Python 3.8 or newer is
+required; on RHEL 8 it automatically offers the python39 package for this.
 
-Környezeti változók (a docker/entrypoint.sh alapértékeivel egyezően):
-  HV_FWD_MARK          a forward szabályok nftables markja (alap: 0x44524a4b)
-  HV_DROP_LOG_GROUP    a drop-napló NFLOG csoportja (alap: 5)
+Environment variables (matching the defaults in docker/entrypoint.sh):
+  HV_FWD_MARK          nftables mark for the forward rules (default: 0x44524a4b)
+  HV_DROP_LOG_GROUP    NFLOG group for the drop log (default: 5)
 EOF
 }
 
-# ------------------------------------------------------------------ argumentumok
+# ------------------------------------------------------------------ arguments
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -120,12 +119,12 @@ while [[ $# -gt 0 ]]; do
     --yes)        ASSUME_YES=1; shift ;;
     --skip-user)  SKIP_USER=1; shift ;;
     -h|--help)    usage; exit 0 ;;
-    *)            die "ismeretlen opció: $1 (lásd: --help)" ;;
+    *)            die "unknown option: $1 (see: --help)" ;;
   esac
 done
 
-[[ $EUID -eq 0 ]] || die "rootként futtasd: sudo $0"
-command -v systemctl >/dev/null 2>&1 || die "hiányzik a systemd"
+[[ $EUID -eq 0 ]] || die "run as root: sudo $0"
+command -v systemctl >/dev/null 2>&1 || die "systemd is missing"
 for f in server.py gateway.py settings_store.py fail2ban.py droplog.py tunnel.py \
          index.html icon.png blocked.png unauthorized.png sus.png ok.png services.json VERSION \
          deploy/hatarvedelem.nft deploy/hatarvedelem.service \
@@ -134,10 +133,10 @@ for f in server.py gateway.py settings_store.py fail2ban.py droplog.py tunnel.py
          deploy/tunnel-agent/Dockerfile deploy/tunnel-agent/agent.py \
          deploy/tunnel-agent/selfinstall.sh \
          deploy/tunnel-agent/check-containment.sh; do
-  [[ -f "$SRC_DIR/$f" ]] || die "hiányzó fájl: $SRC_DIR/$f"
+  [[ -f "$SRC_DIR/$f" ]] || die "missing file: $SRC_DIR/$f"
 done
 
-# ------------------------------------------------------------------ segédfüggvények
+# ------------------------------------------------------------------ helper functions
 
 ask_value() {
   local prompt="$1" default="$2" value
@@ -154,13 +153,13 @@ confirm() {
   if [[ $ASSUME_YES -eq 1 ]]; then
     return 0
   fi
-  read -r -p "$prompt [i/N]: " answer
-  [[ "$answer" =~ ^[iI]([gG][eE][nN])?$ ]]
+  read -r -p "$prompt [y/N]: " answer
+  [[ "$answer" =~ ^[yY]([eE][sS])?$ ]]
 }
 
-# sed helyettesítési mintájába kerülő érték escape-elése. A minták `|`
-# határolót használnak, ezért a backslash, a `|` és a `&` karaktereket kell
-# escape-elni.
+# Escaping a value that goes into a sed substitution pattern. The patterns use
+# the `|` delimiter, so the backslash, `|` and `&` characters must be
+# escaped.
 sed_escape() {
   local value="$1"
   value="${value//\\/\\\\}"
@@ -187,7 +186,7 @@ find_python() {
   return 1
 }
 
-# ------------------------------------------------------------------ disztribúció
+# ------------------------------------------------------------------ distribution
 
 detect_system() {
   if [[ -r /etc/os-release ]]; then
@@ -213,7 +212,7 @@ detect_system() {
   elif command -v zypper >/dev/null 2>&1; then
     PKG_MANAGER="zypper"
   else
-    die "nem találom a csomagkezelőt (dnf/yum/apt-get/zypper)"
+    die "cannot find the package manager (dnf/yum/apt-get/zypper)"
   fi
 
   case "$PKG_MANAGER" in
@@ -245,9 +244,9 @@ pkg_install() {
   local pkgs=("$@")
   [[ ${#pkgs[@]} -gt 0 ]] || return 0
 
-  note "Hiányzó csomagok: ${pkgs[*]}"
-  if ! confirm "Telepítsem őket a(z) $PKG_MANAGER segítségével?"; then
-    die "telepítsd kézzel: $PKG_MANAGER install ${pkgs[*]}, majd futtasd újra"
+  note "Missing packages: ${pkgs[*]}"
+  if ! confirm "Install them using $PKG_MANAGER?"; then
+    die "install them manually: $PKG_MANAGER install ${pkgs[*]}, then run again"
   fi
 
   case "$PKG_MANAGER" in
@@ -274,7 +273,7 @@ ensure_dependencies() {
 
   if ! PYTHON="$(find_python)"; then
     missing+=("$PKG_PY")
-    # RHEL 8-on a python3 még 3.6; a python39 csomag ad 3.9-et.
+    # On RHEL 8 python3 is still 3.6; the python39 package provides 3.9.
     if [[ ( "$PKG_MANAGER" == "dnf" || "$PKG_MANAGER" == "yum" ) \
           && "${DISTRO_VERSION%%.*}" == "8" ]]; then
       missing+=("python39")
@@ -282,19 +281,19 @@ ensure_dependencies() {
   fi
 
   if ! command -v conntrack >/dev/null 2>&1; then
-    if confirm "Telepítsem a conntrack eszközt? (a kilépés azonnali érvényesítéséhez ajánlott)"; then
+    if confirm "Install the conntrack tool? (recommended for immediate enforcement of logout)"; then
       missing+=("$PKG_CT")
     fi
   fi
 
   pkg_install "${missing[@]}"
 
-  command -v nft >/dev/null 2>&1 || die "az nft nem érhető el a telepítés után"
-  command -v ip >/dev/null 2>&1 || die "az ip parancs nem érhető el"
-  command -v useradd >/dev/null 2>&1 || die "a useradd nem érhető el"
+  command -v nft >/dev/null 2>&1 || die "nft is not available after installation"
+  command -v ip >/dev/null 2>&1 || die "the ip command is not available"
+  command -v useradd >/dev/null 2>&1 || die "useradd is not available"
 
   if ! PYTHON="$(find_python)"; then
-    die "Python 3.8 vagy újabb szükséges. Telepítsd kézzel (pl. python39 vagy python3.11), majd futtasd újra."
+    die "Python 3.8 or newer is required. Install it manually (e.g. python39 or python3.11), then run again."
   fi
 
   NFT_BIN="$(command -v nft)"
@@ -305,7 +304,7 @@ ensure_dependencies() {
 detect_system
 ensure_dependencies
 
-# ------------------------------------------------------------------ hálózati segédek
+# ------------------------------------------------------------------ network helpers
 
 canon_v4_net() {
   "$PYTHON" - "$1" <<'PY'
@@ -351,7 +350,7 @@ default_wan_if() {
   ip -4 route show default 2>/dev/null | awk '{print $5; exit}'
 }
 
-# A telepítést futtató SSH-forrás (ha van).
+# The SSH source running the installation (if any).
 detect_ssh_src() {
   if [[ -n "${SSH_CONNECTION:-}" ]]; then
     printf '%s\n' "${SSH_CONNECTION%% *}"
@@ -367,50 +366,50 @@ detect_ssh_src() {
   fi
 }
 
-# ------------------------------------------------------------------ értékek
+# ------------------------------------------------------------------ values
 
 PORTAL_URL_RE='^https?://[A-Za-z0-9.-]+(:[0-9]{1,5})?/?$'
 [[ "$PORT" =~ ^[0-9]+$ ]] && (( PORT >= 1 && PORT <= 65535 )) \
-  || die "érvénytelen port: $PORT"
+  || die "invalid port: $PORT"
 
 SSH_SRC="$(detect_ssh_src || true)"
 
 if [[ -z "$WAN_IF" ]]; then
   WAN_IF="$(default_wan_if || true)"
   if [[ -z "$WAN_IF" ]]; then
-    WAN_IF="$(ask_value "Nincs alapértelmezett útvonal. Add meg a WAN interfészt" "eth0")"
+    WAN_IF="$(ask_value "No default route. Specify the WAN interface" "eth0")"
   elif [[ $ASSUME_YES -eq 0 ]]; then
-    WAN_IF="$(ask_value "WAN interfész (felfelé)" "$WAN_IF")"
+    WAN_IF="$(ask_value "WAN interface (upstream)" "$WAN_IF")"
   fi
 fi
-iface_ok "$WAN_IF" || die "nincs ilyen WAN interfész: $WAN_IF"
+iface_ok "$WAN_IF" || die "no such WAN interface: $WAN_IF"
 
 if [[ -z "$LAN_IF" ]]; then
-  note "Elérhető IPv4-es interfészek:"
+  note "Available IPv4 interfaces:"
   ip -o -4 addr show scope global | awk '{print "  " $2 "  " $4}'
-  LAN_IF="$(ask_value "LAN interfész (a kliensek felé)" "eth1")"
+  LAN_IF="$(ask_value "LAN interface (toward clients)" "eth1")"
 fi
-iface_ok "$LAN_IF" || die "nincs ilyen LAN interfész: $LAN_IF"
-[[ "$LAN_IF" != "$WAN_IF" ]] || die "a LAN és a WAN interfész nem lehet ugyanaz"
+iface_ok "$LAN_IF" || die "no such LAN interface: $LAN_IF"
+[[ "$LAN_IF" != "$WAN_IF" ]] || die "the LAN and WAN interface cannot be the same"
 
 LAN_CIDR="$(first_v4_cidr "$LAN_IF" || true)"
-[[ -n "$LAN_CIDR" ]] || die "a(z) $LAN_IF interfészen nincs IPv4-cím; állítsd be előbb"
+[[ -n "$LAN_CIDR" ]] || die "interface $LAN_IF has no IPv4 address; configure one first"
 
 if [[ -z "$GW_IP" ]]; then
   GW_IP="${LAN_CIDR%%/*}"
-  GW_IP="$(ask_value "A kapu címe a LAN-on" "$GW_IP")"
+  GW_IP="$(ask_value "The gateway address on the LAN" "$GW_IP")"
 fi
-is_v4 "$GW_IP" || die "érvénytelen gateway IP: $GW_IP"
+is_v4 "$GW_IP" || die "invalid gateway IP: $GW_IP"
 
 if [[ -z "$LAN_NET" ]]; then
   LAN_NET="$("$PYTHON" -c \
     'import ipaddress,sys; print(ipaddress.ip_interface(sys.argv[1]).network)' \
     "$LAN_CIDR")"
-  LAN_NET="$(ask_value "Belső hálózat" "$LAN_NET")"
+  LAN_NET="$(ask_value "Internal network" "$LAN_NET")"
 fi
-LAN_NET="$(canon_v4_net "$LAN_NET")" || die "érvénytelen LAN hálózat: $LAN_NET"
+LAN_NET="$(canon_v4_net "$LAN_NET")" || die "invalid LAN network: $LAN_NET"
 "$PYTHON" - "$GW_IP" "$LAN_NET" <<'PY' \
-  || die "a gateway IP ($GW_IP) nincs benne a LAN hálózatban ($LAN_NET)"
+  || die "the gateway IP ($GW_IP) is not inside the LAN network ($LAN_NET)"
 import ipaddress, sys
 sys.exit(0 if ipaddress.ip_address(sys.argv[1]) in ipaddress.ip_network(sys.argv[2]) else 1)
 PY
@@ -421,10 +420,10 @@ if [[ -z "$PORTAL_NET" ]]; then
   else
     PORTAL_NET="$LAN_NET"
   fi
-  PORTAL_NET="$(ask_value "Portál forrás-hálózata (0.0.0.0/0 = bárhonnan)" "$PORTAL_NET")"
+  PORTAL_NET="$(ask_value "Portal source network (0.0.0.0/0 = from anywhere)" "$PORTAL_NET")"
 fi
 PORTAL_NET="$(canon_v4_net "$PORTAL_NET")" \
-  || die "érvénytelen portál hálózat: $PORTAL_NET"
+  || die "invalid portal network: $PORTAL_NET"
 
 if [[ -z "$PORTAL_URL" ]]; then
   if [[ "$PORT" == "80" ]]; then
@@ -433,7 +432,7 @@ if [[ -z "$PORTAL_URL" ]]; then
     PORTAL_URL="http://${GW_IP}:${PORT}"
   fi
 fi
-[[ "$PORTAL_URL" =~ $PORTAL_URL_RE ]] || die "érvénytelen portál URL: $PORTAL_URL"
+[[ "$PORTAL_URL" =~ $PORTAL_URL_RE ]] || die "invalid portal URL: $PORTAL_URL"
 
 if [[ -n "$SSH_SRC" ]] && is_v4 "$SSH_SRC"; then
   if ! "$PYTHON" - "$SSH_SRC" "$PORTAL_NET" <<'PY'
@@ -441,92 +440,92 @@ import ipaddress, sys
 sys.exit(0 if ipaddress.ip_address(sys.argv[1]) in ipaddress.ip_network(sys.argv[2]) else 1)
 PY
   then
-    warn "az SSH forrása ($SSH_SRC) nincs a portál forrás-hálózatában."
-    warn "A mostani kapcsolatod túlélheti, de a portálon kívülről nem tudsz"
-    warn "új SSH-munkamenetet nyitni. Nyilvános portálhoz: --portal-net 0.0.0.0/0."
-    confirm "Mégis folytatod?" || die "megszakítva"
+    warn "the SSH source ($SSH_SRC) is not inside the portal source network."
+    warn "Your current connection may survive, but you cannot open a new SSH"
+    warn "session from outside the portal. For a public portal: --portal-net 0.0.0.0/0."
+    confirm "Continue anyway?" || die "aborted"
   fi
 fi
 
-note "Telepítési terv"
+note "Installation plan"
 cat <<EOF
-  Rendszer:            $DISTRO_NAME ($PKG_MANAGER)
+  System:              $DISTRO_NAME ($PKG_MANAGER)
   Python:              $PYTHON
   nft:                 $NFT_BIN
-  WAN interfész:       $WAN_IF
-  LAN interfész:       $LAN_IF
-  LAN hálózat:         $LAN_NET
-  Kapu címe:           $GW_IP
-  Portál forrás:       $PORTAL_NET  Portál:              $PORTAL_URL  (port: $PORT)
+  WAN interface:       $WAN_IF
+  LAN interface:       $LAN_IF
+  LAN network:         $LAN_NET
+  Gateway address:     $GW_IP
+  Portal source:       $PORTAL_NET  Portal:              $PORTAL_URL  (port: $PORT)
   Program:             $APP_DIR
-  Állapot:             $STATE_DIR
+  State:               $STATE_DIR
 EOF
 
-confirm "Folytatod a telepítést?" || die "megszakítva"
+confirm "Continue the installation?" || die "aborted"
 
-# ------------------------------------------------------------------ más tűzfalak
+# ------------------------------------------------------------------ other firewalls
 
 disable_conflicting_firewalls() {
   if systemctl is-enabled --quiet firewalld 2>/dev/null \
      || systemctl is-active --quiet firewalld 2>/dev/null; then
-    warn "A firewalld aktív vagy engedélyezett, és ütközhet a saját szabályainkkal."
-    if confirm "Kikapcsoljam és tiltsam le a firewalld-t?"; then
+    warn "firewalld is active or enabled, and may conflict with our own rules."
+    if confirm "Disable and mask firewalld?"; then
       systemctl disable --now firewalld >/dev/null 2>&1 || true
       DISABLED_OTHER_FIREWALL=1
     else
-      die "a firewalld-t előbb kapcsold ki, különben a kapu nem fog működni"
+      die "disable firewalld first, otherwise the gateway will not work"
     fi
   fi
 
   if command -v ufw >/dev/null 2>&1 \
      && ufw status 2>/dev/null | grep -qi '^Status: active'; then
-    warn "A ufw aktív, és ütközhet a saját szabályainkkal."
-    if confirm "Kikapcsoljam a ufw-t?"; then
+    warn "ufw is active, and may conflict with our own rules."
+    if confirm "Disable ufw?"; then
       ufw --force disable >/dev/null 2>&1 || true
       DISABLED_OTHER_FIREWALL=1
     else
-      die "a ufw-t előbb kapcsold ki, különben a kapu nem fog működni"
+      die "disable ufw first, otherwise the gateway will not work"
     fi
   fi
 
   if systemctl is-enabled --quiet netfilter-persistent 2>/dev/null; then
-    warn "A netfilter-persistent (iptables-persistent) engedélyezett."
-    warn "A bootkor visszatöltött iptables-szabályok ütközhetnek a kapuval."
-    if confirm "Kikapcsoljam a netfilter-persistent szolgáltatást?"; then
+    warn "netfilter-persistent (iptables-persistent) is enabled."
+    warn "iptables rules restored at boot may conflict with the gateway."
+    if confirm "Disable the netfilter-persistent service?"; then
       systemctl disable --now netfilter-persistent >/dev/null 2>&1 || true
       DISABLED_OTHER_FIREWALL=1
     else
-      die "a netfilter-persistent-et előbb kapcsold ki"
+      die "disable netfilter-persistent first"
     fi
   fi
 
   local unit
   for unit in iptables ip6tables; do
     if systemctl is-enabled --quiet "$unit" 2>/dev/null; then
-      warn "A(z) $unit.service engedélyezett, bootkor iptables-szabályokat tölthet be."
-      if confirm "Kikapcsoljam a(z) $unit.service-t?"; then
+      warn "$unit.service is enabled, and may load iptables rules at boot."
+      if confirm "Disable $unit.service?"; then
         systemctl disable --now "$unit" >/dev/null 2>&1 || true
         DISABLED_OTHER_FIREWALL=1
       else
-        die "a(z) $unit.service-t előbb kapcsold ki"
+        die "disable $unit.service first"
       fi
     fi
   done
 
   if systemctl is-enabled --quiet nftables 2>/dev/null \
      || systemctl is-active --quiet nftables 2>/dev/null; then
-    warn "Az nftables.service aktív vagy engedélyezett."
-    warn "A saját táblánk mellette is működik, de a benne lévő forward-"
-    warn "szabályok ütközhetnek. Ellenőrizd: nft list ruleset"
-    warn "A saját szabályaink a hatarvedelem-firewall.service-ben vannak."
+    warn "nftables.service is active or enabled."
+    warn "Our own table works alongside it, but the forward rules in it"
+    warn "may conflict. Check: nft list ruleset"
+    warn "Our own rules are in hatarvedelem-firewall.service."
   fi
 }
 
 disable_conflicting_firewalls
 
-# ------------------------------------------------------------------ fájlok, user
+# ------------------------------------------------------------------ files, user
 
-note "Program telepítése"
+note "Installing the program"
 install -d -m 0755 "$APP_DIR"
 install -m 0644 "$SRC_DIR/server.py" "$SRC_DIR/gateway.py" \
   "$SRC_DIR/settings_store.py" "$SRC_DIR/fail2ban.py" "$SRC_DIR/droplog.py" \
@@ -537,11 +536,11 @@ install -m 0644 "$SRC_DIR/server.py" "$SRC_DIR/gateway.py" \
 if [[ -f "$SRC_DIR/README.md" ]]; then
   install -m 0644 "$SRC_DIR/README.md" "$APP_DIR/"
 fi
-# A sablon a Docker-layouttal egyezően referencia-célból kerül ide; a natív
-# tűzfal a /etc/nftables/hatarvedelem.nft renderelt példányát használja.
+# The template is placed here as a reference target, matching the Docker layout; the native
+# firewall uses the rendered copy at /etc/nftables/hatarvedelem.nft.
 install -d -m 0755 "$APP_DIR/deploy"
 install -m 0644 "$SRC_DIR/deploy/hatarvedelem.nft" "$APP_DIR/deploy/"
-# A letölthető ügynök-csomag forrása (a natív telepítés is ugyanazt adja).
+# Source of the downloadable agent package (the native installation provides the same).
 install -d -m 0755 "$APP_DIR/tunnel-agent"
 install -m 0644 "$SRC_DIR/deploy/tunnel-agent/Dockerfile" \
   "$SRC_DIR/deploy/tunnel-agent/compose.agent.yml" \
@@ -560,7 +559,7 @@ install -d -m 0750 -o "$SERVICE_USER" -g "$SERVICE_USER" "$STATE_DIR"
 
 # ------------------------------------------------------------------ nftables
 
-note "Tűzfalszabályok előkészítése"
+note "Preparing the firewall rules"
 TMP_NFT="$(mktemp)"
 TMP_FW=""
 TMP_UNIT=""
@@ -581,28 +580,28 @@ sed \
   "$SRC_DIR/deploy/hatarvedelem.nft" > "$TMP_NFT"
 
 if grep -qE '__[A-Z0-9_]+__' "$TMP_NFT"; then
-  die "kitöltetlen helyőrző maradt a generált nftables-szabályokban"
+  die "an unfilled placeholder remained in the generated nftables rules"
 fi
-# A 3.14.0 interval flagjei helyben nem vehetők fel egy meglévő setre, a
-# hivatkozott set pedig nem törölhető. Régi tábla esetén ezért a táblát a
-# korai boot-védelem alatt újraépítjük; ezt az ellenőrzés ELŐTT kell
-# eldönteni, mert a régi set-ek mellett az `nft -c` elbukna. A törlés a
-# megerősítés után történik, és utána még egyszer ellenőrzünk.
+# The 3.14.0 interval flags cannot be added in place to an existing set, and the
+# referenced set cannot be deleted. Therefore, with an old table, we rebuild the table
+# under the early boot protection; this must be decided BEFORE the check,
+# because `nft -c` would fail with the old sets. Deletion happens after
+# confirmation, and we check once more afterwards.
 recreate_table=0
 if "$NFT_BIN" list set inet hatarvedelem allowed_tcp >/dev/null 2>&1 \
         && ! "$NFT_BIN" list set inet hatarvedelem allowed_tcp \
             2>/dev/null | grep -q 'flags interval'; then
   recreate_table=1
 else
-  "$NFT_BIN" -c -f "$TMP_NFT" || die "a generált szabályok nem érvényesek"
+  "$NFT_BIN" -c -f "$TMP_NFT" || die "the generated rules are not valid"
 fi
 
 install -d -m 0755 /etc/nftables
 install -m 0600 "$TMP_NFT" "$NFT_FILE"
 
-note "IP-továbbítás bekapcsolása"
+note "Enabling IP forwarding"
 cat > "$SYSCTL_FILE" <<'EOF'
-# Dropjak: a gép routerként továbbítja a forgalmat.
+# Dropjak: the machine forwards traffic as a router.
 net.ipv4.ip_forward = 1
 EOF
 if command -v sysctl >/dev/null 2>&1; then
@@ -611,51 +610,50 @@ else
   printf '1\n' > /proc/sys/net/ipv4/ip_forward
 fi
 
-note "Tűzfal betöltése"
-warn "A host SSH ezután csak akkor nyílik meg, ha ugyanarról az IP-ről"
-warn "belépsz a portálra, és egy a felhasználóhoz rendelt host szabályban"
-warn "kifejezetten engedélyezed a TCP 22-es portot."
-warn "FIGYELEM: az első betöltés megszakítja a jelenlegi SSH-kapcsolatot,"
-warn "ha a forrás IP-hez még nincs ilyen hozzárendelt szabály. A conntrack"
-warn "önmagában nem tartja életben. Őrizd meg a szolgáltatói konzol"
-warn "hozzáférését, vagy előbb HV_SKIP_FIREWALL=1 értékkel indíts, állítsd"
-warn "be a szabályt, és utána töltsd be a tűzfalat."
-confirm "Betöltöm a tűzfalszabályokat?" || die "megszakítva"
+note "Loading the firewall"
+warn "After this, host SSH only opens if you log in to the portal from the same IP,"
+warn "and explicitly allow TCP port 22 in a host rule assigned to the user."
+warn "WARNING: the first load drops the current SSH connection,"
+warn "if there is no such assigned rule for the source IP yet. conntrack"
+warn "alone does not keep it alive. Keep the provider console"
+warn "access, or first start with HV_SKIP_FIREWALL=1, set"
+warn "the rule, and then load the firewall."
+confirm "Load the firewall rules?" || die "aborted"
 if (( recreate_table )); then
-  warn "A régi nft set-flagek miatt a hatarvedelem tábla újraépül."
-  # A törlés és az új betöltés között a host csak a korai boot-védelem
-  # alatt maradhat (fail-closed).
+  warn "Due to the old nft set flags, the hatarvedelem table is rebuilt."
+  # Between deletion and the new load, the host may only be under the early boot
+  # protection (fail-closed).
   if ! "$NFT_BIN" list table inet hatarvedelem_boot >/dev/null 2>&1; then
     "$NFT_BIN" -f "$SRC_DIR/deploy/hatarvedelem-boot.nft" \
-      || die "a korai boot-védelem betöltése nem sikerült"
+      || die "loading the early boot protection failed"
   fi
   "$NFT_BIN" delete table inet hatarvedelem \
-    || die "a régi nft tábla törlése nem sikerült; a korai boot-védelem érvényben maradt"
+    || die "deleting the old nft table failed; the early boot protection remained in effect"
   if ! "$NFT_BIN" -c -f "$TMP_NFT"; then
-    die "a generált szabályok nem érvényesek; a régi tábla már törölve, a korai boot-védelem érvényben maradt (fail-closed)"
+    die "the generated rules are not valid; the old table has already been deleted, the early boot protection remained in effect (fail-closed)"
   fi
 fi
-# A fájl idempotens: többszöri futtatás nem duplázza a szabályokat, és a
-# belépett kliensek halmazelemei megmaradnak (az interval-flagre váltás
-# egyszeri tábla-újraépítése után).
+# The file is idempotent: running it multiple times does not duplicate the rules, and
+# the set elements of logged-in clients are preserved (after the one-time table
+# rebuild for switching to the interval flag).
 if ! "$NFT_BIN" -f "$NFT_FILE"; then
   if (( recreate_table )); then
-    die "a szabályok betöltése sikertelen; a korai boot-védelem érvényben maradt (fail-closed)"
+    die "loading the rules failed; the early boot protection remained in effect (fail-closed)"
   fi
-  die "a szabályok betöltése sikertelen"
+  die "loading the rules failed"
 fi
 if "$NFT_BIN" list table inet hatarvedelem_boot >/dev/null 2>&1; then
   "$NFT_BIN" delete table inet hatarvedelem_boot \
-    || die "a korai boot-védelem eltávolítása nem sikerült"
+    || die "removing the early boot protection failed"
 fi
 for hv_set in allowed_v4 allowed_tcp allowed_udp allowed_icmp; do
   "$NFT_BIN" list set inet hatarvedelem "$hv_set" >/dev/null \
-    || die "a tűzfal betöltődött, de a(z) $hv_set halmaz nem található"
+    || die "the firewall was loaded, but set $hv_set cannot be found"
 done
 
 # ------------------------------------------------------------------ systemd
 
-note "Szolgáltatások telepítése"
+note "Installing services"
 TMP_FW="$(mktemp)"
 sed -e "s|__NFT_BIN__|$NFT_BIN|g" \
   "$SRC_DIR/deploy/hatarvedelem-firewall.service" > "$TMP_FW"
@@ -671,12 +669,12 @@ sed \
 install -m 0644 "$TMP_UNIT" "$SYSTEMD_UNIT"
 
 if grep -qE '__[A-Z0-9_]+__' "$SYSTEMD_UNIT" "$FIREWALL_UNIT"; then
-  die "kitöltetlen helyőrző maradt a systemd unitokban"
+  die "an unfilled placeholder remained in the systemd units"
 fi
 
-# A renderelt szabályok markjának és NFLOG-csoportjának egyeznie kell a
-# portál és a drop-log figyelő által használt értékkel. A unit sablon ezeket
-# nem tartalmazza, ezért drop-inként adjuk át őket.
+# The mark and NFLOG group of the rendered rules must match the values used by
+# the portal and the drop-log listener. The unit template does not contain these,
+# so we pass them as a drop-in.
 ENV_DROPIN_DIR="${SYSTEMD_DIR}/${SERVICE}.service.d"
 install -d -m 0755 "$ENV_DROPIN_DIR"
 cat > "$ENV_DROPIN_DIR/10-hatarvedelem-env.conf" <<EOF
@@ -691,28 +689,28 @@ systemctl enable "$FIREWALL_SERVICE" >/dev/null
 systemctl enable "$SERVICE" >/dev/null
 
 if ! systemctl restart "$FIREWALL_SERVICE"; then
-  warn "a tűzfal-szolgáltatás nem indult el; napló:"
+  warn "the firewall service did not start; log:"
   journalctl -u "$FIREWALL_SERVICE" -n 30 --no-pager || true
-  die "telepítés sikertelen"
+  die "installation failed"
 fi
 for hv_set in allowed_v4 allowed_tcp allowed_udp allowed_icmp; do
   "$NFT_BIN" list set inet hatarvedelem "$hv_set" >/dev/null \
-    || die "a(z) $hv_set halmaz nem található a szolgáltatás indulása után"
+    || die "set $hv_set cannot be found after the service started"
 done
 
 if ! systemctl restart "$SERVICE"; then
-  warn "a szolgáltatás nem indult el; napló:"
+  warn "the service did not start; log:"
   journalctl -u "$SERVICE" -n 30 --no-pager || true
-  die "telepítés sikertelen"
+  die "installation failed"
 fi
 sleep 1
 if ! systemctl is-active --quiet "$SERVICE"; then
-  warn "a szolgáltatás nem fut; napló:"
+  warn "the service is not running; log:"
   journalctl -u "$SERVICE" -n 30 --no-pager || true
-  die "telepítés sikertelen"
+  die "installation failed"
 fi
 
-# ------------------------------------------------------------------ első user
+# ------------------------------------------------------------------ first user
 
 if [[ $SKIP_USER -eq 0 ]]; then
   if ! "$PYTHON" - "$STATE_DIR/users.json" <<'PY' 2>/dev/null
@@ -725,11 +723,11 @@ except Exception:
 PY
   then
     if [[ $ASSUME_YES -eq 1 ]]; then
-      warn "nem hoztam létre felhasználót (--yes). Később:"
-      echo "  HV_USERS=$STATE_DIR/users.json $PYTHON $APP_DIR/server.py user add <név>"
+      warn "I did not create a user (--yes). Later:"
+      echo "  HV_USERS=$STATE_DIR/users.json $PYTHON $APP_DIR/server.py user add <name>"
     else
       echo
-      ADMIN_NAME="$(ask_value "Első felhasználó neve" "admin")"
+      ADMIN_NAME="$(ask_value "First user's name" "admin")"
       HV_USERS="$STATE_DIR/users.json" HV_STATE_DIR="$STATE_DIR" \
         "$PYTHON" "$APP_DIR/server.py" user add "$ADMIN_NAME"
       chown "$SERVICE_USER:$SERVICE_USER" "$STATE_DIR/users.json"
@@ -746,31 +744,31 @@ if command -v restorecon >/dev/null 2>&1; then
     >/dev/null 2>&1 || true
 fi
 
-# ------------------------------------------------------------------ összegzés
+# ------------------------------------------------------------------ summary
 
-note "Kész"
+note "Done"
 cat <<EOF
-  Rendszer:          $DISTRO_NAME ($PKG_MANAGER)
+  System:            $DISTRO_NAME ($PKG_MANAGER)
   Python:            $PYTHON
   nft:               $NFT_BIN
-  Portál:            $PORTAL_URL
-  Tűzfal állapot:    systemctl status $FIREWALL_SERVICE
-  Portál állapot:    systemctl status $SERVICE
-  Napló:             journalctl -u $SERVICE -f
-  Tűzfal napló:      journalctl -u $FIREWALL_SERVICE -f
-  Engedélyek:        $NFT_BIN list set inet hatarvedelem allowed_v4
-  Felhasználó:       HV_USERS=$STATE_DIR/users.json $PYTHON $APP_DIR/server.py user add <név>
+  Portal:            $PORTAL_URL
+  Firewall status:   systemctl status $FIREWALL_SERVICE
+  Portal status:     systemctl status $SERVICE
+  Log:               journalctl -u $SERVICE -f
+  Firewall log:      journalctl -u $FIREWALL_SERVICE -f
+  Permissions:       $NFT_BIN list set inet hatarvedelem allowed_v4
+  User:              HV_USERS=$STATE_DIR/users.json $PYTHON $APP_DIR/server.py user add <name>
 
-  A kliensek alapértelmezett átjárója: $GW_IP
-  A belépés előtt HTTPS nem megy át (csak a HTTP-t tudjuk a portálra
-  irányítani), ezért a portál címe: $PORTAL_URL
+  The clients' default gateway: $GW_IP
+  HTTPS does not pass before login (we can only direct HTTP to the portal),
+  therefore the portal address is: $PORTAL_URL
 
-  A portál újraindítása minden belépést töröl (tiszta indulás).
-  A tűzfal újratöltése (systemctl reload $FIREWALL_SERVICE) megőrzi a
-  belépett klienseket.
+  Restarting the portal deletes every login (clean start).
+  Reloading the firewall (systemctl reload $FIREWALL_SERVICE) preserves the
+  logged-in clients.
 EOF
 
 if [[ $DISABLED_OTHER_FIREWALL -eq 1 ]]; then
-  warn "Más tűzfalat is kikapcsoltunk. A bootkori maradék szabályok miatt"
-  warn "érdemes újraindítani a gépet, mielőtt éles használatba veszed."
+  warn "We also disabled other firewalls. Because of leftover boot-time rules,"
+  warn "it is worth rebooting the machine before putting it into production use."
 fi

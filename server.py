@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Dropjak — HTTP belépőkapu és adminisztrációs CLI.
+Dropjak — HTTP gateway and administrative CLI.
 
-Használat:
+Usage:
 
-  python3 server.py                     # a kapu futtatása
-  python3 server.py user add alice      # felhasználó létrehozása
-  python3 server.py user passwd alice   # jelszó csere
-  python3 server.py user del alice      # felhasználó törlése
-  python3 server.py user list           # felhasználók listája
-  python3 server.py check-firewall      # nftables halmaz ellenőrzése
+  python3 server.py                     # run the gateway
+  python3 server.py user add alice      # create a user
+  python3 server.py user passwd alice   # change password
+  python3 server.py user del alice      # delete a user
+  python3 server.py user list           # list users
+  python3 server.py check-firewall      # check the nftables set
 
-A tényleges tűzfalkezelés a gateway.py-ban van.
+The actual firewall handling is in gateway.py.
 """
 
 from __future__ import annotations
@@ -61,21 +61,21 @@ STATIC_FILES = {
     "ok.png": ("image/png", "public, max-age=3600"),
 }
 
-# A proxy-végpontokat csak a hoston futó Caddy hívhatja (a nyers socket
-# peer, nem az X-Forwarded-For alapján; lásd _peer_ip).
+# The proxy endpoints may only be called by Caddy running on the host (based
+# on the raw socket peer, not X-Forwarded-For; see _peer_ip).
 PROXY_LOOPBACK = ("127.0.0.1", "::1")
-# A többes naplószűrő elemei: az eseménykódok alakja (kisbetű, számjegy, _).
+# Components of the multi-log filter: the shape of event codes (lowercase, digit, _).
 AUDIT_EVENT_CODE_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 
-# A 80-as port átirányításának Hostja: hostnév/IPv4 vagy [IPv6], opcionális
-# porttal; minden más (CRLF, szóköz, userinfo, %-scope) érvénytelen.
+# Host of the port 80 redirect: hostname/IPv4 or [IPv6], with an optional
+# port; everything else (CRLF, space, userinfo, %-scope) is invalid.
 _REDIRECT_HOST_RE = re.compile(
     r"((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}"
     r"[a-z0-9])?|\[[0-9a-f:.]+\])(?::[0-9]{1,5})?"
 )
 
-# A proxy tiltó- és challenge-oldala közös váz; a {mező} helyőrzőket a
-# _proxy_page tölti ki. Látható szöveg nincs: az állapotot ikon jelzi.
+# Shared skeleton for the proxy block and challenge pages; _proxy_page fills
+# in the {field} placeholders. There is no visible text: an icon shows the state.
 PROXY_PAGE = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -96,7 +96,7 @@ a.login:focus-visible{outline:3px solid #9fc3ff;outline-offset:2px}
 """
 _PROXY_PAGE_FIELD = re.compile(r"\{(title|style|image|body)\}")
 
-# Belépés gomb: nyíl az ajtón át; a szöveget az aria-label adja.
+# Login button: arrow through the door; the text is provided by aria-label.
 PROXY_LOGIN_ICON = """<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
 <path d="M14 3H6a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h8"/>
 <path d="M10 12h11"/>
@@ -105,14 +105,14 @@ PROXY_LOGIN_ICON = """<svg viewBox="0 0 24 24" width="24" height="24" fill="none
 
 
 def _proxy_page(**values: str) -> bytes:
-    # Egyetlen menet: a beillesztett CSS/JS kapcsos zárójelei érintetlenek.
+    # Single pass: braces in the inserted CSS/JS are left untouched.
     return _PROXY_PAGE_FIELD.sub(
         lambda match: values.get(match.group(1), ""), PROXY_PAGE
     ).encode("utf-8")
 
 
-# A challenge-oldal a belépőoldal captcha-modulját használja: a stílusát és
-# az SHA-256 PoW-kódját az index.html-ből emeljük ki (egyszer, lustán).
+# The challenge page uses the login page's captcha module: its style and
+# SHA-256 PoW code are extracted from index.html (once, lazily).
 _CAPTCHA_CSS_LINE = re.compile(
     r'^\s*(?::root\[data-theme="dark"\] )?'
     r"(?:\.captcha|\.box|\.bar|\.spinner|#turnstile|@keyframes spin)\b.*$",
@@ -127,7 +127,7 @@ def _captcha_assets_from_index() -> tuple[str, str]:
         with open(os.path.join(BASE, "index.html"), encoding="utf-8") as fh:
             source = fh.read()
         style = source[source.index("<style>"):source.index("</style>")]
-        # Az oldal mindig sötét: a sötét téma szabályai feltétel nélküliek.
+        # The page is always dark: the dark theme rules are unconditional.
         css = "\n".join(
             m.group(0).strip().replace(':root[data-theme="dark"] ', "")
             for m in _CAPTCHA_CSS_LINE.finditer(style)
@@ -156,7 +156,7 @@ async function verify(captcha) {
     body: JSON.stringify({ captcha })
   });
   if (res.ok) {
-    // Ismeretlen aldomainről a gyökérdomainre visz; a bejegyzés újratölt.
+    // Redirects from an unknown subdomain to the root domain; the entry reloads.
     const data = await res.json().catch(() => ({}));
     if (data.redirect) location.href = data.redirect; else location.reload();
     return;
@@ -175,7 +175,7 @@ if (CFG.mode === 'turnstile') {
     sitekey: CFG.sitekey, theme: 'dark', language: 'en',
     callback: token => verify({ token }).catch(e => {
       show(e.shown ? e.message : 'Verification failed.');
-      try { window.turnstile.reset('#turnstile'); } catch (_) { /* nincs widget */ }
+      try { window.turnstile.reset('#turnstile'); } catch (_) { /* no widget */ }
     }),
     'error-callback': () => show('The captcha could not load. Reload the page.')
   });
@@ -197,7 +197,7 @@ if (CFG.mode === 'turnstile') {
   const box = document.getElementById('powbox');
   const text = document.getElementById('powtext');
   const bar = document.getElementById('powbar');
-  // A belépőoldal startPow() ciklusa, a megoldás után azonnali beküldéssel.
+  // The login page's startPow() loop, submitting immediately after solving.
   const start = async () => {
     if (box.dataset.state === 'busy' || box.dataset.state === 'done') return;
     box.dataset.state = 'busy';
@@ -206,10 +206,10 @@ if (CFG.mode === 'turnstile') {
     try {
       const res = await fetch('/__dropjak/challenge', { cache: 'no-store' });
       const ch = await res.json();
-      if (ch.mode !== 'pow') throw new Error('mód-váltás');
+      if (ch.mode !== 'pow') throw new Error('mode changed');
       const difficulty = Number(ch.difficulty);
       if (!Number.isInteger(difficulty) || difficulty < 1 || difficulty > 6) {
-        throw new Error('érvénytelen nehézség');
+        throw new Error('invalid difficulty');
       }
       const saltBytes = new TextEncoder().encode(ch.salt);
       const expected = Math.pow(16, difficulty) / 2;
@@ -224,7 +224,7 @@ if (CFG.mode === 'turnstile') {
         const done = found >= 0;
         bar.style.width = (done ? 100 : Math.min(96, (n / expected) * 100)).toFixed(1) + '%';
         if (done) break;
-        if (n > limit) throw new Error('túl hosszú számítás');
+        if (n > limit) throw new Error('computation took too long');
         await new Promise(r => setTimeout(r, 0));
       }
       box.dataset.state = 'done';
@@ -278,9 +278,9 @@ def _proxy_challenge_page() -> bytes:
     )
 
 
-# A proxy challenge belépője: __Host- süti a bejegyzés hostján, értéke
-# base64url(host|ip vagy *|kiadva ms|lejár s).HMAC-SHA256. A kulcs folyamatonként
-# új (mint a PoW-kulcs): újraindítás után minden belépő érvénytelen.
+# Proxy challenge pass: a __Host- cookie on the entry host, whose value is
+# base64url(host|ip or *|issued ms|expires s).HMAC-SHA256. The key is new per
+# process (like the PoW key): every pass is invalid after a restart.
 PROXY_PASS_COOKIE = "__Host-dropjak_pass"
 PROXY_PASS_TTL = 24 * 3600
 _PROXY_PASS_KEY = secrets.token_bytes(32)
@@ -291,9 +291,9 @@ _CLI_AGENT_RE = re.compile(
 )
 
 
-# A "burst" feltétel (sok frissítés / spam): ugyanarról az IP-ről ugyanarra a
-# hostra ennyi oldalmegnyitás ennyi másodpercen belül. Folyamatonként a
-# memóriában (mint a belépő kulcsa), újraindításkor törlődik.
+# The "burst" condition (many refreshes / spam): this many page loads from the
+# same IP to the same host within this many seconds. In memory per process
+# (like the pass key), cleared on restart.
 PROXY_BURST_LIMIT = 10
 PROXY_BURST_WINDOW = 30
 PROXY_BURST_MAX_KEYS = 10000
@@ -302,10 +302,10 @@ _PROXY_BURST_LOCK = threading.Lock()
 
 
 def _proxy_burst(ip: str, host: str, now: float, count: bool) -> float:
-    """A legutóbbi spam-észlelés ideje az IP+hostra (0: nem volt).
+    """Time of the most recent spam detection for the IP+host (0: none).
 
-    ``count``: ez a kérés oldalmegnyitás, beleszámít. A határ elérésekor az
-    észlelés ideje frissül és a számláló nullázódik.
+    ``count``: this request is a page load and counts. On reaching the limit,
+    the detection time is refreshed and the counter is reset.
     """
     key = (ip, host)
     with _PROXY_BURST_LOCK:
@@ -320,30 +320,30 @@ def _proxy_burst(ip: str, host: str, now: float, count: bool) -> float:
                         if not f and (not h or now - h[-1] >= PROXY_BURST_WINDOW)]:
                 del _PROXY_BURST[old]
             if len(_PROXY_BURST) >= PROXY_BURST_MAX_KEYS:
-                # shortcut: tele táblánál minden észlelés elvész; LRU kell, ha
-                # a valós forgalom eléri a 10 000 IP+host párt.
+                # shortcut: on a full table every detection is lost; LRU is
+                # needed if real traffic reaches 10,000 IP+host pairs.
                 _PROXY_BURST.clear()
         _PROXY_BURST[key] = (hits, flagged)
         return flagged
 
 
 def _portal_parent_root(portal: str, roots) -> str:
-    """A Dropjak-cím gyökérdomainje; a mentés ezt garantálja, de futásidejű
-    állapotból is biztonságosan ""-t ad, ha nincs."""
+    """Root domain of the Dropjak address; saving guarantees it, but it also
+    safely returns "" from runtime state when there is none."""
     return next((root for root in roots if portal.endswith("." + root)), "")
 
 
 def _tunnel_domain_target(settings: dict, host: str):
-    """Egy domaines alagút-szolgáltatás szintetikus proxy-célja és gyökere.
+    """Synthetic proxy target and root for a domain-mode tunnel service.
 
-    Csak bekapcsolt ügynök bekapcsolt szolgáltatása oldódik fel. A Caddy a
-    ``10.77.0.2:<belső port>`` címre továbbít; az ügynök a wg0 felől DNAT-ol
-    a szolgáltatás konténerére. Nincs WAN-port és nincs WAN-DNAT.
+    Only an enabled service of an enabled agent is resolved. Caddy forwards to
+    ``10.77.0.2:<internal port>``; the agent DNATs from wg0 to the service's
+    container. There is no WAN port and no WAN DNAT.
     """
     if not host:
         return None
     roots = settings.get("proxy_domains", [])
-    # A leghosszabb illeszkedő gyökér nyer (a mentés ezt garantálja).
+    # The longest matching root wins (saving guarantees this).
     root = max(
         (item for item in roots if host.endswith("." + item)),
         key=len, default="",
@@ -395,15 +395,15 @@ def _proxy_pass_sign(payload: bytes) -> bytes:
 
 
 def _proxy_pass_value(host: str, ip: str, issued: float, expires: int) -> str:
-    # Ezredmásodperc, lefelé kerekítve: a belépő sosem tűnik későbbinek.
+    # Milliseconds, rounded down: the pass never appears to be later.
     payload = f"{host}|{ip or '*'}|{int(issued * 1000)}|{expires}".encode()
     encoded = base64.urlsafe_b64encode(payload).rstrip(b"=").decode()
     return f"{encoded}.{_proxy_pass_sign(payload).decode()}"
 
 
 def _proxy_pass_issued(value: str, host: str, ip: str, now: float) -> float:
-    """Az érvényes belépő kiadási ideje; 0, ha hiányzik, hamis, lejárt vagy
-    más hosté. Üres ``ip``: a belépő IP-től függetlenül érvényes."""
+    """Issue time of a valid pass; 0 if missing, false, expired or for
+    another host. Empty ``ip``: the pass is valid regardless of IP."""
     encoded, _, signature = value.partition(".")
     try:
         payload = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
@@ -421,15 +421,15 @@ def _proxy_pass_issued(value: str, host: str, ip: str, now: float) -> float:
     return issued_at
 
 
-# Egy munkamenet legfeljebb ennyi szabályt választhat egyszerre. A korlát
-# az audit- és a válaszméretet is kordában tartja.
+# A session may select at most this many rules at once. The limit also keeps
+# the audit and response sizes in check.
 MAX_SESSION_RULES = 16
 
 
 def _log_fail2ban_error(
     ip: str, exc: Exception, audit=None, operation: str = "record"
 ) -> None:
-    print(f"[{ip}] fail2ban: a tiltás nem sikerült: {exc}", flush=True)
+    print(f"[{ip}] fail2ban: blocking failed: {exc}", flush=True)
     if audit is None:
         return
     try:
@@ -439,34 +439,35 @@ def _log_fail2ban_error(
             operation=operation,
             reason=str(exc),
         )
-    except Exception as log_exc:  # a naplózás ne blokkolja a belépést
-        print(f"[napló] fail2ban_error írása nem sikerült: {log_exc}", flush=True)
+    except Exception as log_exc:  # logging must not block login
+        print(f"[log] failed to write fail2ban_error: {log_exc}", flush=True)
 
 
-# --------------------------------------------------- kétfaktoros belépőjegyek
+# --------------------------------------------------- two-factor login tickets
 
 LOGIN_TICKET_TTL = 300
 LOGIN_TICKET_MAX_ATTEMPTS = 5
-# A jegy a felhasználói rekord pillanatképéhez kötődik. A só folyamatonként
-# új, így a memóriában tárolt ujjlenyomat külsőleg nem visszafejthető.
+# The ticket is bound to a snapshot of the user record. The salt is new per
+# process, so the fingerprint stored in memory cannot be reversed externally.
 _TICKET_FP_SALT = secrets.token_bytes(32)
 
 
 def _ticket_hash(token: str) -> str:
-    """A jegy nem visszafejthető, 12 karakteres hivatkozása a naplóhoz.
+    """Non-reversible, 12-character reference to the ticket for the log.
 
-    A nyers jegy (és ezzel a belépés folytatásához szükséges titok) soha nem
-    kerülhet az auditnaplóba; csak ez a SHA-256-kivonat első 12 karaktere.
+    The raw ticket (and with it the secret needed to continue login) must
+    never reach the audit log; only the first 12 characters of this SHA-256
+    digest do.
     """
     return hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
 
 
 @dataclass
 class LoginTicket:
-    """Rövid életű, egyszer használatos jegy a jelszó utáni 2FA-lépéshez."""
+    """Short-lived, single-use ticket for the 2FA step after the password."""
 
     token: str
-    purpose: str  # "verify" vagy "enroll"
+    purpose: str  # "verify" or "enroll"
     username: str
     ip: str
     fingerprint: str
@@ -476,11 +477,11 @@ class LoginTicket:
 
 
 class LoginTicketStore:
-    """Memóriabeli jégytár szálbiztos, atomikus műveletekkel.
+    """In-memory ticket store with thread-safe, atomic operations.
 
-    A jegyet csak ugyanaz az IP-cím használhatja, mint amelyik kiváltotta.
-    A sikertelen kódpróbákat a jegyhez számoljuk; a limit elérésével a jegy
-    megszűnik, így a kliensnek elölről kell kezdenie a belépést.
+    Only the same IP address that requested the ticket may use it.
+    Failed code attempts are counted against the ticket; on reaching the
+    limit the ticket ceases to exist, so the client must restart login.
     """
 
     def __init__(
@@ -495,9 +496,9 @@ class LoginTicketStore:
         self._lock = threading.Lock()
         self._tickets: dict[str, LoginTicket] = {}
         self.audit = None
-        # A lejárt vagy elhasznált jegyek elutasítási okát rövid ideig
-        # megőrizzük, hogy egy későbbi kérés pontos indokot kaphasson. Ez
-        # kizárólag memóriabeli adat; a token soha nem kerül a naplóba.
+        # The rejection reason of expired or used tickets is kept briefly so
+        # a later request can receive the exact reason. This is in-memory data
+        # only; the token never reaches the log.
         self._tombstones: dict[str, tuple[str, float]] = {}
         self._tombstone_grace = max(60.0, float(self._ttl))
         self._tombstone_limit = 4096
@@ -507,17 +508,17 @@ class LoginTicketStore:
         return self._ttl
 
     def set_audit(self, audit) -> None:
-        """Az auditnapló utólagos bekötése (az induló folyamatban)."""
+        """Late binding of the audit log (in the starting process)."""
         self.audit = audit
 
     def _write_audit(self, event: str, **fields) -> None:
-        """Nem kötelező naplóbejegyzés; hiba esetén sem blokkol."""
+        """Optional log entry; it does not block even on error."""
         if self.audit is None:
             return
         try:
             self.audit.write(event, **fields)
         except Exception as exc:
-            print(f"[napló] {event} írása nem sikerült: {exc}", flush=True)
+            print(f"[log] failed to write {event}: {exc}", flush=True)
 
     def _tombstone_locked(self, token: str, reason: str, now: float) -> None:
         self._tombstones[token] = (reason, now + self._tombstone_grace)
@@ -552,8 +553,8 @@ class LoginTicketStore:
             del self._tickets[token]
             self._tombstone_locked(token, "expired", now)
         self._prune_tombstones_locked(now)
-        # A naplóírás a tár zárja alatt történik; az AuditLog soha nem nyúl
-        # vissza a jégytárhoz, így nem alakulhat ki holtpont.
+        # Log writing happens under the store lock; AuditLog never reaches
+        # back into the ticket store, so no deadlock can occur.
         for token, ticket in expired:
             self._write_audit(
                 "totp_ticket_expired",
@@ -595,7 +596,7 @@ class LoginTicketStore:
         return token
 
     def peek(self, token: str, ip: str) -> LoginTicket | None:
-        """A jegy olvasása fogyasztás nélkül; érvénytelen esetén None."""
+        """Read the ticket without consuming it; None if invalid."""
         with self._lock:
             now = self._clock()
             self._purge_locked(now)
@@ -610,11 +611,11 @@ class LoginTicketStore:
             return ticket
 
     def inspect(self, token: str, ip: str) -> tuple[LoginTicket | None, str]:
-        """Nem fogyasztó ellenőrzés a pontos elutasítási okkal.
+        """Non-consuming check with the exact rejection reason.
 
-        Az érvényes jegyet és üres okot ad vissza; egyébként (None, ok),
-        ahol az ok a naplózáshoz használható: ``unknown``, ``expired``,
-        ``already_consumed``, ``too_many_attempts``, ``ip_mismatch`` vagy
+        Returns the valid ticket and an empty reason; otherwise (None, reason),
+        where the reason is suitable for logging: ``unknown``, ``expired``,
+        ``already_consumed``, ``too_many_attempts``, ``ip_mismatch`` or
         ``user_state_changed``.
         """
         if not token:
@@ -634,7 +635,7 @@ class LoginTicketStore:
             return ticket, ""
 
     def consume(self, token: str, ip: str) -> LoginTicket | None:
-        """Atomikus ellenőrzés és törlés: egy jegy csak egyszer használható."""
+        """Atomic check and delete: a ticket can be used only once."""
         with self._lock:
             now = self._clock()
             self._purge_locked(now)
@@ -654,11 +655,11 @@ class LoginTicketStore:
     def fail_with_status(
         self, token: str, ip: str
     ) -> tuple[int, bool, int, bool]:
-        """Sikertelen próba rögzítése részletes állapottal.
+        """Record a failed attempt with detailed status.
 
-        Visszatérés: ``(hátralévő, most_záródott_le, próbák, létezett)``.
-        A ``fail()`` régi, egész számos visszatérési értéke változatlanul
-        megmarad a meglévő hívók és tesztek számára.
+        Returns: ``(remaining, just_closed, attempts, existed)``.
+        The old integer return value of ``fail()`` remains unchanged for
+        existing callers and tests.
         """
         with self._lock:
             now = self._clock()
@@ -679,14 +680,14 @@ class LoginTicketStore:
             )
 
     def fail(self, token: str, ip: str) -> int:
-        """Sikertelen próba rögzítése; a hátralévő próbák száma (0 = nincs)."""
+        """Record a failed attempt; the number of remaining attempts (0 = none)."""
         return self.fail_with_status(token, ip)[0]
 
     def revoke_user(self, username: str, reason: str = "") -> int:
-        """A felhasználó összes függő jegyének törlése.
+        """Delete all pending tickets of the user.
 
-        Nem üres ``reason`` esetén összesített auditbejegyzés is készül
-        (admin elutasítás, letiltás, törlés vagy 2FA-reset).
+        With a non-empty ``reason``, an aggregate audit entry is also created
+        (admin rejection, disabling, deletion or 2FA reset).
         """
         with self._lock:
             now = self._clock()
@@ -710,7 +711,7 @@ class LoginTicketStore:
         return count
 
     def revoke_all(self, reason: str = "") -> int:
-        """Minden jegy eldobása; nem üres ok esetén auditbejegyzéssel."""
+        """Discard every ticket; with a non-empty reason, also log an audit entry."""
         with self._lock:
             count = len(self._tickets)
             self._tickets.clear()
@@ -730,7 +731,7 @@ LOGIN_TICKETS = LoginTicketStore()
 
 
 def _record_fingerprint(record: gateway.UserRecord) -> str:
-    """A jegyhez kötött felhasználói pillanatkép ujjlenyomata."""
+    """Fingerprint of the user snapshot bound to the ticket."""
     digest = hashlib.sha256()
     digest.update(_TICKET_FP_SALT)
     digest.update(record.digest)
@@ -742,47 +743,47 @@ def _record_fingerprint(record: gateway.UserRecord) -> str:
 
 
 def _access_rule_ids(data: dict) -> tuple[list[str], str]:
-    """A /api/access kérés szabályválasztásának értelmezése.
+    """Interpret the rule selection of the /api/access request.
 
-    Visszatérés: (szabály-azonosítók, hibaüzenet). Az új ``rules`` lista
-    elsőbbséget élvez a régi ``rule`` mezővel szemben. Az ismétlődő
-    azonosítókat az első előfordulás sorrendjében vonjuk össze, így a
-    hosszkorlát valóban az egyedi szabályokat számolja.
+    Returns: (rule IDs, error message). The new ``rules`` list takes
+    precedence over the old ``rule`` field. Duplicate IDs are merged in
+    order of first occurrence, so the length limit really counts unique
+    rules.
     """
     if "rules" in data:
         raw = data.get("rules")
         if not isinstance(raw, list):
-            return [], "a szabályok listája kötelező"
+            return [], "the rules list is required"
         selected: list[str] = []
         seen: set[str] = set()
         for item in raw:
             if not isinstance(item, str) or not item.strip():
-                return [], "érvénytelen szabálylista"
+                return [], "invalid rule list"
             rule_id = item.strip()
             if rule_id in seen:
                 continue
             seen.add(rule_id)
             selected.append(rule_id)
         if not selected:
-            return [], "válassz legalább egy szabályt"
+            return [], "select at least one rule"
         if len(selected) > MAX_SESSION_RULES:
             return [], (
-                f"egyszerre legfeljebb {MAX_SESSION_RULES} szabály "
-                "választható"
+                f"at most {MAX_SESSION_RULES} rules can be "
+                "selected at once"
             )
         return selected, ""
     rule_id = data.get("rule")
     if not isinstance(rule_id, str):
-        return [], "hiányzó szabály vagy időtartam"
+        return [], "missing rule or duration"
     return [rule_id], ""
 
 
-# ------------------------------------------------------------ konfigurációs csomag
+# ------------------------------------------------------------ configuration bundle
 
 CONFIG_FORMAT = "dropjak-config"
-# 2: a settings szakasz tunnels (WireGuard-alagút) részt is tartalmaz. Az
-# 1. verziójú csomagokat továbbra is elfogadjuk: a hiányzó tunnels szakaszt
-# alapértelmezéssel töltjük ki (nincs ügynök, a WireGuard port zárva).
+# 2: the settings section also contains the tunnels (WireGuard tunnel) part.
+# Version 1 bundles are still accepted: the missing tunnels section is filled
+# with defaults (no agents, the WireGuard port closed).
 CONFIG_FORMAT_VERSION = 2
 CONFIG_FORMAT_MIN_VERSION = 1
 CONFIG_MAX_BYTES = 8 * 1024 * 1024
@@ -796,21 +797,21 @@ _FAIL2BAN_CONFIG_KEYS = frozenset({
 
 
 class ConfigBundleError(ValueError):
-    """A konfigurációs csomag érvénytelen vagy nem támogatott."""
+    """The configuration bundle is invalid or unsupported."""
 
 
 def _fail2ban_config(snapshot: dict) -> dict:
-    """Csak a beállítások, tiltások és számlálók nélkül."""
+    """Only the settings, without blocks and counters."""
     return {key: snapshot[key] for key in _FAIL2BAN_CONFIG_KEYS}
 
 
 def _config_bundle(gw) -> dict:
-    """A teljes, exportálható konfiguráció (naplók és futásidejű állapot nélkül)."""
+    """The full exportable configuration (without logs and runtime state)."""
     try:
         settings = gw.settings.snapshot()
         error = settings.pop("error", "")
         if error:
-            raise ConfigBundleError(f"a beállításfájl hibás: {error}")
+            raise ConfigBundleError(f"the settings file is invalid: {error}")
         settings = settings_store.validate_state(settings)
         sections = {
             "settings": settings,
@@ -842,40 +843,40 @@ def _config_bundle(gw) -> dict:
 
 
 def _validate_config_bundle(gw, bundle) -> dict:
-    """A teljes csomag ellenőrzése írás nélkül; a normalizált szakaszokat adja."""
+    """Validate the whole bundle without writing; returns the normalized sections."""
     if not isinstance(bundle, dict):
-        raise ConfigBundleError("a csomag JSON-objektum kell")
+        raise ConfigBundleError("the bundle must be a JSON object")
     if bundle.get("format") != CONFIG_FORMAT:
-        raise ConfigBundleError("ez nem Dropjak konfigurációs csomag")
+        raise ConfigBundleError("this is not a Dropjak configuration bundle")
     version = bundle.get("format_version")
     if isinstance(version, bool) or not isinstance(version, int) \
             or not CONFIG_FORMAT_MIN_VERSION <= version <= CONFIG_FORMAT_VERSION:
-        # A nyers értéket szándékosan nem idézzük vissza: a csomag tartalma
-        # ne szivárogjon a hibaüzenetbe.
+        # The raw value is deliberately not echoed back: the bundle content
+        # must not leak into the error message.
         raise ConfigBundleError(
-            "nem támogatott formátumverzió; ez a portál az "
-            f"{CONFIG_FORMAT_MIN_VERSION}–{CONFIG_FORMAT_VERSION}. verziót "
-            "ismeri (az 1-esnél a hiányzó tunnels szakasz alapértelmezéssel "
-            "töltődik)"
+            "unsupported format version; this portal supports versions "
+            f"{CONFIG_FORMAT_MIN_VERSION}-{CONFIG_FORMAT_VERSION} "
+            "(for version 1 the missing tunnels section is filled with "
+            "defaults)"
         )
     raw_sections = bundle.get("sections")
     if not isinstance(raw_sections, dict):
-        raise ConfigBundleError("a sections mező JSON-objektum kell")
+        raise ConfigBundleError("the sections field must be a JSON object")
     missing = [name for name in CONFIG_SECTIONS if name not in raw_sections]
     if missing:
         raise ConfigBundleError(
-            "hiányzó szakasz(ok): " + ", ".join(missing)
+            "missing section(s): " + ", ".join(missing)
         )
     unknown = sorted(set(raw_sections) - set(CONFIG_SECTIONS))
     if unknown:
         raise ConfigBundleError(
-            "ismeretlen szakasz(ok): " + ", ".join(unknown)
+            "unknown section(s): " + ", ".join(unknown)
         )
     raw_fail2ban = raw_sections["fail2ban"]
     if not isinstance(raw_fail2ban, dict) \
             or set(raw_fail2ban) != _FAIL2BAN_CONFIG_KEYS:
         raise ConfigBundleError(
-            "a fail2ban szakasz hiányos vagy ismeretlen mezőt tartalmaz"
+            "the fail2ban section is incomplete or contains an unknown field"
         )
     raw_settings = raw_sections["settings"]
     if version == 1 and isinstance(raw_settings, dict) \
@@ -885,7 +886,7 @@ def _validate_config_bundle(gw, bundle) -> dict:
     elif version >= 2 and isinstance(raw_settings, dict) \
             and "tunnels" not in raw_settings:
         raise ConfigBundleError(
-            "a(z) 2. verziójú csomag beállításaiból hiányzik a tunnels szakasz"
+            "the settings of a version 2 bundle are missing the tunnels section"
         )
     try:
         settings = settings_store.validate_state(raw_settings)
@@ -901,14 +902,14 @@ def _validate_config_bundle(gw, bundle) -> dict:
     ) as exc:
         raise ConfigBundleError(str(exc)) from exc
 
-    # A tanúsítványok külön, mert a CertStore csak a saját hibáját dobja.
+    # Certificates are separate because CertStore throws only its own error.
     raw_certs = raw_sections["certs"]
     if not isinstance(raw_certs, dict):
-        raise ConfigBundleError("a certs szakasz JSON-objektum kell")
+        raise ConfigBundleError("the certs section must be a JSON object")
     checked_certs: dict[str, dict] = {}
     for raw_root, item in raw_certs.items():
         if not isinstance(item, dict):
-            raise ConfigBundleError(f"{raw_root}: hibás tanúsítványbejegyzés")
+            raise ConfigBundleError(f"{raw_root}: invalid certificate entry")
         try:
             meta = gw.certs.validate_import(
                 raw_root, item.get("cert"), item.get("key")
@@ -916,10 +917,10 @@ def _validate_config_bundle(gw, bundle) -> dict:
         except settings_store.SettingsError as exc:
             raise ConfigBundleError(f"{raw_root}: {exc}") from exc
         if not isinstance(meta, dict):
-            raise ConfigBundleError(f"{raw_root}: hibás tanúsítvány")
+            raise ConfigBundleError(f"{raw_root}: invalid certificate")
         root = raw_root.strip().lower()
         if root in checked_certs:
-            raise ConfigBundleError(f"duplikált gyökérdomain: {root}")
+            raise ConfigBundleError(f"duplicate root domain: {root}")
         checked_certs[root] = {
             "cert": item.get("cert"), "key": item.get("key"),
         }
@@ -928,8 +929,8 @@ def _validate_config_bundle(gw, bundle) -> dict:
     except fail2ban_mod.Fail2banError as exc:
         raise ConfigBundleError(f"fail2ban: {exc}") from exc
 
-    # Hivatkozási integritás: szabály -> proxy host, felhasználó -> szabály,
-    # csoport -> szabály/tag, tanúsítvány -> gyökérdomain.
+    # Referential integrity: rule -> proxy host, user -> rule,
+    # group -> rule/tag, certificate -> root domain.
     route_hosts = {
         settings_store.route_host(route)
         for route in settings["proxy_routes"]
@@ -938,7 +939,7 @@ def _validate_config_bundle(gw, bundle) -> dict:
         missing_hosts = [name for name in rule.domains if name not in route_hosts]
         if missing_hosts:
             raise ConfigBundleError(
-                f"{rule.id}: nincs ilyen proxy útvonal: "
+                f"{rule.id}: no such proxy route: "
                 + ", ".join(missing_hosts)
             )
     for name, item in users.items():
@@ -947,23 +948,23 @@ def _validate_config_bundle(gw, bundle) -> dict:
         ]
         if missing_rules:
             raise ConfigBundleError(
-                f"{name}: ismeretlen szabály: " + ", ".join(missing_rules)
+                f"{name}: unknown rule: " + ", ".join(missing_rules)
             )
     for group in groups.values():
         missing_rules = [rid for rid in group.rules if rid not in rules]
         if missing_rules:
             raise ConfigBundleError(
-                f"{group.id}: ismeretlen szabály: " + ", ".join(missing_rules)
+                f"{group.id}: unknown rule: " + ", ".join(missing_rules)
             )
         missing_users = [name for name in group.members if name not in users]
         if missing_users:
             raise ConfigBundleError(
-                f"{group.id}: ismeretlen tag: " + ", ".join(missing_users)
+                f"{group.id}: unknown member: " + ", ".join(missing_users)
             )
     for root in checked_certs:
         if root not in settings["proxy_domains"]:
             raise ConfigBundleError(
-                f"{root}: a tanúsítványhoz nincs ilyen gyökérdomain"
+                f"{root}: no such root domain for the certificate"
             )
     if not any(
         item["role"] == gateway.ROLE_ADMIN
@@ -971,7 +972,7 @@ def _validate_config_bundle(gw, bundle) -> dict:
         for item in users.values()
     ):
         raise ConfigBundleError(
-            "a csomag nem tartalmaz legalább egy engedélyezett admin fiókot"
+            "the bundle does not contain at least one enabled admin account"
         )
     return {
         "settings": settings,
@@ -984,17 +985,17 @@ def _validate_config_bundle(gw, bundle) -> dict:
 
 
 def _apply_config_bundle(gw, bundle: dict) -> None:
-    """A már ellenőrzött szakaszok írása a meglévő tároló-utakon."""
+    """Write the already validated sections through the existing store paths."""
     gw.users.replace_all(bundle["users"])
     gw.rules.replace_all(bundle["rules"])
     gw.groups.replace_all(bundle["groups"])
     gw.apply_settings(bundle["settings"])
-    # A szabályok a beállítások előtt íródtak, ezért a csomagban érkező új
-    # alagút-szolgáltatásokra hivatkozó szabályok feloldott portjai még
-    # üresek lehetnek. A beállítások telepítése után azonnal újraszámoljuk
-    # őket (és a függő gyűjtőket), hogy az importált szabály ne csak
-    # újraindítás után legyen használható. A visszaszámolt portok nem
-    # perzisztáltak, ezért nincs szükség további fájlírásra.
+    # Rules were written before settings, so resolved ports of rules that
+    # refer to new tunnel services arriving in the bundle may still be empty.
+    # Right after installing the settings we recalculate them (and the
+    # dependent collections) so the imported rule is usable without a restart.
+    # The recalculated ports are not persisted, so no further file writes are
+    # needed.
     refreshed = gw.rules.reflect_services()
     if refreshed:
         gw.sessions.revoke_rules(refreshed)
@@ -1004,7 +1005,7 @@ def _apply_config_bundle(gw, bundle: dict) -> None:
 
 
 def _config_counts(bundle: dict) -> dict:
-    """Csak darabszámok az auditba (soha nem tartalom vagy titok)."""
+    """Only counts for the audit (never content or secrets)."""
     settings = bundle["settings"]
     return {
         "users": len(bundle["users"]),
@@ -1036,9 +1037,9 @@ _TUNNEL_ACTIONS = frozenset({
     "tunnel_service_test",
 })
 _TUNNEL_SYNC_MIN_SECONDS = 5.0
-# Az elérhetőségi teszt felső korlátai: a leképezések párhuzamosan futnak,
-# így egy halott cél nem sokszorozza meg a várakozást. A TCP 2 s alatt
-# eldől, az UDP-próba legfeljebb 0,6 s-ot vár válaszra.
+# Upper limits of the reachability test: mappings run in parallel, so a dead
+# target does not multiply the wait. TCP settles within 2 s, the UDP probe
+# waits at most 0.6 s for a reply.
 _TUNNEL_TEST_MAX_MAPPINGS = 4
 _TUNNEL_TEST_TCP_TIMEOUT = 2.0
 _TUNNEL_TEST_UDP_WAIT = 0.6
@@ -1046,7 +1047,7 @@ _TUNNEL_TEST_DEADLINE = 6.0
 
 
 def _tunnel_agent_bundle_dir() -> str:
-    """Az ügynök-csomag forrásfájljai (Docker-layout: ./tunnel-agent)."""
+    """Source files of the agent bundle (Docker layout: ./tunnel-agent)."""
     base = os.path.dirname(os.path.abspath(__file__))
     for path in (os.path.join(base, "tunnel-agent"),
                  os.path.join(base, "deploy", "tunnel-agent")):
@@ -1057,7 +1058,7 @@ def _tunnel_agent_bundle_dir() -> str:
 
 def _tar_member(tar: tarfile.TarFile, name: str, data: bytes,
                 mode: int) -> None:
-    """Egy fájl a memóriabeli tar.gz csomagban (nincs temp fájl)."""
+    """One file in the in-memory tar.gz bundle (no temp file)."""
     info = tarfile.TarInfo(name)
     info.size = len(data)
     info.mode = mode
@@ -1066,7 +1067,7 @@ def _tar_member(tar: tarfile.TarFile, name: str, data: bytes,
 
 
 def _tunnel_service_public(service: dict) -> dict:
-    """Egy szolgáltatás admin nézete a származtatott portokkal."""
+    """Admin view of one service with the derived ports."""
     try:
         ports = settings_store.tunnel_service_ports(service)
     except settings_store.SettingsError:
@@ -1092,7 +1093,7 @@ def _tunnel_service_public(service: dict) -> dict:
 
 
 def _tunnels_public(gw, settings: dict) -> dict:
-    """Az alagút-ügynökök admin nézete: kulcs és token nélkül."""
+    """Admin view of tunnel agents: without key and token."""
     tunnels = settings.get("tunnels")
     if not isinstance(tunnels, dict):
         tunnels = settings_store.default_tunnels()
@@ -1101,9 +1102,9 @@ def _tunnels_public(gw, settings: dict) -> dict:
     except Exception:
         status = {"error": "", "agents": []}
     rows = {row.get("id"): row for row in status.get("agents", [])}
-    # Az ügynök utolsó sikeres konfiguráció-szinkronjának kora másodpercben.
-    # A szinkronidők monotonic órával készülnek; a pillanatkép a zár alatt
-    # készül, hogy a frissítés ne olvasson félkész állapotot.
+    # Age in seconds of the agent's last successful configuration sync.
+    # Sync times use the monotonic clock; the snapshot is taken under the
+    # lock so the update does not read a half-finished state.
     now = time.monotonic()
     lock = getattr(gw, "tunnel_sync_lock", None)
     sync_times = getattr(gw, "tunnel_sync_times", {}) or {}
@@ -1144,27 +1145,27 @@ def _tunnels_public(gw, settings: dict) -> dict:
 
 
 def _tunnel_error_field(error: str, fallback: str = "") -> str:
-    """A validációs hiba szövegéből a mező neve (a felület jelöléséhez)."""
+    """Field name from the validation error text (for marking in the UI)."""
     for needle, field in (
-        ("hallgató port", "listen_port"),
-        ("belső port", "tunnel_port"),
-        ("célport", "target"),
-        ("célhost", "target_host"),
-        ("portleképezés", "mappings"),
-        ("leképezés", "mappings"),
+        ("listen port", "listen_port"),
+        ("internal port", "tunnel_port"),
+        ("target port", "target"),
+        ("target host", "target_host"),
+        ("port mapping", "mappings"),
+        ("mapping", "mappings"),
         ("mappings", "mappings"),
-        ("cél", "target"),
-        ("protokoll", "proto"),
-        ("ügynökcím", "address"),
-        ("ügynök-azonosító", "id"),
-        ("ügynök", "agents"),
+        ("target", "target"),
+        ("protocol", "proto"),
+        ("agent address", "address"),
+        ("agent ID", "id"),
+        ("agent", "agents"),
         ("token", "token"),
-        ("privát kulcs", "server_private_key"),
-        ("megosztott kulcs", "preshared_key"),
-        ("WireGuard-kulcs", "server_private_key"),
+        ("private key", "server_private_key"),
+        ("preshared key", "preshared_key"),
+        ("WireGuard key", "server_private_key"),
         ("WireGuard port", "port"),
-        ("végpont", "endpoint"),
-        ("címke", "label"),
+        ("endpoint", "endpoint"),
+        ("label", "label"),
     ):
         if needle in error:
             return field
@@ -1177,11 +1178,11 @@ def _effective_site_name(gw) -> str:
 
 
 def _config_state_nonempty(gw) -> bool:
-    """Van-e olyan állapot, amit import előtt gépelt névvel kell védeni?
+    """Is there state that must be protected by a typed name before import?
 
-    A .env-ből létrehozott admin nem számít felhasználói állapotnak: friss
-    telepítésnél ez az egyetlen fiók, és az újraindulás úgyis újra létrehozza.
-    A kezdő (seedelt) szabályok szintén nem számítanak.
+    The admin created from .env does not count as user state: on a fresh
+    installation this is the only account, and a restart recreates it anyway.
+    The initial (seeded) rules also do not count.
     """
     try:
         for name in gw.users.names():
@@ -1194,7 +1195,7 @@ def _config_state_nonempty(gw) -> bool:
             return True
     except (gateway.UserStoreError, gateway.GroupStoreError,
             settings_store.SettingsError, OSError):
-        # Ha nem tudjuk biztosan üresnek látni, kérjünk megerősítést.
+        # If we cannot confidently see it as empty, ask for confirmation.
         return True
     snapshot = gw.settings.snapshot()
     if snapshot.get("error"):
@@ -1228,7 +1229,7 @@ def _config_backup_path(gw) -> str:
 
 
 def _write_private_json(path: str, data: dict) -> None:
-    """A csomag mentése 0600-mal, atomikusan (a könyvtárat nem hozzuk létre)."""
+    """Save the bundle atomically with mode 0600 (the directory is not created)."""
     directory = os.path.dirname(path) or "."
     fd, tmp = tempfile.mkstemp(
         dir=directory, prefix=".config-backup-", suffix=".tmp"
@@ -1250,9 +1251,9 @@ def _write_private_json(path: str, data: dict) -> None:
 
 
 def _request_service_restart(delay: float = 0.5) -> None:
-    """SIGTERM a saját folyamatnak; a compose ``restart: unless-stopped`` indítja újra.
+    """SIGTERM to the own process; compose ``restart: unless-stopped`` restarts it.
 
-    Nem Docker alatt a folyamat egyszerűen leáll (a felület ezt jelzi).
+    Outside Docker the process simply stops (the UI indicates this).
     """
     def _stop() -> None:
         try:
@@ -1265,37 +1266,37 @@ def _request_service_restart(delay: float = 0.5) -> None:
     timer.start()
 
 
-# -------------------------------------------------------------------- HTTP réteg
+# -------------------------------------------------------------------- HTTP layer
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "Dropjak/2"
     sys_version = ""
     protocol_version = "HTTP/1.1"
-    # Lassú/beragadt kapcsolatok ne foglalják örökre a szálakat.
+    # Slow/stuck connections must not occupy threads forever.
     timeout = 30
-    # Kérésenként állítjuk; megakadályozza, hogy a már kiolvasott body-t
-    # egy későbbi hibaág még egyszer „elfogyassza” a keep-alive kapcsolatból.
+    # Set per request; prevents a later error branch from consuming the
+    # already read body again from the keep-alive connection.
     _body_read = False
 
-    # -- segédek ---------------------------------------------------------------
+    # -- helpers ---------------------------------------------------------------
 
     @property
     def gw(self) -> gateway.Gateway:
         return self.server.gateway  # type: ignore[attr-defined]
 
     def _peer_ip(self) -> str:
-        """A nyers socket peer (a Caddy mögött 127.0.0.1)."""
+        """The raw socket peer (behind Caddy, 127.0.0.1)."""
         try:
             return gateway.normalize_ip(self.client_address[0])
         except ValueError:
             return str(self.client_address[0])
 
     def _client_ip(self) -> str:
-        # Bizalmi határ: X-Forwarded-For-t csak loopback peertől (a hoston
-        # futó Caddytől) fogadunk el. A Caddy reverse_proxy a kívülről
-        # érkező XFF-et eldobja, és a valódi távoli címre állítja, így az
-        # utolsó elem nem hamisítható. Idegen peer fejlécét figyelmen kívül
-        # hagyjuk; érvénytelen értéknél a loopback peer marad.
+        # Trust boundary: X-Forwarded-For is accepted only from a loopback peer
+        # (Caddy running on the host). Caddy's reverse_proxy drops incoming XFF
+        # and sets it to the real remote address, so the last element cannot be
+        # forged. Headers from foreign peers are ignored; on an invalid value
+        # the loopback peer remains.
         peer = self._peer_ip()
         headers = getattr(self, "headers", None)
         forwarded = headers.get("X-Forwarded-For") if headers else None
@@ -1307,7 +1308,7 @@ class Handler(BaseHTTPRequestHandler):
         return peer
 
     def _via_proxy(self) -> bool:
-        """A kérés a Caddyn át, egy gyökérdomain HTTPS-portáljára jött-e."""
+        """Whether the request came through Caddy to a root domain's HTTPS portal."""
         if self._peer_ip() not in PROXY_LOOPBACK:
             return False
         host = (self.headers.get("Host") or "").strip().lower()
@@ -1337,7 +1338,7 @@ class Handler(BaseHTTPRequestHandler):
         return morsel.value if morsel else ""
 
     def _origin_ok(self) -> bool:
-        """Azonos eredetű kérés-e (CSRF ellen, a SameSite mellett)."""
+        """Whether this is a same-origin request (against CSRF, alongside SameSite)."""
         origin = self.headers.get("Origin")
         if not origin:
             return True
@@ -1352,8 +1353,8 @@ class Handler(BaseHTTPRequestHandler):
         host = (self.headers.get("Host") or "").strip()
         ok = bool(host) and origin_netloc.lower() == host.lower()
         if not ok:
-            # A korai 403 előtt olvassuk ki a body-t, különben a keep-alive
-            # kapcsolaton a következő kérés a régi body után olvasódna.
+            # Read the body before the early 403, otherwise on a keep-alive
+            # connection the next request would be read after the old body.
             self._discard_body()
         return ok
 
@@ -1389,7 +1390,7 @@ class Handler(BaseHTTPRequestHandler):
             with open(os.path.join(BASE, name), "rb") as fh:
                 body = fh.read()
         except OSError:
-            self._json(500, {"ok": False, "error": "a felület fájlja hiányzik"})
+            self._json(500, {"ok": False, "error": "the UI file is missing"})
             return
         if name == "index.html":
             body = body.replace(
@@ -1398,9 +1399,9 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, body, ctype, cache=cache)
 
     def _read_json(self, limit: int = 64 * 1024) -> dict | None:
-        # Az állapotmódosító végpontok csak JSON-t fogadnak. Ez a böngészők
-        # űrlapos (simple request) CSRF-ját is kizárja, mert az űrlap nem tud
-        # application/json tartalomtípust küldeni.
+        # State-changing endpoints accept only JSON. This also excludes browser
+        # form (simple request) CSRF, because a form cannot send an
+        # application/json content type.
         ctype = (self.headers.get("Content-Type") or "").split(";", 1)[0]
         if ctype.strip().lower() != "application/json":
             self.close_connection = True
@@ -1450,10 +1451,10 @@ class Handler(BaseHTTPRequestHandler):
         self.gw.audit.write(event, **fields)
 
     def _session(self) -> gateway.Session | None:
-        # Védelem mélységben: egy tiltott IP-cím a már meglévő munkamenetét
-        # sem használhatja a védett végpontokon. Itt szándékosan nem
-        # vonjuk vissza a munkamenetet (azt a belépési/hozzáférési utak
-        # teszik meg); a tiltott kliens egyszerűen nem hitelesített.
+        # Defense in depth: a blocked IP address cannot use even its existing
+        # session on protected endpoints. Here we deliberately do not revoke
+        # the session (the login/access paths do that); the blocked client is
+        # simply unauthenticated.
         ip = self._client_ip()
         if self.gw.fail2ban.banned(ip) is not None:
             return None
@@ -1465,26 +1466,26 @@ class Handler(BaseHTTPRequestHandler):
             self._audit(
                 "admin_denied",
                 user=session.user if session is not None else "",
-                reason="nincs admin munkamenet",
+                reason="no admin session",
                 path=urllib.parse.urlsplit(self.path).path,
             )
-            # A body-t a 403 előtt ki kell olvasni, különben a keep-alive
-            # kapcsolaton a következő kérés a régi body-ba futna.
+            # The body must be read before the 403, otherwise on a keep-alive
+            # connection the next request would run into the old body.
             self._discard_body()
             self._json(
                 403,
                 {
                     "ok": False,
-                    "error": "admin jogosultság szükséges",
+                    "error": "admin privileges required",
                     "code": "admin_session",
                 },
             )
             return None
         record = self.gw.users.record(session.user)
         if record is None or not record.enabled or record.pending or not record.is_admin:
-            # A munkamenet szerepkörét/aktív állapotát minden admin-kérésnél
-            # a friss felhasználói nyilvántartásból ellenőrizzük, nem a
-            # belépéskori pillanatképből. Elavult munkamenet nem maradhat.
+            # The session's role/active state is checked on every admin request
+            # from the current user registry, not from the snapshot taken at
+            # login. A stale session must not survive.
             ended = self.gw.sessions.terminate(session.sid, reason="revoked")
             if ended is None:
                 ended = session
@@ -1500,7 +1501,7 @@ class Handler(BaseHTTPRequestHandler):
             self._audit(
                 "admin_denied",
                 user=session.user,
-                reason="a felhasználó már nem aktív admin",
+                reason="the user is no longer an active admin",
                 path=urllib.parse.urlsplit(self.path).path,
             )
             self._discard_body()
@@ -1508,7 +1509,7 @@ class Handler(BaseHTTPRequestHandler):
                 403,
                 {
                     "ok": False,
-                    "error": "admin jogosultság szükséges",
+                    "error": "admin privileges required",
                     "code": "admin_session",
                 },
             )
@@ -1517,7 +1518,7 @@ class Handler(BaseHTTPRequestHandler):
             self._audit(
                 "admin_denied",
                 user=session.user,
-                reason="kötelező jelszócsere előtt",
+                reason="before mandatory password change",
                 path=urllib.parse.urlsplit(self.path).path,
             )
             self._discard_body()
@@ -1525,7 +1526,7 @@ class Handler(BaseHTTPRequestHandler):
                 403,
                 {
                     "ok": False,
-                    "error": "Előbb cseréld le a kezdetleges jelszavad.",
+                    "error": "Change your initial password first.",
                     "must_change_password": True,
                 },
             )
@@ -1543,8 +1544,8 @@ class Handler(BaseHTTPRequestHandler):
             users.append(item)
         settings = self.gw.settings.snapshot()
         tunnels = _tunnels_public(self.gw, settings)
-        # A nyers tunnels szakasz privát kulcsokat és tokeneket tartalmaz;
-        # a felület csak a fenti, titok nélküli nézetet kapja.
+        # The raw tunnels section contains private keys and tokens;
+        # the UI receives only the secret-free view above.
         settings.pop("tunnels", None)
         caddy = getattr(self.gw, "caddy", None)
         return {
@@ -1558,9 +1559,9 @@ class Handler(BaseHTTPRequestHandler):
             "roles": [gateway.ROLE_USER, gateway.ROLE_ADMIN],
             "settings": settings,
             "tunnels": tunnels,
-            # Csak metaadat: a kulcs és a PEM soha nem kerül a válaszba.
+            # Metadata only: the key and PEM never enter the response.
             "proxy_certs": self.gw.certs.public(settings),
-            # A Caddy admin API állapota (None: nincs domain proxy).
+            # Status of the Caddy admin API (None: no domain proxy).
             "caddy": caddy.snapshot() if caddy is not None else None,
             "drop_log": self.gw.drops.status(),
             "fail2ban": self.gw.fail2ban.snapshot(),
@@ -1572,15 +1573,15 @@ class Handler(BaseHTTPRequestHandler):
             return None
         raw = data.get("rules")
         if not isinstance(raw, list) or len(raw) > 64:
-            raise gateway.RuleStoreError("a rules mező legfeljebb 64 elemű lista")
+            raise gateway.RuleStoreError("the rules field must be a list of at most 64 elements")
         out: list[str] = []
         for value in raw:
             if not isinstance(value, str) or not value.strip():
-                raise gateway.RuleStoreError("érvénytelen szabály-azonosító")
+                raise gateway.RuleStoreError("invalid rule ID")
             value = value.strip()
             if value == gateway.LEGACY_ADMIN_RULE_ID:
                 raise gateway.RuleStoreError(
-                    "ez egy fenntartott, régi azonosító, nem rendelhető hozzá"
+                    "this is a reserved legacy ID and cannot be assigned"
                 )
             if value not in out:
                 out.append(value)
@@ -1593,7 +1594,7 @@ class Handler(BaseHTTPRequestHandler):
         unknown = set(rule_ids) - self._known_rule_ids()
         if unknown:
             raise gateway.RuleStoreError(
-                f"ismeretlen szabály: {', '.join(sorted(unknown))}"
+                f"unknown rule: {', '.join(sorted(unknown))}"
             )
 
     def _group_ids(self, data: dict) -> list[str] | None:
@@ -1601,14 +1602,14 @@ class Handler(BaseHTTPRequestHandler):
             return None
         raw = data.get("groups")
         if not isinstance(raw, list) or len(raw) > 64:
-            raise gateway.GroupStoreError("a groups mező legfeljebb 64 elemű lista")
+            raise gateway.GroupStoreError("the groups field must be a list of at most 64 elements")
         out: list[str] = []
         for value in raw:
             if not isinstance(value, str) or not value.strip():
-                raise gateway.GroupStoreError("érvénytelen csoport-azonosító")
+                raise gateway.GroupStoreError("invalid group ID")
             value = value.strip()
             if self.gw.groups.get(value) is None:
-                raise gateway.GroupStoreError(f"ismeretlen csoport: {value}")
+                raise gateway.GroupStoreError(f"unknown group: {value}")
             if value not in out:
                 out.append(value)
         return out
@@ -1618,45 +1619,45 @@ class Handler(BaseHTTPRequestHandler):
             return None
         raw = data.get("members")
         if not isinstance(raw, list) or len(raw) > 512:
-            raise gateway.GroupStoreError("a members mező legfeljebb 512 elemű lista")
+            raise gateway.GroupStoreError("the members field must be a list of at most 512 elements")
         out: list[str] = []
         for value in raw:
             if not isinstance(value, str) or not value.strip():
-                raise gateway.GroupStoreError("érvénytelen felhasználónév")
+                raise gateway.GroupStoreError("invalid username")
             value = value.strip()
             record = self.gw.users.record(value)
             if record is None:
-                raise gateway.GroupStoreError(f"ismeretlen felhasználó: {value}")
+                raise gateway.GroupStoreError(f"unknown user: {value}")
             if record.pending:
                 raise gateway.GroupStoreError(
-                    "a jóváhagyásra váró fiók nem rendelhető csoporthoz"
+                    "an account pending approval cannot be assigned to a group"
                 )
             if value not in out:
                 out.append(value)
         return out
 
     def _rule_users(self, data: dict) -> list[str] | None:
-        """A szabály közvetlen felhasználó-kiosztásai (opcionális ``users``)."""
+        """Direct user assignments of the rule (optional ``users``)."""
         if "users" not in data:
             return None
         raw = data.get("users")
         if not isinstance(raw, list) or len(raw) > 512:
             raise gateway.UserStoreError(
-                "a users mező legfeljebb 512 elemű lista"
+                "the users field must be a list of at most 512 elements"
             )
         out: list[str] = []
         for value in raw:
             if not isinstance(value, str) or not value.strip():
-                raise gateway.UserStoreError("érvénytelen felhasználónév")
+                raise gateway.UserStoreError("invalid username")
             value = value.strip()
             record = self.gw.users.record(value)
             if record is None:
                 raise gateway.UserStoreError(
-                    f"ismeretlen felhasználó: {value}"
+                    f"unknown user: {value}"
                 )
             if record.pending:
                 raise gateway.UserStoreError(
-                    "a jóváhagyásra váró fiók nem rendelhető szabályhoz"
+                    "an account pending approval cannot be assigned to a rule"
                 )
             if value not in out:
                 out.append(value)
@@ -1665,12 +1666,12 @@ class Handler(BaseHTTPRequestHandler):
     def _apply_rule_assignments(
         self, rule_id: str, users, groups
     ) -> dict:
-        """A szabály közvetlen felhasználó- és csoportkiosztásainak alkalmazása.
+        """Apply the rule's direct user and group assignments.
 
-        A hívó már ellenőrizte az azonosítókat és elmentette a szabályt. A
-        két tár külön fájl, ezért a részleges hiba esetén a már alkalmazott
-        felet visszaállítjuk: így a szabály elmentve marad, de a kiosztások
-        nem maradnak félig módosítva. Visszatérés: az audit mezői.
+        The caller has already validated the IDs and saved the rule. The two
+        stores are separate files, so on partial failure the already applied
+        half is rolled back: the rule stays saved, but assignments do not
+        remain half-modified. Returns: the audit fields.
         """
         if users is None and groups is None:
             return {}
@@ -1716,16 +1717,16 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as rollback_exc:
                 rollback_failed = True
                 print(
-                    "[szabályok] a felhasználói kiosztás visszaállítása "
-                    f"nem sikerült: {rollback_exc}",
+                    "[rules] failed to roll back the user assignment: "
+                    f"{rollback_exc}",
                     flush=True,
                 )
             message = (
-                "a szabály elmentve, de a kiosztás alkalmazása nem "
-                f"sikerült: {exc}"
+                "the rule was saved, but applying the assignment "
+                f"failed: {exc}"
             )
             if rollback_failed:
-                message += " (a részleges módosítás visszaállítása sem sikerült)"
+                message += " (rolling back the partial change also failed)"
             raise gateway.RuleStoreError(message) from exc
         return {
             "users_added": ",".join(result["users_added"]),
@@ -1735,7 +1736,7 @@ class Handler(BaseHTTPRequestHandler):
         }
 
     def _portal_host_matches(self) -> bool:
-        # A gyökérdomaineken a Caddy HTTPS-en a portált szolgálja ki.
+        # On the root domains, Caddy serves the portal over HTTPS.
         if not gateway.PORTAL_URL or self._via_proxy():
             return True
         host = (self.headers.get("Host") or "").strip().lower()
@@ -1745,11 +1746,11 @@ class Handler(BaseHTTPRequestHandler):
         return host == target
 
     def _https_portal_url(self) -> str:
-        """A WAN-ról közvetlenül (http) nyitott portál HTTPS-célja, vagy "".
+        """HTTPS target for a portal opened directly (http) from the WAN, or "".
 
-        A LAN-kliens, a tiltott és a proxy-tiltott IP a 443-at nem éri el,
-        ezért nekik a http portál marad; a loopback (healthcheck, Caddy)
-        és a Caddyn át érkező kérés érintetlen.
+        LAN clients, blocked IPs and proxy-blocked IPs cannot reach port 443,
+        so they keep the http portal; loopback (healthcheck, Caddy) and
+        requests arriving through Caddy are untouched.
         """
         if not gateway.PROXY_ENABLED or self._peer_ip() in PROXY_LOOPBACK:
             return ""
@@ -1765,7 +1766,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return ""
         root = roots[0]
-        # A saját cím bekapcsolva: a közvetlen HTTP-portál is oda vált.
+        # Own address enabled: the direct HTTP portal also switches there.
         host = settings.get("portal_domain") or root
         if host != root:
             root = _portal_parent_root(host, roots)
@@ -1823,10 +1824,10 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/gate/"):
             return self._gate_api(path)
         if path.startswith("/api/"):
-            return self._json(404, {"ok": False, "error": "ismeretlen végpont"})
+            return self._json(404, {"ok": False, "error": "unknown endpoint"})
 
-        # A WAN-ról közvetlenül nyitott http portál a gyökérdomain HTTPS
-        # portáljára vált (a captive átirányítás előtt, annak célja helyett).
+        # The http portal opened directly from the WAN switches to the root
+        # domain's HTTPS portal (before the captive redirect, in place of its target).
         https_url = self._https_portal_url()
         if https_url:
             self._audit("portal_https_redirect", target=https_url[:300])
@@ -1835,8 +1836,8 @@ class Handler(BaseHTTPRequestHandler):
                 headers={"Location": https_url},
             )
 
-        # Captive portal: idegen Hosttal érkező HTTP kérést a kapu saját
-        # címére irányítjuk, hogy a süti és az állapot egy helyen legyen.
+        # Captive portal: an HTTP request with a foreign Host is redirected to
+        # the gateway's own address so the cookie and state stay in one place.
         if not self._portal_host_matches():
             self._audit(
                 "portal_host_redirect",
@@ -1869,20 +1870,20 @@ class Handler(BaseHTTPRequestHandler):
             return self._static("blocked.png")
         if path == "/ok.png":
             return self._static("ok.png")
-        # Bármely más útvonalra a belépőoldalt adjuk (captive viselkedés).
+        # Any other path returns the login page (captive behavior).
         return self._static("index.html")
 
     do_HEAD = do_GET
 
-    # -- Caddy aldomain-proxy (csak loopbackről) ------------------------------
+    # -- Caddy subdomain proxy (loopback only) --------------------------------
 
     def _proxy_target(self, host: str):
-        """A host proxy-célja ("root", a bejegyzés, a portál vagy None) és gyökere."""
+        """The host's proxy target ("root", the entry, the portal or None) and its root."""
         settings = self.gw.settings.snapshot()
         portal = settings.get("portal_domain", "")
         if portal and host == portal:
-            # A saját címén a portál egy publikus bejegyzésként viselkedik:
-            # a challenge-feltételek ugyanúgy érvényesek rá.
+            # On its own address the portal behaves like a public entry:
+            # the challenge conditions apply to it the same way.
             target = {
                 "type": "input", "port": gateway.PORT,
                 "visibility": "public", "enabled": True, "portal": True,
@@ -1893,13 +1894,13 @@ class Handler(BaseHTTPRequestHandler):
             return target, _portal_parent_root(
                 portal, settings.get("proxy_domains", [])
             )
-        # A bejegyzések elsőbbséget élveznek: üres nevű bejegyzés a gyökérre
-        # szól, és a gyökér csak saját portálcím nélkül szolgálja ki a portált.
+        # Entries take precedence: an entry with an empty name refers to the
+        # root, and the root serves the portal only without its own portal address.
         for route in settings.get("proxy_routes", []):
             if route["enabled"] and host == settings_store.route_host(route):
                 return route, route["root"]
-        # Domaines alagút-szolgáltatás: a Caddy ugyanazon a forward_auth
-        # úton kérdez, a cél pedig az ügynök belső alagút-portja.
+        # Domain-mode tunnel service: Caddy asks on the same forward_auth
+        # path, and the target is the agent's internal tunnel port.
         tunnel = _tunnel_domain_target(settings, host)
         if tunnel is not None:
             return tunnel
@@ -1908,10 +1909,10 @@ class Handler(BaseHTTPRequestHandler):
         return None, ""
 
     def _proxy_unknown_root(self, host: str) -> str:
-        """A nem bejegyzett (vagy kikapcsolt) aldomain gyökere, ha a gyökér
-        feltöltött, érvényes tanúsítványa ACME nélkül fedi a nevet; vagy "".
+        """Root of the unregistered (or disabled) subdomain, if the root's
+        uploaded, valid certificate covers the name without ACME; or "".
 
-        Csak a _proxy_target None eredménye után értelmes.
+        Only meaningful after _proxy_target returns None.
         """
         for root in self.gw.settings.snapshot().get("proxy_domains", []):
             if host.endswith("." + root) \
@@ -1920,14 +1921,14 @@ class Handler(BaseHTTPRequestHandler):
         return ""
 
     def _proxy_redirect(self) -> None:
-        """A 80-as port (Caddy http:// forward_auth) válasza: mindig 3xx.
+        """Response for port 80 (Caddy http:// forward_auth): always 3xx.
 
-        Saját név (gyökér, bekapcsolt bejegyzés, feltöltött tanúsítvánnyal
-        fedett ismeretlen aldomain) az eredeti URI-val HTTPS-re vált (308);
-        más névre nincs tanúsítvány, ezért a (tartalmazó, különben az első)
-        gyökér portáljára visz (302: ideiglenes, egy később felvett
-        bejegyzést nem takar el). Gyökér nélkül a régi viselkedés marad.
-        Kérésenként fut: nincs audit.
+        An own name (root, enabled entry, unknown subdomain covered by an
+        uploaded certificate) switches to HTTPS with the original URI (308);
+        other names have no certificate, so they go to the portal of the
+        (containing, otherwise first) root (302: temporary, so it does not
+        mask an entry added later). Without roots the old behavior remains.
+        Runs per request: no audit.
         """
         raw = (
             self.headers.get("X-Forwarded-Host")
@@ -1949,8 +1950,9 @@ class Handler(BaseHTTPRequestHandler):
         portal = settings.get("portal_domain", "")
         if host and portal and host in roots \
                 and self._proxy_target(host)[0] is None:
-            # Saját portálcím mellett a gyökér már nem a portálé: bejegyzés
-            # nélkül nincs hozzá tanúsítvány, ezért nem irányítunk rá.
+            # With an own portal address the root no longer belongs to the
+            # portal: without an entry there is no certificate, so we do not
+            # redirect to it.
             return self._send(404, b"", "text/plain; charset=utf-8")
         if host and (
             self._proxy_target(host)[0] is not None
@@ -1958,7 +1960,7 @@ class Handler(BaseHTTPRequestHandler):
         ):
             code, location = 308, f"https://{host}{uri}"
         elif roots:
-            # Ismeretlen név: a portál (vagy annak híján a tartalmazó gyökér).
+            # Unknown name: the portal (or, lacking it, the containing root).
             root = portal or next(
                 (r for r in roots if host.endswith("." + r)), roots[0]
             )
@@ -1971,27 +1973,27 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _proxy_api(self, path: str) -> None:
-        # A Caddy minden proxyzott kérésnél hívja: auditot csak a bejegyzés
-        # oldalmegnyitása kap, a 401 drop-sort; a fail2ban csak a privát
-        # bejegyzés 401-es válaszait számolja. Idegen peer semmit nem tudhat meg.
+        # Caddy calls this for every proxied request: only the entry's page
+        # load gets an audit, the 401 a drop row; fail2ban counts only the
+        # private entry's 401 responses. A foreign peer must learn nothing.
         if self._peer_ip() not in PROXY_LOOPBACK:
             return self._send(404, b"", "text/plain; charset=utf-8")
         if path in ("/api/proxy/unauthorized.png", "/api/proxy/sus.png"):
             return self._static(path.rpartition("/")[2])
         query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
         if path == "/api/proxy/ask":
-            # On-demand TLS: tanúsítvány csak a beállított nevekre kérhető,
-            # és csak bekapcsolt automatikus tanúsítványnál.
+            # On-demand TLS: a certificate may be requested only for configured
+            # names, and only with automatic certificates enabled.
             domain = (query.get("domain") or [""])[0].strip().lower()
             target, _ = self._proxy_target(domain)
             acme = self.gw.settings.snapshot().get("proxy_acme", True)
             code = 200 if acme and target is not None else 404
             return self._send(code, b"", "text/plain; charset=utf-8")
         if path == "/api/proxy/cert":
-            # A Caddy get_certificate http kérése (titkos kulcsot ad): a
-            # Caddyn át érkező (proxyzott) kérés semmit nem kaphat. A Caddy
-            # reverse_proxy/forward_auth mindig küld X-Forwarded-For-t, a
-            # tanúsítványlekérés soha.
+            # Caddy's get_certificate http request (returns a private key): a
+            # request arriving through Caddy (proxied) must get nothing. Caddy
+            # reverse_proxy/forward_auth always sends X-Forwarded-For, the
+            # certificate request never does.
             if self._via_proxy() or any(
                 self.headers.get(name) is not None
                 for name in (
@@ -2000,14 +2002,14 @@ class Handler(BaseHTTPRequestHandler):
             ):
                 return self._send(404, b"", "text/plain; charset=utf-8")
             name = (query.get("server_name") or [""])[0].strip().lower()
-            # A lefedettség dönt, nem a bejegyzés: az ismeretlen, de a
-            # feltöltött wildcard által fedett név is megkapja (challenge-re).
+            # Coverage decides, not the entry: an unknown name covered by the
+            # uploaded wildcard also gets it (for the challenge).
             target, root = self._proxy_target(name)
             if target is None:
                 root = self._proxy_unknown_root(name)
             bundle = self.gw.certs.bundle(name, root) if root else None
             if bundle is None:
-                # 204: a Caddy a saját (on-demand ACME) útján folytatja.
+                # 204: Caddy continues on its own (on-demand ACME) path.
                 return self._send(204, b"", "text/plain; charset=utf-8")
             return self._send(200, bundle, "application/x-pem-file")
         if path == "/api/proxy/redirect":
@@ -2019,14 +2021,14 @@ class Handler(BaseHTTPRequestHandler):
             or self.headers.get("Host") or ""
         )
         host = host.strip().lower().partition(":")[0]
-        # A Caddy az X-Forwarded-For-t a valódi kliens IP-re állítja (nem
-        # bízik a bejövő értékben); az utolsó elem a közvetlen kliens.
+        # Caddy sets X-Forwarded-For to the real client IP (it does not trust
+        # the incoming value); the last element is the direct client.
         forwarded = (self.headers.get("X-Forwarded-For") or "").split(",")[-1]
         try:
             ip = gateway.normalize_ip(forwarded)
         except ValueError:
             ip = ""
-        # Lekérdezés nélkül, csonkolva (a query tokent is hordozhat).
+        # Without the query, truncated (the query may carry a token too).
         page_path = urllib.parse.urlsplit(
             self.headers.get("X-Forwarded-Uri") or "/"
         ).path[:200]
@@ -2034,9 +2036,9 @@ class Handler(BaseHTTPRequestHandler):
         if target is None:
             if not self._proxy_unknown_root(host):
                 return self._send(404, b"", "text/plain; charset=utf-8")
-            # Ismeretlen, de feltöltött tanúsítvánnyal fedett aldomain:
-            # feltételektől és munkamenettől függetlenül mindig challenge
-            # (a sikeres megoldás a gyökérre visz, belépő nélkül).
+            # Unknown subdomain covered by an uploaded certificate: always a
+            # challenge regardless of conditions and session (a successful
+            # solution redirects to the root, without a pass).
             if (
                 not ip
                 or self.gw.fail2ban.banned(ip) is not None
@@ -2045,7 +2047,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(403, b"", "text/plain; charset=utf-8")
             if not self._proxy_navigation():
                 return self._json(403, {
-                    "ok": False, "error": "ellenőrzés szükséges",
+                    "ok": False, "error": "verification required",
                     "code": "proxy_challenge",
                 })
             self._audit(
@@ -2063,21 +2065,21 @@ class Handler(BaseHTTPRequestHandler):
         portal = settings.get("portal_domain", "")
         if portal:
             login = f"https://{portal}/"
-        # A portál saját címe ugyanazt a loopback-védelmet kapja: a Caddy a
-        # portálhoz továbbít, így a /api/proxy/ végpontok különben elérhetők
-        # lennének (a peer ott is loopback).
+        # The portal's own address gets the same loopback protection: Caddy
+        # forwards to the portal, so the /api/proxy/ endpoints would otherwise
+        # be reachable (the peer is loopback there too).
         if isinstance(target, dict) and target.get("portal"):
             uri = self.headers.get("X-Forwarded-Uri") or "/"
             if urllib.parse.urlsplit(uri).path.startswith("/api/proxy/"):
                 return self._send(404, b"", "text/plain; charset=utf-8")
         if target == "root":
-            # A gyökérdomain maga a portál. A Caddyn át a proxy-végpontok
-            # nem érhetők el (ott a peer is loopback lenne).
+            # The root domain is the portal itself. Through Caddy the proxy
+            # endpoints are unreachable (the peer would be loopback there too).
             uri = self.headers.get("X-Forwarded-Uri") or "/"
             if urllib.parse.urlsplit(uri).path.startswith("/api/proxy/"):
                 return self._send(404, b"", "text/plain; charset=utf-8")
             if portal:
-                # A felület a saját címére költözött; a gyökér oda irányít.
+                # The UI moved to its own address; the root redirects there.
                 if not (uri.startswith("/") and uri.isascii()
                         and uri.isprintable() and " " not in uri):
                     uri = "/"
@@ -2089,9 +2091,9 @@ class Handler(BaseHTTPRequestHandler):
                 200, b"", "text/plain; charset=utf-8",
                 headers={"X-Dropjak-Upstream": f"127.0.0.1:{gateway.PORT}"},
             )
-        # Publikus bejegyzés: bárki, akit a fail2ban nem tilt. A proxy-tiltott
-        # IP-t a tűzfal a 80/443-on eldobja; itt is jogosulatlan (mélységi
-        # védelem), és további kérése nem számít.
+        # Public entry: anyone not blocked by fail2ban. A proxy-blocked IP is
+        # dropped by the firewall on 80/443; here it is also unauthorized
+        # (defense in depth), and its further requests are not counted.
         user = None
         if (
             ip
@@ -2103,18 +2105,18 @@ class Handler(BaseHTTPRequestHandler):
                 else self.gw.sessions.domain_user(ip, host)
             )
         if user is not None:
-            # A forward_auth csak 2xx esetén enged tovább, és ekkor mindig
-            # mi adjuk a célt: a kliens által küldött fejléc nem irányíthat.
+            # forward_auth allows through only on 2xx, and then we always
+            # provide the target: a client-sent header cannot direct it.
             upstream = (
                 target["ip"] if target["type"] == "forward" else "127.0.0.1"
             )
-            # A challenge 403-at ad (nem 401-et): sem a fail2ban, sem a drop
-            # log nem számolja.
+            # The challenge returns 403 (not 401): neither fail2ban nor the
+            # drop log counts it.
             fired = self._proxy_challenge_triggers(target, host, ip)
             if fired:
                 if not self._proxy_navigation():
                     return self._json(403, {
-                        "ok": False, "error": "ellenőrzés szükséges",
+                        "ok": False, "error": "verification required",
                         "code": "proxy_challenge",
                     })
                 self._audit(
@@ -2143,8 +2145,8 @@ class Handler(BaseHTTPRequestHandler):
                     "X-Dropjak-Upstream": f"{upstream}:{target['port']}"
                 },
             )
-        # Csak privát bejegyzésnél lehet ide jutni számolható IP-vel: a
-        # publikus 401 mindig üres vagy már tiltott IP-é, az nem számít.
+        # Only a private entry can get here with a countable IP: a public 401
+        # always belongs to an empty or already blocked IP, which does not count.
         if ip:
             try:
                 self.gw.fail2ban.record_proxy_unauthorized(ip)
@@ -2167,13 +2169,13 @@ class Handler(BaseHTTPRequestHandler):
     def _proxy_challenge_triggers(
         self, target: dict, host: str, ip: str
     ) -> list[str]:
-        """A bejegyzés most teljesülő challenge-feltételei (üres: nem kell).
+        """Challenge conditions of the entry that now apply (empty: none).
 
-        Az always/interval/daily/new_ip érvényes belépőt kér (ezek az
-        érvényességet szűkítik). Az after_401/fail2ban csak futó számlálónál
-        kér, és a legutóbbi találat után kiadott belépőt; a burst ugyanígy
-        a legutóbbi spam-észlelés (sok oldalmegnyitás) után kiadottat; a
-        suspicious gyanús kérésnél bármely érvényes belépőt.
+        always/interval/daily/new_ip require a valid pass (they narrow
+        validity). after_401/fail2ban require one only while the counter is
+        active, and a pass issued after the latest hit; burst likewise one
+        issued after the latest spam detection (many page loads); suspicious
+        accepts any valid pass for a suspicious request.
         """
         challenge = target.get("challenge")
         if not challenge:
@@ -2211,7 +2213,7 @@ class Handler(BaseHTTPRequestHandler):
         return fired
 
     def _proxy_suspicious(self) -> bool:
-        """Nem böngészőszerű-e a forward_auth által továbbított kérés."""
+        """Whether the request forwarded by forward_auth is not browser-like."""
         agent = (self.headers.get("User-Agent") or "").strip()
         return (
             not agent
@@ -2224,13 +2226,13 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _gate_api(self, path: str) -> None:
-        """A proxy challenge végpontja (a Caddy /__dropjak/challenge útja).
+        """Proxy challenge endpoint (Caddy's /__dropjak/challenge path).
 
-        GET: PoW-feladvány vagy Turnstile-mód (mint a /api/challenge); POST:
-        a megoldás ellenőrzése és a belépő sütije. Csak a Caddyn át (loopback
-        peer), challenge-es bejegyzés vagy tanúsítvánnyal fedett ismeretlen
-        aldomain hostján (ez utóbbinál belépő helyett a gyökérre irányít);
-        minden más 404.
+        GET: PoW puzzle or Turnstile mode (like /api/challenge); POST:
+        verify the solution and set the pass cookie. Only through Caddy
+        (loopback peer), on the host of a challenge entry or an unknown
+        subdomain covered by a certificate (for the latter, redirect to the
+        root instead of a pass); everything else is 404.
         """
         host = (self.headers.get("Host") or "").strip().lower().partition(":")[0]
         target, unknown_root = None, ""
@@ -2247,18 +2249,18 @@ class Handler(BaseHTTPRequestHandler):
         if self.gw.fail2ban.banned(ip) is not None \
                 or self.gw.fail2ban.proxy_banned(ip) is not None:
             self._discard_body()
-            return self._json(403, {"ok": False, "error": "tiltott IP-cím"})
+            return self._json(403, {"ok": False, "error": "blocked IP address"})
         if self.command != "POST":
             return self._challenge()
         data = self._read_json(limit=4096)
         if data is None:
-            return self._json(400, {"ok": False, "error": "hibás kérés"})
+            return self._json(400, {"ok": False, "error": "bad request"})
         if not self._origin_ok():
-            return self._json(403, {"ok": False, "error": "érvénytelen kérés-eredet"})
+            return self._json(403, {"ok": False, "error": "invalid request origin"})
         if not self.gw.login_rate.allow(ip):
             return self._json(
                 429,
-                {"ok": False, "error": "Túl sok próbálkozás. Várj egy percet."},
+                {"ok": False, "error": "Too many attempts. Wait a minute."},
                 headers={"Retry-After": str(gateway.RATE_WINDOW)},
             )
         extra = {"unknown_host": True} if unknown_root else {
@@ -2266,7 +2268,7 @@ class Handler(BaseHTTPRequestHandler):
         }
         captcha = data.get("captcha")
         if not isinstance(captcha, dict):
-            ok, why = False, "hiányos adatok"
+            ok, why = False, "incomplete data"
         elif gateway.TURNSTILE_ON:
             ok, why = gateway.verify_turnstile(str(captcha.get("token", "")), ip)
         else:
@@ -2276,7 +2278,7 @@ class Handler(BaseHTTPRequestHandler):
                 "proxy_challenge_failed", ip=ip, host=host,
                 reason=f"captcha: {why}", **extra,
             )
-            # A sikertelen challenge a proxy-jel számlálójába megy.
+            # A failed challenge goes into the proxy signal counter.
             try:
                 self.gw.fail2ban.record_proxy_unauthorized(ip)
             except Exception as exc:
@@ -2304,9 +2306,9 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def _proxy_navigation(self) -> bool:
-        """Oldalmegnyitás-e a forward_auth által továbbított eredeti kérés.
+        """Whether the original request forwarded by forward_auth is a page load.
 
-        A Sec-Fetch-* fejléc dönt; nélküle a GET + text/html Accept.
+        The Sec-Fetch-* header decides; without it, GET + text/html Accept.
         """
         dest = self.headers.get("Sec-Fetch-Dest")
         if dest is not None:
@@ -2337,7 +2339,7 @@ class Handler(BaseHTTPRequestHandler):
         return self._with_hosts(rule.public())
 
     def _service_index(self) -> dict:
-        """A jelenlegi beállítások szolgáltatás-indexe hivatkozás szerint."""
+        """Service index of the current settings by reference."""
         try:
             tunnels = self.gw.settings.snapshot().get("tunnels")
         except Exception:
@@ -2347,7 +2349,7 @@ class Handler(BaseHTTPRequestHandler):
         return settings_store.tunnel_service_index(tunnels)
 
     def _services_payload(self, refs) -> list[dict]:
-        """A kiválasztott szolgáltatások feloldott, megjelenítési alakja."""
+        """Resolved display form of the selected services."""
         index = self._service_index()
         out: list[dict] = []
         for ref in refs:
@@ -2363,8 +2365,8 @@ class Handler(BaseHTTPRequestHandler):
                 "label": item.get("label") or ref,
                 "tcp": list(item.get("tcp", ())),
                 "udp": list(item.get("udp", ())),
-                # Domain-módú szolgáltatás: nincs portja, a proxy-gapun
-                # keresztül a domainje nyílik meg.
+                # Domain-mode service: it has no port; its domain opens
+                # through the proxy gateway.
                 "domain": item.get("domain") or None,
             })
         return out
@@ -2375,7 +2377,7 @@ class Handler(BaseHTTPRequestHandler):
         for service in services:
             pieces: list[str] = []
             if service.get("domain"):
-                # Domain-módú szolgáltatás: a port helyett a hostnév.
+                # Domain-mode service: the hostname instead of the port.
                 pieces.append(str(service["domain"]))
             if service.get("tcp"):
                 pieces.append(
@@ -2385,18 +2387,18 @@ class Handler(BaseHTTPRequestHandler):
                 pieces.append(
                     "UDP " + ", ".join(str(port) for port in service["udp"])
                 )
-            detail = " · ".join(pieces) if pieces else "nincs elérhető port"
+            detail = " · ".join(pieces) if pieces else "no available port"
             parts.append(f"{service.get('label') or service.get('ref')} ({detail})")
-        return "Szolgáltatás: " + ", ".join(parts)
+        return "Service: " + ", ".join(parts)
 
     def _with_hosts(self, payload: dict) -> dict:
-        """A domain- és szolgáltatás-választás megjelenítési mezői.
+        """Display fields for domain and service selection.
 
-        A ``ports_label`` domain szabálynál a hostneveket mutatja (portos
-        résszel együtt ``·`` elválasztással), a ``hosts`` a teljes neveket.
-        Szolgáltatás-szabálynál a ``services`` a beállításokból feloldott
-        címkéket és portokat tartalmazza, a ``ports_label`` pedig ezeket
-        mutatja a nyers portok helyett.
+        For a domain rule, ``ports_label`` shows the hostnames (together with
+        the port part, separated by ``·``), and ``hosts`` contains the full
+        names. For a service rule, ``services`` contains the labels and ports
+        resolved from settings, and ``ports_label`` shows these instead of the
+        raw ports.
         """
         refs = [
             ref for ref in (payload.get("service_refs") or [])
@@ -2419,11 +2421,11 @@ class Handler(BaseHTTPRequestHandler):
         return payload
 
     def _selection_payload(self, session: gateway.Session) -> dict:
-        """Az engedélyezett munkamenet szabályválasztásának közös mezői.
+        """Shared fields for the rule selection of an authorized session.
 
-        A ``selected_rules``/``selected_rule_labels``/``grants`` a teljes,
-        több szabályos választást írja le. A ``rule``/``rule_label``/
-        ``grant`` mezők a régi kliensek számára az első választást tükrözik.
+        ``selected_rules``/``selected_rule_labels``/``grants`` describe the
+        full multi-rule selection. The ``rule``/``rule_label``/``grant``
+        fields mirror the first selection for old clients.
         """
         selected_rules = (
             list(session.rules)
@@ -2449,10 +2451,10 @@ class Handler(BaseHTTPRequestHandler):
         }
 
     def _ban_fields(self) -> dict:
-        """A kliens IP-címének fail2ban tiltása, ha van ilyen.
+        """The fail2ban block of the client's IP address, if any.
 
-        A belépőoldal ebből tudja a normál felület helyére tenni a tiltott
-        IP-címre figyelmeztető képernyőt.
+        From this, the login page can put the blocked-IP warning screen in
+        place of the normal UI.
         """
         banned = self.gw.fail2ban.banned(self._client_ip())
         if banned is None:
@@ -2471,12 +2473,12 @@ class Handler(BaseHTTPRequestHandler):
         registration_enabled = bool(
             settings.get("registration_enabled", False)
         )
-        # A tűzfal neve nyilvános: a belépőoldal fejléce és a böngésző
-        # címe mutatja. A beállításfájl hibaszövegét nem adjuk ki.
+        # The firewall's name is public: the login page header and the browser
+        # title show it. The settings file's error text is not exposed.
         site_name = settings.get("site_name", "")
-        # Védelem mélységben: tiltott IP a meglévő munkamenetével sem
-        # kérdezheti le a védett állapotot. A válasz a belépő- és
-        # hozzáférés-végpontokkal közös tiltásforma, munkamenet-adat nélkül.
+        # Defense in depth: a blocked IP cannot query the protected state even
+        # with its existing session. The response is the block form shared with
+        # the login and access endpoints, without session data.
         banned = self.gw.fail2ban.banned(self._client_ip())
         if banned is not None:
             payload, headers = self._ban_reply(banned)
@@ -2488,8 +2490,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         session = self._session()
         if session is None:
-            # A legutóbbi lezárás okát is megadjuk, hogy a felület meg tudja
-            # mondani, miért esett ki a felhasználó a countdown közben.
+            # The reason for the latest termination is also provided so the UI
+            # can say why the user dropped out during the countdown.
             last_end = self.gw.sessions.last_end(self._client_ip())
             payload = {
                 "ok": True,
@@ -2548,8 +2550,8 @@ class Handler(BaseHTTPRequestHandler):
             "site_name": site_name,
             "version": gateway.APP_VERSION,
         }
-        # Csak a még érvényes közlemény hagyja el a szervert; a lejárt
-        # vagy kikapcsolt MOTD nem kerül a válaszba.
+        # Only a still-valid announcement leaves the server; an expired or
+        # disabled MOTD does not enter the response.
         motd = settings_store.active_motd(settings)
         if motd:
             payload["motd"] = motd
@@ -2568,17 +2570,16 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, self._admin_state())
 
     def _admin_preview(self) -> None:
-        """Egy felhasználó portál-hozzáférési nézetének csak olvasható előnézete.
+        """Read-only preview of a user's portal access view.
 
-        Szándékosan nem hoz létre munkamenetet és nem nyit nft-engedélyt:
-        ugyanazokat a szabályokat, limiteket és állapotmezőket adja vissza,
-        amelyeket a ``/api/status`` adna a felhasználónak. Az előnézet
-        megnyitása mindig audit-bejegyzést ír.
+        Deliberately creates no session and opens no nft grant: it returns the
+        same rules, limits and status fields that ``/api/status`` would return
+        for the user. Opening the preview always writes an audit entry.
         """
         if not self._origin_ok():
             self._admin_request_rejected("invalid_origin")
             return self._json(
-                403, {"ok": False, "error": "érvénytelen kérés-eredet"}
+                403, {"ok": False, "error": "invalid request origin"}
             )
         session = self._admin_guard()
         if session is None:
@@ -2588,11 +2589,11 @@ class Handler(BaseHTTPRequestHandler):
         record = self.gw.users.record(name) if name else None
         if record is None:
             self._admin_action_error(
-                "user_preview", gateway.UserStoreError("ismeretlen felhasználó"),
+                "user_preview", gateway.UserStoreError("unknown user"),
                 target=name,
             )
             return self._json(
-                404, {"ok": False, "error": "ismeretlen felhasználó"}
+                404, {"ok": False, "error": "unknown user"}
             )
         rules = self.gw.effective_rules(record.name)
         self._audit("admin_user_preview", user=session.user, target=record.name)
@@ -2644,7 +2645,7 @@ class Handler(BaseHTTPRequestHandler):
                 503,
                 {
                     "ok": False,
-                    "error": f"a tűzfal állapota nem olvasható: {exc}",
+                    "error": f"cannot read firewall status: {exc}",
                 },
             )
             return
@@ -2655,7 +2656,7 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, payload)
 
     def _admin_firewall_rules(self) -> None:
-        """A kernelben élő nftables láncok nyers szöveges kiírása."""
+        """Raw text dump of the nftables chains live in the kernel."""
         if self._admin_guard() is None:
             return
         try:
@@ -2668,7 +2669,7 @@ class Handler(BaseHTTPRequestHandler):
                 503,
                 {
                     "ok": False,
-                    "error": f"a nyers szabályok nem olvashatók: {exc}",
+                    "error": f"cannot read raw rules: {exc}",
                 },
             )
             return
@@ -2683,7 +2684,7 @@ class Handler(BaseHTTPRequestHandler):
             self._admin_request_rejected(
                 "invalid_origin", user=session.user
             )
-            self._json(403, {"ok": False, "error": "érvénytelen kérés-eredet"})
+            self._json(403, {"ok": False, "error": "invalid request origin"})
             return
         data = self._read_json()
         if data is None:
@@ -2696,7 +2697,7 @@ class Handler(BaseHTTPRequestHandler):
                 target="",
                 reason="unknown_action",
             )
-            self._json(400, {"ok": False, "error": "ismeretlen művelet"})
+            self._json(400, {"ok": False, "error": "unknown operation"})
             return
         sid = data.get("id")
         if not isinstance(sid, str) or not sid.strip():
@@ -2706,7 +2707,7 @@ class Handler(BaseHTTPRequestHandler):
                 target="",
                 reason="missing_id",
             )
-            self._json(400, {"ok": False, "error": "hiányzó munkamenet-azonosító"})
+            self._json(400, {"ok": False, "error": "missing session ID"})
             return
         sid = sid.strip()
         if sid == session.sid:
@@ -2720,7 +2721,7 @@ class Handler(BaseHTTPRequestHandler):
                 400,
                 {
                     "ok": False,
-                    "error": "a saját munkamenetedet a Kilépés gombbal zárhatod le",
+                    "error": "you can end your own session with the Logout button",
                 },
             )
             return
@@ -2734,7 +2735,7 @@ class Handler(BaseHTTPRequestHandler):
             )
             self._json(
                 404,
-                {"ok": False, "error": "nincs ilyen munkamenet (már lejárt)"},
+                {"ok": False, "error": "no such session (already expired)"},
             )
             return
         self._audit(
@@ -2747,7 +2748,7 @@ class Handler(BaseHTTPRequestHandler):
             authorized=terminated.authorized,
         )
         payload = self._sessions_payload(session)
-        payload["message"] = f"{terminated.user} munkamenete lezárva."
+        payload["message"] = f"Session of {terminated.user} terminated."
         self._json(200, payload)
 
     def _admin_logs(self) -> None:
@@ -2768,8 +2769,8 @@ class Handler(BaseHTTPRequestHandler):
             before = float(before_raw) if before_raw else None
         except ValueError:
             before = None
-        # Többes eseményszűrő: ``events=a,b`` (ismételhető) vagy ismételt
-        # ``event=``. Egyetlen ``event=`` a régi részleges egyezés marad.
+        # Multi-event filter: ``events=a,b`` (repeatable) or repeated
+        # ``event=``. A single ``event=`` keeps the old partial match.
         event_values = query.get("event") or []
         multi = list(query.get("events") or [])
         if len(event_values) > 1:
@@ -2784,7 +2785,7 @@ class Handler(BaseHTTPRequestHandler):
             AUDIT_EVENT_CODE_RE.fullmatch(code) for code in events
         ):
             return self._json(400, {
-                "ok": False, "error": "érvénytelen eseménykód a szűrőben",
+                "ok": False, "error": "invalid event code in filter",
             })
         user_filter = first("user")
         q_filter = first("q")
@@ -2797,7 +2798,7 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 return self._json(400, {
                     "ok": False,
-                    "error": "érvénytelen IP-cím vagy CIDR (pl. 192.168.10.0/24)",
+                    "error": "invalid IP address or CIDR (e.g. 192.168.10.0/24)",
                 })
         rows = self.gw.audit.read(
             limit=limit,
@@ -2811,8 +2812,8 @@ class Handler(BaseHTTPRequestHandler):
         )
         manual = first("manual").strip().lower() in ("1", "true", "yes")
         if manual:
-            # Csak a felhasználó által indított lekérés kerül a naplóba; az
-            # öt másodperces automatikus frissítés nem.
+            # Only a user-initiated query enters the log; the five-second
+            # automatic refresh does not.
             self._audit(
                 "admin_logs_read",
                 user=session.user,
@@ -2860,7 +2861,7 @@ class Handler(BaseHTTPRequestHandler):
                     400,
                     {
                         "ok": False,
-                        "error": "a port 1 és 65535 között lehet",
+                        "error": "the port must be between 1 and 65535",
                     },
                 )
                 return
@@ -2908,7 +2909,7 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _tunnel_endpoint_host(self) -> str:
-        """A letöltött konfiguráció nyilvános végpontja (Host, majd PORTAL_URL)."""
+        """Public endpoint of the downloaded configuration (Host, then PORTAL_URL)."""
         host = (self.headers.get("Host") or "").strip()
         if host:
             try:
@@ -2925,7 +2926,7 @@ class Handler(BaseHTTPRequestHandler):
         return ""
 
     def _tunnel_download(self, agent_id: str):
-        """A letöltésekhez tartozó beállítás és ügynök (hiányzó: None)."""
+        """Settings and agent for downloads (missing: None)."""
         snapshot = self.gw.settings.snapshot()
         tunnels = snapshot.get("tunnels")
         if not isinstance(tunnels, dict):
@@ -2940,7 +2941,7 @@ class Handler(BaseHTTPRequestHandler):
         return tunnels, agent
 
     def _tunnel_agent_config(self, agent: dict, tunnels: dict):
-        """Az ügynök konfigurációja (WireGuard-kulcsokkal) és a szolgáltatásai."""
+        """The agent's configuration (with WireGuard keys) and its services."""
         endpoint = tunnels.get("endpoint") or self._tunnel_endpoint_host()
         services = [
             {
@@ -2990,13 +2991,12 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _admin_tunnels_status(self) -> None:
-        """Csak olvasó állapotfrissítés az ügynök-listához.
+        """Read-only status refresh for the agent list.
 
-        A beállításfájlt nem írja és az nftables-t sem érinti: ugyanazt a
-        titok nélküli nézetet adja vissza, mint az admin állapot, friss
-        ``checked_at`` időbélyeggel. A felület ezzel kéri újra a
-        kézfogás- és szinkronadatokat anélkül, hogy a teljes admin
-        állapotot újratöltené.
+        It does not write the settings file and does not touch nftables: it
+        returns the same secret-free view as the admin state, with a fresh
+        ``checked_at`` timestamp. The UI uses this to re-request handshake and
+        sync data without reloading the full admin state.
         """
         if self._admin_guard() is None:
             return
@@ -3006,7 +3006,7 @@ class Handler(BaseHTTPRequestHandler):
                 503,
                 {
                     "ok": False,
-                    "error": f"a beállításfájl hibás: {snapshot['error']}",
+                    "error": f"the settings file is invalid: {snapshot['error']}",
                 },
             )
             return
@@ -3020,7 +3020,7 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _admin_tunnel_config(self, path: str) -> None:
-        """Egy ügynök letölthető konfigurációja (kulcsokkal, csak adminnak)."""
+        """Downloadable configuration of an agent (with keys, admin only)."""
         session = self._admin_guard()
         if session is None:
             return
@@ -3030,7 +3030,7 @@ class Handler(BaseHTTPRequestHandler):
                 reason="invalid_origin",
             )
             return self._json(
-                403, {"ok": False, "error": "érvénytelen kérés-eredet"}
+                403, {"ok": False, "error": "invalid request origin"}
             )
         agent_id = path[
             len("/api/admin/tunnels/"):-len("/config")
@@ -3041,7 +3041,7 @@ class Handler(BaseHTTPRequestHandler):
                 session, agent_id, "unknown_agent"
             )
             return self._json(
-                404, {"ok": False, "error": "nincs ilyen ügynök"}
+                404, {"ok": False, "error": "no such agent"}
             )
         config, count = self._tunnel_agent_config(agent, tunnels)
         body = json.dumps(config, ensure_ascii=False, indent=2).encode("utf-8")
@@ -3059,10 +3059,11 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _admin_tunnel_bundle(self, path: str) -> None:
-        """A letölthető ügynök-telepítő: egyetlen önkitömörítő shell script.
+        """Downloadable agent installer: a single self-extracting shell script.
 
-        A script eleje a selfinstall.sh, utána a tar.gz csomag (compose,
-        agent.json, forrás). Így a másik gépre egy fájlt kell átvinni.
+        The script starts with selfinstall.sh, followed by the tar.gz bundle
+        (compose, agent.json, source). This way only one file must be moved to
+        the other machine.
         """
         session = self._admin_guard()
         if session is None:
@@ -3073,7 +3074,7 @@ class Handler(BaseHTTPRequestHandler):
                 reason="invalid_origin",
             )
             return self._json(
-                403, {"ok": False, "error": "érvénytelen kérés-eredet"}
+                403, {"ok": False, "error": "invalid request origin"}
             )
         agent_id = path[
             len("/api/admin/tunnels/"):-len("/bundle")
@@ -3084,7 +3085,7 @@ class Handler(BaseHTTPRequestHandler):
                 session, agent_id, "unknown_agent"
             )
             return self._json(
-                404, {"ok": False, "error": "nincs ilyen ügynök"}
+                404, {"ok": False, "error": "no such agent"}
             )
         directory = _tunnel_agent_bundle_dir()
         contents = {}
@@ -3105,7 +3106,7 @@ class Handler(BaseHTTPRequestHandler):
                 session, agent_id, "bundle_missing"
             )
             return self._json(
-                500, {"ok": False, "error": "az ügynök-csomag nem elérhető"}
+                500, {"ok": False, "error": "the agent bundle is not available"}
             )
         config, count = self._tunnel_agent_config(agent, tunnels)
         payload = io.BytesIO()
@@ -3137,11 +3138,11 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _tunnel_config_sync(self) -> None:
-        """Az ügynök konfiguráció-szinkronja: forrás-IP + Bearer token.
+        """Agent configuration sync: source IP + Bearer token.
 
-        Nem admin-végpont: kizárólag a WireGuard-alagút forrás-IP-jéről
-        (a nyers socket peer, nem X-Forwarded-For) és a token birtokában
-        hívható. Minden más kérés részletek nélküli 403.
+        Not an admin endpoint: callable only from the WireGuard tunnel's
+        source IP (the raw socket peer, not X-Forwarded-For) and in possession
+        of the token. Every other request gets a detail-free 403.
         """
         peer = self._peer_ip()
         snapshot = self.gw.settings.snapshot()
@@ -3193,7 +3194,7 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _audit_cert(self, action: str, session, root: str, meta) -> None:
-        # A naplóba csak a gyökér, a SAN-ok, a lejárat és az ujjlenyomat kerül.
+        # Only the root, SANs, expiry and fingerprint enter the log.
         meta = meta or {}
         self._audit(
             "admin_settings_changed",
@@ -3210,7 +3211,7 @@ class Handler(BaseHTTPRequestHandler):
         if caddy is not None:
             caddy.request_restart()
 
-    # -- konfigurációs csomag --------------------------------------------------
+    # -- configuration bundle --------------------------------------------------
 
     def _admin_config_export(self) -> None:
         session = self._admin_guard()
@@ -3222,20 +3223,20 @@ class Handler(BaseHTTPRequestHandler):
                 reason="invalid_origin",
             )
             return self._json(
-                403, {"ok": False, "error": "érvénytelen kérés-eredet"}
+                403, {"ok": False, "error": "invalid request origin"}
             )
         try:
             bundle = _config_bundle(self.gw)
         except ConfigBundleError as exc:
-            # A részletes hiba a válaszba mehet, a naplóba nem.
+            # The detailed error may go into the response, but not the log.
             self._audit(
                 "config_export_failed", user=session.user,
                 reason="export_failed",
             )
-            gateway.log(f"[konfiguráció] export sikertelen: {exc}")
+            gateway.log(f"[configuration] export failed: {exc}")
             return self._json(
                 500,
-                {"ok": False, "error": f"az export nem sikerült: {exc}"},
+                {"ok": False, "error": f"export failed: {exc}"},
             )
         body = json.dumps(bundle, ensure_ascii=False, indent=2).encode("utf-8")
         self._audit(
@@ -3263,7 +3264,7 @@ class Handler(BaseHTTPRequestHandler):
                 reason="invalid_origin",
             )
             return self._json(
-                403, {"ok": False, "error": "érvénytelen kérés-eredet"}
+                403, {"ok": False, "error": "invalid request origin"}
             )
         data = self._read_json(CONFIG_MAX_BYTES)
         if data is None or not isinstance(data.get("bundle"), dict):
@@ -3271,7 +3272,7 @@ class Handler(BaseHTTPRequestHandler):
                 "config_import_failed", user=session.user, reason="bad_request"
             )
             return self._json(
-                400, {"ok": False, "error": "hiányzó vagy hibás konfigurációs csomag"}
+                400, {"ok": False, "error": "missing or invalid configuration bundle"}
             )
         if not _config_confirm_ok(self.gw, data):
             self._audit(
@@ -3283,7 +3284,7 @@ class Handler(BaseHTTPRequestHandler):
                 {
                     "ok": False,
                     "error": (
-                        "a felülíráshoz gépeld be a jelenlegi oldalnevet"
+                        "type the current site name to overwrite"
                     ),
                     "confirm_required": True,
                     "site_name": _effective_site_name(self.gw),
@@ -3298,14 +3299,13 @@ class Handler(BaseHTTPRequestHandler):
             )
             return self._json(
                 400,
-                {"ok": False, "error": f"a csomag érvénytelen: {str(exc)[:300]}"},
+                {"ok": False, "error": f"the bundle is invalid: {str(exc)[:300]}"},
             )
 
-        # Az admin_lock sorosít az egyes admin-műveletekkel: a teljes csere
-        # alatt más írás ne csúszhasson be a mentés és az alkalmazás közé.
+        # admin_lock serializes with individual admin operations: no other
+        # write may slip between the backup and the apply during the full swap.
         with self.gw.admin_lock:
-            # Biztonsági mentés az első írás előtt; ennek kudarca esetén
-            # semmi nem változik.
+            # Backup before the first write; if it fails, nothing changes.
             try:
                 backup_path = _config_backup_path(self.gw)
                 _write_private_json(backup_path, _config_bundle(self.gw))
@@ -3314,14 +3314,14 @@ class Handler(BaseHTTPRequestHandler):
                     "config_import_failed", user=session.user,
                     reason="backup_failed",
                 )
-                gateway.log(f"[konfiguráció] az import előtti mentés nem sikerült: {exc}")
+                gateway.log(f"[configuration] backup before import failed: {exc}")
                 return self._json(
                     500,
                     {
                         "ok": False,
                         "error": (
-                            "az import előtti biztonsági mentés nem sikerült; "
-                            "semmi nem változott"
+                            "the backup before import failed; "
+                            "nothing changed"
                         ),
                     },
                 )
@@ -3343,17 +3343,17 @@ class Handler(BaseHTTPRequestHandler):
                     reason="apply_failed" if not rollback_error else "rollback_failed",
                     backup=os.path.basename(backup_path),
                 )
-                gateway.log(f"[konfiguráció] import hiba: {exc}")
+                gateway.log(f"[configuration] import error: {exc}")
                 if rollback_error:
-                    gateway.log(f"[konfiguráció] a visszaállítás sem sikerült: {rollback_error}")
+                    gateway.log(f"[configuration] rollback also failed: {rollback_error}")
                     return self._json(
                         500,
                         {
                             "ok": False,
                             "error": (
-                                "az import félbeszakadt, és a biztonsági mentés "
-                                "visszaállítása sem sikerült; a szolgáltatás nem "
-                                f"indul újra. Mentés: {os.path.basename(backup_path)}"
+                                "the import was interrupted and restoring the "
+                                "backup also failed; the service will not "
+                                f"restart. Backup: {os.path.basename(backup_path)}"
                             ),
                         },
                     )
@@ -3362,8 +3362,8 @@ class Handler(BaseHTTPRequestHandler):
                     {
                         "ok": False,
                         "error": (
-                            "az import nem sikerült; az előző állapot "
-                            "visszaállítva, semmi nem változott"
+                            "import failed; the previous state was "
+                            "restored, nothing changed"
                         ),
                     },
                 )
@@ -3373,7 +3373,7 @@ class Handler(BaseHTTPRequestHandler):
             revoked = self.gw.sessions.shutdown(reason="config_import")
         except Exception as exc:
             revoked = 0
-            gateway.log(f"[konfiguráció] a munkamenetek visszavonása nem sikerült: {exc}")
+            gateway.log(f"[configuration] failed to revoke sessions: {exc}")
         LOGIN_TICKETS.revoke_all(reason="config_import")
         self._audit(
             "config_imported", user=session.user, revoked=revoked,
@@ -3384,7 +3384,7 @@ class Handler(BaseHTTPRequestHandler):
             200,
             {
                 "ok": True,
-                "message": "a konfiguráció betöltve; a szolgáltatás újraindul",
+                "message": "configuration loaded; the service is restarting",
                 "restarting": True,
                 "counts": counts,
             },
@@ -3400,7 +3400,7 @@ class Handler(BaseHTTPRequestHandler):
                 reason="invalid_origin",
             )
             return self._json(
-                403, {"ok": False, "error": "érvénytelen kérés-eredet"}
+                403, {"ok": False, "error": "invalid request origin"}
             )
         data = self._read_json()
         expected = _effective_site_name(self.gw)
@@ -3415,14 +3415,14 @@ class Handler(BaseHTTPRequestHandler):
                 400,
                 {
                     "ok": False,
-                    "error": "a visszaállításhoz gépeld be az oldalnevet",
+                    "error": "type the site name to reset",
                     "confirm_required": True,
                     "site_name": expected,
                 },
             )
 
         with self.gw.admin_lock:
-            # Előbb a futásidejű állapot; ha ez nem megy, semmi nem törlődik.
+            # Runtime state first; if this fails, nothing is deleted.
             try:
                 revoked = self.gw.sessions.shutdown(reason="config_reset")
                 LOGIN_TICKETS.revoke_all(reason="config_reset")
@@ -3434,20 +3434,20 @@ class Handler(BaseHTTPRequestHandler):
                     "config_reset_failed", user=session.user,
                     reason="runtime_flush_failed",
                 )
-                gateway.log(f"[konfiguráció] a visszaállítás előtti tűzfalürítés nem sikerült: {exc}")
+                gateway.log(f"[configuration] firewall flush before reset failed: {exc}")
                 return self._json(
                     503,
                     {
                         "ok": False,
                         "error": (
-                            "a tűzfal állapotát nem sikerült törölni; "
-                            "a visszaállítás nem történt meg"
+                            "failed to clear the firewall state; "
+                            "the reset did not happen"
                         ),
                     },
                 )
 
-            # A fájlok az egyes tárolók saját, 0600-os írási útján tűnnek el;
-            # a .env, a naplók és a szolgáltatásfájlok érintetlenek maradnak.
+            # Files disappear through each store's own 0600 write path;
+            # .env, logs and service files remain untouched.
             errors = 0
             for label, reset in (
                 ("users", self.gw.users.reset),
@@ -3456,15 +3456,15 @@ class Handler(BaseHTTPRequestHandler):
                 ("settings", self.gw.settings.reset),
                 ("fail2ban", self.gw.fail2ban.reset),
                 ("certs", self.gw.certs.reset),
-                # A WireGuard-peerek a settings.reset után is a kernelben
-                # maradnának; a visszaállításnál explicit töröljük őket.
+                # WireGuard peers would remain in the kernel even after
+                # settings.reset; delete them explicitly on reset.
                 ("tunnels", self.gw.tunnels.remove_all),
             ):
                 try:
                     reset()
                 except Exception as exc:
                     errors += 1
-                    gateway.log(f"[konfiguráció] a(z) {label} törlése nem sikerült: {exc}")
+                    gateway.log(f"[configuration] failed to delete {label}: {exc}")
             directory = os.path.dirname(self.gw.users.path) or "."
             try:
                 names = os.listdir(directory)
@@ -3476,11 +3476,11 @@ class Handler(BaseHTTPRequestHandler):
                         os.unlink(os.path.join(directory, name))
                     except OSError as exc:
                         errors += 1
-                        gateway.log(f"[konfiguráció] a(z) {name} törlése nem sikerült: {exc}")
+                        gateway.log(f"[configuration] failed to delete {name}: {exc}")
         try:
             self.gw.sync_host_ports()
         except Exception as exc:
-            gateway.log(f"[konfiguráció] a host portok szinkronizálása nem sikerült: {exc}")
+            gateway.log(f"[configuration] failed to sync host ports: {exc}")
         self._audit(
             "config_reset", user=session.user, revoked=revoked, errors=errors
         )
@@ -3492,8 +3492,8 @@ class Handler(BaseHTTPRequestHandler):
                     "ok": False,
                     "restarting": True,
                     "error": (
-                        "a visszaállítás részben nem sikerült; a szolgáltatás "
-                        "újraindul, az eredmény a naplóban látható"
+                        "the reset partially failed; the service is "
+                        "restarting, the result is visible in the log"
                     ),
                 },
             )
@@ -3501,25 +3501,25 @@ class Handler(BaseHTTPRequestHandler):
             200,
             {
                 "ok": True,
-                "message": "minden konfiguráció törölve; a szolgáltatás újraindul",
+                "message": "all configuration deleted; the service is restarting",
                 "restarting": True,
             },
         )
 
     def _admin_certs_action(self) -> None:
-        """Gyökérdomain-tanúsítvány feltöltése/cseréje (upload) és törlése."""
+        """Upload/replace (upload) and delete a root domain certificate."""
         session = self._admin_guard()
         if session is None:
             return
         if not self._origin_ok():
             self._admin_request_rejected("invalid_origin", user=session.user)
-            self._json(403, {"ok": False, "error": "érvénytelen kérés-eredet"})
+            self._json(403, {"ok": False, "error": "invalid request origin"})
             return
-        # Két, egyenként legfeljebb 64 KiB-os PEM JSON-kódolva.
+        # Two PEMs, each at most 64 KiB, JSON-encoded.
         data = self._read_json(4 * settings_store.MAX_CERT_PEM)
         if data is None:
             self._admin_request_rejected("bad_request", user=session.user)
-            return self._json(400, {"ok": False, "error": "hibás kérés"})
+            return self._json(400, {"ok": False, "error": "bad request"})
         action = str(data.get("action", "")).strip().lower()
         root = data.get("root")
         try:
@@ -3528,37 +3528,37 @@ class Handler(BaseHTTPRequestHandler):
                     "proxy_domains", []
                 ):
                     raise settings_store.SettingsError(
-                        "ismeretlen gyökérdomain"
+                        "unknown root domain"
                     )
                 if action == "upload":
                     meta = self.gw.certs.install(
                         root, data.get("cert"), data.get("key")
                     )
-                    # A gyorsítótárban lévő ACME-tanúsítvány megelőzné a
-                    # feltöltöttet; ACME nélkül nincs ilyen.
+                    # An ACME certificate in the cache would take precedence
+                    # over the uploaded one; without ACME there is none.
                     if self.gw.settings.snapshot().get("proxy_acme", True):
                         self._caddy_restart()
-                    message = "A tanúsítvány mentve."
+                    message = "Certificate saved."
                 elif action == "delete":
                     meta = self.gw.certs.delete(root)
                     if meta is None:
                         raise settings_store.SettingsError(
-                            "ehhez a gyökérdomainhez nincs feltöltött "
-                            "tanúsítvány"
+                            "there is no uploaded certificate "
+                            "for this root domain"
                         )
-                    message = "A tanúsítvány törölve."
+                    message = "Certificate deleted."
                 else:
                     raise settings_store.SettingsError(
-                        f"ismeretlen művelet: {action!r}"
+                        f"unknown operation: {action!r}"
                     )
                 self._audit_cert(f"proxy_cert_{action}", session, root, meta)
         except (settings_store.SettingsError, ValueError, OSError) as exc:
             self._admin_request_rejected("invalid_proxy_cert", user=session.user)
-            # Az OSError szövege útvonalat tartalmazhat; nem adjuk ki.
+            # The OSError text may contain a path; do not expose it.
             if isinstance(exc, ValueError):
                 return self._json(400, {"ok": False, "error": str(exc)})
             return self._json(
-                500, {"ok": False, "error": "a tanúsítvány mentése nem sikerült"}
+                500, {"ok": False, "error": "failed to save the certificate"}
             )
         payload = self._admin_state()
         payload["message"] = message
@@ -3572,16 +3572,16 @@ class Handler(BaseHTTPRequestHandler):
             self._admin_request_rejected(
                 "invalid_origin", user=session.user
             )
-            self._json(403, {"ok": False, "error": "érvénytelen kérés-eredet"})
+            self._json(403, {"ok": False, "error": "invalid request origin"})
             return
         data = self._read_json()
         if data is None:
             self._admin_request_rejected("bad_request", user=session.user)
-            return self._json(400, {"ok": False, "error": "hibás kérés"})
+            return self._json(400, {"ok": False, "error": "bad request"})
         action = str(data.get("action", "")).strip().lower()
         if action == "registration_enabled":
-            # Portálkezelés: nem megy át az nftables-előkészítésen és
-            # -alkalmazáson, ezért külön ágban kezeljük.
+            # Portal setting: it does not go through nftables preparation and
+            # application, so it is handled in a separate branch.
             value = data.get("enabled", data.get("registration_enabled"))
             if not isinstance(value, bool):
                 self._admin_request_rejected(
@@ -3591,8 +3591,8 @@ class Handler(BaseHTTPRequestHandler):
                     400,
                     {
                         "ok": False,
-                        "error": "a registration_enabled mező igaz/hamis "
-                                 "érték kell",
+                        "error": "the registration_enabled field must be "
+                                 "a true/false value",
                     },
                 )
                 return
@@ -3606,12 +3606,12 @@ class Handler(BaseHTTPRequestHandler):
                     registration_enabled=value,
                 )
             payload = self._admin_state()
-            payload["message"] = "A fiókkérés beállítása mentve."
+            payload["message"] = "The account request setting was saved."
             self._json(200, payload)
             return
         if action == "site_name":
-            # A tűzfal neve csak megjelenítési adat: nem megy át az
-            # nftables-előkészítésen és -alkalmazáson.
+            # The firewall's name is display data only: it does not go through
+            # nftables preparation and application.
             value = data.get("name", data.get("site_name"))
             if not isinstance(value, str):
                 self._admin_request_rejected(
@@ -3621,7 +3621,7 @@ class Handler(BaseHTTPRequestHandler):
                     400,
                     {
                         "ok": False,
-                        "error": "a tűzfal neve szöveg kell",
+                        "error": "the firewall name must be text",
                     },
                 )
                 return
@@ -3643,18 +3643,18 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(400, {"ok": False, "error": str(exc)})
                 return
             payload = self._admin_state()
-            payload["message"] = "A tűzfal neve mentve."
+            payload["message"] = "The firewall name was saved."
             self._json(200, payload)
             return
         if action == "motd":
-            # A közlemény csak megjelenítési adat: nem megy át az
-            # nftables-előkészítésen és -alkalmazáson.
+            # The announcement is display data only: it does not go through
+            # nftables preparation and application.
             try:
                 with self.gw.admin_lock:
                     stored = self.gw.settings.set_motd(
                         data.get("text", ""), data.get("expires_at", "")
                     )
-                    # A szöveg nem kerül a naplóba, csak a hossza és a lejárat.
+                    # The text does not enter the log, only its length and expiry.
                     self._audit(
                         "admin_settings_changed",
                         user=session.user,
@@ -3668,12 +3668,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(400, {"ok": False, "error": str(exc)})
                 return
             payload = self._admin_state()
-            payload["message"] = "A közlemény mentve."
+            payload["message"] = "The announcement was saved."
             self._json(200, payload)
             return
         if action == "proxy_acme":
-            # A /api/proxy/ask válaszát változtatja; kikapcsoláskor a Caddy
-            # újraindul, hogy a már kiadott tanúsítványokat se szolgálja ki.
+            # Changes the response of /api/proxy/ask; when disabled, Caddy
+            # restarts so it does not serve already issued certificates either.
             value = data.get("enabled")
             if not isinstance(value, bool):
                 self._admin_request_rejected(
@@ -3683,7 +3683,7 @@ class Handler(BaseHTTPRequestHandler):
                     400,
                     {
                         "ok": False,
-                        "error": "a proxy_acme mező igaz/hamis érték kell",
+                        "error": "the proxy_acme field must be a true/false value",
                     },
                 )
                 return
@@ -3700,12 +3700,12 @@ class Handler(BaseHTTPRequestHandler):
                     proxy_acme=value,
                 )
             payload = self._admin_state()
-            payload["message"] = "Az automatikus tanúsítvány beállítása mentve."
+            payload["message"] = "The automatic certificate setting was saved."
             self._json(200, payload)
             return
         if action == "portal_domain":
-            # A Caddy kérésenként kérdezi a portált, ezért nincs újratöltés;
-            # a címnek gyökérdomain alatt kell lennie (a tanúsítvány miatt).
+            # Caddy queries the portal per request, so there is no reload;
+            # the address must be under a root domain (because of the certificate).
             value = data.get("domain", "")
             if not isinstance(value, str):
                 self._admin_request_rejected(
@@ -3713,7 +3713,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 self._json(
                     400,
-                    {"ok": False, "error": "portal_domain: szöveg kell"},
+                    {"ok": False, "error": "portal_domain: text required"},
                 )
                 return
             try:
@@ -3733,16 +3733,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(400, {"ok": False, "error": str(exc)})
                 return
             payload = self._admin_state()
-            payload["message"] = "A Dropjak címe mentve."
+            payload["message"] = "The Dropjak address was saved."
             self._json(200, payload)
             return
         if action == "proxy":
-            # A Caddy kérésenként a portált kérdezi, ezért itt nincs
-            # újratöltés és nftables-módosítás sem.
+            # Caddy queries the portal per request, so there is no reload and
+            # no nftables change here either.
             try:
                 with self.gw.admin_lock:
-                    # A domain szabályok hivatkozásai ugyanezen zár alatt
-                    # olvasódnak, mint a szabálymentés (lásd _admin_rules).
+                    # Domain rule references are read under the same lock
+                    # as rule saving (see _admin_rules).
                     stored = self.gw.settings.set_proxy(
                         data.get("proxy_domains", []),
                         data.get("proxy_routes", []),
@@ -3770,7 +3770,7 @@ class Handler(BaseHTTPRequestHandler):
                             for route in stored["proxy_routes"]
                         ),
                     )
-                    # A törölt gyökérdomain tanúsítványa is törlődik.
+                    # The certificate of a deleted root domain is also deleted.
                     for root, meta in self.gw.certs.prune(
                         stored["proxy_domains"]
                     ).items():
@@ -3782,7 +3782,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(400, {"ok": False, "error": str(exc)})
                 return
             payload = self._admin_state()
-            payload["message"] = "A proxy beállításai mentve."
+            payload["message"] = "Proxy settings saved."
             self._json(200, payload)
             return
         if action == "port_proxies":
@@ -3798,12 +3798,12 @@ class Handler(BaseHTTPRequestHandler):
                 "invalid_entry_id", user=session.user
             )
             self._json(
-                400, {"ok": False, "error": "érvénytelen bejegyzés-azonosító"}
+                400, {"ok": False, "error": "invalid entry ID"}
             )
             return
-        # A módosítás előkészítése és az nftables-re alkalmazása egy zár
-        # alatt fut, hogy két párhuzamos admin-kérés ne írja felül
-        # egymás beállításait (TOCTOU).
+        # Preparing the change and applying it to nftables run under one lock
+        # so two parallel admin requests cannot overwrite each other's
+        # settings (TOCTOU).
         with self.gw.admin_lock:
             try:
                 new_data = self.gw.settings.prepare(
@@ -3829,8 +3829,8 @@ class Handler(BaseHTTPRequestHandler):
                     503,
                     {
                         "ok": False,
-                        "error": "a tűzfal-beállítások alkalmazása nem "
-                                 f"sikerült: {exc}",
+                        "error": "failed to apply the firewall settings: "
+                                 f"{exc}",
                     },
                 )
                 return
@@ -3838,21 +3838,21 @@ class Handler(BaseHTTPRequestHandler):
             self._audit(
                 "admin_settings_changed",
                 user=session.user,
-                action=action or "ismeretlen",
+                action=action or "unknown",
                 kind=kind,
                 target=target,
                 preauth_count=len(new_data.get("preauth", [])),
                 block_count=len(new_data.get("block", [])),
             )
         payload = self._admin_state()
-        payload["message"] = "A tűzfalbeállítások mentve."
+        payload["message"] = "Firewall settings saved."
         self._json(200, payload)
 
     def _admin_port_proxies(self, session, data: dict) -> None:
-        """A port proxy lista cseréje: nft alkalmazás -> mentés -> conntrack.
+        """Replace the port proxy list: nft apply -> save -> conntrack.
 
-        Az apply_settings a többi testreszabott lánccal egy tranzakcióban
-        cseréli a port proxy láncokat, és mentési hibánál visszaállít.
+        apply_settings replaces the port proxy chains in one transaction with
+        the other customized chains, and rolls back on a save error.
         """
         with self.gw.admin_lock:
             old = self.gw.settings.snapshot().get("port_proxies", [])
@@ -3877,14 +3877,14 @@ class Handler(BaseHTTPRequestHandler):
                     503,
                     {
                         "ok": False,
-                        "error": "a tűzfal-beállítások alkalmazása nem "
-                                 f"sikerült: {exc}",
+                        "error": "failed to apply the firewall settings: "
+                                 f"{exc}",
                     },
                 )
                 return
             entries = new_data["port_proxies"]
-            # A régi NAT-kötésű folyamok a conntrackben a végükig a régi
-            # célra mennének: a megváltozott hallgató portokét töröljük.
+            # Old NAT-bound flows in conntrack would go to the old target until
+            # they end: delete the entries of changed listening ports.
             changed = gateway.port_proxy_changes(old, entries)
             for proto, port in changed:
                 gateway.conntrack_flush_port(proto, port, audit=self.gw.audit)
@@ -3911,21 +3911,21 @@ class Handler(BaseHTTPRequestHandler):
             self.gw.firewall.docker_published_ports(),
             set(self.gw.firewall.portproxy_localnet_blocked(entries)),
         )
-        payload["message"] = "A port proxy beállításai mentve."
+        payload["message"] = "Port proxy settings saved."
         self._json(200, payload)
 
     def _tunnel_reference_error(self, refs) -> str:
-        """Hibaüzenet, ha a megadott szolgáltatás-hivatkozásokra szabály épül.
+        """Error message if a rule is built on the given service references.
 
-        A hivatkozó szabályokat azonosítóval és címkével sorolja fel, hogy
-        az admin tudja, mit kell előbb módosítania. Üres szöveg, ha nincs
-        hivatkozás (a művelet folytatható).
+        It lists the referencing rules by ID and label so the admin knows what
+        must be changed first. Empty text if there is no reference (the
+        operation can proceed).
         """
         try:
             references = self.gw.rules.service_references()
         except Exception as exc:
             raise settings_store.SettingsError(
-                "tunnel: a szabályhivatkozások ellenőrzése nem sikerült: "
+                "tunnel: failed to check rule references: "
                 f"{exc}"
             ) from exc
         rows: list[str] = []
@@ -3944,23 +3944,23 @@ class Handler(BaseHTTPRequestHandler):
         if not rows:
             return ""
         return (
-            "tunnel: a szolgáltatás nem törölhető, mert "
-            "szabály hivatkozik rá; előbb módosítsd vagy töröld a "
-            "hivatkozó szabályokat: " + "; ".join(rows)
+            "tunnel: the service cannot be deleted because "
+            "a rule references it; first change or delete the "
+            "referencing rules: " + "; ".join(rows)
         )
 
     def _tunnel_domain_reference_error(self, domains) -> str:
-        """Hibaüzenet, ha egy domain szabály hivatkozik a megadott nevekre.
+        """Error message if a domain rule references the given names.
 
-        A proxy-bejegyzéseknél megszokott viselkedést követi: a hivatkozott
-        domain nem tűnhet el csendben, mert a szabály a döntéskori
-        ellenőrzésnél érvénytelenné válna.
+        It follows the behavior usual for proxy entries: a referenced domain
+        must not disappear silently, because the rule would become invalid at
+        the check made at decision time.
         """
         try:
             referenced = self.gw.rules.domain_references()
         except Exception as exc:
             raise settings_store.SettingsError(
-                "tunnel: a domain-hivatkozások ellenőrzése nem sikerült: "
+                "tunnel: failed to check domain references: "
                 f"{exc}"
             ) from exc
         missing = sorted({
@@ -3969,23 +3969,23 @@ class Handler(BaseHTTPRequestHandler):
         if not missing:
             return ""
         return (
-            "tunnel: domain szabály hivatkozik rá, ezért nem törölhető és "
-            "a domainje nem módosítható: " + ", ".join(missing)
-            + "; előbb vedd ki a szabályból"
+            "tunnel: a domain rule references it, so it cannot be deleted and "
+            "its domain cannot be changed: " + ", ".join(missing)
+            + "; first remove it from the rule"
         )
 
     @staticmethod
     def _tunnel_effective_ports(service) -> object:
-        """A szolgáltatás teljes effektív leképezése; hibánál ``None``.
+        """Full effective mapping of the service; ``None`` on error.
 
-        A hallgató port mellett a protokollt, a célhostot és a célportot is
-        tartalmazza, hogy a cél átirányítása akkor is változásnak számítson,
-        ha a hallgató portok változatlanok. Domain-módú szolgáltatásnál a
-        domainnév külön ``("domain", 0, név, 0)`` sorként szerepel: a UI a
-        domain szerkesztésekor a belső hallgató portot változatlanul hagyja,
-        ezért a domain átnevezése/törlése csak így számít változásnak, és
-        csak így indul el a hivatkozó szabályok frissítése és a
-        munkamenetek visszavonása.
+        Besides the listening port it also contains the protocol, target host
+        and target port, so redirecting the target counts as a change even if
+        the listening ports are unchanged. For a domain-mode service the domain
+        name appears as a separate ``("domain", 0, name, 0)`` row: when editing
+        the domain, the UI leaves the internal listening port unchanged, so
+        renaming/deleting the domain counts as a change only this way, and only
+        this way does refreshing the referencing rules and revoking sessions
+        start.
         """
         try:
             ports = settings_store.tunnel_service_ports(service)
@@ -4009,26 +4009,26 @@ class Handler(BaseHTTPRequestHandler):
         return tuple(sorted(rows))
 
     def _admin_tunnels(self, session, data: dict, action: str) -> None:
-        """WireGuard-ügynökök és szolgáltatásaik kezelése.
+        """Manage WireGuard agents and their services.
 
-        A szakasz a prepare_tunnels -> apply_settings úton megy, ezért az
-        nftables (jump + szintetikus forward szabályok) és a WireGuard-peer
-        szinkron ugyanabban a műveletben frissül. A naplóba csak azonosítók,
-        portok és darabszámok kerülnek: kulcs és token soha.
+        The section goes through prepare_tunnels -> apply_settings, so nftables
+        (jump + synthetic forward rules) and the WireGuard peer sync are
+        updated in the same operation. Only IDs, ports and counts enter the
+        log: key and token never.
         """
         target = str(data.get("id") or data.get("agent_id") or "")[:64]
         extra: dict = {}
         message = ""
-        # A letiltás mindig engedélyezett (fail-closed): a hivatkozó
-        # szabályok hozzáférése megszűnik, ezért a művelet után a
-        # érintett munkameneteket bontjuk. A törlés továbbra is tiltott,
-        # amíg szabály hivatkozik az ügynökre/szolgáltatásra.
+        # Disabling is always allowed (fail-closed): access from referencing
+        # rules ceases, so affected sessions are torn down after the operation.
+        # Deletion is still forbidden while a rule references the
+        # agent/service.
         agent_disabled = False
         agent_toggled = False
         agent_service_refs: list[str] = []
         if action == "tunnel_service_test":
-            # Az elérhetőségi teszt csak olvas: nem megy át a beállítás-
-            # előkészítésen és az nftables-alkalmazáson, és nem ír állapotot.
+            # The reachability test is read-only: it does not go through
+            # settings preparation and nftables application, and writes no state.
             self._admin_tunnel_service_test(session, data)
             return
         try:
@@ -4036,7 +4036,7 @@ class Handler(BaseHTTPRequestHandler):
                 snapshot = self.gw.settings.snapshot()
                 if snapshot.get("error"):
                     raise settings_store.SettingsError(
-                        f"a beállításfájl hibás: {snapshot['error']}"
+                        f"the settings file is invalid: {snapshot['error']}"
                     )
                 tunnels = snapshot.get("tunnels")
                 if not isinstance(tunnels, dict):
@@ -4046,7 +4046,7 @@ class Handler(BaseHTTPRequestHandler):
                         tunnels["port"] = data.get("port")
                     if "endpoint" in data:
                         tunnels["endpoint"] = data.get("endpoint")
-                    message = "Az alagút beállításai mentve."
+                    message = "Tunnel settings saved."
                 elif action == "tunnel_agent_add":
                     keys = self.gw.tunnels.generate_keys()
                     if not (tunnels.get("server_private_key")
@@ -4068,7 +4068,7 @@ class Handler(BaseHTTPRequestHandler):
                             break
                     if not address:
                         raise settings_store.SettingsError(
-                            "tunnel: nincs szabad ügynökcím"
+                            "tunnel: no free agent address"
                         )
                     agent_id = secrets.token_hex(4)
                     while any(
@@ -4089,7 +4089,7 @@ class Handler(BaseHTTPRequestHandler):
                     target = agent_id
                     extra["agent_id"] = agent_id
                     message = (
-                        "Az ügynök létrejött; töltsd le a konfigurációját."
+                        "Agent created; download its configuration."
                     )
                 elif action == "tunnel_agent_update":
                     agent = self._tunnel_agent(tunnels, data.get("id"))
@@ -4112,8 +4112,8 @@ class Handler(BaseHTTPRequestHandler):
                     if "enabled" in data:
                         agent["enabled"] = data.get("enabled")
                     message = (
-                        "Az ügynök letiltva."
-                        if agent_disabled else "Az ügynök mentve."
+                        "Agent disabled."
+                        if agent_disabled else "Agent saved."
                     )
                 elif action == "tunnel_agent_delete":
                     agent = next(
@@ -4125,7 +4125,7 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     if agent is None:
                         raise settings_store.SettingsError(
-                            "tunnel: nincs ilyen ügynök"
+                            "tunnel: no such agent"
                         )
                     refs = [
                         f"{agent['id']}/{service['id']}"
@@ -4144,7 +4144,7 @@ class Handler(BaseHTTPRequestHandler):
                         item for item in tunnels["agents"]
                         if item["id"] != agent["id"]
                     ]
-                    message = "Az ügynök törölve."
+                    message = "Agent deleted."
                 elif action == "tunnel_service_save":
                     agent = self._tunnel_agent(tunnels, data.get("agent_id"))
                     services = agent["services"]
@@ -4179,7 +4179,7 @@ class Handler(BaseHTTPRequestHandler):
                         )
                         if service is None:
                             raise settings_store.SettingsError(
-                                "tunnel: nincs ilyen szolgáltatás"
+                                "tunnel: no such service"
                             )
                         old_service = copy.deepcopy(service)
                         old_ports = self._tunnel_effective_ports(
@@ -4193,16 +4193,15 @@ class Handler(BaseHTTPRequestHandler):
                         ):
                             if key in data:
                                 service[key] = data[key]
-                        # A domain elhagyásakor a challenge is törlődik:
-                        # domain nélkül nincs host, amin érvényesülhetne.
+                        # Removing the domain also deletes the challenge:
+                        # without a domain there is no host for it to apply to.
                         if "domain" in data and not service.get("domain"):
                             service.pop("challenge", None)
                         ref = f"{agent['id']}/{service_id}"
-                        # A letiltás mindig engedélyezett (fail-closed); a
-                        # hivatkozó szabályok hozzáférése megszűnik. A
-                        # domain-váltás/törlés továbbra is védett, mert a
-                        # domain-szabály a döntéskori ellenőrzésnél
-                        # érvénytelenné válna.
+                        # Disabling is always allowed (fail-closed); access from
+                        # referencing rules ceases. Changing/deleting the domain
+                        # remains protected because the domain rule would become
+                        # invalid at the check made at decision time.
                         became_disabled = (
                             was_enabled
                             and service.get("enabled", True) is False
@@ -4222,7 +4221,7 @@ class Handler(BaseHTTPRequestHandler):
                             changed_ref = ref
                     target = f"{agent['id']}/{service_id}"
                     extra["service_id"] = service_id
-                    message = "A szolgáltatás mentve."
+                    message = "Service saved."
                 elif action == "tunnel_service_delete":
                     agent = self._tunnel_agent(tunnels, data.get("agent_id"))
                     service_id = data.get("id")
@@ -4250,10 +4249,10 @@ class Handler(BaseHTTPRequestHandler):
                     ]
                     if len(agent["services"]) == before:
                         raise settings_store.SettingsError(
-                            "tunnel: nincs ilyen szolgáltatás"
+                            "tunnel: no such service"
                         )
                     target = ref
-                    message = "A szolgáltatás törölve."
+                    message = "Service deleted."
                 new_data = self.gw.settings.prepare_tunnels(tunnels)
                 self.gw.apply_settings(new_data)
                 if action == "tunnel_service_save":
@@ -4280,12 +4279,11 @@ class Handler(BaseHTTPRequestHandler):
                             f"->{mapping['target']}"
                             for mapping in mappings
                         )
-                    # A módosított leképzésre épülő szabályok feloldott
-                    # portjai frissülnek; a megváltozott szabályok
-                    # munkameneteit azonnal bontjuk. Letiltáskor a
-                    # hivatkozó szabályok hozzáférése mindenképpen
-                    # megszűnik, ezért a hivatkozó szabályok munkamenetei
-                    # is bontandók (fail-closed).
+                    # Resolved ports of rules built on the modified mapping are
+                    # refreshed; sessions of changed rules are torn down
+                    # immediately. On disable, access from referencing rules
+                    # ceases in any case, so sessions of referencing rules must
+                    # also be torn down (fail-closed).
                     if changed_ref is not None:
                         references = self.gw.rules.service_references()
                         rule_ids = set(references.get(changed_ref, ()))
@@ -4302,15 +4300,15 @@ class Handler(BaseHTTPRequestHandler):
                             )
                         if became_disabled:
                             message = (
-                                "A szolgáltatás letiltva; a hivatkozó "
-                                "szabályok hozzáférése megszűnt."
-                                if rule_ids else "A szolgáltatás letiltva."
+                                "Service disabled; access from the referencing "
+                                "rules ceased."
+                                if rule_ids else "Service disabled."
                             )
                 if action == "tunnel_agent_update" and agent_toggled:
-                    # Az ügynök letiltása az összes szolgáltatását elérhetet-
-                    # lenné teszi. A feloldott portok újraszámolása után a
-                    # hivatkozó szabályok (a gyűjtőkön át is) munkamenetei
-                    # azonnal bontandók.
+                    # Disabling the agent makes all its services unreachable.
+                    # After recalculating the resolved ports, sessions of
+                    # referencing rules (also through collections) must be torn
+                    # down immediately.
                     refreshed = self.gw.rules.reflect_services()
                     try:
                         references = self.gw.rules.service_references()
@@ -4332,11 +4330,11 @@ class Handler(BaseHTTPRequestHandler):
                             references.get(ref) for ref in agent_service_refs
                         ):
                             message = (
-                                "Az ügynök letiltva; a hivatkozó szabályok "
-                                "hozzáférése megszűnt."
+                                "Agent disabled; access from the referencing "
+                                "rules ceased."
                             )
                         else:
-                            message = "Az ügynök letiltva."
+                            message = "Agent disabled."
                 self._audit(
                     "admin_settings_changed",
                     user=session.user,
@@ -4356,7 +4354,7 @@ class Handler(BaseHTTPRequestHandler):
                 {
                     "ok": False,
                     "field": "wireguard",
-                    "error": f"a WireGuard-kulcsok előállítása nem sikerült: {exc}",
+                    "error": f"failed to generate WireGuard keys: {exc}",
                 },
             )
             return
@@ -4378,8 +4376,8 @@ class Handler(BaseHTTPRequestHandler):
                 {
                     "ok": False,
                     "field": "tunnels",
-                    "error": "a tűzfal-beállítások alkalmazása nem "
-                             f"sikerült: {exc}",
+                    "error": "failed to apply the firewall settings: "
+                             f"{exc}",
                 },
             )
             return
@@ -4389,36 +4387,38 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, payload)
 
     def _tunnel_test_address(self, agent: dict) -> str:
-        """A teszt célcíme; tesztben felülbírálható (pl. 127.0.0.1)."""
+        """The test target address; overridable in tests (e.g. 127.0.0.1)."""
         return str(agent.get("address") or "")
 
     @staticmethod
     def _tunnel_probe_tcp(address: str, port: int) -> dict:
-        """Egy TCP-kapcsolat a teljes úton (portál -> WireGuard -> DNAT).
+        """One TCP connection along the full path (portal -> WireGuard -> DNAT).
 
-        A sikerhez elég a kapcsolat létrejötte: a port elérhető. A nyitott
-        socketet azonnal bezárjuk, mert a teszt nem küld protokoll-adatot.
+        Connection establishment is enough for success: the port is reachable.
+        The open socket is closed immediately because the test sends no
+        protocol data.
         """
         try:
             connection = socket.create_connection(
                 (address, port), timeout=_TUNNEL_TEST_TCP_TIMEOUT
             )
             connection.close()
-            return {"ok": True, "detail": "csatlakozás létrejött"}
+            return {"ok": True, "detail": "connection established"}
         except socket.timeout:
-            return {"ok": False, "detail": "időtúllépés"}
+            return {"ok": False, "detail": "timeout"}
         except ConnectionRefusedError:
-            return {"ok": False, "detail": "elutasítva"}
+            return {"ok": False, "detail": "refused"}
         except OSError as exc:
-            return {"ok": False, "detail": f"hálózati hiba: {exc}"}
+            return {"ok": False, "detail": f"network error: {exc}"}
 
     @staticmethod
     def _tunnel_probe_udp(address: str, port: int) -> dict:
-        """Egyetlen nulla bájt kiküldése UDP-n, rövid válaszvárakozással.
+        """Send a single zero byte over UDP, with a short wait for a reply.
 
-        UDP-n a válasz hiánya nem hiba: a cél nem köteles visszaírni. A
-        ``ConnectionRefusedError`` viszont ICMP port-unreachable-t jelent,
-        vagyis a cél nem hallgat a porton; ezt hibaként jelentjük.
+        On UDP, absence of a reply is not an error: the target is not required
+        to write back. ``ConnectionRefusedError``, however, means ICMP
+        port-unreachable, that is, the target is not listening on the port; we
+        report this as an error.
         """
         probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
@@ -4430,19 +4430,19 @@ class Handler(BaseHTTPRequestHandler):
             except socket.timeout:
                 return {
                     "ok": True,
-                    "detail": "kiküldve, UDP-válasz nem várható",
+                    "detail": "sent, no UDP reply expected",
                 }
-            return {"ok": True, "detail": "válasz érkezett"}
+            return {"ok": True, "detail": "reply received"}
         except ConnectionRefusedError:
-            return {"ok": False, "detail": "elutasítva (ICMP)"}
+            return {"ok": False, "detail": "refused (ICMP)"}
         except socket.timeout:
-            # A send/connect várakozása sem tekinthető elutasításnak.
+            # Waiting during send/connect cannot be considered a refusal either.
             return {
                 "ok": True,
-                "detail": "kiküldve, UDP-válasz nem várható",
+                "detail": "sent, no UDP reply expected",
             }
         except OSError as exc:
-            return {"ok": False, "detail": f"hálózati hiba: {exc}"}
+            return {"ok": False, "detail": f"network error: {exc}"}
         finally:
             try:
                 probe.close()
@@ -4450,28 +4450,27 @@ class Handler(BaseHTTPRequestHandler):
                 pass
 
     def _admin_tunnel_service_test(self, session, data: dict) -> None:
-        """Egy szolgáltatás teljes elérési útjának próbája (csak olvasás).
+        """Probe the full access path of a service (read-only).
 
-        A portál host-hálózatú, ezért az ügynök WireGuard-címére
-        (``10.77.0.2:<tunnel_port>``) csatlakozunk: az útvonal a portál
-        hostjától a WireGuard-alagúton át az ügynök DNAT-jáig tart. Nem a
-        nyilvános WAN-címet és nem a loopbacket használjuk, mert az nem
-        ugyanazt az utat járja be. Állapot nem változik, kulcs/token nem
-        kerül a naplóba.
+        The portal uses host networking, so we connect to the agent's WireGuard
+        address (``10.77.0.2:<tunnel_port>``): the path runs from the portal
+        host through the WireGuard tunnel to the agent's DNAT. We do not use
+        the public WAN address or loopback, because those do not follow the
+        same path. State does not change, key/token do not enter the log.
         """
         agent_id = str(data.get("agent_id") or "")[:64]
         service_id = str(data.get("service_id") or "")[:64]
         if not agent_id or not service_id:
             self._json(400, {
                 "ok": False,
-                "error": "tunnel: az ügynök- és szolgáltatás-azonosító kell",
+                "error": "tunnel: agent and service ID required",
             })
             return
         try:
             snapshot = self.gw.settings.snapshot()
             if snapshot.get("error"):
                 raise settings_store.SettingsError(
-                    f"a beállításfájl hibás: {snapshot['error']}"
+                    f"the settings file is invalid: {snapshot['error']}"
                 )
             tunnels = snapshot.get("tunnels")
             if not isinstance(tunnels, dict):
@@ -4486,7 +4485,7 @@ class Handler(BaseHTTPRequestHandler):
             if agent is None:
                 self._json(404, {
                     "ok": False, "field": "agent_id",
-                    "error": "tunnel: nincs ilyen ügynök",
+                    "error": "tunnel: no such agent",
                 })
                 return
             service = next(
@@ -4499,24 +4498,23 @@ class Handler(BaseHTTPRequestHandler):
             if service is None:
                 self._json(404, {
                     "ok": False, "field": "service_id",
-                    "error": "tunnel: nincs ilyen szolgáltatás",
+                    "error": "tunnel: no such service",
                 })
                 return
             if not agent.get("enabled", True):
                 self._json(409, {
                     "ok": False, "field": "agent_id",
-                    "error": "tunnel: az ügynök ki van kapcsolva",
+                    "error": "tunnel: the agent is disabled",
                 })
                 return
             if not service.get("enabled", True):
                 self._json(409, {
                     "ok": False, "field": "service_id",
-                    "error": "tunnel: a szolgáltatás ki van kapcsolva",
+                    "error": "tunnel: the service is disabled",
                 })
                 return
-            # A kiterjesztett leképezések a tartományokat is felbontják, és
-            # a tcp+udp párt ugyanúgy ``both``-ra vonják össze, mint az
-            # ügynök szinkronja.
+            # Expanded mappings also resolve ranges, and combine the tcp+udp
+            # pair into ``both`` the same way as the agent sync does.
             mappings = [
                 item for item in settings_store.agent_services_expanded(agent)
                 if item.get("service_id") == service_id
@@ -4530,7 +4528,7 @@ class Handler(BaseHTTPRequestHandler):
         if not mappings:
             self._json(409, {
                 "ok": False, "field": "service_id",
-                "error": "tunnel: nincs tesztelhető portleképezés",
+                "error": "tunnel: no testable port mapping",
             })
             return
 
@@ -4574,7 +4572,7 @@ class Handler(BaseHTTPRequestHandler):
             2 if item.get("proto") == "both" else 1 for item in limited
         )
         finished = len(results) >= expected
-        # A TCP a mérvadó; ha nincs TCP-próba (tiszta UDP), akkor az UDP.
+        # TCP is authoritative; if there is no TCP probe (pure UDP), then UDP.
         tcp_results = [row for row in results if row["proto"] == "tcp"]
         authoritative = tcp_results or [
             row for row in results if row["proto"] == "udp"
@@ -4583,21 +4581,21 @@ class Handler(BaseHTTPRequestHandler):
             finished and bool(authoritative)
             and all(row["ok"] for row in authoritative)
         )
-        summary = "a szolgáltatás elérhető"
+        summary = "service reachable"
         if not reachable:
             failures = [row for row in authoritative if not row["ok"]]
             if failures:
                 first = failures[0]
                 summary = (
-                    "a szolgáltatás nem érhető el: "
+                    "service unreachable: "
                     f"{first['proto'].upper()} {first['listen']} "
                     f"({first['detail']})"
                 )
             else:
-                summary = "a szolgáltatás nem érhető el: a teszt nem fejeződött be"
+                summary = "service unreachable: the test did not finish"
         if len(mappings) > len(limited):
             summary += (
-                f"; csak az első {len(limited)} leképezés lett tesztelve"
+                f"; only the first {len(limited)} mappings were tested"
             )
         self._audit(
             "tunnel_service_test",
@@ -4628,7 +4626,7 @@ class Handler(BaseHTTPRequestHandler):
             None,
         )
         if agent is None:
-            raise settings_store.SettingsError("tunnel: nincs ilyen ügynök")
+            raise settings_store.SettingsError("tunnel: no such agent")
         return agent
 
     def _admin_fail2ban_api(self) -> None:
@@ -4651,12 +4649,12 @@ class Handler(BaseHTTPRequestHandler):
             self._admin_request_rejected(
                 "invalid_origin", user=session.user
             )
-            self._json(403, {"ok": False, "error": "érvénytelen kérés-eredet"})
+            self._json(403, {"ok": False, "error": "invalid request origin"})
             return
         data = self._read_json()
         if data is None:
             self._admin_request_rejected("bad_request", user=session.user)
-            return self._json(400, {"ok": False, "error": "hibás kérés"})
+            return self._json(400, {"ok": False, "error": "bad request"})
         action = str(data.get("action", "")).strip().lower()
         target = ""
         message = ""
@@ -4694,17 +4692,17 @@ class Handler(BaseHTTPRequestHandler):
                     audit_extra["released"] = max(
                         0, before_bans - config_snapshot["banned_count"]
                     )
-                    message = "A fail2ban beállításai mentve."
+                    message = "Fail2ban settings saved."
                 elif action in ("ban", "unban"):
                     ip = data.get("ip")
                     if not isinstance(ip, str) or not ip.strip():
-                        raise fail2ban_mod.Fail2banError("hiányzó IP-cím")
+                        raise fail2ban_mod.Fail2banError("missing IP address")
                     ip = ip.strip()
                     target = ip
                     if action == "ban":
                         if ip == self._client_ip():
                             raise fail2ban_mod.Fail2banError(
-                                "a saját IP-címed nem tiltható le a portálról"
+                                "your own IP address cannot be blocked from the portal"
                             )
                         seconds = data.get("seconds", 0)
                         record = self.gw.fail2ban.ban(
@@ -4719,10 +4717,10 @@ class Handler(BaseHTTPRequestHandler):
                             ),
                             "until": record.get("until", 0),
                         }
-                        message = f"{ip} letiltva."
+                        message = f"{ip} blocked."
                     else:
-                        # A proxy-tiltás (TCP 80/443) külön oldható fel; a
-                        # teljes tiltás ettől megmarad, és fordítva.
+                        # The proxy block (TCP 80/443) can be lifted separately;
+                        # the full block remains, and vice versa.
                         proxy = data.get("proxy", False) is True
                         existing = (
                             self.gw.fail2ban.proxy_banned(ip) if proxy
@@ -4736,7 +4734,7 @@ class Handler(BaseHTTPRequestHandler):
                                 404,
                                 {
                                     "ok": False,
-                                    "error": "ez az IP-cím nem volt letiltva",
+                                    "error": "this IP address was not blocked",
                                 },
                             )
                             return
@@ -4747,23 +4745,23 @@ class Handler(BaseHTTPRequestHandler):
                             ),
                             "proxy": proxy,
                         }
-                        message = f"{ip} tiltása feloldva."
+                        message = f"Block on {ip} lifted."
                 elif action == "unban_all":
                     removed = self.gw.fail2ban.unban_all()
                     audit_extra = {"removed": removed}
-                    message = f"{removed} tiltás feloldva."
+                    message = f"{removed} blocks lifted."
                 else:
                     self._admin_request_rejected(
                         "unknown_action", user=session.user
                     )
                     self._json(
-                        400, {"ok": False, "error": "ismeretlen művelet"}
+                        400, {"ok": False, "error": "unknown operation"}
                     )
                     return
                 self._audit(
                     "admin_fail2ban_changed",
                     user=session.user,
-                    action=action or "ismeretlen",
+                    action=action or "unknown",
                     target=target,
                     **audit_extra,
                 )
@@ -4781,7 +4779,7 @@ class Handler(BaseHTTPRequestHandler):
                 503,
                 {
                     "ok": False,
-                    "error": f"a fail2ban művelet nem sikerült: {exc}",
+                    "error": f"fail2ban operation failed: {exc}",
                 },
             )
             return
@@ -4831,40 +4829,40 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/gate/"):
             return self._gate_api(path)
         self._discard_body()
-        self._json(404, {"ok": False, "error": "ismeretlen végpont"})
+        self._json(404, {"ok": False, "error": "unknown endpoint"})
 
     def _register(self) -> None:
-        """Nyilvános fiókkérés: jóváhagyásra váró felhasználó létrehozása."""
+        """Public account request: create a user pending approval."""
         ip = self._client_ip()
         data = self._read_json()
         if data is None:
             self._audit("registration_failed", reason="bad_request")
-            return self._json(400, {"ok": False, "error": "hibás kérés"})
+            return self._json(400, {"ok": False, "error": "bad request"})
         if not self._origin_ok():
             self._audit("registration_failed", reason="invalid_origin")
-            return self._json(403, {"ok": False, "error": "érvénytelen kérés-eredet"})
+            return self._json(403, {"ok": False, "error": "invalid request origin"})
         if not gateway.is_ipv4(ip):
             self._audit("registration_failed", reason="non_ipv4")
             return self._json(
-                400, {"ok": False, "error": "A kapu csak IPv4-címmel érhető el."}
+                400, {"ok": False, "error": "The gateway is reachable only with an IPv4 address."}
             )
         if not bool(self.gw.settings.snapshot().get("registration_enabled", False)):
             self._audit(
-                "registration_failed", reason="a fiókkérés ki van kapcsolva"
+                "registration_failed", reason="account requests are disabled"
             )
             return self._json(
                 403,
                 {
                     "ok": False,
-                    "error": "A fiókkérés nem engedélyezett.",
+                    "error": "Account requests are not allowed.",
                     "code": "registration_disabled",
                 },
             )
         if not self.gw.register_rate.allow(ip):
-            self._audit("registration_failed", reason="túl sok próbálkozás")
+            self._audit("registration_failed", reason="too many attempts")
             return self._json(
                 429,
-                {"ok": False, "error": "Túl sok fiókkérés. Próbáld újra később."},
+                {"ok": False, "error": "Too many account requests. Try again later."},
                 headers={"Retry-After": "600"},
             )
 
@@ -4878,19 +4876,19 @@ class Handler(BaseHTTPRequestHandler):
             or not isinstance(email, str)
             or not isinstance(captcha, dict)
         ):
-            self._audit("registration_failed", reason="hiányos adatok")
-            return self._json(400, {"ok": False, "error": "hiányos adatok"})
+            self._audit("registration_failed", reason="incomplete data")
+            return self._json(400, {"ok": False, "error": "incomplete data"})
         user = user.strip()
         if len(user) > 32 or not gateway.USERNAME_RE.match(user):
             self._audit(
-                "registration_failed", reason="érvénytelen felhasználónév"
+                "registration_failed", reason="invalid username"
             )
             return self._json(
                 400,
                 {
                     "ok": False,
-                    "error": "a felhasználónév 1–32 karakter lehet: betű, "
-                             "szám, pont, kötőjel, aláhúzás",
+                    "error": "the username must be 1-32 characters: letter, "
+                             "digit, dot, hyphen, underscore",
                 },
             )
         if not (
@@ -4899,24 +4897,24 @@ class Handler(BaseHTTPRequestHandler):
             <= gateway.UserStore.MAX_PASSWORD
         ):
             self._audit(
-                "registration_failed", user=user, reason="érvénytelen jelszóhossz"
+                "registration_failed", user=user, reason="invalid password length"
             )
             return self._json(
                 400,
                 {
                     "ok": False,
-                    "error": f"a jelszó {gateway.UserStore.MIN_PASSWORD}–"
-                             f"{gateway.UserStore.MAX_PASSWORD} karakter legyen",
+                    "error": f"the password must be {gateway.UserStore.MIN_PASSWORD}-"
+                             f"{gateway.UserStore.MAX_PASSWORD} characters",
                 },
             )
         try:
             email = gateway.normalize_email(email, strict=True)
         except ValueError:
             self._audit(
-                "registration_failed", user=user, reason="érvénytelen e-mail-cím"
+                "registration_failed", user=user, reason="invalid email address"
             )
             return self._json(
-                400, {"ok": False, "error": "Érvénytelen e-mail-cím."}
+                400, {"ok": False, "error": "Invalid email address."}
             )
 
         if gateway.TURNSTILE_ON:
@@ -4930,18 +4928,18 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(403, {"ok": False, "error": f"Captcha: {why}"})
 
         if self.gw.users.record(user) is not None:
-            self._audit("registration_failed", user=user, reason="foglalt név")
+            self._audit("registration_failed", user=user, reason="name taken")
             return self._json(
                 409,
                 {
                     "ok": False,
-                    "error": "Ez a bejelentkezési név már foglalt.",
+                    "error": "This login name is already taken.",
                     "code": "username_taken",
                 },
             )
         try:
-            # A jelszót és az e-mail-címet kizárólag a felhasználótároló
-            # kapja meg; naplóba és auditba egyik sem kerülhet.
+            # The password and email address go only to the user store;
+            # neither may enter a log or the audit.
             self.gw.users.add(
                 user,
                 password,
@@ -4953,32 +4951,32 @@ class Handler(BaseHTTPRequestHandler):
                 must_change_password=False,
             )
         except gateway.UserStoreError as exc:
-            if "már létezik" in str(exc):
+            if "already exists" in str(exc):  # matches gateway.py's message
                 self._audit(
-                    "registration_failed", user=user, reason="foglalt név"
+                    "registration_failed", user=user, reason="name taken"
                 )
                 return self._json(
                     409,
                     {
                         "ok": False,
-                        "error": "Ez a bejelentkezési név már foglalt.",
+                        "error": "This login name is already taken.",
                         "code": "username_taken",
                     },
                 )
             self._audit(
                 "registration_failed",
                 user=user,
-                reason="a felhasználó létrehozása nem sikerült",
+                reason="failed to create the user",
             )
             return self._json(400, {"ok": False, "error": str(exc)})
         self._audit("registration_requested", target=user)
-        print(f"[{ip}] fiókkérés rögzítve: {user!r}", flush=True)
+        print(f"[{ip}] account request recorded: {user!r}", flush=True)
         self._json(
             200,
             {
                 "ok": True,
-                "message": "Kérelmedet rögzítettük. Az admin jóváhagyása "
-                           "után beléphetsz.",
+                "message": "Your request has been recorded. After admin "
+                           "approval you can log in.",
             },
         )
 
@@ -4986,33 +4984,33 @@ class Handler(BaseHTTPRequestHandler):
         ip = self._client_ip()
         data = self._read_json()
         if data is None:
-            self._audit("login_failed", reason="hibás kérés")
-            return self._json(400, {"ok": False, "error": "hibás kérés"})
+            self._audit("login_failed", reason="bad request")
+            return self._json(400, {"ok": False, "error": "bad request"})
 
         if not self.gw.login_rate.allow(ip):
-            self._audit("login_failed", reason="túl sok próbálkozás")
+            self._audit("login_failed", reason="too many attempts")
             return self._json(
                 429,
-                {"ok": False, "error": "Túl sok próbálkozás. Várj egy percet."},
+                {"ok": False, "error": "Too many attempts. Wait a minute."},
                 headers={"Retry-After": str(gateway.RATE_WINDOW)},
             )
 
         if not gateway.is_ipv4(ip):
-            self._audit("login_failed", reason="nem IPv4 cím")
+            self._audit("login_failed", reason="not an IPv4 address")
             return self._json(
-                400, {"ok": False, "error": "A kapu csak IPv4-címmel érhető el."}
+                400, {"ok": False, "error": "The gateway is reachable only with an IPv4 address."}
             )
 
         if not self._origin_ok():
-            self._audit("login_failed", reason="érvénytelen kérés-eredet")
-            return self._json(403, {"ok": False, "error": "érvénytelen kérés-eredet"})
+            self._audit("login_failed", reason="invalid request origin")
+            return self._json(403, {"ok": False, "error": "invalid request origin"})
 
         banned = self.gw.fail2ban.banned(ip)
         if banned is not None:
             payload, headers = self._ban_reply(banned)
             self._audit(
                 "login_failed",
-                reason="fail2ban tiltás alatt",
+                reason="under fail2ban block",
                 source=payload["ban_source"],
                 ban_until=payload["ban_until"],
                 remaining=payload["remaining"],
@@ -5023,12 +5021,12 @@ class Handler(BaseHTTPRequestHandler):
         password = data.get("pass")
         captcha = data.get("captcha")
         if not isinstance(user, str) or not isinstance(password, str) or not isinstance(captcha, dict):
-            self._audit("login_failed", reason="hiányos adatok")
-            return self._json(400, {"ok": False, "error": "hiányos adatok"})
+            self._audit("login_failed", reason="incomplete data")
+            return self._json(400, {"ok": False, "error": "incomplete data"})
         user = user.strip()
         if not user or len(user) > 64 or len(password) > 1024:
-            self._audit("login_failed", user=user[:64], reason="hiányos adatok")
-            return self._json(400, {"ok": False, "error": "hiányos adatok"})
+            self._audit("login_failed", user=user[:64], reason="incomplete data")
+            return self._json(400, {"ok": False, "error": "incomplete data"})
 
         if gateway.TURNSTILE_ON:
             ok, why = gateway.verify_turnstile(str(captcha.get("token", "")), ip)
@@ -5039,8 +5037,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(403, {"ok": False, "error": f"Captcha: {why}"})
 
         if not self.gw.users.verify(user, password):
-            self._audit("login_failed", user=user, reason="hibás felhasználónév vagy jelszó")
-            print(f"[{ip}] sikertelen belépés: {user!r}", flush=True)
+            self._audit("login_failed", user=user, reason="invalid username or password")
+            print(f"[{ip}] failed login: {user!r}", flush=True)
             try:
                 ban = self.gw.fail2ban.record_failure(ip, user)
             except fail2ban_mod.Fail2banError as exc:
@@ -5054,8 +5052,8 @@ class Handler(BaseHTTPRequestHandler):
                     {
                         "ok": False,
                         "error": (
-                            "Túl sok sikertelen belépés: az IP-címedet a "
-                            "tűzfal letiltotta. Próbáld újra később."
+                            "Too many failed logins: your IP address was "
+                            "blocked by the firewall. Try again later."
                         ),
                         "banned": True,
                         "ban_until": ban.get("until", 0),
@@ -5063,28 +5061,28 @@ class Handler(BaseHTTPRequestHandler):
                     },
                 )
             return self._json(
-                403, {"ok": False, "error": "Hibás felhasználónév vagy jelszó."}
+                403, {"ok": False, "error": "Invalid username or password."}
             )
 
         record = self.gw.users.record(user)
         if record is not None and record.pending:
-            # A helyes jelszó ellenére sem jön létre munkamenet vagy 2FA-jegy,
-            # és a fail2bant sem terheljük: ez nem hibás belépési kísérlet.
+            # Despite the correct password, no session or 2FA ticket is created,
+            # and fail2ban is not charged either: this is not a failed login attempt.
             self._audit(
-                "login_failed", user=user, reason="a fiók jóváhagyásra vár"
+                "login_failed", user=user, reason="the account is pending approval"
             )
             return self._json(
                 403,
                 {
                     "ok": False,
-                    "error": "A fiók jóváhagyásra vár. Az admin jóváhagyása "
-                             "után beléphetsz.",
+                    "error": "The account is pending approval. After admin "
+                             "approval you can log in.",
                     "code": "pending_approval",
                     "pending": True,
                 },
             )
         if record is None or not record.enabled:
-            self._audit("login_failed", user=user, reason="letiltott felhasználó")
+            self._audit("login_failed", user=user, reason="disabled user")
             try:
                 self.gw.fail2ban.record_failure(ip, user)
             except fail2ban_mod.Fail2banError as exc:
@@ -5092,15 +5090,15 @@ class Handler(BaseHTTPRequestHandler):
                     ip, exc, self.gw.audit, operation="record_failure"
                 )
             return self._json(
-                403, {"ok": False, "error": "Hibás felhasználónév vagy jelszó."}
+                403, {"ok": False, "error": "Invalid username or password."}
             )
 
         if record.totp_required:
             fingerprint = _record_fingerprint(record)
             if not record.totp_secret:
-                # Első 2FA-belépés: a titkot még nem tároltuk. A jegyhez
-                # kötjük, hogy csak ugyanaz az IP és felhasználói állapot
-                # fejezhesse be a regisztrációt.
+                # First 2FA login: the secret is not stored yet. It is bound to
+                # the ticket so only the same IP and user state can finish
+                # enrollment.
                 secret = gateway.generate_totp_secret()
                 ticket = LOGIN_TICKETS.issue(
                     "enroll", record.name, ip, fingerprint, secret=secret
@@ -5160,13 +5158,13 @@ class Handler(BaseHTTPRequestHandler):
         method: str | None = None,
         extra: dict | None = None,
     ) -> None:
-        """A jelszó vagy a 2FA lépés utáni közös munkamenet-válasz."""
+        """Shared session response after the password or 2FA step."""
         ip = self._client_ip()
-        # F7: versenyhelyzet a korai tiltás-ellenőrzés és a munkamenet
-        # létrehozása között. A jelszó-/TOTP-/regisztrációs/recovery ág mind
-        # ide fut be; itt, közvetlenül a munkamenet létrehozása előtt még
-        # egyszer a démon authoritative állapotából ellenőrizzük a tiltást.
-        # Így egy közben bekövetkező tiltás után sem jön létre munkamenet.
+        # F7: race between the early block check and session creation. The
+        # password/TOTP/registration/recovery branches all end up here; here,
+        # immediately before creating the session, we check the block once more
+        # from the daemon's authoritative state. Thus no session is created even
+        # after a block that occurs in the meantime.
         banned = self.gw.fail2ban.banned(ip)
         if banned is not None:
             payload, headers = self._ban_reply(banned)
@@ -5185,25 +5183,25 @@ class Handler(BaseHTTPRequestHandler):
             )
         except gateway.FirewallError as exc:
             self._audit(
-                "login_failed", user=record.name, reason=f"tűzfal hiba: {exc}"
+                "login_failed", user=record.name, reason=f"firewall error: {exc}"
             )
             print(
-                f"[{ip}] a régi hozzáférés visszavonása nem sikerült: {exc}",
+                f"[{ip}] failed to revoke the old access: {exc}",
                 flush=True,
             )
             return self._json(
                 503,
                 {
                     "ok": False,
-                    "error": "A belépés előtti tűzfal-frissítés nem sikerült, ezért "
-                             "nem léptél be. Szólj az adminisztrátornak.",
+                    "error": "The pre-login firewall refresh failed, so you "
+                             "were not logged in. Contact the administrator.",
                 },
             )
 
-        # F7: a korai ellenőrzés és a login() között eltelt időben is
-        # megtilthatja az IP-t egy másik kérés (pl. párhuzamos, sikertelen
-        # belépések). A létrehozott munkamenetet azonnal visszavonjuk, és
-        # a közös tiltásválaszt adjuk vissza — cookie nélkül.
+        # F7: in the time between the early check and login(), another request
+        # (e.g. parallel failed logins) may also block the IP. The created
+        # session is revoked immediately, and the shared block response is
+        # returned - without a cookie.
         banned = self.gw.fail2ban.banned(ip)
         if banned is not None:
             ended = self.gw.sessions.logout(
@@ -5249,7 +5247,7 @@ class Handler(BaseHTTPRequestHandler):
             audit_fields["method"] = method
         self._audit("login_success", **audit_fields)
         print(
-            f"[{ip}] hitelesítve: {record.name!r}; hozzáférés-választásra vár",
+            f"[{ip}] authenticated: {record.name!r}; waiting for access selection",
             flush=True,
         )
         payload = {
@@ -5268,15 +5266,15 @@ class Handler(BaseHTTPRequestHandler):
                 for rule in self.gw.effective_rules(record.name)
             ],
             "message": (
-                "Sikeres belépés. Első belépésnél le kell cserélned a "
-                "kezdetleges jelszavad."
+                "Login successful. On first login you must change your "
+                "initial password."
                 if record.must_change_password else
-                "Sikeres belépés. Válaszd ki a hozzáférési szabályt "
-                "és azt, mennyi ideig szeretnéd használni a hálózatot."
+                "Login successful. Select the access rule and how long "
+                "you want to use the network."
             ),
         }
-        # A belépés válasza ugyanazt a már érvényes közleményt kapja, mint
-        # a /api/status; lejárt vagy kikapcsolt MOTD nem kerül bele.
+        # The login response gets the same still-valid announcement as
+        # /api/status; an expired or disabled MOTD is not included.
         motd = settings_store.active_motd(self.gw.settings.snapshot())
         if motd:
             payload["motd"] = motd
@@ -5288,20 +5286,20 @@ class Handler(BaseHTTPRequestHandler):
     def _ban_error(source: str) -> str:
         if source == "drop":
             return (
-                "Ez az IP-cím fail2ban tiltás alatt áll, mert a tűzfal "
-                "gyanús hálózati forgalmat (például portvizsgálatot) "
-                "észlelt. Próbáld újra később."
+                "This IP address is under a fail2ban block because the firewall "
+                "detected suspicious network traffic (for example a port scan). "
+                "Try again later."
             )
         return (
-            "Ez az IP-cím fail2ban tiltás alatt áll a túl sok "
-            "sikertelen belépés miatt. Próbáld újra később."
+            "This IP address is under a fail2ban block due to too many "
+            "failed logins. Try again later."
         )
 
     @classmethod
     def _ban_reply(cls, banned: dict) -> tuple[dict, dict[str, str]]:
-        """A belépő- és hozzáférés-végpontok közös tiltásválasza.
+        """Shared block response of the login and access endpoints.
 
-        A válasz sosem tartalmaz jelszót, cookie-t vagy tokent.
+        The response never contains a password, cookie or token.
         """
         remaining = int(banned.get("remaining", 0))
         source = str(banned.get("source") or "login")
@@ -5319,14 +5317,14 @@ class Handler(BaseHTTPRequestHandler):
         return payload, headers
 
     def _totp_ban_guard(self, ip: str) -> bool:
-        """A 2FA-végpontok közös fail2ban tiltás-ellenőrzése."""
+        """Shared fail2ban block check of the 2FA endpoints."""
         banned = self.gw.fail2ban.banned(ip)
         if banned is None:
             return False
         payload, headers = self._ban_reply(banned)
         self._audit(
             "login_failed",
-            reason="fail2ban tiltás alatt",
+            reason="under fail2ban ban",
             source=payload["ban_source"],
             ban_until=payload["ban_until"],
             remaining=payload["remaining"],
@@ -5344,33 +5342,33 @@ class Handler(BaseHTTPRequestHandler):
             return None
 
     def _totp_prelude(self) -> tuple[str, dict] | None:
-        """JSON, IPv4, eredet, sebességkorlát és tiltás ellenőrzése."""
+        """Check JSON, IPv4, origin, rate limit and block."""
         ip = self._client_ip()
         data = self._read_json()
         if data is None:
-            self._audit("login_failed", reason="hibás kérés")
+            self._audit("login_failed", reason="bad request")
             self._json(
                 400,
-                {"ok": False, "error": "hibás kérés", "code": "bad_request"},
+                {"ok": False, "error": "bad request", "code": "bad_request"},
             )
             return None
         if not gateway.is_ipv4(ip):
-            self._audit("login_failed", reason="nem IPv4 cím")
+            self._audit("login_failed", reason="not an IPv4 address")
             self._json(
-                400, {"ok": False, "error": "A kapu csak IPv4-címmel érhető el."}
+                400, {"ok": False, "error": "The gateway is reachable only with an IPv4 address."}
             )
             return None
         if not self._origin_ok():
-            self._audit("login_failed", reason="érvénytelen kérés-eredet")
+            self._audit("login_failed", reason="invalid request origin")
             self._json(
-                403, {"ok": False, "error": "érvénytelen kérés-eredet"}
+                403, {"ok": False, "error": "invalid request origin"}
             )
             return None
         if not self.gw.login_rate.allow(ip):
-            self._audit("login_failed", reason="túl sok próbálkozás")
+            self._audit("login_failed", reason="too many attempts")
             self._json(
                 429,
-                {"ok": False, "error": "Túl sok próbálkozás. Várj egy percet."},
+                {"ok": False, "error": "Too many attempts. Wait a minute."},
                 headers={"Retry-After": str(gateway.RATE_WINDOW)},
             )
             return None
@@ -5398,8 +5396,8 @@ class Handler(BaseHTTPRequestHandler):
         purpose: str = "",
         user: str = "",
     ) -> None:
-        # Ugyanaz a válasz jár a hiányzó, lejárt és elhasznált jegyre is; a
-        # naplóban viszont megkülönböztetjük az okot.
+        # The same response is given for a missing, expired and used ticket;
+        # in the log, however, we distinguish the reason.
         fields = {"purpose": purpose, "reason": reason}
         if user:
             fields["user"] = user
@@ -5411,7 +5409,7 @@ class Handler(BaseHTTPRequestHandler):
             {
                 "ok": False,
                 "code": "ticket_invalid",
-                "error": "Érvénytelen vagy lejárt bejelentkezés. Kezdd újra.",
+                "error": "Invalid or expired login. Start again.",
             },
         )
 
@@ -5423,7 +5421,7 @@ class Handler(BaseHTTPRequestHandler):
         recovery: bool = False,
         purpose: str = "",
     ) -> None:
-        """Hibás 2FA-kód: jegypróba, fail2ban és a megfelelő hibaüzenet."""
+        """Invalid 2FA code: ticket attempt, fail2ban and the appropriate error message."""
         remaining, locked, attempts, existed = (
             LOGIN_TICKETS.fail_with_status(token, ip)
         )
@@ -5458,8 +5456,8 @@ class Handler(BaseHTTPRequestHandler):
                 {
                     "ok": False,
                     "error": (
-                        "Túl sok sikertelen belépés: az IP-címedet a "
-                        "tűzfal letiltotta. Próbáld újra később."
+                        "Too many failed logins: your IP address was "
+                        "blocked by the firewall. Try again later."
                     ),
                     "banned": True,
                     "ban_until": ban.get("until", 0),
@@ -5470,16 +5468,16 @@ class Handler(BaseHTTPRequestHandler):
         if recovery:
             code = "recovery_invalid" if remaining > 0 else "ticket_locked"
             error = (
-                f"Hibás recovery kód. Még {remaining} próbálkozás."
+                f"Invalid recovery code. {remaining} attempts left."
                 if remaining > 0 else
-                "Túl sok hibás kód. Kezdd újra a belépést."
+                "Too many invalid codes. Restart login."
             )
         else:
             code = "totp_invalid" if remaining > 0 else "ticket_locked"
             error = (
-                f"Hibás kód. Még {remaining} próbálkozás."
+                f"Invalid code. {remaining} attempts left."
                 if remaining > 0 else
-                "Túl sok hibás kód. Kezdd újra a belépést."
+                "Too many invalid codes. Restart login."
             )
         self._json(
             403,
@@ -5492,7 +5490,7 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _login_totp(self) -> None:
-        """A jelszó utáni TOTP-kód ellenőrzése és a munkamenet létrehozása."""
+        """Verify the TOTP code after the password and create the session."""
         prelude = self._totp_prelude()
         if prelude is None:
             return
@@ -5506,7 +5504,7 @@ class Handler(BaseHTTPRequestHandler):
             )
             return self._json(
                 400,
-                {"ok": False, "error": "hibás kérés", "code": "bad_request"},
+                {"ok": False, "error": "bad request", "code": "bad_request"},
             )
         token, code = credentials
         ticket = LOGIN_TICKETS.peek(token, ip)
@@ -5522,7 +5520,7 @@ class Handler(BaseHTTPRequestHandler):
                 purpose=ticket.purpose,
                 user=ticket.username,
             )
-        # A felhasználót kizárólag a szerveroldali jegy választja ki.
+        # The user is selected exclusively by the server-side ticket.
         record = self.gw.users.record(ticket.username)
         if (
             record is None
@@ -5562,7 +5560,7 @@ class Handler(BaseHTTPRequestHandler):
         self._login_session_response(record, method="totp")
 
     def _login_totp_enroll(self) -> None:
-        """Az első 2FA-beállítás: titok megerősítése és recovery kódok."""
+        """First 2FA setup: confirm the secret and generate recovery codes."""
         prelude = self._totp_prelude()
         if prelude is None:
             return
@@ -5576,7 +5574,7 @@ class Handler(BaseHTTPRequestHandler):
             )
             return self._json(
                 400,
-                {"ok": False, "error": "hibás kérés", "code": "bad_request"},
+                {"ok": False, "error": "bad request", "code": "bad_request"},
             )
         token, code = credentials
         ticket = LOGIN_TICKETS.peek(token, ip)
@@ -5641,8 +5639,8 @@ class Handler(BaseHTTPRequestHandler):
                     "ok": False,
                     "code": "enroll_failed",
                     "error": (
-                        "A kétfaktoros beállítás nem sikerült. "
-                        "Próbáld újra."
+                        "Two-factor setup failed. "
+                        "Try again."
                     ),
                 },
             )
@@ -5661,8 +5659,8 @@ class Handler(BaseHTTPRequestHandler):
                     "ok": False,
                     "code": "enroll_failed",
                     "error": (
-                        "A kétfaktoros beállítás nem sikerült. "
-                        "Próbáld újra."
+                        "Two-factor setup failed. "
+                        "Try again."
                     ),
                 },
             )
@@ -5678,13 +5676,13 @@ class Handler(BaseHTTPRequestHandler):
             user=record.name,
             recovery_codes=len(codes),
         )
-        # A nyílt recovery kódok kizárólag ebben a válaszban jelennek meg.
+        # The plaintext recovery codes appear only in this response.
         self._login_session_response(
             record, method="totp_enroll", extra={"recovery_codes": codes}
         )
 
     def _login_recovery(self) -> None:
-        """Belépés egy egyszer használatos recovery kóddal."""
+        """Log in with a single-use recovery code."""
         prelude = self._totp_prelude()
         if prelude is None:
             return
@@ -5698,7 +5696,7 @@ class Handler(BaseHTTPRequestHandler):
             )
             return self._json(
                 400,
-                {"ok": False, "error": "hibás kérés", "code": "bad_request"},
+                {"ok": False, "error": "bad request", "code": "bad_request"},
             )
         token, code = credentials
         ticket = LOGIN_TICKETS.peek(token, ip)
@@ -5763,22 +5761,22 @@ class Handler(BaseHTTPRequestHandler):
         ip = self._client_ip()
         data = self._read_json()
         if data is None:
-            self._audit("access_denied", reason="hibás kérés")
-            return self._json(400, {"ok": False, "error": "hibás kérés"})
+            self._audit("access_denied", reason="bad request")
+            return self._json(400, {"ok": False, "error": "bad request"})
 
         if not self._origin_ok():
-            self._audit("access_denied", reason="érvénytelen kérés-eredet")
-            return self._json(403, {"ok": False, "error": "érvénytelen kérés-eredet"})
+            self._audit("access_denied", reason="invalid request origin")
+            return self._json(403, {"ok": False, "error": "invalid request origin"})
         if not gateway.is_ipv4(ip):
-            self._audit("access_denied", reason="nem IPv4 cím")
+            self._audit("access_denied", reason="not an IPv4 address")
             return self._json(
-                400, {"ok": False, "error": "A kapu csak IPv4-címmel érhető el."}
+                400, {"ok": False, "error": "The gateway is reachable only with an IPv4 address."}
             )
 
-        # F7: a tiltás-ellenőrzés a sebességkorlát és a munkamenet-zár előtt
-        # fut, így nincs zár-inverzió. Az on_ban visszahívás rendszerint már
-        # bontotta az IP munkameneteit; itt védelmi mélységként megismételjük,
-        # és a tiltott kliens semmilyen engedélyt nem kaphat.
+        # F7: the ban check runs before the rate limit and the session lock,
+        # so there is no lock inversion. The on_ban callback usually has
+        # already torn down the IP's sessions; here we repeat it as defense
+        # in depth, and a banned client must not receive any authorization.
         banned = self.gw.fail2ban.banned(ip)
         if banned is not None:
             payload, headers = self._ban_reply(banned)
@@ -5787,8 +5785,8 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 revoked = 0
                 print(
-                    f"[{ip}] a fail2ban tiltás munkamenet-bontása nem "
-                    f"sikerült: {exc}",
+                    f"[{ip}] tearing down sessions for the fail2ban ban "
+                    f"failed: {exc}",
                     flush=True,
                 )
             self._audit(
@@ -5802,10 +5800,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(403, payload, headers=headers)
 
         if not self.gw.access_rate.allow(ip):
-            self._audit("access_denied", reason="túl sok próbálkozás")
+            self._audit("access_denied", reason="too many attempts")
             return self._json(
                 429,
-                {"ok": False, "error": "Túl sok hozzáférés-módosítás. Várj egy percet."},
+                {"ok": False, "error": "Too many access changes. Wait a minute."},
                 headers={"Retry-After": "60"},
             )
 
@@ -5817,40 +5815,41 @@ class Handler(BaseHTTPRequestHandler):
 
         ttl = data.get("ttl")
         if isinstance(ttl, bool) or not isinstance(ttl, int):
-            self._audit("access_denied", reason="hiányzó szabály vagy időtartam")
+            self._audit("access_denied", reason="missing rule or duration")
             return self._json(
-                400, {"ok": False, "error": "hiányzó szabály vagy időtartam"}
+                400, {"ok": False, "error": "missing rule or duration"}
             )
 
         token = self._cookie_token()
         current = self.gw.sessions.validate(token, ip)
         if current is None:
-            self._audit("access_denied", reason="nincs érvényes munkamenet",
+            self._audit("access_denied", reason="no valid session",
                         rule=rule_field)
             return self._json(
-                400, {"ok": False, "error": "érvénytelen vagy lejárt munkamenet"}
+                400, {"ok": False, "error": "invalid or expired session"}
             )
         record = self.gw.users.record(current.user)
         if record is None or not record.enabled or record.pending:
             self.gw.sessions.logout(token, ip)
             self._audit(
                 "access_denied", user=current.user,
-                reason="letiltott vagy törölt felhasználó", rule=rule_field,
+                reason="disabled or deleted user", rule=rule_field,
             )
-            return self._json(403, {"ok": False, "error": "a felhasználó nem aktív"})
+            return self._json(403, {"ok": False, "error": "the user is not active"})
         if record.must_change_password:
-            # F7: védelmi mélység. Ha a jelző olyan munkameneten látszik,
-            # amely már engedélyt kapott (például egy másik folyamatból
-            # történő beállítás után), a hálózati engedély nem maradhat
-            # érvényben. A logout célzottan csak ezt a munkamenetet bontja.
+            # F7: defense in depth. If the flag appears on a session that
+            # has already received authorization (for example after a
+            # setting made from another process), the network
+            # authorization must not remain in effect. logout deliberately
+            # tears down only this session.
             #
-            # Trade-off: a /api/password végpont érvényes munkamenetet kér,
-            # ezért a kijelentkeztetés után a felhasználónak újra be kell
-            # lépnie az ideiglenes jelszóval, hogy lecserélhesse. Ez
-            # elfogadható: nem hagyunk élő engedélyt, és a jelszócsere
-            # továbbra is elérhető. (Ha a felhasználó csak a jelszavát
-            # akarja cserélni, és nem hívja a /api/access végpontot, a
-            # függő munkamenet megmarad, így közvetlenül cserélhet.)
+            # Trade-off: the /api/password endpoint requires a valid
+            # session, so after logging out the user must log in again with
+            # the temporary password to change it. This is acceptable: we
+            # leave no live authorization, and password change is still
+            # available. (If the user only wants to change their password
+            # and does not call the /api/access endpoint, the pending
+            # session remains, so they can change it directly.)
             access_revoked = False
             if current.authorized:
                 logged_out = self.gw.sessions.logout(
@@ -5859,22 +5858,22 @@ class Handler(BaseHTTPRequestHandler):
                 access_revoked = logged_out is not None
             self._audit(
                 "access_denied", user=current.user,
-                reason="kötelező jelszócsere", rule=rule_field,
+                reason="mandatory password change", rule=rule_field,
                 access_revoked=access_revoked,
             )
             return self._json(
                 403,
                 {
                     "ok": False,
-                    "error": "Előbb cseréld le a kezdetleges jelszavad.",
+                    "error": "Change your initial password first.",
                     "must_change_password": True,
                 },
             )
 
         groups = self.gw.groups.groups_for(current.user)
         try:
-            # Előbb minden azonosítót feloldunk; hiba esetén egyik szabály
-            # sem kerül engedélyezésre (nincs részleges hozzáférés).
+            # First resolve every identifier; on error none of the rules is
+            # granted (no partial access).
             resolved_rules = [
                 self.gw.rules.resolve_for(record, groups, rule_id)
                 for rule_id in rule_ids
@@ -5891,15 +5890,15 @@ class Handler(BaseHTTPRequestHandler):
         except gateway.FirewallError as exc:
             self._audit(
                 "access_denied", user=current.user, rule=rule_field,
-                ttl=ttl, reason=f"tűzfal hiba: {exc}",
+                ttl=ttl, reason=f"firewall error: {exc}",
             )
-            print(f"[{ip}] a hozzáférés beállítása nem sikerült: {exc}", flush=True)
+            print(f"[{ip}] failed to set access: {exc}", flush=True)
             return self._json(
                 503,
                 {
                     "ok": False,
-                    "error": "A tűzfal engedélyezése nem sikerült. Próbáld újra; "
-                             "ha ismétlődik, szólj az adminisztrátornak.",
+                    "error": "Failed to enable the firewall access. Try again; "
+                             "if it repeats, notify the administrator.",
                 },
             )
 
@@ -5944,7 +5943,7 @@ class Handler(BaseHTTPRequestHandler):
             **audit_fields,
         )
         print(
-            f"[{ip}] hozzáférés engedélyezve: {session.user!r}, "
+            f"[{ip}] access granted: {session.user!r}, "
             f"{', '.join(selected_ids)} ({session.ports.label()}), "
             f"{gateway.format_duration(ttl)}",
             flush=True,
@@ -5969,7 +5968,7 @@ class Handler(BaseHTTPRequestHandler):
                     for item in self.gw.effective_rules(session.user)
                 ],
                 "message": (
-                    "Hozzáférés engedélyezve: "
+                    "Access granted: "
                     f"{gateway.format_duration(ttl)} "
                     f"({', '.join(selection['selected_rule_labels'])})."
                 ),
@@ -5981,8 +5980,8 @@ class Handler(BaseHTTPRequestHandler):
         self._discard_body()
         ip = self._client_ip()
         if not self._origin_ok():
-            self._audit("logout_failed", reason="érvénytelen kérés-eredet")
-            return self._json(403, {"ok": False, "error": "érvénytelen kérés-eredet"})
+            self._audit("logout_failed", reason="invalid request origin")
+            return self._json(403, {"ok": False, "error": "invalid request origin"})
         token = self._cookie_token()
         session = self.gw.sessions.logout(token, ip)
         if session is not None:
@@ -6003,52 +6002,52 @@ class Handler(BaseHTTPRequestHandler):
         )
         if self._cookie_secure():
             clear += "; Secure"
-        print(f"[{ip}] kilépés", flush=True)
+        print(f"[{ip}] logout", flush=True)
         self._json(
-            200, {"ok": True, "message": "Kiléptél. A hálózat le van tiltva."},
+            200, {"ok": True, "message": "You have logged out. The network is blocked."},
             headers={"Set-Cookie": clear},
         )
 
     def _password(self) -> None:
-        """Saját jelszó cseréje (első belépéskor kötelező is lehet)."""
+        """Change your own password (may be mandatory on first login)."""
         ip = self._client_ip()
         data = self._read_json()
         if data is None:
-            self._audit("password_change_failed", reason="hibás kérés")
-            return self._json(400, {"ok": False, "error": "hibás kérés"})
+            self._audit("password_change_failed", reason="bad request")
+            return self._json(400, {"ok": False, "error": "bad request"})
         if not self._origin_ok():
-            self._audit("password_change_failed", reason="érvénytelen kérés-eredet")
-            return self._json(403, {"ok": False, "error": "érvénytelen kérés-eredet"})
+            self._audit("password_change_failed", reason="invalid request origin")
+            return self._json(403, {"ok": False, "error": "invalid request origin"})
         if not gateway.is_ipv4(ip):
-            self._audit("password_change_failed", reason="nem IPv4 cím")
+            self._audit("password_change_failed", reason="not an IPv4 address")
             return self._json(
-                400, {"ok": False, "error": "A kapu csak IPv4-címmel érhető el."}
+                400, {"ok": False, "error": "The gateway is reachable only with an IPv4 address."}
             )
-        # Védelem mélységben: tiltott IP a meglévő munkamenetével sem
-        # cserélhet jelszót. A rate limitert megelőzően, a közös
-        # tiltásválasszal zárjuk el; tokent/cookie-t nem adunk ki.
+        # Defense in depth: a banned IP cannot change its password even with
+        # its existing session. We block it before the rate limiter using the
+        # common ban response; no token/cookie is issued.
         banned = self.gw.fail2ban.banned(ip)
         if banned is not None:
             payload, headers = self._ban_reply(banned)
             self._audit(
                 "password_change_failed",
-                reason="fail2ban tiltás",
+                reason="fail2ban ban",
                 source=payload["ban_source"],
             )
             return self._json(403, payload, headers=headers)
         if not self.gw.password_rate.allow(ip):
-            self._audit("password_change_failed", reason="túl sok próbálkozás")
+            self._audit("password_change_failed", reason="too many attempts")
             return self._json(
                 429,
-                {"ok": False, "error": "Túl sok próbálkozás. Várj öt percet."},
+                {"ok": False, "error": "Too many attempts. Wait five minutes."},
                 headers={"Retry-After": "300"},
             )
         token = self._cookie_token()
         session = self.gw.sessions.validate(token, ip)
         if session is None:
-            self._audit("password_change_failed", reason="nincs érvényes munkamenet")
+            self._audit("password_change_failed", reason="no valid session")
             return self._json(
-                401, {"ok": False, "error": "érvénytelen vagy lejárt munkamenet"}
+                401, {"ok": False, "error": "invalid or expired session"}
             )
         record = self.gw.users.record(session.user)
         if record is None or not record.enabled or record.pending:
@@ -6058,37 +6057,37 @@ class Handler(BaseHTTPRequestHandler):
             )
             self._audit(
                 "password_change_failed", user=session.user,
-                reason="letiltott vagy törölt felhasználó",
+                reason="disabled or deleted user",
             )
-            return self._json(403, {"ok": False, "error": "a felhasználó nem aktív"})
+            return self._json(403, {"ok": False, "error": "the user is not active"})
 
         current = data.get("current")
         new = data.get("new")
         if not isinstance(current, str) or not isinstance(new, str):
             self._audit(
                 "password_change_failed", user=session.user,
-                reason="hiányzó jelszó",
+                reason="missing password",
             )
             return self._json(
                 400,
-                {"ok": False, "error": "a jelenlegi és az új jelszó is kötelező"},
+                {"ok": False, "error": "both the current and the new password are required"},
             )
         if not self.gw.users.verify(session.user, current):
             self._audit(
                 "password_change_failed", user=session.user,
-                reason="hibás jelenlegi jelszó",
+                reason="incorrect current password",
             )
             return self._json(
-                403, {"ok": False, "error": "A jelenlegi jelszó nem megfelelő."}
+                403, {"ok": False, "error": "The current password is incorrect."}
             )
         if current == new:
             self._audit(
                 "password_change_failed", user=session.user,
-                reason="az új jelszó azonos a régivel",
+                reason="the new password matches the old one",
             )
             return self._json(
                 400,
-                {"ok": False, "error": "Az új jelszó térjen el a jelenlegitől."},
+                {"ok": False, "error": "The new password must differ from the current one."},
             )
         try:
             self.gw.users.set_password(
@@ -6109,21 +6108,21 @@ class Handler(BaseHTTPRequestHandler):
             role=record.role,
             sessions_revoked=revoked,
         )
-        print(f"[{ip}] jelszó megváltoztatva: {session.user!r}", flush=True)
+        print(f"[{ip}] password changed: {session.user!r}", flush=True)
         self._json(
             200,
             {
                 "ok": True,
                 "must_change_password": False,
                 "sessions_revoked": revoked,
-                "message": "A jelszavad megváltozott.",
+                "message": "Your password has been changed.",
             },
         )
 
     # -- admin CRUD ------------------------------------------------------------
 
     def _admin_request_rejected(self, reason: str, user: str = "") -> None:
-        """Az admin-végpontok előzetes (még nem műveleti) elutasításai."""
+        """Preliminary (not yet operational) rejections of the admin endpoints."""
         self._audit(
             "admin_request_rejected",
             user=user,
@@ -6149,10 +6148,10 @@ class Handler(BaseHTTPRequestHandler):
         data = self._read_json()
         if data is None:
             self._admin_request_rejected("bad_request")
-            return self._json(400, {"ok": False, "error": "hibás kérés"})
+            return self._json(400, {"ok": False, "error": "bad request"})
         if not self._origin_ok():
             self._admin_request_rejected("invalid_origin")
-            return self._json(403, {"ok": False, "error": "érvénytelen kérés-eredet"})
+            return self._json(403, {"ok": False, "error": "invalid request origin"})
         session = self._admin_guard()
         if session is None:
             return
@@ -6167,19 +6166,19 @@ class Handler(BaseHTTPRequestHandler):
                 self._admin_user_delete(data)
             elif action == "approve":
                 self._admin_user_approve(data)
-                message = "A fiókkérés jóváhagyva."
+                message = "The account request was approved."
             elif action == "reject":
                 self._admin_user_reject(data)
-                message = "A fiókkérés elutasítva."
+                message = "The account request was rejected."
             elif action == "totp_reset":
                 self._admin_user_totp_reset(data, session)
-                # A reset-ág maga küldi a választ; ne legyen második.
+                # The reset branch sends the response itself; there must be no second one.
                 return
             else:
                 self._admin_request_rejected(
                     "unknown_action", user=session.user
                 )
-                raise gateway.UserStoreError("ismeretlen művelet")
+                raise gateway.UserStoreError("unknown action")
         except (gateway.UserStoreError, gateway.GroupStoreError,
                 gateway.RuleStoreError, gateway.AccessError, ValueError) as exc:
             self._admin_action_error(
@@ -6196,17 +6195,17 @@ class Handler(BaseHTTPRequestHandler):
         name = data.get("name")
         password = data.get("password")
         if not isinstance(name, str) or not isinstance(password, str):
-            raise gateway.UserStoreError("a név és a jelszó kötelező")
+            raise gateway.UserStoreError("name and password are required")
         name = name.strip()
         role = data.get("role", gateway.ROLE_USER)
         if role not in (gateway.ROLE_USER, gateway.ROLE_ADMIN):
-            raise gateway.UserStoreError("érvénytelen szerepkör")
+            raise gateway.UserStoreError("invalid role")
         enabled = data.get("enabled", True)
         if not isinstance(enabled, bool):
-            raise gateway.UserStoreError("az enabled mező logikai érték kell legyen")
+            raise gateway.UserStoreError("the enabled field must be a boolean")
         totp_required = data.get("totp_required", False)
         if not isinstance(totp_required, bool):
-            raise gateway.UserStoreError("érvénytelen totp_required")
+            raise gateway.UserStoreError("invalid totp_required")
         rules = self._rule_ids(data)
         if rules is not None:
             self._validate_rule_ids(rules)
@@ -6236,21 +6235,21 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _admin_user_approve(self, data: dict) -> None:
-        """Fiókkérés jóváhagyása: szabály és csoport nélkül engedélyezés."""
+        """Approve an account request: enable it without rules or groups."""
         name = data.get("name")
         if not isinstance(name, str) or not name.strip():
-            raise gateway.UserStoreError("hiányzó felhasználónév")
+            raise gateway.UserStoreError("missing username")
         name = name.strip()
         session = self._session()
         with self.gw.admin_lock:
             record = self.gw.users.record(name)
             if record is None or not record.pending:
                 raise gateway.UserStoreError(
-                    "ez a felhasználó nem jóváhagyásra váró kérelem"
+                    "this user is not a pending approval request"
                 )
             if not self.gw.users.approve_user(name):
                 raise gateway.UserStoreError(
-                    "ez a felhasználó nem jóváhagyásra váró kérelem"
+                    "this user is not a pending approval request"
                 )
             self._audit(
                 "registration_approved",
@@ -6259,23 +6258,23 @@ class Handler(BaseHTTPRequestHandler):
             )
 
     def _admin_user_reject(self, data: dict) -> None:
-        """Fiókkérés elutasítása: a kérelem és minden maradéka törlődik."""
+        """Reject an account request: the request and all its remnants are deleted."""
         name = data.get("name")
         if not isinstance(name, str) or not name.strip():
-            raise gateway.UserStoreError("hiányzó felhasználónév")
+            raise gateway.UserStoreError("missing username")
         name = name.strip()
         session = self._session()
         with self.gw.admin_lock:
             record = self.gw.users.record(name)
             if record is None:
-                raise gateway.UserStoreError(f"nincs ilyen felhasználó: {name}")
+                raise gateway.UserStoreError(f"no such user: {name}")
             if not record.pending:
                 raise gateway.UserStoreError(
-                    "csak jóváhagyásra váró kérelem utasítható el"
+                    "only a pending approval request can be rejected"
                 )
             if not self.gw.users.reject_user(name):
                 raise gateway.UserStoreError(
-                    "csak jóváhagyásra váró kérelem utasítható el"
+                    "only a pending approval request can be rejected"
                 )
             self.gw.groups.remove_member_everywhere(name)
             revoked = self.gw.sessions.revoke_user(name)
@@ -6289,38 +6288,38 @@ class Handler(BaseHTTPRequestHandler):
             )
 
     def _admin_user_update(self, data: dict) -> None:
-        # Az utolsó admin ellenőrzése és a módosítás egy zár alatt fut, hogy
-        # két párhuzamos kérés ne tudja egyszerre lefokozni/letiltani az
-        # utolsó adminokat (TOCTOU).
+        # The last-admin check and the modification run under one lock so that
+        # two concurrent requests cannot demote/disable the last admins at the
+        # same time (TOCTOU).
         with self.gw.admin_lock:
             self._admin_user_update_locked(data)
 
     def _admin_user_update_locked(self, data: dict) -> None:
         name = data.get("name")
         if not isinstance(name, str) or not name.strip():
-            raise gateway.UserStoreError("hiányzó felhasználónév")
+            raise gateway.UserStoreError("missing username")
         name = name.strip()
         record = self.gw.users.record(name)
         if record is None:
-            raise gateway.UserStoreError(f"nincs ilyen felhasználó: {name}")
+            raise gateway.UserStoreError(f"no such user: {name}")
         if record.pending:
-            # A jóváhagyásra váró kérelem nem szerkeszthető: így nem kerülhet
-            # rá szabály vagy csoport a jóváhagyás előtt.
+            # A pending approval request cannot be edited: this way no rule or
+            # group can be attached to it before approval.
             raise gateway.UserStoreError(
-                "a jóváhagyásra váró fiók nem szerkeszthető; használd a "
-                "jóváhagyás vagy az elutasítás műveletet"
+                "the pending account cannot be edited; use the approve "
+                "or reject action"
             )
         role = data.get("role", record.role)
         if role not in (gateway.ROLE_USER, gateway.ROLE_ADMIN):
-            raise gateway.UserStoreError("érvénytelen szerepkör")
+            raise gateway.UserStoreError("invalid role")
         enabled = data.get("enabled", record.enabled)
         if not isinstance(enabled, bool):
-            raise gateway.UserStoreError("az enabled mező logikai érték kell legyen")
+            raise gateway.UserStoreError("the enabled field must be a boolean")
         if record.is_admin and record.enabled and (
             role != gateway.ROLE_ADMIN or not enabled
         ) and self.gw.users.admin_count() <= 1:
             raise gateway.UserStoreError(
-                "az utolsó aktív admin nem tiltható le és nem vehető el a jogosultsága"
+                "the last active admin cannot be disabled or demoted"
             )
         rules = self._rule_ids(data)
         if rules is not None:
@@ -6328,33 +6327,33 @@ class Handler(BaseHTTPRequestHandler):
         group_ids = self._group_ids(data)
         password = data.get("password")
         if password is not None and not isinstance(password, str):
-            raise gateway.UserStoreError("érvénytelen jelszó")
+            raise gateway.UserStoreError("invalid password")
         must_change = data.get("must_change_password")
         if must_change is not None and not isinstance(must_change, bool):
             raise gateway.UserStoreError(
-                "a must_change_password mező logikai érték kell legyen"
+                "the must_change_password field must be a boolean"
             )
         totp_required = data.get("totp_required")
         if "totp_required" in data and not isinstance(totp_required, bool):
-            raise gateway.UserStoreError("érvénytelen totp_required")
+            raise gateway.UserStoreError("invalid totp_required")
         password_changed = bool(isinstance(password, str) and password)
         reason = "disabled" if not enabled else (
             "password_changed" if password_changed else "revoked"
         )
-        # A munkameneteket és a függő 2FA-jegyeket a módosítások előtt
-        # vonjuk vissza. Ha egy későbbi írás hibára fut, a felhasználó nem
-        # maradhat élő munkamenettel a részben módosított állapoton; így a
-        # visszavonás köztes hiba miatt sem maradhat el.
+        # Revoke the sessions and pending 2FA tickets before the changes. If a
+        # later write fails, the user must not keep live sessions on a
+        # partially modified state; this way revocation cannot be skipped due
+        # to an intermediate error either.
         revoked = self.gw.sessions.revoke_user(name, reason=reason)
         tickets = 0
         if record.enabled and not enabled:
-            # Letiltáskor a függő 2FA-jegyek sem maradhatnak életben.
+            # When disabling, pending 2FA tickets must not survive either.
             tickets = LOGIN_TICKETS.revoke_user(name, reason="disabled")
         stage = "password"
         try:
             if password_changed:
-                # Az admin által beállított (ideiglenes) jelszót az érintett
-                # felhasználónak első belépéskor le kell cserélnie.
+                # The affected user must change the (temporary) password set
+                # by the admin on first login.
                 self.gw.users.set_password(
                     name, password, must_change_password=True
                 )
@@ -6369,15 +6368,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.gw.groups.set_memberships(name, group_ids)
         except Exception as exc:
             if password_changed:
-                # A jelszó írása commitolódhatott a hiba előtt; a többi
-                # lépés külön, atomikus fájlírással dolgozik, ezért csak a
-                # jelszó-állapotot kell visszaállítani. A munkamenetek
-                # visszavonása már megtörtént.
+                # The password write may have committed before the error; the
+                # other steps use separate atomic file writes, so only the
+                # password state has to be restored. The sessions have
+                # already been revoked.
                 try:
                     self.gw.users.restore_password(name, record)
                 except Exception as restore_exc:
                     print(
-                        f"[{name}] a jelszó visszaállítása sem sikerült: "
+                        f"[{name}] restoring the password also failed: "
                         f"{restore_exc}",
                         flush=True,
                     )
@@ -6399,8 +6398,8 @@ class Handler(BaseHTTPRequestHandler):
             user=self._session().user if self._session() else "",
             role=role,
             enabled=enabled,
-            rules=",".join(rules) if rules is not None else "(változatlan)",
-            groups=",".join(group_ids) if group_ids is not None else "(változatlan)",
+            rules=",".join(rules) if rules is not None else "(unchanged)",
+            groups=",".join(group_ids) if group_ids is not None else "(unchanged)",
             password_changed=password_changed,
             must_change_password=(
                 updated.must_change_password if updated is not None
@@ -6408,7 +6407,7 @@ class Handler(BaseHTTPRequestHandler):
             ),
             totp_required=(
                 (updated.totp_required if updated is not None else totp_required)
-                if totp_required is not None else "(változatlan)"
+                if totp_required is not None else "(unchanged)"
             ),
             sessions_revoked=revoked,
             tickets_revoked=tickets,
@@ -6417,20 +6416,20 @@ class Handler(BaseHTTPRequestHandler):
     def _admin_user_totp_reset(
         self, data: dict, session: gateway.Session
     ) -> None:
-        """A 2FA-titok és recovery kódok törlése; a kötelező jelző marad."""
+        """Delete the 2FA secret and recovery codes; the required flag stays."""
         name = data.get("name")
         if not isinstance(name, str) or not name.strip():
-            raise gateway.UserStoreError("hiányzó felhasználónév")
+            raise gateway.UserStoreError("missing username")
         name = name.strip()
         with self.gw.admin_lock:
             record = self.gw.users.record(name)
             if record is None:
-                raise gateway.UserStoreError(f"nincs ilyen felhasználó: {name}")
-            # A reset előtti állapotot rögzítjük a naplóhoz; a titok és a
-            # recovery-hashek értéke természetesen nem kerülhet bele.
+                raise gateway.UserStoreError(f"no such user: {name}")
+            # Record the pre-reset state for the log; the secret and the
+            # recovery hashes must of course not be included.
             was_enrolled = bool(record.totp_secret)
             if not self.gw.users.reset_totp(name):
-                raise gateway.UserStoreError(f"nincs ilyen felhasználó: {name}")
+                raise gateway.UserStoreError(f"no such user: {name}")
             revoked = self.gw.sessions.revoke_user(name, reason="totp_reset")
             tickets = LOGIN_TICKETS.revoke_user(name, reason="totp_reset")
             self._audit(
@@ -6445,7 +6444,7 @@ class Handler(BaseHTTPRequestHandler):
             200,
             {
                 **self._admin_state(),
-                "message": f"{name} 2FA beállítása alaphelyzetbe állítva.",
+                "message": f"2FA for {name} has been reset.",
             },
         )
 
@@ -6456,13 +6455,13 @@ class Handler(BaseHTTPRequestHandler):
     def _admin_user_delete_locked(self, data: dict) -> None:
         name = data.get("name")
         if not isinstance(name, str) or not name.strip():
-            raise gateway.UserStoreError("hiányzó felhasználónév")
+            raise gateway.UserStoreError("missing username")
         name = name.strip()
         record = self.gw.users.record(name)
         if record is None:
-            raise gateway.UserStoreError(f"nincs ilyen felhasználó: {name}")
+            raise gateway.UserStoreError(f"no such user: {name}")
         if record.is_admin and self.gw.users.admin_count() <= 1:
-            raise gateway.UserStoreError("az utolsó admin nem törölhető")
+            raise gateway.UserStoreError("the last admin cannot be deleted")
         self.gw.users.remove(name)
         self.gw.groups.remove_member_everywhere(name)
         revoked = self.gw.sessions.revoke_user(name)
@@ -6479,10 +6478,10 @@ class Handler(BaseHTTPRequestHandler):
         data = self._read_json()
         if data is None:
             self._admin_request_rejected("bad_request")
-            return self._json(400, {"ok": False, "error": "hibás kérés"})
+            return self._json(400, {"ok": False, "error": "bad request"})
         if not self._origin_ok():
             self._admin_request_rejected("invalid_origin")
-            return self._json(403, {"ok": False, "error": "érvénytelen kérés-eredet"})
+            return self._json(403, {"ok": False, "error": "invalid request origin"})
         session = self._admin_guard()
         if session is None:
             return
@@ -6498,7 +6497,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._admin_request_rejected(
                     "unknown_action", user=session.user
                 )
-                raise gateway.GroupStoreError("ismeretlen művelet")
+                raise gateway.GroupStoreError("unknown action")
         except (gateway.GroupStoreError, gateway.RuleStoreError,
                 gateway.UserStoreError, ValueError) as exc:
             self._admin_action_error(
@@ -6531,7 +6530,7 @@ class Handler(BaseHTTPRequestHandler):
     def _admin_group_create(self, data: dict) -> None:
         group_id = data.get("id")
         if not isinstance(group_id, str):
-            raise gateway.GroupStoreError("hiányzó csoport-azonosító")
+            raise gateway.GroupStoreError("missing group ID")
         payload = self._group_payload(data)
         group = self.gw.groups.create(group_id, payload)
         self._audit(
@@ -6545,10 +6544,10 @@ class Handler(BaseHTTPRequestHandler):
     def _admin_group_update(self, data: dict) -> None:
         group_id = data.get("id")
         if not isinstance(group_id, str):
-            raise gateway.GroupStoreError("hiányzó csoport-azonosító")
+            raise gateway.GroupStoreError("missing group ID")
         existing = self.gw.groups.get(group_id.strip())
         if existing is None:
-            raise gateway.GroupStoreError(f"nincs ilyen csoport: {group_id}")
+            raise gateway.GroupStoreError(f"no such group: {group_id}")
         payload = self._group_payload(data, existing)
         updated = self.gw.groups.update(group_id, payload)
         affected = set(existing.members) | set(updated.members)
@@ -6565,7 +6564,7 @@ class Handler(BaseHTTPRequestHandler):
     def _admin_group_delete(self, data: dict) -> None:
         group_id = data.get("id")
         if not isinstance(group_id, str):
-            raise gateway.GroupStoreError("hiányzó csoport-azonosító")
+            raise gateway.GroupStoreError("missing group ID")
         group = self.gw.groups.delete(group_id.strip())
         revoked = sum(self.gw.sessions.revoke_user(name) for name in group.members)
         self._audit(
@@ -6580,18 +6579,18 @@ class Handler(BaseHTTPRequestHandler):
         data = self._read_json()
         if data is None:
             self._admin_request_rejected("bad_request")
-            return self._json(400, {"ok": False, "error": "hibás kérés"})
+            return self._json(400, {"ok": False, "error": "bad request"})
         if not self._origin_ok():
             self._admin_request_rejected("invalid_origin")
-            return self._json(403, {"ok": False, "error": "érvénytelen kérés-eredet"})
+            return self._json(403, {"ok": False, "error": "invalid request origin"})
         session = self._admin_guard()
         if session is None:
             return
         action = str(data.get("action", "")).strip()
         message = ""
         try:
-            # Az admin_lock a proxy-bejegyzések mentésével sorosít: egy
-            # domain szabály nem hivatkozhat közben törölt bejegyzésre.
+            # admin_lock serializes with saving proxy entries: a domain rule
+            # must not reference an entry deleted in the meantime.
             with self.gw.admin_lock:
                 if action == "create":
                     self._admin_rule_create(data)
@@ -6601,12 +6600,12 @@ class Handler(BaseHTTPRequestHandler):
                     self._admin_rule_delete(data)
                 elif action == "duplicate":
                     self._admin_rule_duplicate(data)
-                    message = "Szabály duplikálva."
+                    message = "Rule duplicated."
                 else:
                     self._admin_request_rejected(
                         "unknown_action", user=session.user
                     )
-                    raise gateway.RuleStoreError("ismeretlen művelet")
+                    raise gateway.RuleStoreError("unknown action")
         except (gateway.RuleStoreError, gateway.UserStoreError,
                 gateway.GroupStoreError, ValueError) as exc:
             self._admin_action_error(
@@ -6622,9 +6621,9 @@ class Handler(BaseHTTPRequestHandler):
     def _admin_rule_create(self, data: dict) -> None:
         rule_id = data.get("id")
         if not isinstance(rule_id, str):
-            raise gateway.RuleStoreError("hiányzó szabály-azonosító")
-        # A kiosztásokat a mentés ELŐTT ellenőrizzük: érvénytelen azonosító
-        # esetén a szabály ne jöjjön létre.
+            raise gateway.RuleStoreError("missing rule ID")
+        # Check the assignments BEFORE saving: on an invalid identifier the
+        # rule must not be created.
         users = self._rule_users(data)
         groups = self._group_ids(data)
         rule = self.gw.rules.create(rule_id, data)
@@ -6643,22 +6642,23 @@ class Handler(BaseHTTPRequestHandler):
             members=len(rule.members),
             **assignments,
         )
-        # A host (input) szabály portjai azonnal kerüljenek a kerneloldali
-        # host_service_* védőhalmazokba; egy esetleges hiba csak naplózódik.
+        # The ports of a host (input) rule must immediately go into the
+        # kernel-side host_service_* guard sets; any error is only logged.
         self.gw.sync_host_ports()
 
     def _admin_rule_update(self, data: dict) -> None:
         rule_id = data.get("id")
         if not isinstance(rule_id, str):
-            raise gateway.RuleStoreError("hiányzó szabály-azonosító")
-        # A kiosztásokat a mentés ELŐTT ellenőrizzük: érvénytelen azonosító
-        # esetén a szabály ne módosuljon.
+            raise gateway.RuleStoreError("missing rule ID")
+        # Check the assignments BEFORE saving: on an invalid identifier the
+        # rule must not be modified.
         users = self._rule_users(data)
         groups = self._group_ids(data)
-        # A függő gyűjtők listáját a szabálytár a módosítással egy záron
-        # belül, a commit pontján adja vissza: a közben létrehozott gyűjtő
-        # is belekerül, így nem maradhat engedélyezett munkamenet a régi
-        # portokkal, nem csak a szabály sajátjait kell bontani.
+        # The rule store returns the list of dependent collections together
+        # with the modification, at the commit point under one lock: a
+        # collection created in the meantime is included as well, so no
+        # authorized session can remain with the old ports and not only the
+        # rule's own ones have to be torn down.
         rule, dependents = self.gw.rules.update_with_dependents(
             rule_id.strip(), data
         )
@@ -6680,20 +6680,20 @@ class Handler(BaseHTTPRequestHandler):
             sessions_revoked=revoked,
             **assignments,
         )
-        # A feloldott portok a függő gyűjtők miatt is változhattak, ezért a
-        # teljes szabálytárból szinkronizálunk (a halmazok csak bővülnek).
+        # The resolved ports may also have changed because of dependent
+        # collections, so we sync from the whole rule store (sets only grow).
         self.gw.sync_host_ports()
 
     def _admin_rule_duplicate(self, data: dict) -> None:
         rule_id = data.get("id")
         if not isinstance(rule_id, str):
-            raise gateway.RuleStoreError("hiányzó szabály-azonosító")
+            raise gateway.RuleStoreError("missing rule ID")
         label = data.get("label")
         if label is not None and not isinstance(label, str):
-            raise gateway.RuleStoreError("label: szöveg kell")
+            raise gateway.RuleStoreError("label: must be a string")
         new_id = data.get("new_id")
         if new_id is not None and not isinstance(new_id, str):
-            raise gateway.RuleStoreError("new_id: szöveg kell")
+            raise gateway.RuleStoreError("new_id: must be a string")
         rule = self.gw.rules.duplicate(
             rule_id.strip(), new_id=new_id, label=label
         )
@@ -6714,7 +6714,7 @@ class Handler(BaseHTTPRequestHandler):
     def _admin_rule_delete(self, data: dict) -> None:
         rule_id = data.get("id")
         if not isinstance(rule_id, str):
-            raise gateway.RuleStoreError("hiányzó szabály-azonosító")
+            raise gateway.RuleStoreError("missing rule ID")
         rule = self.gw.rules.delete(rule_id.strip())
         users_changed = self.gw.users.remove_rule_everywhere(rule.id)
         groups_changed = self.gw.groups.remove_rule_everywhere(rule.id)
@@ -6728,22 +6728,22 @@ class Handler(BaseHTTPRequestHandler):
             groups_changed=groups_changed,
             sessions_revoked=revoked,
         )
-        # A törölt szabály portjai szándékosan a host_service_* halmazokban
-        # maradnak (add-only), így a meglévő kapcsolat nem nyílik meg újra.
+        # The ports of the deleted rule intentionally remain in the
+        # host_service_* sets (add-only), so existing connections do not reopen.
         self.gw.sync_host_ports()
 
 
-# ---------------------------------------------- Caddy tanúsítvány-gyorsítótár
+# ---------------------------------------------- Caddy certificate cache
 #
-# A certmagic (Caddy 2.10.2) kézfogáskor először a memóriájában tartott
-# tanúsítványt adja ki, csak utána kérdezi a get_certificate-et és az ask-et;
-# a konfiguráció újratöltése pedig az on-demand tanúsítványokat nem veszi ki
-# a gyorsítótárból. Az ACME kikapcsolása után így a már kiadott Let's
-# Encrypt-tanúsítványok a Caddy újraindításáig megmaradnának. A portál ezért
-# az admin API (Unix socket a közös caddy-admin köteten) POST /stop hívásával
-# leállítja a Caddyt, amelyet a compose (restart: unless-stopped) azonnal
-# újraindít, üres gyorsítótárral. A /data tárolóhoz nem nyúl: a
-# visszakapcsolt ACME a meglévő tanúsítványt tölti be, új kiadás nélkül.
+# On a handshake, certmagic (Caddy 2.10.2) first serves the certificate held
+# in its memory, and only afterwards consults get_certificate and ask;
+# reloading the configuration does not evict on-demand certificates from the
+# cache. Thus, after disabling ACME, already issued Let's Encrypt certificates
+# would remain until Caddy restarts. The portal therefore stops Caddy by
+# calling POST /stop on the admin API (a Unix socket on the shared
+# caddy-admin volume), and compose (restart: unless-stopped) restarts it
+# immediately with an empty cache. It does not touch the /data store: ACME
+# re-enabled later loads the existing certificate, with no new issuance.
 
 CADDY_RESTART_PENDING_NAME = "caddy-restart-pending"
 
@@ -6760,16 +6760,16 @@ class _UnixHTTPConnection(http.client.HTTPConnection):
 
 
 class CaddyAdmin:
-    """A Caddy admin API kliense és a gyorsítótár-ürítő háttérszál.
+    """Caddy admin API client and certificate-cache flushing background thread.
 
-    Az újraindítási igény a jelzőfájlban is megmarad, így a portál
-    újraindítása után is lefut; a sikeres /stop törli. Újraindítás csak
-    kérésre és kérésenként egyszer történik, ciklusban soha.
+    The restart request also survives in the flag file, so it runs even after
+    the portal restarts; a successful /stop removes it. A restart happens only
+    on request, once per request, never in a loop.
     """
 
     CHECK_INTERVAL = 60.0
     MAX_BACKOFF = 60.0
-    # A /stop a Caddy grace_period-jéig (5 s) is eltarthat.
+    # /stop can take up to Caddy's grace_period (5 s).
     TIMEOUT = 15.0
 
     def __init__(self, socket_path: str, pending_path: str) -> None:
@@ -6780,7 +6780,8 @@ class CaddyAdmin:
         self._stopping = threading.Event()
         self._thread: threading.Thread | None = None
         self._failures = 0
-        # Minden kérés új generáció: a /stop alatt érkezett kérés nem vész el.
+        # Every request is a new generation: a request arriving during /stop
+        # is not lost.
         self._generation = 1 if os.path.exists(pending_path) else 0
         self._done = 0
         self._status = {
@@ -6798,22 +6799,21 @@ class CaddyAdmin:
             conn.close()
 
     def request_restart(self) -> None:
-        """A Caddy újraindításának kérése (ACME be→ki, tanúsítványfeltöltés)."""
+        """Request a Caddy restart (ACME on→off, certificate upload)."""
         with self._lock:
             self._generation += 1
         try:
             with open(self.pending_path, "w", encoding="utf-8"):
                 pass
         except OSError as exc:
-            # A memóriabeli kérés így is lefut; csak a portál-újraindítás
-            # utáni ismétlés vész el.
-            print(f"[caddy] a jelzőfájl nem írható: {exc}",
+            # The in-memory request still runs; only its repetition after a
+            # portal restart is lost.
+            print(f"[caddy] cannot write the flag file: {exc}",
                   file=sys.stderr, flush=True)
         self._wake.set()
 
     def run_once(self) -> float:
-        """Egy kör (függő /stop vagy elérhetőség-ellenőrzés); a következő
-        várakozás másodpercben."""
+        """One round (pending /stop or reachability check); the next wait in seconds."""
         with self._lock:
             generation = self._generation
         pending = generation != self._done
@@ -6846,11 +6846,11 @@ class CaddyAdmin:
             except FileNotFoundError:
                 pass
             except OSError as exc:
-                print(f"[caddy] a jelzőfájl nem törölhető: {exc}",
+                print(f"[caddy] cannot remove the flag file: {exc}",
                       file=sys.stderr, flush=True)
-        print("[caddy] a Caddy újraindult (tanúsítvány-gyorsítótár ürítve)",
+        print("[caddy] Caddy restarted (certificate cache flushed)",
               flush=True)
-        # Az újraindult Caddy elérhetőségét hamar újra megnézzük.
+        # Check reachability of the restarted Caddy again soon.
         return 5.0
 
     def snapshot(self) -> dict:
@@ -6866,8 +6866,8 @@ class CaddyAdmin:
                 return
             try:
                 delay = self.run_once()
-            except Exception as exc:  # a szál soha ne haljon meg
-                print(f"[caddy] váratlan hiba: {exc}",
+            except Exception as exc:  # the thread must never die
+                print(f"[caddy] unexpected error: {exc}",
                       file=sys.stderr, flush=True)
                 delay = self.MAX_BACKOFF
 
@@ -6891,53 +6891,54 @@ class AppServer(ThreadingHTTPServer):
         super().__init__(address, Handler)
 
 
-# ------------------------------------------------------- helyi vezérlőcsatorna
+# ------------------------------------------------- local control channel
 #
-# A parancssori műveletek eddig külön folyamatban, a futó démontól függetlenül
-# módosították a fájlokat és a kernelt. Egy CLI-s törlés/jelszócsere után így
-# a démon memóriájában élő munkamenet és tűzfalengedély a TTL-ig életben
-# maradhatott. A vezérlőcsatorna egy csak helyi (Unix domain) socket, amelyen
-# a CLI a futó démonhoz fordul; a démon a saját élő objektumaival hajtja végre
-# a műveletet, és azonnal visszavonja az érintett munkameneteket.
+# Until now, command-line operations modified files and the kernel in a
+# separate process, independently of the running daemon. Thus, after a CLI
+# delete/password change, a session and firewall grant living in the daemon's
+# memory could remain alive until the TTL. The control channel is a local-only
+# (Unix domain) socket through which the CLI contacts the running daemon; the
+# daemon performs the operation with its own live objects and immediately
+# revokes the affected sessions.
 #
-# Biztonsági modell:
-#   * a socket a STATE_DIR alatt van, 0600 jogosultsággal;
-#   * a démon SO_PEERCRED-del ellenőrzi, hogy a kliens uid-je azonos-e;
-#   * a kérés egyetlen, új sorral zárt JSON objektum, legfeljebb 64 KiB;
-#   * a démon egyetlen JSON választ küld, és nem naplóz kérésbody-t,
-#     jelszót, hasht, TOTP-titkot vagy tokent.
+# Security model:
+#   * the socket is under STATE_DIR with 0600 permissions;
+#   * the daemon checks with SO_PEERCRED that the client uid is the same;
+#   * a request is a single newline-terminated JSON object, at most 64 KiB;
+#   * the daemon sends a single JSON response and never logs the request
+#     body, password, hash, TOTP secret or token.
 
 CONTROL_DIR_NAME = "control"
 CONTROL_SOCKET_NAME = "control.sock"
 SERVER_PID_NAME = "server.pid"
 CONTROL_MAX_REQUEST = 64 * 1024
 CONTROL_TIMEOUT = 5.0
-# A CLI várakozási ideje hosszabb, mint a szerveroldali feldolgozási idő:
-# egy lassú, de egészséges démont ne minősítsünk elérhetetlennek még a
-# kérés elküldése előtt.
+# The CLI wait is longer than the server-side processing time: do not
+# classify a slow but healthy daemon as unreachable before the request
+# is even sent.
 CONTROL_CLI_TIMEOUT = 15.0
 _PEERCRED_SIZE = struct.calcsize("3i")
 
 
 class ControlError(RuntimeError):
-    """A vezérlőcsatorna általános hibája."""
+    """Generic error of the control channel."""
 
 
 class ControlUnavailable(ControlError):
-    """A csatorna a kérés elküldése előtt nem érhető el (fallback lehet)."""
+    """The channel is unavailable before the request is sent (fallback is allowed)."""
 
 
 class ControlAmbiguous(ControlError):
-    """A kérés elküldése után a válasz bizonytalan (fallback TILOS)."""
+    """The response is uncertain after the request was sent (fallback FORBIDDEN)."""
 
 
 class ControlProtocolError(ControlError):
-    """A csatorna válasza érvénytelen (a kérést már elküldtük)."""
+    """The channel's response is invalid (the request has already been sent)."""
 
 
 def _control_dir_path() -> str:
-    # Nem importáláskor rögzítjük: a tesztek és a HV_STATE_DIR átállítása
-    # is érvényesüljön.
+    # We do not capture it at import time: tests and reassignment of
+    # HV_STATE_DIR must also take effect.
     return os.path.join(gateway.STATE_DIR, CONTROL_DIR_NAME)
 
 
@@ -6952,26 +6953,26 @@ def _server_pid_path() -> str:
 def _dir_security_error(
     directory: str, *, follow_symlinks: bool = False
 ) -> str | None:
-    """A könyvtár tulajdonosa/jogosultsága alkalmas-e a socket tárolására."""
+    """Whether the directory's owner/permissions are suitable for holding the socket."""
     stat_fn = os.stat if follow_symlinks else os.lstat
     try:
         state = stat_fn(directory)
     except OSError as exc:
-        return f"nem érhető el: {exc}"
+        return f"unavailable: {exc}"
     if not stat.S_ISDIR(state.st_mode):
-        return "nem könyvtár"
+        return "not a directory"
     if state.st_uid not in (0, os.geteuid()):
         return (
-            f"a tulajdonosa uid {state.st_uid}, nem a folyamat "
-            "felhasználója vagy root"
+            f"owned by uid {state.st_uid}, not the process "
+            "user or root"
         )
     if state.st_mode & 0o022:
-        return "csoport vagy más felhasználók által írható"
+        return "writable by group or other users"
     return None
 
 
 def _write_server_pid() -> int | None:
-    """A futó démon pidje a state könyvtárban, 0600 jogosultsággal."""
+    """The running daemon's pid in the state directory, with 0600 permissions."""
     path = _server_pid_path()
     directory = os.path.dirname(path) or "."
     try:
@@ -6989,7 +6990,7 @@ def _write_server_pid() -> int | None:
         return inode
     except OSError as exc:
         print(
-            f"FIGYELEM: a démon pidfájlja nem írható ({path}): {exc}",
+            f"WARNING: cannot write the daemon pid file ({path}): {exc}",
             file=sys.stderr,
             flush=True,
         )
@@ -6997,7 +6998,7 @@ def _write_server_pid() -> int | None:
 
 
 def _remove_server_pid(inode: int | None) -> None:
-    """Csak a saját, változatlan pidfájlunkat távolítja el."""
+    """Remove only our own, unchanged pid file."""
     if inode is None:
         return
     path = _server_pid_path()
@@ -7007,7 +7008,7 @@ def _remove_server_pid(inode: int | None) -> None:
         return
     except OSError as exc:
         print(
-            f"[control] a pidfájl állapota nem vizsgálható: {exc}",
+            f"[control] cannot inspect the pid file state: {exc}",
             file=sys.stderr,
             flush=True,
         )
@@ -7038,14 +7039,14 @@ def _remove_server_pid(inode: int | None) -> None:
         pass
     except OSError as exc:
         print(
-            f"[control] a pidfájl eltávolítása nem sikerült: {exc}",
+            f"[control] failed to remove the pid file: {exc}",
             file=sys.stderr,
             flush=True,
         )
 
 
 def _control_peer_uid(sock) -> int | None:
-    """A Unix socket túloldalának uid-je (Linux SO_PEERCRED)."""
+    """The uid of the other end of a Unix socket (Linux SO_PEERCRED)."""
     if not hasattr(socket, "SO_PEERCRED"):
         return None
     try:
@@ -7064,7 +7065,7 @@ def _control_peer_uid(sock) -> int | None:
 
 
 class ControlHandler(socketserver.StreamRequestHandler):
-    """Egy kérés = egy új sorral zárt JSON objektum, egy JSON válasz."""
+    """One request = one newline-terminated JSON object, one JSON response."""
 
     def handle(self) -> None:
         try:
@@ -7073,7 +7074,7 @@ class ControlHandler(socketserver.StreamRequestHandler):
             pass
         if not self._peer_allowed():
             self._respond(
-                {"ok": False, "status": 1, "error": "elutasítva"}
+                {"ok": False, "status": 1, "error": "rejected"}
             )
             return
 
@@ -7081,17 +7082,17 @@ class ControlHandler(socketserver.StreamRequestHandler):
             line = self.rfile.readline(CONTROL_MAX_REQUEST + 1)
         except (OSError, ValueError):
             self._respond(
-                {"ok": False, "status": 1, "error": "olvasási hiba"}
+                {"ok": False, "status": 1, "error": "read error"}
             )
             return
         if len(line) > CONTROL_MAX_REQUEST:
             self._respond(
-                {"ok": False, "status": 1, "error": "túl nagy kérés"}
+                {"ok": False, "status": 1, "error": "request too large"}
             )
             return
         if not line.endswith(b"\n"):
             self._respond(
-                {"ok": False, "status": 1, "error": "hibás kérés"}
+                {"ok": False, "status": 1, "error": "bad request"}
             )
             return
         try:
@@ -7101,7 +7102,7 @@ class ControlHandler(socketserver.StreamRequestHandler):
         if not isinstance(data, dict):
             self._audit("control_rejected", reason="bad_request")
             self._respond(
-                {"ok": False, "status": 1, "error": "hibás kérés"}
+                {"ok": False, "status": 1, "error": "bad request"}
             )
             return
 
@@ -7109,12 +7110,12 @@ class ControlHandler(socketserver.StreamRequestHandler):
         if not isinstance(action, str) or not action:
             self._audit("control_rejected", reason="bad_request")
             self._respond(
-                {"ok": False, "status": 1, "error": "hiányzó művelet"}
+                {"ok": False, "status": 1, "error": "missing action"}
             )
             return
         method = self._ACTIONS.get(action)
         if method is None:
-            # A művelet nevét naplózzuk (nem titok), a body-t soha.
+            # Log the action name (not secret), never the body.
             self._audit(
                 "control_rejected",
                 reason="unknown_action",
@@ -7124,7 +7125,7 @@ class ControlHandler(socketserver.StreamRequestHandler):
                 {
                     "ok": False,
                     "status": 1,
-                    "error": f"ismeretlen művelet: {action[:64]}",
+                    "error": f"unknown action: {action[:64]}",
                 }
             )
             return
@@ -7137,7 +7138,7 @@ class ControlHandler(socketserver.StreamRequestHandler):
             fail2ban_mod.Fail2banError,
             ValueError,
         ) as exc:
-            # Ezek az üzenetek nem tartalmaznak jelszót/hasht/titkot.
+            # These messages contain no password/hash/secret.
             self._audit(
                 "control_action_failed",
                 action=action[:64],
@@ -7146,34 +7147,34 @@ class ControlHandler(socketserver.StreamRequestHandler):
             self._respond(
                 {"ok": False, "status": 1, "error": str(exc)}
             )
-        except Exception as exc:  # a csatorna ne haljon meg egy hibától
+        except Exception as exc:  # the channel must not die from an error
             print(
-                f"[control] {action[:64]} hiba: {exc}",
+                f"[control] {action[:64]} error: {exc}",
                 file=sys.stderr,
                 flush=True,
             )
             self._respond(
-                {"ok": False, "status": 1, "error": "belső hiba"}
+                {"ok": False, "status": 1, "error": "internal error"}
             )
         else:
             self._respond(payload)
 
-    # -- alacsony szintű segédek ------------------------------------------------
+    # -- low-level helpers -----------------------------------------------------
 
     def _peer_allowed(self) -> bool:
         uid = _control_peer_uid(self.request)
         if uid is not None and uid == os.geteuid():
             return True
-        # Generikus elutasítás, a peer uid-jét/pid-jét nem naplózzuk.
+        # Generic rejection; we do not log the peer uid/pid.
         self._audit("control_denied", reason="peer_uid")
         return False
 
     def _audit(self, event: str, **fields) -> None:
         try:
             self.server.gateway.audit.write(event, **fields)
-        except Exception as exc:  # a naplózás ne szakítsa meg a csatornát
+        except Exception as exc:  # logging must not interrupt the channel
             print(
-                f"[control] naplózási hiba: {exc}",
+                f"[control] logging error: {exc}",
                 file=sys.stderr,
                 flush=True,
             )
@@ -7191,50 +7192,50 @@ class ControlHandler(socketserver.StreamRequestHandler):
         except OSError:
             pass
 
-    # -- bemenet-ellenőrzés -----------------------------------------------------
+    # -- input validation ------------------------------------------------------
 
     @staticmethod
     def _name(data: dict) -> str:
         name = data.get("name")
         if not isinstance(name, str) or not name.strip():
-            raise ValueError("hiányzó felhasználónév")
+            raise ValueError("missing username")
         return name.strip()
 
     @staticmethod
     def _password(data: dict) -> str:
         password = data.get("password")
         if not isinstance(password, str):
-            raise ValueError("hiányzó jelszó")
+            raise ValueError("missing password")
         return password
 
     @staticmethod
     def _bool(data: dict, key: str, default: bool) -> bool:
         value = data.get(key, default)
         if not isinstance(value, bool):
-            raise ValueError(f"a {key} mező logikai érték kell legyen")
+            raise ValueError(f"the {key} field must be a boolean")
         return value
 
     @staticmethod
     def _rules(data: dict) -> tuple[str, ...]:
         raw = data.get("rules", [])
         if not isinstance(raw, list) or len(raw) > 64:
-            raise ValueError("a rules mező legfeljebb 64 elemű lista")
+            raise ValueError("the rules field must be a list of at most 64 items")
         out: list[str] = []
         for value in raw:
             if not isinstance(value, str) or not value.strip():
-                raise ValueError("érvénytelen szabály-azonosító")
+                raise ValueError("invalid rule ID")
             value = value.strip()
             if not gateway._SERVICE_ID_RE.match(value):
-                raise ValueError(f"érvénytelen szabály-azonosító: {value!r}")
+                raise ValueError(f"invalid rule ID: {value!r}")
             if value == gateway.LEGACY_ADMIN_RULE_ID:
                 raise ValueError(
-                    "ez egy fenntartott, régi azonosító, nem rendelhető hozzá"
+                    "this is a reserved legacy ID and cannot be assigned"
                 )
             if value not in out:
                 out.append(value)
         return tuple(out)
 
-    # -- műveletek --------------------------------------------------------------
+    # -- actions ---------------------------------------------------------------
 
     def _action_user_add(self, data: dict) -> dict:
         gw = self.server.gateway
@@ -7242,15 +7243,15 @@ class ControlHandler(socketserver.StreamRequestHandler):
         password = self._password(data)
         role = data.get("role", gateway.ROLE_USER)
         if role not in (gateway.ROLE_USER, gateway.ROLE_ADMIN):
-            raise ValueError("érvénytelen szerepkör")
+            raise ValueError("invalid role")
         must_change = self._bool(data, "must_change_password", True)
         rules = self._rules(data)
         gw.users.add(
             name, password, role=role, rules=rules,
             must_change_password=must_change,
         )
-        # Ha korábban egy azonos nevű fiók munkamenete vagy belépőjegye élt
-        # volna, ne örökölhesse az új fiók az engedélyt.
+        # If a session or login ticket for an account with the same name
+        # existed before, the new account must not inherit the authorization.
         revoked = gw.sessions.revoke_user(name, reason="created")
         tickets = LOGIN_TICKETS.revoke_user(name, reason="created")
         self._audit(
@@ -7265,7 +7266,7 @@ class ControlHandler(socketserver.StreamRequestHandler):
         return {
             "ok": True,
             "status": 0,
-            "message": f"Felhasználó létrehozva: {name}",
+            "message": f"User created: {name}",
         }
 
     def _action_user_passwd(self, data: dict) -> dict:
@@ -7292,7 +7293,7 @@ class ControlHandler(socketserver.StreamRequestHandler):
         return {
             "ok": True,
             "status": 0,
-            "message": f"Jelszó frissítve: {name}",
+            "message": f"Password updated: {name}",
         }
 
     def _action_user_del(self, data: dict) -> dict:
@@ -7303,16 +7304,16 @@ class ControlHandler(socketserver.StreamRequestHandler):
                 "cli_action_failed",
                 action="del",
                 target=name,
-                reason="nincs ilyen felhasználó",
+                reason="no such user",
             )
             return {
                 "ok": False,
                 "status": 1,
                 "stdout": True,
-                "error": f"Nincs ilyen felhasználó: {name}",
+                "error": f"No such user: {name}",
             }
-        # A csoporttagságot is törölni kell, különben egy később azonos
-        # néven létrehozott fiók örökölné a régi csoport szabályait.
+        # Group membership must be deleted too, otherwise an account created
+        # later with the same name would inherit the old group's rules.
         gw.groups.remove_member_everywhere(name)
         revoked = gw.sessions.revoke_user(name, reason="deleted")
         tickets = LOGIN_TICKETS.revoke_user(name, reason="deleted")
@@ -7325,7 +7326,7 @@ class ControlHandler(socketserver.StreamRequestHandler):
         return {
             "ok": True,
             "status": 0,
-            "message": f"Felhasználó törölve: {name}",
+            "message": f"User deleted: {name}",
             "sessions_revoked": revoked,
         }
 
@@ -7339,13 +7340,13 @@ class ControlHandler(socketserver.StreamRequestHandler):
                 "cli_action_failed",
                 action="totp-reset",
                 target=name,
-                reason="nincs ilyen felhasználó",
+                reason="no such user",
             )
             return {
                 "ok": False,
                 "status": 1,
                 "stdout": True,
-                "error": f"Nincs ilyen felhasználó: {name}",
+                "error": f"No such user: {name}",
             }
         revoked = gw.sessions.revoke_user(name, reason="totp_reset")
         tickets = LOGIN_TICKETS.revoke_user(name, reason="totp_reset")
@@ -7359,7 +7360,7 @@ class ControlHandler(socketserver.StreamRequestHandler):
         return {
             "ok": True,
             "status": 0,
-            "message": f"2FA alaphelyzetbe állítva: {name}",
+            "message": f"2FA reset: {name}",
             "sessions_revoked": revoked,
         }
 
@@ -7367,19 +7368,19 @@ class ControlHandler(socketserver.StreamRequestHandler):
         gw = self.server.gateway
         ip = data.get("ip")
         if not isinstance(ip, str) or not ip.strip():
-            raise ValueError("hiányzó IP-cím")
+            raise ValueError("missing IP address")
         seconds = data.get("seconds", 0)
         if isinstance(seconds, bool) or not isinstance(seconds, int):
             raise ValueError(
-                "a tiltás hossza egész szám (másodperc) kell"
+                "the ban duration must be an integer (seconds)"
             )
         manual = self._bool(data, "manual", True)
         user = data.get("user", "cli")
         if not isinstance(user, str):
             user = "cli"
-        # A futó démon menedzsere: az on_ban visszahívás bontja az IP
-        # munkameneteit és üríti a conntracket. A fail2ban_ban eseményt az
-        # on_ban írja, ezért itt nem duplikáljuk.
+        # The running daemon's manager: the on_ban callback tears down the
+        # IP's sessions and flushes conntrack. The fail2ban_ban event is
+        # written by on_ban, so we do not duplicate it here.
         ban = gw.fail2ban.ban(
             ip.strip(), seconds, manual=manual, user=user
         )
@@ -7395,7 +7396,7 @@ class ControlHandler(socketserver.StreamRequestHandler):
         return {
             "ok": True,
             "status": 0,
-            "message": f"Letiltva: {ban['ip']} ({ban['remaining']} mp)",
+            "message": f"Banned: {ban['ip']} ({ban['remaining']} s)",
             "ip": ban["ip"],
             "until": ban.get("until", 0),
         }
@@ -7404,7 +7405,7 @@ class ControlHandler(socketserver.StreamRequestHandler):
         gw = self.server.gateway
         ip = data.get("ip")
         if not isinstance(ip, str) or not ip.strip():
-            raise ValueError("hiányzó IP-cím")
+            raise ValueError("missing IP address")
         ip = ip.strip()
         removed = gw.fail2ban.unban(ip)
         self._audit("fail2ban_unban", ip=ip, removed=removed)
@@ -7418,9 +7419,9 @@ class ControlHandler(socketserver.StreamRequestHandler):
                 target=ip,
                 reason="not_banned",
             )
-            message = f"Nem volt letiltva: {ip}"
+            message = f"Was not banned: {ip}"
         else:
-            message = f"Feloldva: {ip}"
+            message = f"Unbanned: {ip}"
         return {
             "ok": True,
             "status": 0,
@@ -7436,12 +7437,12 @@ class ControlHandler(socketserver.StreamRequestHandler):
         return {
             "ok": True,
             "status": 0,
-            "message": f"Feloldva: {removed} tiltás",
+            "message": f"Unbanned: {removed} ban(s)",
             "removed": removed,
         }
 
     def _action_status(self, data: dict) -> dict:
-        """Diagnosztika; soha nem tartalmaz jelszót, hasht, tokent."""
+        """Diagnostics; never contains a password, hash or token."""
         gw = self.server.gateway
         names = gw.users.names()
         try:
@@ -7451,7 +7452,7 @@ class ControlHandler(socketserver.StreamRequestHandler):
         return {
             "ok": True,
             "status": 0,
-            "message": "A démon elérhető.",
+            "message": "The daemon is reachable.",
             "user_count": len(names),
             "user_names": names,
             "sessions": gw.sessions.count(),
@@ -7473,7 +7474,7 @@ class ControlHandler(socketserver.StreamRequestHandler):
 
 
 class ControlServer(socketserver.ThreadingUnixStreamServer):
-    """Helyi, csak ugyanazon uid által elérhető vezérlőcsatorna."""
+    """Local control channel reachable only by the same uid."""
 
     daemon_threads = False
     block_on_close = True
@@ -7488,24 +7489,24 @@ class ControlServer(socketserver.ThreadingUnixStreamServer):
         parent_error = _dir_security_error(parent)
         if parent_error is not None:
             raise ControlUnavailable(
-                f"a vezérlőcsatorna könyvtára nem biztonságos "
+                f"the control channel directory is not secure "
                 f"({parent}): {parent_error}"
             )
         self._prepare_path(address)
-        # A bind és a chmod közötti rövid ablakban se legyen szélesebb a
-        # jogosultság; utána kifejezetten 0600-ra állítjuk.
+        # The permissions must not be wider even in the short window between
+        # bind and chmod; afterwards we set them explicitly to 0600.
         old_umask = os.umask(0o177)
         try:
             super().__init__(address, ControlHandler)
         finally:
             os.umask(old_umask)
         try:
-            # A bind után ellenőrizzük, hogy valóban a mi socketünk van az
-            # útvonalon, és csak utána módosítjuk a jogosultságát.
+            # After bind we check that our socket is really at the path, and
+            # only then change its permissions.
             state = os.lstat(address)
             if not stat.S_ISSOCK(state.st_mode):
                 raise ControlUnavailable(
-                    "a bind után az útvonal nem socket"
+                    "the path is not a socket after bind"
                 )
             self._socket_ino = int(state.st_ino)
             os.chmod(address, 0o600)
@@ -7515,7 +7516,7 @@ class ControlServer(socketserver.ThreadingUnixStreamServer):
                 or after.st_ino != self._socket_ino
             ):
                 raise ControlUnavailable(
-                    "a socket a bind után kicserélődött"
+                    "the socket was replaced after bind"
                 )
         except (OSError, ControlUnavailable) as exc:
             try:
@@ -7525,48 +7526,48 @@ class ControlServer(socketserver.ThreadingUnixStreamServer):
             if isinstance(exc, ControlUnavailable):
                 raise
             raise ControlUnavailable(
-                "a vezérlőcsatorna jogosultságát nem sikerült beállítani: "
+                "failed to set the control channel permissions: "
                 f"{exc}"
             ) from exc
 
     @staticmethod
     def _prepare_path(address: str) -> None:
-        """Elavult socket eltávolítása; idegen fájlhoz nem nyúlunk."""
+        """Remove a stale socket; we do not touch a foreign file."""
         try:
             state = os.lstat(address)
         except FileNotFoundError:
             return
         except OSError as exc:
             raise ControlUnavailable(
-                f"a(z) {address} állapota nem vizsgálható: {exc}"
+                f"cannot inspect the state of {address}: {exc}"
             ) from exc
         if not stat.S_ISSOCK(state.st_mode):
             raise ControlUnavailable(
-                f"a(z) {address} létezik, de nem socket; nem törlöm"
+                f"{address} exists but is not a socket; not removing it"
             )
         probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         probe.settimeout(0.5)
         try:
             probe.connect(address)
         except (ConnectionRefusedError, FileNotFoundError):
-            # Elavult socket: a bind előtt biztonságosan eltávolítható.
+            # Stale socket: it can safely be removed before bind.
             try:
                 os.unlink(address)
             except FileNotFoundError:
                 pass
             except OSError as exc:
                 raise ControlUnavailable(
-                    f"az elavult socketet nem sikerült eltávolítani: {exc}"
+                    f"failed to remove the stale socket: {exc}"
                 ) from exc
             return
         except OSError as exc:
             raise ControlUnavailable(
-                f"a(z) {address} állapota nem dönthető el: {exc}"
+                f"cannot determine the state of {address}: {exc}"
             ) from exc
         finally:
             probe.close()
         raise ControlUnavailable(
-            f"a(z) {address} már használatban van (fut egy másik démon?)"
+            f"{address} is already in use (is another daemon running?)"
         )
 
     def start(self) -> threading.Thread:
@@ -7587,7 +7588,7 @@ class ControlServer(socketserver.ThreadingUnixStreamServer):
         self.server_close()
 
     def server_close(self) -> None:
-        """Idempotens lezárás: a socketfájlt is eltávolítja."""
+        """Idempotent close: also removes the socket file."""
         if self._closed:
             return
         self._closed = True
@@ -7603,13 +7604,13 @@ class ControlServer(socketserver.ThreadingUnixStreamServer):
             return
         except OSError as exc:
             print(
-                f"[control] a socket eltávolítása nem sikerült: {exc}",
+                f"[control] failed to remove the socket: {exc}",
                 file=sys.stderr,
                 flush=True,
             )
             return
-        # Csak a saját socketünket töröljük, és csak ha azóta nem cserélték
-        # ki egy másik folyamatéra.
+        # Remove only our own socket, and only if it has not been replaced by
+        # another process's since.
         if not stat.S_ISSOCK(state.st_mode):
             return
         if (
@@ -7623,7 +7624,7 @@ class ControlServer(socketserver.ThreadingUnixStreamServer):
             pass
         except OSError as exc:
             print(
-                f"[control] a socket eltávolítása nem sikerült: {exc}",
+                f"[control] failed to remove the socket: {exc}",
                 file=sys.stderr,
                 flush=True,
             )
@@ -7633,17 +7634,17 @@ def _start_control_server(gw: gateway.Gateway) -> ControlServer | None:
     path = _control_socket_path()
     directory = _control_dir_path()
     state_dir = gateway.STATE_DIR
-    # A STATE_DIR az állapotfájlok (felhasználók, audit, fail2ban, PID) és a
-    # vezérlőkönyvtár szülője. Ha mások írhatják, a socket/pidfile
-    # helyettesíthető, ezért ott nem indítunk vezérlőcsatornát.
+    # STATE_DIR is the parent of the state files (users, audit, fail2ban, PID)
+    # and the control directory. If others can write it, the socket/pidfile
+    # can be replaced, so we do not start a control channel there.
     state_error = _dir_security_error(state_dir, follow_symlinks=True)
     if state_error is not None:
         print(
-            f"FIGYELEM: a(z) {state_dir} állapotkönyvtár nem biztonságos "
-            f"({state_error}); a helyi vezérlőcsatorna nem indul el, a "
-            "portál tovább működik. Amíg a démon fut, a CLI-módosítások "
-            "helyi végrehajtását a PID-fájl miatt megtagadjuk; használd "
-            "az admin felületet.",
+            f"WARNING: the {state_dir} state directory is not secure "
+            f"({state_error}); the local control channel will not start, the "
+            "portal keeps running. While the daemon runs, we refuse local "
+            "execution of CLI modifications because of the PID file; use "
+            "the admin interface.",
             file=sys.stderr,
             flush=True,
         )
@@ -7652,22 +7653,22 @@ def _start_control_server(gw: gateway.Gateway) -> ControlServer | None:
         os.makedirs(directory, mode=0o700, exist_ok=True)
     except OSError as exc:
         print(
-            f"FIGYELEM: a vezérlőcsatorna könyvtára nem hozható létre "
+            f"WARNING: cannot create the control channel directory "
             f"({directory}): {exc}",
             file=sys.stderr,
             flush=True,
         )
         return None
-    # A könyvtárat fd-en keresztül, symlink követése nélkül ellenőrizzük és
-    # szigorítjuk 0700-ra; a meglévő, idegen tulajdonú könyvtárat nem
-    # használjuk.
+    # Check the directory through an fd, without following symlinks, and
+    # tighten it to 0700; we do not use an existing directory owned by
+    # someone else.
     try:
         dir_fd = os.open(
             directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
         )
     except OSError as exc:
         print(
-            f"FIGYELEM: a vezérlőcsatorna könyvtára nem biztonságos "
+            f"WARNING: the control channel directory is not secure "
             f"({directory}): {exc}",
             file=sys.stderr,
             flush=True,
@@ -7677,8 +7678,8 @@ def _start_control_server(gw: gateway.Gateway) -> ControlServer | None:
         state = os.fstat(dir_fd)
         if state.st_uid not in (0, os.geteuid()):
             print(
-                f"FIGYELEM: a vezérlőcsatorna könyvtárának tulajdonosa "
-                f"uid {state.st_uid} ({directory}); nem indul el.",
+                f"WARNING: the control channel directory is owned by "
+                f"uid {state.st_uid} ({directory}); not starting.",
                 file=sys.stderr,
                 flush=True,
             )
@@ -7688,8 +7689,8 @@ def _start_control_server(gw: gateway.Gateway) -> ControlServer | None:
                 os.fchmod(dir_fd, 0o700)
             except OSError as exc:
                 print(
-                    f"FIGYELEM: a vezérlőcsatorna könyvtárának "
-                    f"jogosultságát nem sikerült 0700-ra állítani "
+                    f"WARNING: cannot set the control channel directory's "
+                    f"permissions to 0700 "
                     f"({directory}): {exc}",
                     file=sys.stderr,
                     flush=True,
@@ -7700,8 +7701,8 @@ def _start_control_server(gw: gateway.Gateway) -> ControlServer | None:
     dir_error = _dir_security_error(directory)
     if dir_error is not None:
         print(
-            f"FIGYELEM: a vezérlőcsatorna könyvtára nem biztonságos "
-            f"({directory}): {dir_error}; nem indul el.",
+            f"WARNING: the control channel directory is not secure "
+            f"({directory}): {dir_error}; not starting.",
             file=sys.stderr,
             flush=True,
         )
@@ -7710,7 +7711,7 @@ def _start_control_server(gw: gateway.Gateway) -> ControlServer | None:
         control = ControlServer(path, gw)
     except (ControlUnavailable, OSError) as exc:
         print(
-            f"FIGYELEM: a helyi vezérlőcsatorna nem indult el "
+            f"WARNING: the local control channel did not start "
             f"({path}): {exc}",
             file=sys.stderr,
             flush=True,
@@ -7718,45 +7719,46 @@ def _start_control_server(gw: gateway.Gateway) -> ControlServer | None:
         return None
     control.start()
     print(
-        f"Vezérlőcsatorna: {path} (helyi, 0600)", flush=True
+        f"Control channel: {path} (local, 0600)", flush=True
     )
     return control
 
 
-# ------------------------------------- vezérlőcsatorna: kliensoldal (CLI)
+# ------------------------------------- control channel: client side (CLI)
 
 
 def _control_request(
     payload: dict, timeout: float | None = None
 ) -> dict:
-    """Egy kérés a helyi vezérlőcsatornán.
+    """One request on the local control channel.
 
-    ``ControlUnavailable``: a kérés el sem indult (nincs socket, kapcsolódási
-    vagy socket-létrehozási hiba); ilyenkor a CLI a helyi műveletre eshet
-    vissza. ``ControlAmbiguous``: a kérés elküldése után timeout/IO/EOF
-    történt, tehát nem tudjuk, végrehajtotta-e a démon; helyi módosítás
-    TILOS. ``ControlProtocolError``: a kérés elküldve, de a válasz
-    érvénytelen; szintén tilos a helyi módosítás.
+    ``ControlUnavailable``: the request was not even started (no socket, a
+    connection or socket-creation error); in this case the CLI may fall back
+    to the local operation. ``ControlAmbiguous``: a timeout/IO/EOF occurred
+    after the request was sent, so we do not know whether the daemon executed
+    it; local modification is FORBIDDEN. ``ControlProtocolError``: the request
+    was sent but the response is invalid; local modification is likewise
+    forbidden.
     """
     if timeout is None:
-        # Ne a függvény definíciójakor rögzítsük: a tesztek és a hívók
-        # később is felülírhatják a konstansot.
+        # Do not capture it at function definition time: tests and callers
+        # may override the constant later.
         timeout = CONTROL_CLI_TIMEOUT
     path = _control_socket_path()
     try:
         state = os.stat(path)
     except FileNotFoundError as exc:
-        raise ControlUnavailable("nincs vezérlőcsatorna") from exc
+        raise ControlUnavailable("no control channel") from exc
     except OSError as exc:
         raise ControlUnavailable(
-            f"a vezérlőcsatorna nem vizsgálható: {exc}"
+            f"cannot inspect the control channel: {exc}"
         ) from exc
     if not stat.S_ISSOCK(state.st_mode):
-        raise ControlUnavailable("az útvonal nem socket")
+        raise ControlUnavailable("the path is not a socket")
     if stat.S_IMODE(state.st_mode) & 0o077:
-        # Jelszó csak 0600 socketen mehet át.
+        # A password may only travel over a 0600 socket.
         raise ControlUnavailable(
-            "a vezérlőcsatorna jogosultsága nem 0600"
+            "the control channel permissions are not 0600"
         )
 
     sock: socket.socket | None = None
@@ -7767,39 +7769,39 @@ def _control_request(
         if sock is not None:
             sock.close()
         raise ControlUnavailable(
-            f"a vezérlőcsatorna socket nem hozható létre: {exc}"
+            f"cannot create the control channel socket: {exc}"
         ) from exc
     try:
         try:
             sock.connect(path)
         except FileNotFoundError as exc:
-            raise ControlUnavailable("nincs vezérlőcsatorna") from exc
+            raise ControlUnavailable("no control channel") from exc
         except ConnectionRefusedError as exc:
             raise ControlUnavailable(
-                "a vezérlőcsatorna nem fogad kapcsolatot "
-                "(elavult socket)"
+                "the control channel is not accepting connections "
+                "(stale socket)"
             ) from exc
         except PermissionError as exc:
             raise ControlUnavailable(
-                "nincs jogosultság a vezérlőcsatornához"
+                "no permission for the control channel"
             ) from exc
         except socket.timeout as exc:
             raise ControlUnavailable(
-                "időtúllépés a vezérlőcsatorna csatlakoztatásakor"
+                "timeout while connecting to the control channel"
             ) from exc
         except OSError as exc:
             raise ControlUnavailable(
-                f"a vezérlőcsatorna nem érhető el: {exc}"
+                f"the control channel is unavailable: {exc}"
             ) from exc
 
         peer = _control_peer_uid(sock)
         if peer is not None and peer != os.geteuid():
             raise ControlProtocolError(
-                "a vezérlőcsatorna tulajdonosa nem azonos a hívóval"
+                "the control channel owner is not the caller"
             )
 
-        # Innentől a kérés elküldése megkezdődhet: minden hiba legfeljebb
-        # bizonytalan kimenetelű, ezért nem eshetünk vissza helyi módra.
+        # From here on the request may be sent: any error is at most of
+        # uncertain outcome, so we must not fall back to local mode.
         try:
             body = (
                 json.dumps(
@@ -7810,12 +7812,12 @@ def _control_request(
             sock.sendall(body)
         except socket.timeout as exc:
             raise ControlAmbiguous(
-                "időtúllépés a kérés küldésekor; a kérés részben vagy "
-                "egészben elküldve lehet"
+                "timeout while sending the request; the request may have "
+                "been sent partially or in full"
             ) from exc
         except OSError as exc:
             raise ControlAmbiguous(
-                f"küldési hiba a vezérlőcsatornán: {exc}"
+                f"send error on the control channel: {exc}"
             ) from exc
 
         chunks: list[bytes] = []
@@ -7830,46 +7832,46 @@ def _control_request(
                 total += len(chunk)
                 if total > CONTROL_MAX_REQUEST:
                     raise ControlProtocolError(
-                        "túl nagy válasz a vezérlőcsatornán"
+                        "response too large on the control channel"
                     )
                 if b"\n" in chunk:
                     complete = True
                     break
         except socket.timeout as exc:
             raise ControlAmbiguous(
-                "időtúllépés a vezérlőcsatorna válaszára; a kérés "
-                "elküldve, a válasz nem érkezett meg"
+                "timeout waiting for the control channel response; the "
+                "request was sent but the response did not arrive"
             ) from exc
         except OSError as exc:
             raise ControlAmbiguous(
-                f"olvasási hiba a vezérlőcsatornán: {exc}"
+                f"read error on the control channel: {exc}"
             ) from exc
     finally:
         sock.close()
 
     raw = b"".join(chunks)
     if not complete:
-        # A szerver mindig új sorral zárja a választ. Ha a kapcsolat a
-        # válasz közben szakadt meg, nem tudjuk, mi történt.
+        # The server always terminates the response with a newline. If the
+        # connection broke mid-response, we do not know what happened.
         raise ControlAmbiguous(
-            "a vezérlőcsatorna válasza megszakadt vagy üres lett"
+            "the control channel response was cut off or empty"
         )
     line = raw.split(b"\n", 1)[0]
     try:
         response = json.loads(line)
     except ValueError as exc:
         raise ControlProtocolError(
-            "érvénytelen JSON válasz a vezérlőcsatornán"
+            "invalid JSON response on the control channel"
         ) from exc
     if not isinstance(response, dict):
         raise ControlProtocolError(
-            "érvénytelen válasz a vezérlőcsatornán"
+            "invalid response on the control channel"
         )
     return response
 
 
 def _control_attempt(payload: dict) -> tuple[dict | None, str | None]:
-    """(válasz, None) vagy (None, az elérhetetlenség oka)."""
+    """(response, None) or (None, reason for unavailability)."""
     try:
         return _control_request(payload), None
     except ControlUnavailable as exc:
@@ -7888,32 +7890,32 @@ def _print_control_response(response: dict) -> int:
     else:
         error = response.get("error")
         if not isinstance(error, str) or not error:
-            error = "a démon hibát jelzett"
+            error = "the daemon reported an error"
         if response.get("stdout"):
             print(error)
         else:
-            print(f"hiba: {error}", file=sys.stderr)
+            print(f"error: {error}", file=sys.stderr)
     return status if status >= 0 else 1
 
 
 def _warn_control_fallback(reason: str | None) -> None:
     path = _control_socket_path()
     print(
-        f"FIGYELEM: a vezérlőcsatorna ({path}) nem érhető el: "
-        f"{reason or 'ismeretlen ok'}.",
+        f"WARNING: the control channel ({path}) is unavailable: "
+        f"{reason or 'unknown reason'}.",
         file=sys.stderr,
         flush=True,
     )
     print(
-        "FIGYELEM: a módosítás csak helyben (lemezen/kernelben) történt "
-        "meg; a futó démon élő munkameneteit NEM vonta vissza.",
+        "WARNING: the modification was made only locally (on disk/kernel) "
+        "and did NOT revoke the running daemon's live sessions.",
         file=sys.stderr,
         flush=True,
     )
 
 
 def _read_server_pid() -> int | None:
-    """A futó démon PID-je a PID-fájlból, ha az hitelesnek tűnik."""
+    """The running daemon's PID from the PID file, if it appears authentic."""
     path = _server_pid_path()
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
@@ -7921,7 +7923,7 @@ def _read_server_pid() -> int | None:
         return None
     except OSError as exc:
         print(
-            f"FIGYELEM: a démon PID-fájlja nem olvasható ({path}): {exc}",
+            f"WARNING: cannot read the daemon PID file ({path}): {exc}",
             file=sys.stderr,
             flush=True,
         )
@@ -7932,8 +7934,8 @@ def _read_server_pid() -> int | None:
             return None
         if state.st_uid not in (0, os.geteuid()):
             return None
-        # A PID-fájlt a démon 0600-ra írja; csoport/más által írható
-        # fájlból nem fogadunk el PID-et.
+        # The daemon writes the PID file with 0600; we do not accept a PID
+        # from a file writable by group/others.
         if state.st_mode & 0o077:
             return None
         data = os.read(fd, 64)
@@ -7956,7 +7958,7 @@ def _pid_is_alive(pid: int) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        # A folyamat létezik, csak más felhasználóé.
+        # The process exists, it just belongs to another user.
         return True
     except OSError:
         return False
@@ -7964,7 +7966,7 @@ def _pid_is_alive(pid: int) -> bool:
 
 
 def _live_daemon_pid() -> int | None:
-    """A démon PID-je, ha a PID-fájl szerint még fut; különben None."""
+    """The daemon PID if the PID file says it is still running; otherwise None."""
     pid = _read_server_pid()
     if pid is not None and _pid_is_alive(pid):
         return pid
@@ -7972,19 +7974,20 @@ def _live_daemon_pid() -> int | None:
 
 
 def _control_mutation(payload: dict) -> tuple[bool, int]:
-    """Megpróbálja a démonon végrehajtani a műveletet.
+    """Try to execute the operation on the daemon.
 
-    Visszatérés: ``(True, kilépési_kód)``, ha a démon válaszolt vagy a
-    kimenetel bizonytalan (hiba esetén is; ilyenkor nem szabad helyben is
-    módosítani), ``(False, 0)``, ha a csatorna a kérés elküldése előtt nem
-    volt elérhető, és nincs futó démon, ezért a helyi művelet következik.
+    Returns ``(True, exit_code)`` if the daemon responded or the outcome is
+    uncertain (even on error; in that case local modification must not be
+    performed either), ``(False, 0)`` if the channel was unavailable before
+    the request was sent and no daemon is running, so the local operation
+    follows.
     """
     try:
         response, reason = _control_attempt(payload)
     except ControlAmbiguous as exc:
         print(
-            "hiba: a kérés elküldve, de a válasz nem érkezett meg; "
-            "NEM futtattam helyi módosítást, ellenőrizd a listát "
+            "error: the request was sent but no response arrived; "
+            "I did NOT run a local modification, check the list "
             f"({exc}).",
             file=sys.stderr,
             flush=True,
@@ -7992,8 +7995,8 @@ def _control_mutation(payload: dict) -> tuple[bool, int]:
         return True, 1
     except ControlProtocolError as exc:
         print(
-            f"hiba: a vezérlőcsatorna érvénytelen választ adott: {exc}; "
-            "NEM futtattam helyi módosítást, ellenőrizd a listát.",
+            f"error: the control channel returned an invalid response: {exc}; "
+            "I did NOT run a local modification, check the list.",
             file=sys.stderr,
             flush=True,
         )
@@ -8003,17 +8006,17 @@ def _control_mutation(payload: dict) -> tuple[bool, int]:
     pid = _live_daemon_pid()
     if pid is not None:
         print(
-            f"hiba: a vezérlőcsatorna nem érhető el "
-            f"({reason or 'ismeretlen ok'}), de a démon fut "
+            f"error: the control channel is unavailable "
+            f"({reason or 'unknown reason'}), but the daemon is running "
             f"(PID {pid}).",
             file=sys.stderr,
             flush=True,
         )
         print(
-            "hiba: a helyi módosítást biztonsági okból NEM futtattam, "
-            "mert a futó démon élő munkamenetei és tűzfalállapota "
-            "eltérne a lemeztől. Használd az admin felületet, vagy "
-            "állítsd le a démont.",
+            "error: I did NOT run the local modification for security "
+            "reasons, because the running daemon's live sessions and "
+            "firewall state would diverge from disk. Use the admin "
+            "interface or stop the daemon.",
             file=sys.stderr,
             flush=True,
         )
@@ -8023,12 +8026,12 @@ def _control_mutation(payload: dict) -> tuple[bool, int]:
 
 
 def _daemon_user_names() -> list[str] | None:
-    """Csak olvasás: a démon authoritative felhasználólistája, ha elérhető."""
+    """Read-only: the daemon's authoritative user list, if available."""
     try:
         response, _reason = _control_attempt({"action": "status"})
     except (ControlAmbiguous, ControlProtocolError):
-        # Olvasásnál a helyi lista elfogadható, de a hívó tudja, hogy a
-        # démon állapota bizonytalan.
+        # For reads the local list is acceptable, but the caller knows that
+        # the daemon state is uncertain.
         return None
     if response is None or not response.get("ok"):
         return None
@@ -8046,23 +8049,23 @@ def _prompt_password(from_stdin: bool) -> str:
     if from_stdin:
         line = sys.stdin.readline()
         if line == "":
-            raise SystemExit("hiba: nem érkezett jelszó a szabványos bemeneten")
+            raise SystemExit("error: no password received on standard input")
         return line.rstrip("\r\n")
-    first = getpass.getpass("Jelszó: ")
-    second = getpass.getpass("Jelszó újra: ")
+    first = getpass.getpass("Password: ")
+    second = getpass.getpass("Password again: ")
     if first != second:
-        raise SystemExit("hiba: a két jelszó nem egyezik")
+        raise SystemExit("error: the two passwords do not match")
     return first
 
 
 def _cli_audit(audit, event: str, **fields) -> None:
-    """CLI-művelet naplózása; hiba esetén sem szakítja meg a parancsot."""
+    """Log a CLI operation; even on error it does not interrupt the command."""
     fields.setdefault("actor", "cli")
     try:
         audit.write(event, **fields)
     except Exception as exc:
         print(
-            f"[napló] {event} írása nem sikerült: {exc}",
+            f"[audit] failed to write {event}: {exc}",
             file=sys.stderr,
             flush=True,
         )
@@ -8071,43 +8074,43 @@ def _cli_audit(audit, event: str, **fields) -> None:
 def _user_cli(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="server.py user",
-        description="Felhasználók kezelése a Dropjak users.json fájljában.",
+        description="Manage users in the Dropjak users.json file.",
     )
     sub = parser.add_subparsers(dest="action", required=True)
 
-    p_add = sub.add_parser("add", help="új felhasználó")
+    p_add = sub.add_parser("add", help="new user")
     p_add.add_argument("name")
     p_add.add_argument("--password-stdin", action="store_true")
     p_add.add_argument(
         "--no-must-change", action="store_true",
-        help="első belépéskor ne kelljen lecserélni a jelszót",
+        help="do not require changing the password on first login",
     )
     p_add.add_argument(
         "--role", choices=(gateway.ROLE_USER, gateway.ROLE_ADMIN),
-        default=gateway.ROLE_USER, help="szerepkör (alapértelmezés: user)",
+        default=gateway.ROLE_USER, help="role (default: user)",
     )
     p_add.add_argument(
         "--rule", action="append", default=[], metavar="ID",
-        help="hozzárendelt szabály-azonosító (többször is megadható)",
+        help="assigned rule ID (may be given multiple times)",
     )
 
-    p_pw = sub.add_parser("passwd", help="jelszó csere")
+    p_pw = sub.add_parser("passwd", help="change password")
     p_pw.add_argument("name")
     p_pw.add_argument("--password-stdin", action="store_true")
     p_pw.add_argument(
         "--no-must-change", action="store_true",
-        help="a felhasználónak ne kelljen első belépéskor lecserélnie",
+        help="do not require the user to change it on first login",
     )
 
-    p_del = sub.add_parser("del", help="felhasználó törlése")
+    p_del = sub.add_parser("del", help="delete user")
     p_del.add_argument("name")
 
     p_totp = sub.add_parser(
-        "totp-reset", help="kétfaktoros azonosítás alaphelyzetbe állítása"
+        "totp-reset", help="reset two-factor authentication"
     )
     p_totp.add_argument("name")
 
-    sub.add_parser("list", help="felhasználók listája")
+    sub.add_parser("list", help="list users")
 
     args = parser.parse_args(argv)
     store = gateway.UserStore()
@@ -8125,11 +8128,11 @@ def _user_cli(argv: list[str]) -> int:
             for rule_id in rules:
                 if not gateway._SERVICE_ID_RE.match(rule_id):
                     raise gateway.UserStoreError(
-                        f"érvénytelen szabály-azonosító: {rule_id!r}"
+                        f"invalid rule ID: {rule_id!r}"
                     )
                 if rule_id == gateway.LEGACY_ADMIN_RULE_ID:
                     raise gateway.UserStoreError(
-                        "ez egy fenntartott, régi azonosító, nem rendelhető hozzá"
+                        "this is a reserved legacy ID and cannot be assigned"
                     )
             handled, status = _control_mutation({
                 "action": "user.add",
@@ -8155,7 +8158,7 @@ def _user_cli(argv: list[str]) -> int:
                 rules=",".join(rules),
                 must_change_password=not args.no_must_change,
             )
-            print(f"Felhasználó létrehozva: {args.name}")
+            print(f"User created: {args.name}")
         elif args.action == "passwd":
             password = _prompt_password(args.password_stdin)
             handled, status = _control_mutation({
@@ -8176,7 +8179,7 @@ def _user_cli(argv: list[str]) -> int:
                 target=args.name,
                 must_change_password=not args.no_must_change,
             )
-            print(f"Jelszó frissítve: {args.name}")
+            print(f"Password updated: {args.name}")
         elif args.action == "del":
             handled, status = _control_mutation({
                 "action": "user.del",
@@ -8185,22 +8188,22 @@ def _user_cli(argv: list[str]) -> int:
             if handled:
                 return status
             if store.remove(args.name):
-                # A helyi (démon nélküli) törlés is tisztázza a
-                # csoporttagságot, ugyanúgy, mint az admin API.
+                # A local (daemon-less) delete also clears group membership,
+                # just like the admin API.
                 groups.remove_member_everywhere(args.name)
                 _cli_audit(
                     audit, "cli_user_deleted", target=args.name
                 )
-                print(f"Felhasználó törölve: {args.name}")
+                print(f"User deleted: {args.name}")
             else:
                 _cli_audit(
                     audit,
                     "cli_action_failed",
                     action="del",
                     target=args.name,
-                    reason="nincs ilyen felhasználó",
+                    reason="no such user",
                 )
-                print(f"Nincs ilyen felhasználó: {args.name}")
+                print(f"No such user: {args.name}")
                 return 1
         elif args.action == "totp-reset":
             handled, status = _control_mutation({
@@ -8213,25 +8216,25 @@ def _user_cli(argv: list[str]) -> int:
                 _cli_audit(
                     audit, "cli_totp_reset", target=args.name
                 )
-                print(f"2FA alaphelyzetbe állítva: {args.name}")
+                print(f"2FA reset: {args.name}")
             else:
                 _cli_audit(
                     audit,
                     "cli_action_failed",
                     action="totp-reset",
                     target=args.name,
-                    reason="nincs ilyen felhasználó",
+                    reason="no such user",
                 )
-                print(f"Nincs ilyen felhasználó: {args.name}")
+                print(f"No such user: {args.name}")
                 return 1
         elif args.action == "list":
-            # Csak olvasás: a démon authoritative listáját használjuk, ha
-            # elérhető; különben a helyi fájlból olvasunk (offline is működik).
+            # Read-only: use the daemon's authoritative list if available;
+            # otherwise read from the local file (works offline too).
             names = _daemon_user_names()
             if names is None:
                 names = store.names()
             if not names:
-                print("Nincs felhasználó. Létrehozás: server.py user add <név>")
+                print("No users. To create one: server.py user add <name>")
                 return 0
             for name in names:
                 print(name)
@@ -8243,28 +8246,28 @@ def _user_cli(argv: list[str]) -> int:
             target=getattr(args, "name", ""),
             reason=str(exc),
         )
-        print(f"hiba: {exc}", file=sys.stderr)
+        print(f"error: {exc}", file=sys.stderr)
         return 1
     return 0
 
 
 def _fail2ban_cli(argv: list[str]) -> int:
-    """Fail2ban kezelése a parancssorból (kizárás esetén vészmegoldás)."""
+    """Manage fail2ban from the command line (a fallback when excluded)."""
     parser = argparse.ArgumentParser(
         prog="server.py fail2ban",
-        description="A fail2ban tiltáslista kezelése.",
+        description="Manage the fail2ban ban list.",
     )
     sub = parser.add_subparsers(dest="action", required=True)
-    sub.add_parser("list", help="tiltott IP-k listája")
-    p_ban = sub.add_parser("ban", help="IP-cím letiltása")
+    sub.add_parser("list", help="list banned IPs")
+    p_ban = sub.add_parser("ban", help="ban an IP address")
     p_ban.add_argument("ip")
     p_ban.add_argument(
         "--seconds", type=int, default=0,
-        help="a tiltás hossza másodpercben (alapértelmezés: a beállított érték)",
+        help="ban duration in seconds (default: the configured value)",
     )
-    p_unban = sub.add_parser("unban", help="egy IP-cím feloldása")
+    p_unban = sub.add_parser("unban", help="unban a single IP address")
     p_unban.add_argument("ip")
-    sub.add_parser("unban-all", help="minden tiltás feloldása")
+    sub.add_parser("unban-all", help="unban everything")
 
     args = parser.parse_args(argv)
     audit = gateway.AuditLog()
@@ -8272,41 +8275,41 @@ def _fail2ban_cli(argv: list[str]) -> int:
     try:
         if args.action == "list":
             snapshot = manager.snapshot()
-            state = "aktív" if snapshot["enabled"] else "kikapcsolva"
-            drop_state = "aktív" if snapshot["drop_enabled"] else "kikapcsolva"
+            state = "active" if snapshot["enabled"] else "disabled"
+            drop_state = "active" if snapshot["drop_enabled"] else "disabled"
             print(
-                f"Fail2ban: {state}; küszöb: {snapshot['max_attempts']} "
-                f"próbálkozás / {snapshot['window_seconds']} mp; "
-                f"tiltás: {snapshot['ban_seconds']} mp"
+                f"Fail2ban: {state}; threshold: {snapshot['max_attempts']} "
+                f"attempt(s) / {snapshot['window_seconds']} s; "
+                f"ban: {snapshot['ban_seconds']} s"
             )
             print(
-                f"Drop-alapú tiltás: {drop_state}; csomagküszöb: "
+                f"Drop-based banning: {drop_state}; packet threshold: "
                 f"{snapshot['drop_max']} "
-                f"({'aktív' if snapshot['drop_count_active'] else 'kikapcsolva'}), "
-                f"portküszöb: {snapshot['drop_ports']} "
-                f"({'aktív' if snapshot['drop_ports_active'] else 'kikapcsolva'}) / "
-                f"{snapshot['drop_window_seconds']} mp"
+                f"({'active' if snapshot['drop_count_active'] else 'disabled'}), "
+                f"port threshold: {snapshot['drop_ports']} "
+                f"({'active' if snapshot['drop_ports_active'] else 'disabled'}) / "
+                f"{snapshot['drop_window_seconds']} s"
             )
             print(
-                "Kapcsolók: "
-                f"belépés={'be' if snapshot['enabled'] else 'ki'}, "
-                f"csomagszám={'be' if snapshot['drop_count_enabled'] else 'ki'}, "
-                f"portok={'be' if snapshot['drop_ports_enabled'] else 'ki'}, "
-                f"proxy={'be' if snapshot['proxy_enabled'] else 'ki'}."
+                "Switches: "
+                f"login={'on' if snapshot['enabled'] else 'off'}, "
+                f"drop-count={'on' if snapshot['drop_count_enabled'] else 'off'}, "
+                f"ports={'on' if snapshot['drop_ports_enabled'] else 'off'}, "
+                f"proxy={'on' if snapshot['proxy_enabled'] else 'off'}."
             )
             if snapshot["error"]:
-                print(f"FIGYELEM: {snapshot['error']}")
+                print(f"WARNING: {snapshot['error']}")
             bans = snapshot["bans"]
             if not bans:
-                print("Nincs tiltott IP.")
+                print("No banned IPs.")
                 return 0
-            print(f"Tiltott IP-k ({len(bans)}):")
+            print(f"Banned IPs ({len(bans)}):")
             for ban in bans:
                 source = ban.get("source") or (
                     "manual" if ban["manual"] else "login"
                 )
                 kind = {
-                    "manual": "kézi",
+                    "manual": "manual",
                     "drop": "drop",
                     "login": "login",
                     "proxy": "proxy (HTTP/S)",
@@ -8315,8 +8318,8 @@ def _fail2ban_cli(argv: list[str]) -> int:
                 if source == "drop" and detail:
                     kind = f"drop/{detail}"
                 print(
-                    f"  {ban['ip']:<15}  hátralévő: {ban['remaining']:>6} mp  "
-                    f"{kind:<16}  {ban['attempts']} esemény  "
+                    f"  {ban['ip']:<15}  remaining: {ban['remaining']:>6} s  "
+                    f"{kind:<16}  {ban['attempts']} events  "
                     f"user={ban['user'] or '-'}"
                 )
             return 0
@@ -8351,7 +8354,7 @@ def _fail2ban_cli(argv: list[str]) -> int:
                 until=ban.get("until", 0),
             )
             print(
-                f"Letiltva: {ban['ip']} ({ban['remaining']} mp)"
+                f"Banned: {ban['ip']} ({ban['remaining']} s)"
             )
             return 0
         if args.action == "unban":
@@ -8374,7 +8377,7 @@ def _fail2ban_cli(argv: list[str]) -> int:
                     target=args.ip,
                     removed=True,
                 )
-                print(f"Feloldva: {args.ip}")
+                print(f"Unbanned: {args.ip}")
             else:
                 _cli_audit(
                     audit,
@@ -8383,7 +8386,7 @@ def _fail2ban_cli(argv: list[str]) -> int:
                     target=args.ip,
                     reason="not_banned",
                 )
-                print(f"Nem volt letiltva: {args.ip}")
+                print(f"Was not banned: {args.ip}")
             return 0
         if args.action == "unban-all":
             handled, status = _control_mutation({
@@ -8398,7 +8401,7 @@ def _fail2ban_cli(argv: list[str]) -> int:
             _cli_audit(
                 audit, "cli_fail2ban_unban", removed=removed
             )
-            print(f"Feloldva: {removed} tiltás")
+            print(f"Unbanned: {removed} ban(s)")
             return 0
     except fail2ban_mod.Fail2banError as exc:
         _cli_audit(
@@ -8408,7 +8411,7 @@ def _fail2ban_cli(argv: list[str]) -> int:
             target=getattr(args, "ip", ""),
             reason=str(exc),
         )
-        print(f"hiba: {exc}", file=sys.stderr)
+        print(f"error: {exc}", file=sys.stderr)
         return 1
     return 2
 
@@ -8417,61 +8420,61 @@ def _serve() -> int:
     try:
         gw = gateway.Gateway()
     except gateway.CatalogError as exc:
-        print(f"HIBA: {exc}", file=sys.stderr, flush=True)
+        print(f"ERROR: {exc}", file=sys.stderr, flush=True)
         try:
             gateway.AuditLog().write(
                 "service_start_failed", reason=str(exc)
             )
         except Exception as audit_exc:
             print(
-                f"[napló] service_start_failed írása nem sikerült: "
+                f"[audit] failed to write service_start_failed: "
                 f"{audit_exc}",
                 file=sys.stderr,
                 flush=True,
             )
         return 1
 
-    # A belépőjegyek életciklusa (kiadás/elutasítás/lejárat) is auditált.
+    # The login tickets' lifecycle (issue/reject/expiry) is audited too.
     LOGIN_TICKETS.set_audit(gw.audit)
 
-    print("Dropjak — hálózati belépőkapu", flush=True)
-    print(f"Figyelés: 0.0.0.0:{gateway.PORT}", flush=True)
+    print("Dropjak — network gateway", flush=True)
+    print(f"Listening: 0.0.0.0:{gateway.PORT}", flush=True)
     print(
-        f"Tűzfal: inet {gw.firewall.table} / {gw.firewall.set_name}, "
+        f"Firewall: inet {gw.firewall.table} / {gw.firewall.set_name}, "
         f"{gw.firewall.tcp_set}, {gw.firewall.udp_set}, {gw.firewall.icmp_set}"
-        + ("  (DRY-RUN — a szabályok nem módosulnak!)" if gw.firewall.dry_run else ""),
+        + ("  (DRY-RUN — rules are not modified!)" if gw.firewall.dry_run else ""),
         flush=True,
     )
     captcha_mode = (
         "Cloudflare Turnstile" if gateway.TURNSTILE_ON
-        else f"proof-of-work ({gateway.POW_DIFFICULTY} hex nulla)"
+        else f"proof-of-work ({gateway.POW_DIFFICULTY} hex zeros)"
     )
     print(f"Captcha: {captcha_mode}", flush=True)
     print(
-        f"Szolgáltatáskatalógus: {len(gw.catalog.service_order)} szolgáltatás, "
-        f"{len(gw.catalog.scenario_order)} forgatókönyv ({gw.catalog.source})",
+        f"Service catalog: {len(gw.catalog.service_order)} services, "
+        f"{len(gw.catalog.scenario_order)} scenarios ({gw.catalog.source})",
         flush=True,
     )
     print(
-        f"Szabályok: {len(gw.rules.persisted_rules())} admin szabály, "
-        f"{len(gw.groups.all_groups())} csoport",
+        f"Rules: {len(gw.rules.persisted_rules())} admin rules, "
+        f"{len(gw.groups.all_groups())} groups",
         flush=True,
     )
-    print(f"Napló: {gw.audit.path}", flush=True)
+    print(f"Audit: {gw.audit.path}", flush=True)
     print(
-        f"Választható hozzáférés: {gateway.format_duration(gateway.MIN_TTL)}–"
-        f"{gateway.format_duration(gateway.MAX_TTL)}; alapértelmezett: "
+        f"Selectable access: {gateway.format_duration(gateway.MIN_TTL)}–"
+        f"{gateway.format_duration(gateway.MAX_TTL)}; default: "
         f"{gateway.format_duration(gw.sessions.ttl)}",
         flush=True,
     )
     if gateway.PORTAL_URL:
-        print(f"Kanonikus portálcím: {gateway.PORTAL_URL}", flush=True)
+        print(f"Canonical portal URL: {gateway.PORTAL_URL}", flush=True)
 
     gw.prepare()
     try:
         admin_state = gateway.provision_admin(gw.users)
     except gateway.UserStoreError as exc:
-        print(f"FIGYELEM: az admin fiók beállítása sikertelen: {exc}", flush=True)
+        print(f"WARNING: setting up the admin account failed: {exc}", flush=True)
         gw._write_audit(
             "admin_provision_failed",
             user=gateway.ADMIN_USER,
@@ -8484,14 +8487,14 @@ def _serve() -> int:
             action=admin_state,
         )
         if admin_state == "created":
-            print(f"[admin] felhasználó létrehozva: {gateway.ADMIN_USER}", flush=True)
+            print(f"[admin] user created: {gateway.ADMIN_USER}", flush=True)
         elif admin_state == "updated":
-            print(f"[admin] jelszó frissítve: {gateway.ADMIN_USER}", flush=True)
+            print(f"[admin] password updated: {gateway.ADMIN_USER}", flush=True)
         elif admin_state == "unchanged":
-            print(f"[admin] felhasználó rendben: {gateway.ADMIN_USER}", flush=True)
+            print(f"[admin] user OK: {gateway.ADMIN_USER}", flush=True)
 
     def _admin_has_tcp22_host_rule() -> bool:
-        """Van-e engedélyezett adminnak hatásos, TCP 22-es host szabálya."""
+        """Whether any enabled admin has an effective TCP 22 host rule."""
         for record in gw.users.details():
             if not (
                 record.is_admin and record.enabled and not record.pending
@@ -8508,23 +8511,22 @@ def _serve() -> int:
 
     if not _admin_has_tcp22_host_rule():
         print(
-            "FIGYELEM: egyetlen engedélyezett adminisztrátornak sincs "
-            "hatásos, TCP 22-es host (input) szabálya, ezért a host SSH "
-            "zárva marad.",
+            "WARNING: no enabled administrator has an effective TCP 22 host "
+            "(input) rule, so host SSH remains closed.",
             flush=True,
         )
         print(
-            "FIGYELEM: az admin a portálon hozzon létre egy host szabályt, "
-            "amely kifejezetten a TCP 22-es portot engedélyezi, rendelje "
-            "a felhasználóhoz (vagy egy csoporthoz), majd ugyanarról a "
-            "forrás IP-ről engedélyezze egy aktív munkamenetben.",
+            "WARNING: the admin should create a host rule in the portal "
+            "that explicitly allows TCP port 22, assign it to the user "
+            "(or a group), then authorize it in an active session from the "
+            "same source IP.",
             flush=True,
         )
         print(
-            "FIGYELEM: biztonságos első indítás SSH-n keresztül: először "
-            "HV_SKIP_FIREWALL=1 értékkel indítsd a konténert, állítsd be a "
-            "szabályt és a hozzárendelést, majd indítsd újra normálisan. "
-            "Alternatíva: tartsd nyitva a szolgáltatói konzolt.",
+            "WARNING: secure first start over SSH: first start the container "
+            "with HV_SKIP_FIREWALL=1, set up the rule and the assignment, "
+            "then restart it normally. Alternative: keep the provider "
+            "console open.",
             flush=True,
         )
 
@@ -8533,32 +8535,31 @@ def _serve() -> int:
         for record in gw.users.details()
     ):
         print(
-            "FIGYELEM: nincs engedélyezett admin fiók.",
+            "WARNING: there is no enabled admin account.",
             flush=True,
         )
         print(
-            "FIGYELEM: a portál Admin panelje nem érhető el, és a host SSH "
-            "csak aktív, engedélyezett portál-munkamenettel, valamint a "
-            "22-es TCP-portot kifejezetten engedélyező host szabállyal "
-            "nyílik meg.",
+            "WARNING: the portal's Admin panel is unavailable, and host SSH "
+            "opens only with an active, authorized portal session and a host "
+            "rule that explicitly allows TCP port 22.",
             flush=True,
         )
         print(
-            "FIGYELEM: állítsd be a .env fájlban a HV_ADMIN_ENABLED=1, "
-            "HV_ADMIN_USER, valamint a HV_ADMIN_PASSWORD vagy "
-            "HV_ADMIN_PASSWORD_FILE értéket, majd indítsd újra a konténert.",
+            "WARNING: set HV_ADMIN_ENABLED=1, HV_ADMIN_USER, and either "
+            "HV_ADMIN_PASSWORD or HV_ADMIN_PASSWORD_FILE in the .env file, "
+            "then restart the container.",
             flush=True,
         )
 
     if not gw.users.names():
         print(
-            "FIGYELEM: nincs egyetlen felhasználó sem. "
-            "Létrehozás: python3 server.py user add <név>",
+            "WARNING: there is not a single user. "
+            "To create one: python3 server.py user add <name>",
             flush=True,
         )
 
     gw.start()
-    # A Caddy tanúsítvány-gyorsítótárának ürítése (csak a domain proxyval).
+    # Flush Caddy's certificate cache (only with the domain proxy).
     caddy = None
     if gateway.PROXY_ENABLED and gateway.CADDY_ADMIN:
         caddy = CaddyAdmin(
@@ -8567,27 +8568,27 @@ def _serve() -> int:
         )
         gw.caddy = caddy
         caddy.start()
-    # A futó démon helyi vezérlőcsatornája: a CLI-műveletek így ugyanabban
-    # a folyamatban futnak, és a valódi (élő) munkameneteket is tudják
-    # visszavonni. Ha nem indul el, a CLI a helyi módra esik vissza.
+    # The running daemon's local control channel: CLI operations thus run in
+    # the same process and can also revoke the real (live) sessions. If it
+    # does not start, the CLI falls back to local mode.
     control = _start_control_server(gw)
     server = AppServer(("0.0.0.0", gateway.PORT), gw)
-    # A PID-fájl a vezérlőcsatorna után, de még a kiszolgálás előtt készül
-    # el. A CLI ebből tudja, hogy a daemon él, ezért nem szabad helyben
-    # módosítania, ha a socket épp nem érhető el.
+    # The PID file is created after the control channel but still before
+    # serving. The CLI learns from it that the daemon is alive, so it must not
+    # modify locally if the socket is temporarily unavailable.
     pid_inode = _write_server_pid()
 
-    # A 2FA-jegyek takarítása: a ki nem használt (elhagyott) jegyek
-    # lejáratát így legkésőbb 30 másodperccel a lejárat után naplózzuk.
+    # Cleaning up 2FA tickets: this way unused (abandoned) tickets are
+    # logged as expired at most 30 seconds after expiry.
     sweeper_stop = threading.Event()
 
     def _ticket_sweeper() -> None:
         while not sweeper_stop.wait(30):
             try:
                 LOGIN_TICKETS.purge()
-            except Exception as exc:  # a takarító soha ne haljon meg
+            except Exception as exc:  # the sweeper must never die
                 print(
-                    f"[napló] jégytakarítási hiba: {exc}",
+                    f"[audit] ticket sweeper error: {exc}",
                     file=sys.stderr,
                     flush=True,
                 )
@@ -8596,9 +8597,9 @@ def _serve() -> int:
         target=_ticket_sweeper, name="hv-tickets", daemon=True
     ).start()
 
-    # Konténerben a folyamat PID 1 is lehet, ilyenkor a kernel a SIGTERM-et
-    # alapból figyelmen kívül hagyja. Kezeljük, hogy a docker stop gyorsan
-    # és tisztán zárjon.
+    # In a container the process may be PID 1, in which case the kernel
+    # ignores SIGTERM by default. Handle it so docker stop shuts down quickly
+    # and cleanly.
     def _terminate(signum, frame):
         raise KeyboardInterrupt
 
@@ -8614,10 +8615,10 @@ def _serve() -> int:
         if control is not None:
             try:
                 control.stop()
-            except Exception as exc:  # a leállás ne akadjon el
+            except Exception as exc:  # shutdown must not get stuck
                 print(
-                    f"[control] a vezérlőcsatorna leállítása nem "
-                    f"sikerült: {exc}",
+                    f"[control] failed to stop the control channel: "
+                    f"{exc}",
                     file=sys.stderr,
                     flush=True,
                 )
@@ -8639,10 +8640,10 @@ def main(argv: list[str]) -> int:
         return _fail2ban_cli(argv[1:])
     if argv[0] == "check-firewall":
         ok, why = gateway.Firewall().healthy()
-        print("rendben" if ok else f"hiba: {why}")
+        print("OK" if ok else f"error: {why}")
         return 0 if ok else 1
     print(
-        "Használat: server.py [serve | user ... | fail2ban ... | check-firewall]",
+        "Usage: server.py [serve | user ... | fail2ban ... | check-firewall]",
         file=sys.stderr,
     )
     return 2

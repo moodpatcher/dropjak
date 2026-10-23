@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""A port proxy (3.11.0): beállítás-ellenőrzés, nft-generálás, sablon-sorrend.
+"""The port proxy (3.11.0): settings validation, nft generation, template order.
 
-A tesztek nem nyúlnak a rendszer tűzfalához: a szkriptfuttatást elfogják,
-a sablont az entrypoint render_ruleset függvényével rendereljük, és csak
-``unshare -rn nft -c`` ellenőrzi (ha elérhető).
+The tests do not touch the system firewall: script execution is intercepted,
+the template is rendered with the entrypoint's render_ruleset function, and
+only ``unshare -rn nft -c`` validates it (if available).
 """
 
 from __future__ import annotations
@@ -66,16 +66,16 @@ class StoreValidationTests(unittest.TestCase):
         )
         self.assertRegex(out[0]["id"], r"^[0-9a-f]{8}$")
         self.assertEqual(out[0]["target_ip"], "192.168.10.20")
-        # Input bejegyzésnél nincs cél IP és SNAT.
+        # For an input entry there is no target IP and no SNAT.
         self.assertEqual(out[1]["target_ip"], "")
         self.assertIs(out[1]["snat"], False)
-        # Docker-híd (172.16/12) cél is megengedett.
+        # A Docker bridge (172.16/12) target is allowed too.
         self.check(forward(target_ip="172.30.0.2"))
 
     def test_reserved_listen_ports(self) -> None:
         for port in (22, 53, 67, 80, 443, 2019, settings_store.PORTAL_PORT):
             with self.subTest(port=port), self.assertRaisesRegex(
-                settings_store.SettingsError, "fenntartott"
+                settings_store.SettingsError, "reserved"
             ):
                 self.check(forward(listen_port=port))
 
@@ -84,34 +84,34 @@ class StoreValidationTests(unittest.TestCase):
             (forward(), forward(id="b")),
             (forward(proto="both"), forward(id="b", proto="udp")),
             (forward(proto="udp"), forward(id="b", proto="both")),
-            # A kikapcsolt bejegyzés is foglalja a portot.
+            # A disabled entry also reserves the port.
             (forward(enabled=False), forward(id="b")),
         )
         for first, second in cases:
             with self.subTest(first=first["proto"], second=second["proto"]), \
-                    self.assertRaisesRegex(settings_store.SettingsError, "foglalt"):
+                    self.assertRaisesRegex(settings_store.SettingsError, "already in use"):
                 self.check(first, second)
-        # TCP és UDP ugyanazon a porton nem ütközik.
+        # TCP and UDP on the same port do not collide.
         self.check(forward(), forward(id="b", proto="udp"))
-        with self.assertRaisesRegex(settings_store.SettingsError, "duplikált"):
+        with self.assertRaisesRegex(settings_store.SettingsError, "duplicate"):
             self.check(forward(), forward(proto="udp"))
 
     def test_forward_target_must_be_private(self) -> None:
         for ip in ("8.8.8.8", "127.0.0.1", "169.254.1.1", "", None, "10.0.0"):
             with self.subTest(ip=ip), self.assertRaisesRegex(
-                settings_store.SettingsError, "magánhálózati"
+                settings_store.SettingsError, "private-network"
             ):
                 self.check(forward(target_ip=ip))
 
     def test_input_target_restrictions(self) -> None:
         for port in (22, 2019, settings_store.PORTAL_PORT):
             with self.subTest(port=port), self.assertRaisesRegex(
-                settings_store.SettingsError, "input célport"
+                settings_store.SettingsError, "input target port"
             ):
                 self.check(input_entry(target_port=port))
-        with self.assertRaisesRegex(settings_store.SettingsError, "host szabály"):
+        with self.assertRaisesRegex(settings_store.SettingsError, "host rule"):
             self.check(input_entry(target_port=24455))
-        # Forwardnál az azonos port a szokásos eset.
+        # For forward, the same port is the usual case.
         self.check(forward(target_port=25565))
 
     def test_field_types(self) -> None:
@@ -128,7 +128,7 @@ class StoreValidationTests(unittest.TestCase):
                 self.check(forward(**over))
         with self.assertRaises(settings_store.SettingsError):
             settings_store._port_proxies({})
-        with self.assertRaisesRegex(settings_store.SettingsError, "legfeljebb"):
+        with self.assertRaisesRegex(settings_store.SettingsError, "at most"):
             settings_store._port_proxies(
                 [forward(id=f"e{i}", listen_port=10000 + i) for i in range(65)]
             )
@@ -158,7 +158,7 @@ class RuleGenerationTests(unittest.TestCase):
         )
         self.scripts: list[str] = []
         self.fw._run_script = self.scripts.append  # type: ignore[method-assign]
-        # Determinisztikus: nincs figyelő socket, ezért az input redirect.
+        # Deterministic: there is no listening socket, hence the input redirect.
         empty = tempfile.TemporaryDirectory()
         self.addCleanup(empty.cleanup)
         self.fw.proc_net = self.fw.sysctl_conf = empty.name
@@ -227,7 +227,7 @@ class RuleGenerationTests(unittest.TestCase):
         ):
             with self.subTest(entry=entry), self.assertRaises(gateway.FirewallError):
                 fw._portproxy_rules([entry])
-        # Hibás bejegyzésnél a replace_custom semmit nem futtat.
+        # With an invalid entry replace_custom runs nothing.
         with self.assertRaises(gateway.FirewallError):
             self.fw.replace_custom(port_proxies=[forward(target_ip="8.8.8.8")])
         self.assertEqual(self.scripts, [])
@@ -241,13 +241,13 @@ class RuleGenerationTests(unittest.TestCase):
             lines.index(f"flush chain {T} portproxy_nat"),
             next(i for i, l in enumerate(lines) if "dnat ip to" in l),
         )
-        # Hibás beállításfájl (keep_block): a proxy láncok üresen maradnak.
+        # Invalid settings file (keep_block): the proxy chains remain empty.
         self.scripts.clear()
         self.fw.replace_custom((), (), keep_block=True)
         self.assertIn(f"flush chain {T} portproxy_nat", self.scripts[0])
         self.assertNotIn("dnat", self.scripts[0])
 
-    @unittest.skipUnless(shutil.which("nft") and shutil.which("unshare"), "nincs nft/unshare")
+    @unittest.skipUnless(shutil.which("nft") and shutil.which("unshare"), "no nft/unshare")
     def test_nft_check_template_with_rules(self) -> None:
         rules = self.fw._portproxy_rules([
             forward(),
@@ -264,7 +264,7 @@ class RuleGenerationTests(unittest.TestCase):
                 capture_output=True, text=True, timeout=20,
             )
         if result.returncode != 0 and "Operation not permitted" in result.stderr:
-            self.skipTest("a user namespace nem elérhető")
+            self.skipTest("the user namespace is not available")
         self.assertEqual(result.returncode, 0, result.stderr)
 
 
@@ -274,7 +274,7 @@ V6_ZERO = "00000000000000000000000000000000"
 
 def write_proc(root: str, files: dict[str, list[tuple[str, int, str]]],
                localnet: dict[str, str] | None = None) -> None:
-    """Hamis /proc/net (cím-hex, port, állapot) és route_localnet fájlok."""
+    """Fake /proc/net (address hex, port, state) and route_localnet files."""
     for name, rows in files.items():
         with open(os.path.join(root, name), "w", encoding="ascii") as fh:
             fh.write(HEAD + "".join(
@@ -287,17 +287,17 @@ def write_proc(root: str, files: dict[str, list[tuple[str, int, str]]],
             fh.write(value + "\n")
 
 
-# 127.0.0.1 / 0.0.0.0 / 127.0.0.53 a kernel natív (little-endian) kiírásában.
+# 127.0.0.1 / 0.0.0.0 / 127.0.0.53 in the kernel's native (little-endian) output.
 LO, ANY, STUB = "0100007F", "00000000", "3500007F"
 MAPPED_LO = "0000000000000000FFFF00000100007F"
 V6_LOOP = "00000000000000000000000001000000"
 
 
 class LoopbackTargetTests(unittest.TestCase):
-    """3.11.1: a csak 127.0.0.1-en figyelő input célhoz DNAT kell, nem redirect.
+    """3.11.1: an input target listening only on 127.0.0.1 needs DNAT, not redirect.
 
-    Élő hiba: a redirect a WAN címre írt át, a Docker 127.0.0.1:8081-es
-    publikálása ott nem válaszolt, a kernel RST-t küldött.
+    Live bug: the redirect rewrote to the WAN address, the Docker publication
+    on 127.0.0.1:8081 did not respond there, and the kernel sent an RST.
     """
 
     def setUp(self) -> None:
@@ -314,15 +314,15 @@ class LoopbackTargetTests(unittest.TestCase):
     def test_loopback_target_detection(self) -> None:
         cases = [
             ({"tcp": [(LO, 8081, "0A")]}, "tcp", "127.0.0.1"),
-            ({"tcp": [(LO, 8081, "01")]}, "tcp", None),  # nem LISTEN
+            ({"tcp": [(LO, 8081, "01")]}, "tcp", None),  # not LISTEN
             ({"tcp": [(LO, 8081, "0A"), (ANY, 8081, "0A")]}, "tcp", None),
             ({"tcp": [(ANY, 8081, "0A")]}, "tcp", None),
             ({"tcp6": [(MAPPED_LO, 8081, "0A")]}, "tcp", "127.0.0.1"),
             ({"tcp": [(LO, 8081, "0A")], "tcp6": [(V6_ZERO, 8081, "0A")]}, "tcp", None),
             ({"tcp": [(LO, 8081, "0A")], "tcp6": [(V6_LOOP, 8081, "0A")]}, "tcp", "127.0.0.1"),
             ({"udp": [(STUB, 8081, "07")]}, "udp", "127.0.0.53"),
-            ({"udp": [(LO, 8081, "07")]}, "tcp", None),  # más protokoll
-            ({"udp": [(LO, 8082, "07")]}, "udp", None),  # más port
+            ({"udp": [(LO, 8081, "07")]}, "tcp", None),  # other protocol
+            ({"udp": [(LO, 8082, "07")]}, "udp", None),  # other port
             ({}, "udp", None),
         ]
         for files, proto, expected in cases:
@@ -359,7 +359,7 @@ class LoopbackTargetTests(unittest.TestCase):
             f'add rule {T} portproxy_nat iifname {{ "eth1", "eth0" }} '
             "fib daddr type local udp dport 18086 dnat ip to 127.0.0.1:9001",
         ])
-        # Az engedélyezés változatlanul az eredeti hallgató portra szól.
+        # Authorization still applies to the original listening port.
         self.assertIn(
             f"add rule {T} portproxy_input meta l4proto tcp ct status dnat "
             "ct original proto-dst 8084 "
@@ -370,22 +370,22 @@ class LoopbackTargetTests(unittest.TestCase):
 
     def test_wildcard_or_localnet_off_keeps_redirect(self) -> None:
         entry = input_entry(proto="both", ifaces="wan", listen_port=8084, target_port=8081)
-        # Wildcard UDP: a válasz forrása az interfész címe, ezért redirect.
+        # Wildcard UDP: the response source is the interface address, hence redirect.
         write_proc(self.root, {"tcp": [(LO, 8081, "0A")], "udp": [(ANY, 8081, "07")]},
                    {"all": "1"})
         nat = [r for r in self.fw._portproxy_rules([entry]) if " portproxy_nat " in r]
         self.assertEqual([r.rsplit(" dport ", 1)[1] for r in nat], [
             "8084 dnat ip to 127.0.0.1:8081", "8084 redirect to :8081",
         ])
-        # route_localnet nélkül a kernel eldobná a 127.0.0.1 célt: redirect
-        # és figyelmeztetés.
+        # Without route_localnet the kernel would drop the 127.0.0.1 target:
+        # redirect and a warning.
         write_proc(self.root, {}, {"all": "0", "eth0": "0"})
         nat = [r for r in self.fw._portproxy_rules([entry]) if " portproxy_nat " in r]
         self.assertTrue(all(r.endswith("redirect to :8081") for r in nat))
         self.assertEqual(self.fw.portproxy_localnet_blocked([entry]), [("tcp", 8084)])
         warnings = gateway.port_proxy_warnings([entry], set(), set(), {("tcp", 8084)})
         self.assertEqual([(w["proto"], w["localnet"]) for w in warnings], [("tcp", True)])
-        # A forward bejegyzés nem érintett.
+        # The forward entry is not affected.
         self.assertEqual(self.fw.portproxy_localnet_blocked([forward()]), [])
 
     def test_refresh_reapplies_when_target_binding_changes(self) -> None:
@@ -405,13 +405,13 @@ class LoopbackTargetTests(unittest.TestCase):
         old_flush = gateway.conntrack_flush_port
         gateway.conntrack_flush_port = lambda p, n, audit=None: flushed.append((p, n)) or True
         self.addCleanup(setattr, gateway, "conntrack_flush_port", old_flush)
-        # Még semmi nincs telepítve: a frissítő nem nyúl a kernelhez.
+        # Nothing is installed yet: the refresher does not touch the kernel.
         self.assertEqual(gateway.Gateway.refresh_port_proxies(gw), [])
         gw._apply_custom_settings()
         self.assertIn("redirect to :8081", scripts[-1])
         self.assertEqual(gateway.Gateway.refresh_port_proxies(gw), [])
         self.assertEqual(len(scripts), 1)
-        # A cél később, csak loopbackre kötve indul (bootkori sorrend).
+        # The target starts later, bound only to loopback (boot-time order).
         write_proc(self.root, {"tcp": [(LO, 8081, "0A")]}, {"all": "1"})
         self.assertEqual(gateway.Gateway.refresh_port_proxies(gw), [("tcp", 8084)])
         self.assertIn("dnat ip to 127.0.0.1:8081", scripts[-1])
@@ -462,7 +462,7 @@ class TemplateOrderTests(unittest.TestCase):
             "meta l4proto udp ct original ip saddr . ct original proto-dst "
             "@allowed_udp meta mark set 0x44524a4b accept", lines,
         )
-        # A LAN-on lévő DNAT-cél válasza nem esik a kliens MAC-ellenőrzésére.
+        # The response of a DNAT target on the LAN does not fall under the client MAC check.
         for proto in ("tcp", "udp"):
             self.assertIn(
                 f'iifname "eth1" meta l4proto {proto} ct direction original '
@@ -484,7 +484,7 @@ class TemplateOrderTests(unittest.TestCase):
             if line.startswith("flush chain")
         ]
         self.assertIn("flush chain inet hatarvedelem portproxy_prerouting", flushed)
-        # A futásidejű láncokat a sablon-újratöltés nem üríti.
+        # The template reload does not flush the runtime chains.
         for chain in gateway.PORTPROXY_CHAINS:
             self.assertIn(f"add chain inet hatarvedelem {chain}\n", self.text)
             self.assertNotIn(f"flush chain inet hatarvedelem {chain}", flushed)
@@ -492,7 +492,7 @@ class TemplateOrderTests(unittest.TestCase):
             self.assertIn(chain, gateway.RULESET_CHAINS)
 
     def test_loopback_guard_before_nat(self) -> None:
-        """A route_localnet mellett kívülről érkező 127/8 csomag eldobódik."""
+        """With route_localnet, a 127/8 packet arriving from outside is dropped."""
         guard = [
             'iifname != "lo" ip daddr 127.0.0.0/8 drop',
             'iifname != "lo" ip saddr 127.0.0.0/8 drop',
@@ -538,7 +538,7 @@ class ApplyRollbackTests(unittest.TestCase):
     def run_script(self, script: str) -> None:
         self.scripts.append(script)
         if self.fail and self.fail.pop(0):
-            raise gateway.FirewallError("szimulált nft hiba")
+            raise gateway.FirewallError("simulated nft error")
 
     def apply(self, entries) -> None:
         gateway.Gateway.apply_settings(
@@ -559,7 +559,7 @@ class ApplyRollbackTests(unittest.TestCase):
 
     def test_commit_failure_restores_old_rules(self) -> None:
         def broken(_data):
-            raise OSError("tele a lemez")
+            raise OSError("disk full")
         self.store.commit = broken  # type: ignore[method-assign]
         with self.assertRaises(OSError):
             self.apply([forward(target_port=25566)])
@@ -570,7 +570,7 @@ class ApplyRollbackTests(unittest.TestCase):
         gateway.Gateway._apply_custom_settings(self.gw)
         self.assertIn("dnat ip to 192.168.10.20:25565", self.scripts[-1])
         gateway.Gateway._apply_custom_settings(
-            self.gw, {"error": "hibás", "port_proxies": [forward()]}
+            self.gw, {"error": "invalid", "port_proxies": [forward()]}
         )
         self.assertNotIn("dnat", self.scripts[-1])
         self.assertIn("flush chain inet hatarvedelem portproxy_nat", self.scripts[-1])

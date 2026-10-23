@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""A Dropjak mag és HTTP-réteg automatizált tesztjei.
+"""Automated tests for the Dropjak core and HTTP layer.
 
-Futtatás a projekt gyökeréből:
+Run from the project root:
 
     python3 -m unittest discover -s tests -v
 
-A tesztek nem nyúlnak a valódi nftables-hez: egy hamis nft szkriptet
-használnak, és a HTTP-kiszolgálót is csak 127.0.0.1-re indítják.
+The tests do not touch the real nftables: they use a fake nft script,
+and the HTTP server is also started only on 127.0.0.1.
 """
 
 from __future__ import annotations
@@ -41,14 +41,14 @@ import droplog   # noqa: E402
 import fail2ban as fail2ban_mod  # noqa: E402
 
 
-# ------------------------------------------------------------------ segédek
+# ------------------------------------------------------------------ helpers
 
 CATALOG = gateway.ServiceCatalog.load(str(ROOT / "services.json"))
 FULL = gateway.Ports(full=True)
 
 
 def ports_for(*service_ids: str) -> gateway.Ports:
-    """A katalógus-szolgáltatásokból előállított Ports a tesztekhez."""
+    """Ports built from the catalog services for the tests."""
     tcp: set[int] = set()
     udp: set[int] = set()
     icmp = False
@@ -85,7 +85,7 @@ def make_rule(
 
 
 class FakeTools:
-    """Ideiglenes nft/conntrack szkriptek naplózással."""
+    """Temporary nft/conntrack scripts with logging."""
 
     def __init__(self, directory: str) -> None:
         self.dir = Path(directory)
@@ -153,7 +153,7 @@ class FakeTools:
         self.fail.unlink(missing_ok=True)
 
     def script(self) -> list[str]:
-        """Az nft -f - bemenetére adott sorok."""
+        """Lines passed to nft -f - on its input."""
         prefix = "SCRIPT "
         return [line[len(prefix):] for line in self.lines() if line.startswith(prefix)]
 
@@ -161,7 +161,7 @@ class FakeTools:
         return [line for line in self.lines() if line.startswith("nft delete element")]
 
     def set_json(self, set_name: str, elements: list[dict]) -> None:
-        """A ``nft -j list set`` hamis kimenetének beállítása."""
+        """Set the fake output of ``nft -j list set``."""
         item = {
             "set": {
                 "family": "inet",
@@ -192,7 +192,7 @@ class FakeTools:
             path.unlink()
 
     def chain_text(self, chain: str, text: str) -> None:
-        """A ``nft list chain`` hamis kimenetének beállítása."""
+        """Set the fake output of ``nft list chain``."""
         (self.chain_dir / f"{chain}.txt").write_text(text, encoding="utf-8")
 
     def clear_chains(self) -> None:
@@ -210,13 +210,13 @@ def solve(challenge: dict) -> dict:
 
 
 def fresh_totp_code(secret: str, after_step: int | None = None) -> str:
-    """Aktuális TOTP-kód, az időlépés határától biztonságos távolságban.
+    """Current TOTP code, at a safe distance from the time-step boundary.
 
-    Ha ``after_step`` meg van adva, a visszaadott kód egy annál későbbi
-    időlépéshez tartozik (a beiratkozási kód újrafelhasználásának
-    elkerülésére), de az aktuális ellenőrzési ablakon belül marad.
-    Ha közel vagyunk a 30 másodperces lépés végéhez, megvárjuk a következő
-    lépést, hogy a több kérést igénylő tesztek ne essenek szét határátlépéskor.
+    If ``after_step`` is given, the returned code belongs to a later
+    time step than that one (to avoid reusing the enrollment code), but
+    remains within the current verification window.
+    If we are close to the end of the 30-second step, we wait for the next
+    step so that the tests requiring several requests do not fall apart at a boundary.
     """
     remaining = gateway.TOTP_PERIOD - (time.time() % gateway.TOTP_PERIOD)
     if remaining < 5:
@@ -232,11 +232,11 @@ def fresh_totp_code(secret: str, after_step: int | None = None) -> str:
         code = gateway.hotp_code(secret, counter)
         if gateway.totp_match(secret, code, now=now) == counter:
             return code
-    raise AssertionError("nincs a megadott lépésnél későbbi érvényes kód")
+    raise AssertionError("no valid code later than the given step")
 
 
 def wrong_totp_code(secret: str) -> str:
-    """Olyan 6 jegyű kód, amely egyik elfogadott időablakban sem érvényes."""
+    """A 6-digit code that is valid in none of the accepted time windows."""
     current = int(time.time() // gateway.TOTP_PERIOD)
     accepted = {
         gateway.hotp_code(secret, counter)
@@ -254,7 +254,7 @@ def wrong_totp_code(secret: str) -> str:
 
 
 def audit_since(audit, started: float) -> list[dict]:
-    """A ``started`` időpont után írt naplóbejegyzések (legújabb elöl)."""
+    """Log entries written after ``started`` (newest first)."""
     rows: list[dict] = []
     for row in audit.read(limit=2000):
         try:
@@ -265,7 +265,7 @@ def audit_since(audit, started: float) -> list[dict]:
     return rows
 
 
-# ------------------------------------------------------------------ katalógus
+# ------------------------------------------------------------------ catalog
 
 class CatalogTests(unittest.TestCase):
     def test_project_catalog_loads(self) -> None:
@@ -295,7 +295,7 @@ class CatalogTests(unittest.TestCase):
             [svc.id for svc in CATALOG.resolve(["dns", "web"])],
             ["dns", "web"],
         )
-        # A teljes hozzáférés minden mást magába foglal.
+        # Full access includes everything else.
         self.assertEqual(
             [svc.id for svc in CATALOG.resolve(["web", "all", "dns"])],
             ["all"],
@@ -307,7 +307,7 @@ class CatalogTests(unittest.TestCase):
     def test_validate_ttl_bounds(self) -> None:
         self.assertEqual(gateway.validate_ttl(gateway.MIN_TTL), gateway.MIN_TTL)
         self.assertEqual(gateway.validate_ttl(gateway.MAX_TTL), gateway.MAX_TTL)
-        # Az egy hét is választható legyen, ne álljon meg 24 óránál.
+        # One week must also be selectable; it should not stop at 24 hours.
         one_week = 7 * 24 * 60 * 60
         self.assertGreaterEqual(gateway.MAX_TTL, one_week)
         self.assertEqual(gateway.validate_ttl(one_week), one_week)
@@ -323,10 +323,10 @@ class CatalogTests(unittest.TestCase):
                 gateway.validate_ttl(bad)
 
     def test_format_duration(self) -> None:
-        self.assertEqual(gateway.format_duration(3600), "1 óra")
-        self.assertEqual(gateway.format_duration(7200), "2 óra")
-        self.assertEqual(gateway.format_duration(5400), "90 perc")
-        self.assertEqual(gateway.format_duration(90), "90 másodperc")
+        self.assertEqual(gateway.format_duration(3600), "1 hour")
+        self.assertEqual(gateway.format_duration(7200), "2 hours")
+        self.assertEqual(gateway.format_duration(5400), "90 minutes")
+        self.assertEqual(gateway.format_duration(90), "90 seconds")
 
     def test_invalid_catalogs_rejected(self) -> None:
         bad_catalogs = [
@@ -347,7 +347,7 @@ class CatalogTests(unittest.TestCase):
                 gateway.ServiceCatalog.from_data(data)
 
 
-# ------------------------------------------------------------------ tűzfal
+# ------------------------------------------------------------------ firewall
 
 class FirewallTests(unittest.TestCase):
     @classmethod
@@ -464,7 +464,7 @@ class FirewallTests(unittest.TestCase):
             "{ 192.168.50.23 . 25566 timeout 120s }",
             script,
         )
-        # A host port sosem kerülhet a forward halmazokba.
+        # The host port must never end up in the forward sets.
         self.assertFalse(
             any("allowed_tcp" in line or "allowed_udp" in line
                 for line in script),
@@ -502,19 +502,19 @@ class FirewallTests(unittest.TestCase):
             self.assertIn(line, script)
         self.assertFalse(any("allowed_v4" in line for line in script), script)
 
-        # Ismétlődő engedélyrész nem ad ismétlődő nft-elemet.
+        # A repeated permission part does not produce a repeated nft element.
         self.tools.clear()
         self.fw.grant_all("192.168.50.23", (forward, forward), 60)
         lines = self.tools.script()
         self.assertEqual(len(lines), len(set(lines)), lines)
         self.assertEqual(len(lines), 2, lines)
 
-        # Üres engedélyhalmaz: nincs MAC-kötés és nincs nft-művelet.
+        # Empty permission set: no MAC binding and no nft operation.
         self.tools.clear()
         self.fw.grant_all("192.168.50.23", (), 60)
         self.assertEqual(self.tools.lines(), [])
 
-        # A visszavonás mindkét irány halmazaiból töröl.
+        # Revocation deletes from the sets of both directions.
         self.fw.revoke_all("192.168.50.23", (forward, host))
         deletes = self.tools.deletes()
         for line in (
@@ -579,7 +579,7 @@ class FirewallTests(unittest.TestCase):
             self.assertIn(
                 f"nft flush set inet hatarvedelem {set_name}", flushed
             )
-        # A host_service_* őrhalmazok szándékosan nem ürülnek induláskor.
+        # The host_service_* guard sets are intentionally not flushed at startup.
         for set_name in ("host_service_tcp", "host_service_udp"):
             self.assertNotIn(
                 f"nft flush set inet hatarvedelem {set_name}", flushed
@@ -603,7 +603,7 @@ class FirewallTests(unittest.TestCase):
             any("flush set" in line for line in self.tools.lines()),
             self.tools.lines(),
         )
-        # A portőr nem érinti a tényleges engedélyező halmazokat.
+        # The port proxy does not touch the actual authorizing sets.
         self.assertFalse(
             any("allowed_input" in line or "allowed_tcp" in line
                 for line in script),
@@ -622,9 +622,9 @@ class FirewallTests(unittest.TestCase):
 
     def test_snapshot_and_health_include_input_and_service_sets(self) -> None:
         snapshot = self.fw.snapshot()
-        # A host engedélyek a snapshotban is szerepelnek (az admin nézet
-        # ezekből rajzolja a csoportokat); a csak bővülő védőhalmazok
-        # szándékosan nem részei a megjelenített képnek.
+        # Host permissions also appear in the snapshot (the admin view
+        # draws the groups from them); the add-only guard sets are
+        # intentionally not part of the displayed picture.
         for set_name in ("allowed_input_tcp", "allowed_input_udp"):
             self.assertIn(set_name, snapshot["sets"])
             self.assertIn(
@@ -670,7 +670,7 @@ class FirewallTests(unittest.TestCase):
             "{ 192.168.50.23 . 25566 }",
         ):
             self.assertIn(line, deletes)
-        # Más IP elemét nem törli.
+        # It does not delete another IP's element.
         self.assertFalse(
             any("192.168.50.24" in line for line in deletes), deletes
         )
@@ -713,10 +713,10 @@ class FirewallTests(unittest.TestCase):
 
     def test_missing_element_delete_is_tolerated(self) -> None:
         self.tools.make_fail("Error: Could not process rule: No such file or directory")
-        # A grant először töröl (ez tolerált), majd hozzáad (ez hibázik).
+        # The grant deletes first (tolerated), then adds (this fails).
         with self.assertRaises(gateway.FirewallError):
             self.fw.allow("10.0.0.5", 60)
-        self.fw.deny("10.0.0.5")  # a törlés hibája elfogadható
+        self.fw.deny("10.0.0.5")  # the failure of the deletion is acceptable
 
     def test_nft_failure_is_raised(self) -> None:
         self.tools.make_fail("nft: Operation not permitted")
@@ -779,8 +779,8 @@ class FirewallTests(unittest.TestCase):
         self.assertIn("allowed_tcp", snapshot["errors"][0])
 
     def test_ruleset_lists_chains_without_sets(self) -> None:
-        # Az újabb nft a list chain kimenetét table blokkba ágyazza; a
-        # preauth ág a régebbi, burkolat nélküli formátumot modellezi.
+        # Newer nft wraps the list chain output in a table block; the
+        # preauth branch models the older, unwrapped format.
         self.tools.chain_text(
             "forward",
             "table inet hatarvedelem {\n"
@@ -874,13 +874,13 @@ class FirewallTests(unittest.TestCase):
             [row["ip"] for row in grouped["ips"]],
             ["192.168.50.23", "192.168.50.24", "192.168.50.30"],
         )
-        self.assertNotIn("192.168.50.25", rows)  # függő munkamenet
+        self.assertNotIn("192.168.50.25", rows)  # pending session
 
         alice = rows["192.168.50.23"]
         self.assertFalse(alice["orphan"])
         self.assertFalse(alice["in_sync"])
         self.assertEqual(alice["ports_label"], "TCP 80")
-        self.assertIn("hiányzó TCP 443", alice["mismatch"])
+        self.assertIn("missing TCP 443", alice["mismatch"])
         self.assertNotIn("host_ssh", alice)
         self.assertEqual(alice["expires_in"], 100)
         self.assertEqual(alice["users"], ["alice"])
@@ -889,11 +889,11 @@ class FirewallTests(unittest.TestCase):
         self.assertFalse(bob["orphan"])
         self.assertFalse(bob["in_sync"])
         self.assertEqual(bob["ports_label"], "Nincs port")
-        self.assertIn("hiányzó TCP 53", bob["mismatch"])
+        self.assertIn("missing TCP 53", bob["mismatch"])
 
         orphan = rows["192.168.50.30"]
         self.assertTrue(orphan["orphan"])
-        self.assertIn("váratlan TCP 8080", orphan["mismatch"])
+        self.assertIn("unexpected TCP 8080", orphan["mismatch"])
         self.assertEqual(grouped["counts"]["orphans"], 1)
         self.assertEqual(grouped["counts"]["mismatched"], 2)
 
@@ -951,7 +951,7 @@ class FirewallTests(unittest.TestCase):
         row = grouped["ips"][0]
         self.assertEqual(row["mismatch"], [])
         self.assertTrue(row["in_sync"], row)
-        # A host (input) bejegyzés irányjelölést kap, és a felirat jelzi.
+        # The host (input) entry gets a direction marker, and the label indicates it.
         self.assertEqual(row["tcp"], [{
             "port": 25566, "direction": "input",
             "expires_in": 90, "timeout": 120,
@@ -978,8 +978,8 @@ class FirewallTests(unittest.TestCase):
         }]
         row = gateway.group_firewall_snapshot(snapshot, sessions)["ips"][0]
         self.assertFalse(row["in_sync"])
-        # Nem téves forward „hiányzó TCP” eltérés.
-        self.assertEqual(row["mismatch"], ["hiányzó host TCP 25566"])
+        # Not a false forward "missing TCP" mismatch.
+        self.assertEqual(row["mismatch"], ["missing host TCP 25566"])
 
     def test_group_snapshot_orphan_input_entry_is_visible(self) -> None:
         snapshot = {
@@ -998,7 +998,7 @@ class FirewallTests(unittest.TestCase):
         row = grouped["ips"][0]
         self.assertTrue(row["orphan"])
         self.assertEqual(row["ports_label"], "Host TCP 25566")
-        self.assertEqual(row["mismatch"], ["váratlan host TCP 25566"])
+        self.assertEqual(row["mismatch"], ["unexpected host TCP 25566"])
         self.assertEqual(row["tcp"][0]["direction"], "input")
         self.assertEqual(grouped["counts"]["orphans"], 1)
 
@@ -1055,17 +1055,17 @@ class FirewallTests(unittest.TestCase):
             snapshot([], [25566]), sessions
         )["ips"][0]
         self.assertFalse(missing["in_sync"])
-        self.assertEqual(missing["mismatch"], ["hiányzó host TCP 25566"])
+        self.assertEqual(missing["mismatch"], ["missing host TCP 25566"])
 
         extra = gateway.group_firewall_snapshot(
             snapshot([25566, 25567], [25566]), sessions
         )["ips"][0]
         self.assertFalse(extra["in_sync"])
-        self.assertEqual(extra["mismatch"], ["váratlan host TCP 25567"])
+        self.assertEqual(extra["mismatch"], ["unexpected host TCP 25567"])
 
     def test_group_snapshot_host_ssh_is_only_a_host_22_entry(self) -> None:
-        # A teljes forward szabály nem nyit host SSH-t. A host SSH kizárólag
-        # közönséges TCP 22-es input bejegyzésként jelenik meg.
+        # The full forward rule does not open host SSH. Host SSH appears only
+        # as an ordinary TCP 22 input entry.
         base_sets = {
             "allowed_v4": [{"address": "10.0.0.9", "expires_in": 60,
                             "timeout": 60}],
@@ -1118,7 +1118,7 @@ class FirewallTests(unittest.TestCase):
         self.assertEqual(ssh_row["entry_count"], 1)
 
 
-    # -- MAC-kötés -----------------------------------------------------------
+    # -- MAC binding ---------------------------------------------------------
 
     def _mac_firewall(self, arp_text: str):
         arp_path = os.path.join(self.tmp.name, "arp")
@@ -1197,8 +1197,8 @@ class FirewallTests(unittest.TestCase):
     def test_non_lan_client_needs_no_mac(self) -> None:
         fw = self._mac_firewall("")
         fw.grant("203.0.113.5", ports_for("web"), 60)
-        # Nem-LAN címen nincs MAC-kötés; a maradék elem takarítása viszont
-        # ilyenkor is lefut (F8), ezért csak a hozzáadást tiltjuk.
+        # No MAC binding on a non-LAN address; cleanup of the remaining
+        # element still runs in this case (F8), so we only disable the addition.
         self.assertFalse(
             any(
                 "add element inet hatarvedelem client_mac" in line
@@ -1219,7 +1219,7 @@ class FirewallTests(unittest.TestCase):
         )
 
     def test_revoke_all_removes_mac_for_non_lan_address(self) -> None:
-        """Nem-LAN címnél is kitakarítja a maradt MAC-elemet (F8)."""
+        """It also cleans up the leftover MAC element for a non-LAN address (F8)."""
         fw = self._mac_firewall("")
         self.tools.set_json("client_mac", [
             {"val": {"concat": [
@@ -1234,7 +1234,7 @@ class FirewallTests(unittest.TestCase):
         )
 
     def test_mac_listing_failure_blocks_grant(self) -> None:
-        """Hibás client_mac kimenet esetén nincs engedélyezés (fail-closed)."""
+        """On a broken client_mac output there is no authorization (fail-closed)."""
         fw = self._mac_firewall(self._arp("192.168.10.2", "aa:bb:cc:dd:ee:ff"))
         (self.tools.json_dir / "client_mac.json").write_text(
             "{nem json", encoding="utf-8"
@@ -1262,7 +1262,7 @@ class FirewallTests(unittest.TestCase):
             gateway.Firewall.parse_mac_json(raw, "192.168.10.2"),
             ["aa:bb:cc:dd:ee:ff"],
         )
-        # A hibás listázás nem jelenthet "nincs kötés" állapotot.
+        # A failed listing must not mean a "no binding" state.
         for raw in ("{nem json", "[]", b"\xff"):
             with self.assertRaises(gateway.FirewallError):
                 gateway.Firewall.parse_mac_json(raw, "x")
@@ -1279,7 +1279,7 @@ class FirewallTests(unittest.TestCase):
         )
 
 
-# ------------------------------------------------------------------ felhasználók
+# ------------------------------------------------------------------ users
 
 class UserStoreTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -1354,7 +1354,7 @@ class UserStoreTests(unittest.TestCase):
 
 
 class UserStoreAccountRequestTests(unittest.TestCase):
-    """A fiókkérés (pending) adatmodellje, jóváhagyása és elutasítása."""
+    """The account request (pending) data model, approval and rejection."""
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -1433,8 +1433,8 @@ class UserStoreAccountRequestTests(unittest.TestCase):
         self.assertFalse(self.store.verify("alice", "rossz-jelszo"))
 
     def test_effective_rules_are_empty_for_pending_without_rules_key(self) -> None:
-        # Ellenőrző eset: a rules mező nélküli aktív (örökölt) felhasználó
-        # továbbra is megkapja a forward szabályokat, tehát a régi ág él.
+        # Control case: an active (legacy) user without a rules field still
+        # receives the forward rules, so the old branch is alive.
         self.store.add("legacy", "hosszu-jelszo-1")
         self.store.add(
             "pending", "hosszu-jelszo-1", pending=True, email="p@e.co"
@@ -1451,7 +1451,7 @@ class UserStoreAccountRequestTests(unittest.TestCase):
         self.assertTrue(self.rules.effective_for(legacy, []))
         self.assertFalse(pending.rules_set)
         self.assertEqual(self.rules.effective_for(pending, []), [])
-        # Admin szerepkörű, de még függő fiók sem kap szabályt.
+        # An admin-role but still pending account gets no rule either.
         data["pending"]["role"] = gateway.ROLE_ADMIN
         data["pending"]["enabled"] = True
         self._write_raw(data)
@@ -1550,8 +1550,8 @@ class TotpPrimitiveTests(unittest.TestCase):
         )
         self.assertEqual(gateway.totp_code(RFC_TOTP_SECRET, now=59), "287082")
         self.assertEqual(gateway.totp_match(RFC_TOTP_SECRET, "287082", now=59), 1)
-        # 90 másodpercnél a számláló 3; a ±1 ablak a 2., 3. és 4. lépést
-        # fogadja el, az ezen kívülieket nem.
+        # At 90 seconds the counter is 3; the ±1 window accepts steps 2, 3
+        # and 4, and rejects those outside it.
         for step in (2, 3, 4):
             code = gateway.totp_code(
                 RFC_TOTP_SECRET, now=step * gateway.TOTP_PERIOD
@@ -1694,7 +1694,7 @@ class TotpUserStoreTests(unittest.TestCase):
         self.assertFalse(self.store.verify_totp("alice", code, now=now))
         record = self._fresh_record()
         self.assertEqual(record.totp_last_step, int(now // gateway.TOTP_PERIOD))
-        # A kötelező jelző nélkül is működik; azt a szerver kényszeríti ki.
+        # It works without the mandatory flag; the server enforces that.
         self.assertFalse(record.totp_required)
 
     def test_enroll_records_step_and_rejects_replay(self) -> None:
@@ -1705,11 +1705,11 @@ class TotpUserStoreTests(unittest.TestCase):
         self.assertTrue(
             self.store.enroll_totp("alice", self.secret, [], last_step=matched)
         )
-        # A beiratkozást megerősítő kód ugyanabban az időlépésben már nem
-        # használható fel újra.
+        # The code confirming enrollment can no longer be reused in the same
+        # time step.
         self.assertFalse(self.store.verify_totp("alice", code, now=now))
         self.assertEqual(self._fresh_record().totp_last_step, matched)
-        # Csak a nem negatív egész (nem bool) érték kerül a számlálóba.
+        # Only a non-negative integer (not bool) goes into the counter.
         for value in (None, -1, True, False, "7", 3.5):
             with self.subTest(last_step=value):
                 self.assertTrue(
@@ -1753,12 +1753,12 @@ class TotpUserStoreTests(unittest.TestCase):
         self._enroll(codes)
         first, second, third = codes
         messy = f" {first[:5].lower()} - {first[5:].lower()} "
-        # A "0" nem szerepel a kódábécében, ezért biztosan nem egyezik.
+        # "0" is not in the code alphabet, so it certainly does not match.
         self.assertFalse(self.store.verify_recovery("alice", "0000000000"))
         self.assertTrue(self.store.verify_recovery("alice", messy))
         self.assertFalse(self.store.verify_recovery("alice", messy))
         self.assertEqual(len(self._fresh_record().totp_recovery), 2)
-        # A többi kódot a felhasználás nem érinti.
+        # The use of one code does not affect the others.
         self.assertTrue(self.store.verify_recovery("alice", second))
         self.assertTrue(self.store.verify_recovery("alice", third))
         self.assertEqual(self._fresh_record().totp_recovery, ())
@@ -1786,7 +1786,7 @@ class TotpUserStoreTests(unittest.TestCase):
                 "alice", gateway.totp_code(self.secret, now=now), now=now
             )
         )
-        # Az újrabelépés megőrzi a kötelező jelzőt.
+        # Re-enrollment preserves the mandatory flag.
         self._enroll(codes)
         record = self._fresh_record()
         self.assertTrue(record.totp_required)
@@ -1898,7 +1898,7 @@ class TotpUserStoreTests(unittest.TestCase):
 
 
 class LoginTicketStoreTests(unittest.TestCase):
-    """A 2FA-belépőjegyek élettartama, IP-kötése és próbaszámlálása."""
+    """Lifetime, IP binding and attempt counting of the 2FA login tickets."""
 
     def setUp(self) -> None:
         self.now = 1000.0
@@ -1922,8 +1922,8 @@ class LoginTicketStoreTests(unittest.TestCase):
         self.assertEqual(ticket.attempts, 0)
         self.assertEqual(ticket.expires_at, 1005.0)
 
-        # Idegen IP-ről a jegy nem olvasható, nem fogyasztható és nem
-        # számolható rá sikertelen próba.
+        # From a foreign IP the ticket can neither be read nor consumed, and no
+        # failed attempt can be counted against it.
         self.assertIsNone(self.store.peek(token, "127.0.0.10"))
         self.assertIsNone(self.store.consume(token, "127.0.0.10"))
         self.assertEqual(self.store.fail(token, "127.0.0.10"), 0)
@@ -1937,7 +1937,7 @@ class LoginTicketStoreTests(unittest.TestCase):
         self.now = 1005.0
         self.assertIsNone(self.store.peek(token, self.ip))
 
-        # A purge a hozzáférés nélkül is eltakarítja a lejárt jegyeket.
+        # purge also cleans up expired tickets without access.
         fresh = self.store.issue("verify", "alice", self.ip, "fp")
         self.assertIn(fresh, self.store._tickets)
         self.now = 1011.0
@@ -1962,7 +1962,7 @@ class LoginTicketStoreTests(unittest.TestCase):
         self.assertIsNone(self.store.peek(token, self.ip))
         self.assertIsNone(self.store.consume(token, self.ip))
 
-        # Egy friss jegy ettől függetlenül használható marad.
+        # A fresh ticket remains usable regardless.
         fresh = self.store.issue("verify", "alice", self.ip, "fp")
         self.assertEqual(self.store.consume(fresh, self.ip).username, "alice")
 
@@ -1983,14 +1983,14 @@ class LoginTicketStoreTests(unittest.TestCase):
         token = self.store.issue("verify", "alice", self.ip, "fp")
         ticket = self.store.peek(token, self.ip)
         self.assertEqual(ticket.username, "alice")
-        # A kliens nem tud más felhasználót „beírni” a jegybe: a token csak
-        # a szerveroldali rekordot azonosítja.
+        # The client cannot "write" another user into the ticket: the token
+        # identifies only the server-side record.
         self.assertNotEqual(ticket.username, "bob")
         self.assertIsNone(self.store.peek("alice", self.ip))
 
 
 class LoginTicketAuditTests(unittest.TestCase):
-    """A 2FA-jegyek kiadás/lejárat/elutasítás naplózása."""
+    """Logging of the 2FA tickets' issuance/expiry/rejection."""
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -2022,7 +2022,7 @@ class LoginTicketAuditTests(unittest.TestCase):
         self.assertEqual(row["reason"], "expired")
         self.assertEqual(row["ticket_hash"], server._ticket_hash(token))
         self.assertNotIn(token, json.dumps(rows))
-        # A megőrzött ok alapján a későbbi kérés pontos indokot kap.
+        # Based on the stored reason, a later request gets the exact reason.
         self.assertEqual(self.store.inspect(token, self.ip)[1], "expired")
 
     def test_expiry_after_failed_attempt_is_warning(self) -> None:
@@ -2174,7 +2174,7 @@ class AdminProvisionTests(unittest.TestCase):
         self.assertTrue(self.store.verify("admin", "hosszu-jelszo-1"))
 
 
-# ------------------------------------------------------------------ munkamenet
+# ------------------------------------------------------------------ session
 
 class SessionTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -2190,9 +2190,8 @@ class SessionTests(unittest.TestCase):
         )
         self.web_rule = make_rule("web-only", ("web",))
         self.icmp_rule = make_rule("icmp-only", ("icmp",))
-        # A host SSH ma már csak egy közönséges, a felhasználóhoz rendelt
-        # host (input) szabállyal nyitható, amely kifejezetten a 22-es
-        # TCP-portot engedélyezi.
+        # Host SSH can now only be opened with an ordinary host (input) rule
+        # assigned to the user that explicitly allows TCP port 22.
         self.admin_rule = gateway.Rule(
             id="host-ssh",
             label="Host SSH",
@@ -2215,8 +2214,8 @@ class SessionTests(unittest.TestCase):
         self.assertFalse(session.authorized)
         self.assertEqual(session.ports, gateway.Ports())
         self.assertIsNotNone(self.sessions.validate(session.token, "192.168.50.23"))
-        # Az IP-hez kötött munkamenet más IP-ről érkező ellenőrzésre
-        # megszűnik (és a hozzá tartozó engedély is visszavonódik).
+        # An IP-bound session disappears on a check from another IP (and its
+        # permission is revoked too).
         self.assertIsNone(self.sessions.validate(session.token, "192.168.50.24"))
         self.assertIsNone(self.sessions.validate("hamis", "192.168.50.23"))
         self.assertEqual(self.sessions.count(), 0)
@@ -2251,7 +2250,7 @@ class SessionTests(unittest.TestCase):
             any("allowed_input_tcp" in line for line in script), script
         )
         self.assertFalse(any("allowed_v4" in line for line in script), script)
-        # Előző engedély hiányában nincs conntrack-takarítás.
+        # Without a previous permission there is no conntrack cleanup.
         self.assertEqual(self.conntrack_lines(), [])
 
     def test_authorize_validation(self) -> None:
@@ -2365,7 +2364,7 @@ class SessionTests(unittest.TestCase):
     def test_reaper_revokes_expired_authorized_sessions(self) -> None:
         alice = self.sessions.login("alice", "192.168.50.23")
         self.sessions.authorize(alice.token, "192.168.50.23", self.web_rule, 60)
-        bob = self.sessions.login("bob", "192.168.50.24")  # függő, nincs engedély
+        bob = self.sessions.login("bob", "192.168.50.24")  # pending, no permission
         self.tools.clear()
 
         revoked = self.sessions.reap_once(now=time.time() + 7200)
@@ -2422,8 +2421,8 @@ class SessionTests(unittest.TestCase):
         self.assertGreater(row["logged_in"], 0)
         self.assertTrue(row["id"])
         self.assertEqual(row["id"], session.sid)
-        # A forward szabály munkamenete is megkapja az irányt, hogy az
-        # adminlista és a csoportos nézet egyértelmű legyen.
+        # The forward rule's session also gets the direction, so that the
+        # admin list and the grouped view are unambiguous.
         self.assertEqual(row["direction"], "forward")
 
     def test_snapshot_contains_input_direction_for_host_rule(self) -> None:
@@ -2445,8 +2444,8 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(row["tcp"], [25566])
 
     def test_mixed_collection_grants_and_revocation(self) -> None:
-        # Feloldott, vegyes irányú gyűjtő: forward TCP 80 és host
-        # TCP/UDP 25566 engedély.
+        # Resolved mixed-direction collection: forward TCP 80 and host
+        # TCP/UDP 25566 permission.
         mixed = gateway.Rule(
             id="mixed-col",
             label="Mixed collection",
@@ -2504,7 +2503,7 @@ class SessionTests(unittest.TestCase):
             script,
         )
 
-        # Módosítás: mindkét irány régi engedélye törlődik.
+        # Modification: the old permissions of both directions are deleted.
         self.tools.clear()
         self.sessions.authorize(
             session.token, "192.168.50.23", self.web_rule, 60
@@ -2520,7 +2519,7 @@ class SessionTests(unittest.TestCase):
         ):
             self.assertIn(line, deletes)
 
-        # Lejárat: szintén mindkét irány törlődik.
+        # Expiry: likewise, both directions are deleted.
         self.sessions.authorize(
             session.token, "192.168.50.23", mixed, 60
         )
@@ -2537,7 +2536,7 @@ class SessionTests(unittest.TestCase):
         ):
             self.assertIn(line, deletes)
 
-        # Kijelentkezés: szintén mindkét irány engedélye törlődik.
+        # Logout: likewise, both directions' permissions are deleted.
         second = self.sessions.login("bob", "192.168.50.24")
         self.sessions.authorize(second.token, "192.168.50.24", mixed, 60)
         self.tools.clear()
@@ -2609,7 +2608,7 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(self.sessions.last_end("192.168.50.23")["reason"], "logout")
         self.assertEqual(self.sessions.active_sessions(), [])
 
-    # -- host SSH: csak a felhasználóhoz rendelt, 22/TCP host szabály -------
+    # -- host SSH: only the user-assigned, 22/TCP host rule ----------------
 
     def _host_ssh_script(
         self, manager: gateway.SessionManager, rule: gateway.Rule
@@ -2625,15 +2624,15 @@ class SessionTests(unittest.TestCase):
         manager = gateway.SessionManager(
             self.fw, ttl=3600, pending_ttl=600
         )
-        # Szűk szolgáltatási szabály nem nyit SSH-t.
+        # A narrow service rule does not open SSH.
         self.assertEqual(self._host_ssh_script(manager, self.web_rule), [])
-        # Egyedi teljes hozzáférésű (forward) szabály sem nyit host SSH-t.
+        # A single full-access (forward) rule does not open host SSH either.
         self.tools.clear()
         custom_full = make_rule("custom-full", ("all",))
         self.assertTrue(custom_full.full)
         self.assertEqual(self._host_ssh_script(manager, custom_full), [])
-        # A 22-es TCP-portot kifejezetten engedélyező host szabály viszont
-        # igen, a TTL-jével, és a szokásos MAC-kötéssel.
+        # A host rule that explicitly allows TCP port 22, however, does open
+        # it, with its TTL and the usual MAC binding.
         self.tools.clear()
         self.assertEqual(
             self._host_ssh_script(manager, self.admin_rule),
@@ -2695,7 +2694,7 @@ class SessionTests(unittest.TestCase):
             self.tools.deletes(),
         )
 
-    # -- versenyhelyzetek és leállás ---------------------------------------
+    # -- races and shutdown ------------------------------------------------
 
     def test_rule_check_rejects_removed_rule(self) -> None:
         manager = gateway.SessionManager(
@@ -2732,8 +2731,8 @@ class SessionTests(unittest.TestCase):
         self.sessions.authorize(
             session.token, "192.168.50.23", self.web_rule, 60
         )
-        # A munkamenet lejártát szimuláljuk: a válasznak hibának kell lennie,
-        # és a tűzfalengedélynek azonnal törlődnie kell.
+        # We simulate the session's expiry: the response must be an error, and
+        # the firewall permission must be deleted immediately.
         with self.sessions._lock:
             self.sessions._sessions[session.token] = gateway.replace(
                 self.sessions._sessions[session.token], expires=time.time() - 1
@@ -2751,7 +2750,7 @@ class SessionTests(unittest.TestCase):
 
 
 class UnionGrantsTests(unittest.TestCase):
-    """A ``union_grants`` irányonkénti és determinisztikus uniója."""
+    """The per-direction, deterministic union of ``union_grants``."""
 
     def test_full_absorbs_other_parts_in_the_same_direction(self) -> None:
         union = gateway.union_grants((
@@ -2792,14 +2791,14 @@ class UnionGrantsTests(unittest.TestCase):
 
 
 class SubtractGrantsTests(unittest.TestCase):
-    """Az aktív teljes hozzáférés csak a távozó teljes részt fedi."""
+    """An active full access covers only the departing full part."""
 
     def test_active_full_keeps_non_full_parts_for_exact_deletion(self) -> None:
-        # A portos/ICMP elemek a kernelben léteznek, és a munkamenet
-        # összevont grant_parts-ából eltűntek; ezért a maradéknak
-        # tartalmaznia kell őket, hogy a revoke_exact törölhesse. Ha itt
-        # kimaradnának, a teljes hozzáférés későbbi visszavonásakor újra
-        # előbukkannának.
+        # The port/ICMP elements exist in the kernel and have disappeared from
+        # the session's merged grant_parts; therefore the remainder must
+        # contain them so that revoke_exact can delete them. If they were
+        # omitted here, they would reappear at a later revocation of full
+        # access.
         forward = gateway.Ports(
             tcp=(80,), icmp=True, direction="forward"
         )
@@ -2834,7 +2833,7 @@ class SubtractGrantsTests(unittest.TestCase):
 
 
 class MultiSelectionTests(unittest.TestCase):
-    """Több egyidejű szabályválasztás a valódi tűzfallal."""
+    """Multiple simultaneous rule selections with the real firewall."""
 
     IP = "192.168.50.23"
 
@@ -2963,14 +2962,14 @@ class MultiSelectionTests(unittest.TestCase):
             with self.assertRaises(gateway.AccessError) as ctx:
                 self.sessions.authorize(session.token, self.IP, value, 60)
             self.assertEqual(
-                str(ctx.exception), "érvénytelen hozzáférési szabály"
+                str(ctx.exception), "invalid access rule"
             )
         with self.assertRaises(gateway.AccessError) as ctx:
             self.sessions.authorize(
                 session.token, self.IP, [empty], 60
             )
         self.assertEqual(
-            str(ctx.exception), "ez a szabály nem ad hozzáférést"
+            str(ctx.exception), "this rule does not grant access"
         )
         self.assertEqual(self.sessions.count(authorized_only=True), 0)
         self.assertEqual(self.tools.script(), [])
@@ -2988,25 +2987,25 @@ class MultiSelectionTests(unittest.TestCase):
             )
         message = str(ctx.exception)
         self.assertIn("Rövid", message)
-        self.assertIn("szabály miatt legfeljebb", message)
-        self.assertIn("5 perc", message)
+        self.assertIn("rule, at most", message)
+        self.assertIn("5 minutes", message)
         self.assertEqual(self.sessions.count(authorized_only=True), 0)
         self.assertEqual(self.tools.script(), [])
 
-        # A legszigorúbb szabály max_ttl-je még éppen elfogadható.
+        # The strictest rule's max_ttl is still just acceptable.
         accepted = self.sessions.authorize(
             session.token, self.IP, [long_rule, short_rule], 300
         )
         self.assertTrue(accepted.authorized)
 
-        # Egyetlen szabálynál a régi hibaüzenet marad.
+        # For a single rule the old error message remains.
         with self.assertRaises(gateway.AccessError) as ctx:
             self.sessions.authorize(
                 session.token, self.IP, short_rule, 301
             )
         self.assertEqual(
             str(ctx.exception),
-            "ez a szabály legfeljebb 5 perc időtartamra engedélyez",
+            "this rule allows at most 5 minutes of access",
         )
 
     def test_partial_revoke_rule_keeps_session_and_other_grants(self) -> None:
@@ -3039,9 +3038,9 @@ class MultiSelectionTests(unittest.TestCase):
             f"{{ {self.IP} . 8080 }}",
             deletes,
         )
-        # A maradó elemeket a grant_all az időtúllépés újraindításához
-        # törölheti, de ezeket ugyanabban a folyamatban vissza is adja, és
-        # a revoke_exact nem érintette őket.
+        # The remaining elements may be deleted by grant_all to restart the
+        # timeout, but it re-adds them in the same process, and revoke_exact
+        # did not touch them.
         adds = [
             line for line in self.tools.script()
             if line.startswith("add element ")
@@ -3060,13 +3059,13 @@ class MultiSelectionTests(unittest.TestCase):
         self.assertFalse(
             any("allowed_v4" in line for line in deletes), deletes
         )
-        # Csak a távozó port kapcsolatai szakadnak meg, nem az egész IP.
+        # Only the departing port's connections are cut, not the whole IP.
         lines = self.conntrack_lines()
         self.assertIn(
             f"conntrack -D -s {self.IP} -p tcp --dport 8080", lines
         )
         self.assertNotIn(f"conntrack -D -s {self.IP}", lines)
-        # Újabb hívás már nem érinti a munkamenetet.
+        # A further call no longer affects the session.
         self.assertEqual(self.sessions.revoke_rule("first"), 0)
         self.assertIsNotNone(self.sessions.validate(session.token, self.IP))
 
@@ -3107,9 +3106,9 @@ class MultiSelectionTests(unittest.TestCase):
 
         self.assertEqual(self.sessions.revoke_rule("first"), 1)
 
-        # A lejárt munkamenet nem maradhat részlegesen frissítve a
-        # nyilvántartásban, és a maradó választás grantjeit sem szabad
-        # újra kiadni.
+        # An expired session must not remain partially refreshed in the
+        # registry, and the remaining selection's grants must not be reissued
+        # either.
         self.assertNotIn(session.token, self.sessions._sessions)
         self.assertEqual(self.sessions.count(), 0)
         self.assertEqual(
@@ -3141,8 +3140,8 @@ class MultiSelectionTests(unittest.TestCase):
             self.sessions.revoke_rules((rule.id, collection.id)), 1
         )
 
-        # Egy zárolás alatt a teljes választáshalmaz tűnik el; nincs
-        # köztes, részleges újrakiadás.
+        # Under one lock the whole selection set disappears; there is no
+        # intermediate, partial reissue.
         self.assertNotIn(session.token, self.sessions._sessions)
         self.assertEqual(self.sessions.count(), 0)
         self.assertEqual(
@@ -3198,13 +3197,13 @@ class MultiSelectionTests(unittest.TestCase):
         self.assertFalse(
             any("client_mac" in line for line in deletes), deletes
         )
-        # A 443-as port a munkamenetben továbbra is engedélyezett, ezért a
-        # teljes IP-s ürítés megszakítaná annak élő kapcsolatait. A távozó
-        # full elemhez célzott törlés sem indítható, így nincs conntrack-hívás.
+        # Port 443 remains permitted in the session, so flushing the whole IP
+        # would cut its live connections. Targeted deletion cannot be started
+        # for the departing full element either, so there is no conntrack call.
         self.assertEqual(self.conntrack_lines(), [])
-        # A maradó port eddig az allowed_v4 alatt élt; a törlése után külön
-        # kernel-elemként újra ki kell adni, különben a munkamenet papíron
-        # élne, de a portja nem lenne engedélyezve.
+        # The remaining port lived under allowed_v4 until now; after its
+        # deletion it must be issued again as a separate kernel element,
+        # otherwise the session would live on paper but its port would not be permitted.
         adds = [
             line for line in self.tools.script()
             if line.startswith("add element ")
@@ -3222,7 +3221,7 @@ class MultiSelectionTests(unittest.TestCase):
 
 
 class ConntrackFlushRemovedTests(unittest.TestCase):
-    """A célzott conntrack-törlés irányvak és kíméli a maradó engedélyeket."""
+    """Targeted conntrack deletion is direction-blind and spares the remaining permissions."""
 
     IP = "192.168.50.23"
 
@@ -3243,8 +3242,8 @@ class ConntrackFlushRemovedTests(unittest.TestCase):
         ]
 
     def test_removed_full_does_not_flush_remaining_input_ssh(self) -> None:
-        # Egy teljes forward hozzáférést input-22 vált fel: a teljes IP-s
-        # ürítés megszakítaná a még engedélyezett SSH-kapcsolatot.
+        # A full forward permission is replaced by input-22: flushing the whole
+        # IP would cut the still-permitted SSH connection.
         result = gateway.conntrack_flush_removed(
             self.IP,
             (gateway.Ports(full=True, direction="forward"),),
@@ -3254,8 +3253,8 @@ class ConntrackFlushRemovedTests(unittest.TestCase):
         self.assertEqual(self.conntrack_lines(), [])
 
     def test_removed_port_kept_by_other_direction_is_not_flushed(self) -> None:
-        # A conntrack -D -s irányvak: a 80-as portot egy input engedély
-        # továbbra is használja, ezért nem szabad célzottan törölni.
+        # conntrack -D -s is direction-blind: an input permission still uses
+        # port 80, so it must not be deleted in a targeted way.
         result = gateway.conntrack_flush_removed(
             self.IP,
             (gateway.Ports(tcp=(80,), direction="forward"),),
@@ -3276,8 +3275,8 @@ class ConntrackFlushRemovedTests(unittest.TestCase):
         )
 
     def test_too_many_commands_with_remaining_skips_flush(self) -> None:
-        # 17 célzott parancs > CONNTRACK_REMOVED_LIMIT. Maradó engedély
-        # mellett nem szabad teljes IP-s ürítésre váltani.
+        # 17 targeted commands > CONNTRACK_REMOVED_LIMIT. With a remaining
+        # permission, switching to a full IP flush is not allowed.
         removed = gateway.Ports(
             tcp=tuple(range(8000, 8017)), direction="forward"
         )
@@ -3290,10 +3289,10 @@ class ConntrackFlushRemovedTests(unittest.TestCase):
         self.assertEqual(self.conntrack_lines(), [])
 
 
-# ------------------------------------------------------------------ egyéb mag
+# ------------------------------------------------------------------ other core
 
 class SessionAuditTests(unittest.TestCase):
-    """A munkamenet-életciklus audit-eseményei."""
+    """Audit events of the session lifecycle."""
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -3340,8 +3339,8 @@ class SessionAuditTests(unittest.TestCase):
             self.sessions.validate(second.token, self.ip)
         )
 
-        # Engedéllyel rendelkező munkamenet cseréjekor az összesített
-        # access_revoked esemény is megmarad.
+        # When replacing a session with permissions, the aggregated
+        # access_revoked event is kept as well.
         self.sessions.authorize(second.token, self.ip, self.web_rule, 60)
         self.sessions.login("alice", self.ip)
         rows = self.audit.read(event="session_replaced")
@@ -3413,7 +3412,7 @@ class PowTests(unittest.TestCase):
         self.assertTrue(ok, why)
         ok, why = gateway.verify_pow(solution)
         self.assertFalse(ok)
-        self.assertIn("használva", why)
+        self.assertIn("already used", why)
 
     def test_tampering_rejected(self) -> None:
         challenge = gateway.issue_challenge(difficulty=1)
@@ -3421,9 +3420,9 @@ class PowTests(unittest.TestCase):
         bad = dict(solution, difficulty=0)
         ok, why = gateway.verify_pow(bad)
         self.assertFalse(ok)
-        self.assertIn("aláírás", why)
-        # A szám+1 véletlenül szintén teljesítheti a nehézséget, ezért
-        # addig növeljük, amíg biztosan érvénytelen proof-of-worköt kapunk.
+        self.assertIn("invalid signature", why)
+        # The number+1 may accidentally also satisfy the difficulty, so we
+        # increase it until we surely get an invalid proof-of-work.
         zeros = "0" * int(solution["difficulty"])
         number = int(solution["number"]) + 1
         while hashlib.sha256(f'{solution["salt"]}{number}'.encode()).hexdigest().startswith(zeros):
@@ -3441,13 +3440,13 @@ class PowTests(unittest.TestCase):
             gateway.CHALLENGE_TTL = old
         ok, why = gateway.verify_pow(solve(challenge))
         self.assertFalse(ok)
-        self.assertIn("lejárt", why)
+        self.assertIn("expired", why)
 
 
 # ------------------------------------------------------------------ HTTP
 
 class AuditLogTests(unittest.TestCase):
-    """Az auditnapló központi súlyosság- és érzékenységkezelése."""
+    """Central severity and sensitivity handling of the audit log."""
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -3490,7 +3489,7 @@ class AuditLogTests(unittest.TestCase):
         self.assertEqual([row["event"] for row in warns], ["sajat_esemeny"])
         row = self.audit.read(event="sajat_esemeny")[0]
         self.assertEqual(row["severity"], "warn")
-        # A régi, severity nélküli sorok info szintűnek számítanak.
+        # Old rows without severity count as info level.
         legacy = os.path.join(self.tmp.name, "legacy.jsonl")
         with open(legacy, "w", encoding="utf-8") as fh:
             fh.write(json.dumps({"ts": 1, "event": "login_success"}) + "\n")
@@ -3549,7 +3548,7 @@ class HttpTests(unittest.TestCase):
             rate_limiter=gateway.RateLimiter(window=60, maximum=1000),
             fail2ban=cls.fail2ban,
         )
-        # A 2FA-jegyek életciklusa a HTTP-teszt naplójába írjon.
+        # The 2FA tickets' lifecycle should write to the HTTP test's log.
         server.LOGIN_TICKETS.set_audit(cls.audit)
         cls.server = server.AppServer(("127.0.0.1", 0), cls.gw)
         import threading
@@ -3576,7 +3575,7 @@ class HttpTests(unittest.TestCase):
         self.reset_fail2ban()
 
     def reset_fail2ban(self) -> None:
-        """Friss számláló minden HTTP-teszthez (a tiltásnevek ne szivárogjanak)."""
+        """Fresh counter for every HTTP test (so that ban names do not leak)."""
         path = os.path.join(self.tmp.name, "fail2ban.json")
         try:
             os.unlink(path)
@@ -3654,7 +3653,7 @@ class HttpTests(unittest.TestCase):
         return raw.split(";", 1)[0]
 
     def login_from(self, user: str, password: str, source: str):
-        """Jelszavas belépés megadott forrás-IP-ről (a 2FA-jegyhez kell)."""
+        """Password login from the given source IP (needed for the 2FA ticket)."""
         _, _, body = self.get("/api/challenge", source=source)
         challenge = json.loads(body)
         return self.post_json(
@@ -3664,22 +3663,22 @@ class HttpTests(unittest.TestCase):
         )
 
     def require_totp(self, name: str) -> None:
-        """2FA kötelezővé tétele a teszt erejéig, biztos visszaállítással."""
+        """Make 2FA mandatory for the duration of the test, with reliable restoration."""
         self.users.reset_totp(name)
         self.users.set_totp_required(name, True)
         self.addCleanup(self._clear_totp, name)
 
     def _clear_totp(self, name: str) -> None:
-        # A HttpTests felhasználói osztályszinten közösek, ezért a 2FA-t és a
-        # nyitva maradt jegyeket/munkameneteket minden érintett teszt végén
-        # vissza kell állítani.
+        # HttpTests' users are shared at class level, so 2FA and the
+        # tickets/sessions left open must be restored at the end of every
+        # affected test.
         server.LOGIN_TICKETS.revoke_all()
         self.users.reset_totp(name)
         self.users.set_totp_required(name, False)
         self.gw.sessions.revoke_user(name)
 
     def enroll_totp(self, user: str, password: str, source: str | None = None):
-        """Teljes első 2FA-beállítás; (secret, ticket, headers, válasz)."""
+        """Full first 2FA setup; (secret, ticket, headers, response)."""
         status, _, body = self.login_from(user, password, source or "127.0.0.1")
         self.assertEqual(status, 200, body)
         offer = json.loads(body)
@@ -3728,14 +3727,14 @@ class HttpTests(unittest.TestCase):
         self.assertIn(f"v{gateway.APP_VERSION}".encode(), body)
         self.assertNotIn(b"__VERSION__", body)
 
-        # A nyilvános állapotvégpont a verziót is megadja.
+        # The public status endpoint also provides the version.
         status, _, body = self.get("/api/status")
         self.assertEqual(status, 200)
         self.assertEqual(
             json.loads(body)["version"], gateway.APP_VERSION
         )
 
-        # Bejelentkezve ugyanaz a verzió szerepel a válaszban.
+        # When logged in, the same version appears in the response.
         status, headers, body = self.login("alice", "hosszu-jelszo-1")
         self.assertEqual(status, 200, body)
         cookie = self.cookie_from(headers)
@@ -3796,7 +3795,7 @@ class HttpTests(unittest.TestCase):
             "add element inet hatarvedelem allowed_udp { 127.0.0.1 . 443 timeout 60s }",
         ):
             self.assertIn(line, script)
-        # Az egyedi web szabály nem nyit host SSH-t.
+        # The individual web rule does not open host SSH.
         self.assertFalse(
             any("allowed_input_tcp" in line for line in script), script
         )
@@ -3826,7 +3825,7 @@ class HttpTests(unittest.TestCase):
         )
         self.assertEqual(status, 400)
         self.assertFalse(json.loads(body)["ok"])
-        self.assertIn("munkamenet", json.loads(body)["error"])
+        self.assertIn("session", json.loads(body)["error"])
 
     def test_access_grant_of_host_rule_audits_direction(self) -> None:
         self.rules.create("host-25566", {
@@ -3896,7 +3895,7 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(
             data["selected_rule_labels"], ["Csak web", "Csak ping"]
         )
-        # A régi mezők az első választást tükrözik.
+        # The old fields reflect the first selection.
         self.assertEqual(data["rule"], "web-only")
         self.assertEqual(data["rule_label"], "Csak web")
         self.assertEqual(data["grant"]["tcp"], [80, 443])
@@ -3986,7 +3985,7 @@ class HttpTests(unittest.TestCase):
             self.assertEqual(status, 400, (payload, body))
             self.assertFalse(json.loads(body)["ok"])
 
-        # Ismeretlen, de jól formált azonosító: egyik szabály sem jut be.
+        # Unknown but well-formed identifier: none of the rules gets in.
         before_unknown = list(self.tools.lines())
         status, _, body = self.post_json(
             "/api/access",
@@ -4002,7 +4001,7 @@ class HttpTests(unittest.TestCase):
         ]
         self.assertGreaterEqual(len(denied), len(bad_requests) + 1)
 
-        # Az ismétlődő azonosító nem számít bele a 16-os korlátba.
+        # The duplicate identifier does not count toward the limit of 16.
         status, _, body = self.post_json(
             "/api/access",
             {"rules": ["web-only"] * 17, "ttl": 60},
@@ -4024,7 +4023,7 @@ class HttpTests(unittest.TestCase):
             cookie, "web-only", 60, source=source
         )
         self.assertEqual(status, 200, body)
-        # Csak a módosítás tűzfal-hívásait vizsgáljuk.
+        # We only examine the modification's firewall calls.
         self.tools.clear()
         started = time.time()
         status, _, body = self.post_json(
@@ -4196,7 +4195,7 @@ class HttpTests(unittest.TestCase):
             self.assertFalse(json.loads(body)["ok"])
         self.assertFalse(any("add element" in line for line in self.tools.lines()))
 
-        # A határok elfogadottak; a második kérés újraengedélyez.
+        # The boundaries are accepted; the second request re-authorizes.
         status, _, body = self.access(cookie, "web-only", gateway.MIN_TTL)
         self.assertEqual(status, 200, body)
         self.assertTrue(json.loads(body)["authorized"])
@@ -4219,12 +4218,12 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(status, 400, body)
         self.assertFalse(json.loads(body)["ok"])
 
-        # A más IP-ről érkező kérés a munkamenetet is megszünteti, ezért a
-        # eredeti IP-ről sem használható tovább a régi cookie.
+        # A request from another IP also terminates the session, so the old
+        # cookie can no longer be used from the original IP either.
         status, _, body = self.access(cookie, "web-only", 60)
         self.assertEqual(status, 400, body)
 
-        # Új belépéssel viszont működik.
+        # With a new login, however, it works.
         _, headers, _ = self.login("alice", "hosszu-jelszo-1")
         cookie = self.cookie_from(headers)
         status, _, body = self.access(cookie, "web-only", 60)
@@ -4238,19 +4237,19 @@ class HttpTests(unittest.TestCase):
             "/api/login", {"user": "alice", "pass": "rossz", "captcha": solution}
         )
         self.assertEqual(status, 403)
-        self.assertIn("Hibás", json.loads(body)["error"])
+        self.assertIn("Invalid", json.loads(body)["error"])
         self.assertFalse(any("add element" in line for line in self.tools.lines()))
 
         status, _, body = self.post_json(
             "/api/login", {"user": "alice", "pass": "hosszu-jelszo-1", "captcha": solution}
         )
         self.assertEqual(status, 403)
-        self.assertIn("használva", json.loads(body)["error"])
+        self.assertIn("already used", json.loads(body)["error"])
 
     def test_unknown_user_generic_error(self) -> None:
         status, _, body = self.login("nincs-ilyen", "barmi-jelszo")
         self.assertEqual(status, 403)
-        self.assertIn("Hibás", json.loads(body)["error"])
+        self.assertIn("Invalid", json.loads(body)["error"])
 
     def test_missing_captcha(self) -> None:
         status, _, _ = self.post_json(
@@ -4397,7 +4396,7 @@ class HttpTests(unittest.TestCase):
         resp.read()
         conn.close()
 
-    # -- kétfaktoros belépés ---------------------------------------------------
+    # -- two-factor login --------------------------------------------------
 
     def test_totp_required_enroll_offer_without_session(self) -> None:
         self.require_totp("alice")
@@ -4414,7 +4413,7 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(data["issuer"], gateway.TOTP_ISSUER)
         self.assertIn("otpauth://totp/", data["otpauth_uri"])
         self.assertIn(data["secret"], data["otpauth_uri"])
-        # A jelszó önmagában nem ad munkamenetet.
+        # A password alone does not give a session.
         self.assertNotIn("Set-Cookie", headers)
         status, _, status_body = self.get("/api/status")
         self.assertEqual(status, 200)
@@ -4455,8 +4454,8 @@ class HttpTests(unittest.TestCase):
         for digest in record.totp_recovery:
             self.assertRegex(digest, r"^[0-9a-f]{64}$")
 
-        # A nyílt kódok és a titok se a naplóba, se a nyilvános állapotba
-        # nem szivároghatnak be.
+        # The plaintext codes and the secret must not leak into either the log
+        # or the public state.
         public_dump = json.dumps(
             [item.public() for item in self.users.details()],
             ensure_ascii=False,
@@ -4474,7 +4473,7 @@ class HttpTests(unittest.TestCase):
             self.assertNotIn(digest, public_dump)
             self.assertNotIn(digest, audit_dump)
 
-        # A regisztrációs jegy egyszer használatos.
+        # The registration ticket is single-use.
         status, headers, body = self.post_json(
             "/api/login/totp/enroll",
             {"ticket": ticket, "code": gateway.totp_code(secret)},
@@ -4536,7 +4535,7 @@ class HttpTests(unittest.TestCase):
         }
         self.assertNotIn(source, pending)
 
-        # Ugyanaz a jegy nem használható újra.
+        # The same ticket cannot be used again.
         status, headers, body = self.post_json(
             "/api/login/totp", {"ticket": ticket, "code": code}, source=source
         )
@@ -4565,8 +4564,8 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(status, 200, body)
         self.assertIn("Set-Cookie", headers)
 
-        # Friss jegy, ugyanaz a még aktuális kód: a last_step replay-védelem
-        # miatt el kell utasítani (a jegy egyszer használata nem fedi el).
+        # Fresh ticket, same still-current code: it must be rejected because of
+        # the last_step replay protection (the ticket's single use does not hide this).
         status, _, body = self.login_from("alice", "hosszu-jelszo-1", source)
         self.assertEqual(status, 200, body)
         second_ticket = json.loads(body)["ticket"]
@@ -4611,7 +4610,7 @@ class HttpTests(unittest.TestCase):
             rows,
         )
 
-        # Ugyanaz a recovery kód nem használható újra.
+        # The same recovery code cannot be used again.
         status, _, body = self.login_from("alice", "hosszu-jelszo-1", source)
         self.assertEqual(status, 200, body)
         ticket = json.loads(body)["ticket"]
@@ -4624,7 +4623,7 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(json.loads(body)["code"], "recovery_invalid")
         self.assertNotIn("Set-Cookie", headers)
 
-        # Egy másik kód viszont még egyszer működik.
+        # Another code, however, still works once more.
         status, _, body = self.login_from("alice", "hosszu-jelszo-1", source)
         self.assertEqual(status, 200, body)
         ticket = json.loads(body)["ticket"]
@@ -4659,8 +4658,8 @@ class HttpTests(unittest.TestCase):
         source = "127.0.0.30"
         store = server.LoginTicketStore(max_attempts=3)
         with mock.patch.object(server, "LOGIN_TICKETS", store):
-            # A fail2ban ne zavarja a jegy-próbaszámlálás determinisztikus
-            # ellenőrzését.
+            # fail2ban should not disturb the deterministic check of the ticket
+            # attempt counting.
             with mock.patch.object(
                 self.gw.fail2ban, "record_failure", return_value=None
             ):
@@ -4705,8 +4704,8 @@ class HttpTests(unittest.TestCase):
     def test_totp_ticket_attempt_cap_with_fail2ban(self) -> None:
         self.require_totp("alice")
         source = "127.0.0.31"
-        # A fail2ban-tiltás drop-log bejegyzést ír; azt a teszt könyvtárába
-        # irányítjuk, hogy a projekt gyökerébe ne kerüljön szemét.
+        # A fail2ban block writes a drop-log entry; we direct it to the test
+        # directory so that no litter ends up in the project root.
         drops = gateway.droplog.DropLogService(
             os.path.join(self.tmp.name, "totp-ban-drops.jsonl"),
             enabled=False, logger=lambda *_: None,
@@ -4737,8 +4736,8 @@ class HttpTests(unittest.TestCase):
             last,
         )
 
-        # A kimerült (vagy fail2ban-tiltott) jegy után a helyes kód sem
-        # adhat munkamenetet.
+        # After an exhausted (or fail2ban-banned) ticket, even the correct code
+        # must not give a session.
         status, headers, body = self.post_json(
             "/api/login/totp",
             {"ticket": ticket, "code": fresh_totp_code(secret)},
@@ -4812,7 +4811,7 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(rows[0]["count"], 1)
         self.assertEqual(rows[0]["user"], "alice")
 
-        # Ugyanaz a számlálás hibás jelszónál is (friss fail2ban-állapotból).
+        # The same counting applies to a wrong password (from a fresh fail2ban state).
         self.reset_fail2ban()
         status, headers, body = self.login_from(
             "bob", "rossz-jelszo", source
@@ -4963,13 +4962,13 @@ class HttpTests(unittest.TestCase):
             )
             started = time.time()
 
-            # Hiányzó jelszó utáni jegy/kód: bad_request.
+            # Ticket/code after a missing password: bad_request.
             status, _, _ = self.post_json(
                 "/api/login/totp", {}, source=source
             )
             self.assertEqual(status, 400)
 
-            # Ismeretlen jegy: unknown.
+            # Unknown ticket: unknown.
             status, _, _ = self.post_json(
                 "/api/login/totp",
                 {"ticket": unknown, "code": "123456"},
@@ -4983,7 +4982,7 @@ class HttpTests(unittest.TestCase):
             self.assertEqual(status, 200, body)
             ticket = json.loads(body)["ticket"]
 
-            # Jó jegy, rossz végpont: wrong_purpose.
+            # Good ticket, wrong endpoint: wrong_purpose.
             status, _, _ = self.post_json(
                 "/api/login/totp/enroll",
                 {"ticket": ticket, "code": "123456"},
@@ -4991,7 +4990,7 @@ class HttpTests(unittest.TestCase):
             )
             self.assertEqual(status, 403)
 
-            # Jó jegy, idegen forrás-IP: ip_mismatch.
+            # Good ticket, foreign source IP: ip_mismatch.
             status, _, _ = self.post_json(
                 "/api/login/totp",
                 {"ticket": ticket, "code": "123456"},
@@ -4999,7 +4998,7 @@ class HttpTests(unittest.TestCase):
             )
             self.assertEqual(status, 403)
 
-            # Sikeres felhasználás, majd ugyanaz a jegy: already_consumed.
+            # Successful use, then the same ticket: already_consumed.
             code = fresh_totp_code(
                 secret,
                 after_step=self.users.record("alice").totp_last_step,
@@ -5017,7 +5016,7 @@ class HttpTests(unittest.TestCase):
             )
             self.assertEqual(status, 403)
 
-            # Lejárt jegy: expired (és közben totp_ticket_expired is).
+            # Expired ticket: expired (and totp_ticket_expired as well in the meantime).
             status, _, body = self.login_from(
                 "alice", "hosszu-jelszo-1", source
             )
@@ -5200,7 +5199,7 @@ class HttpTests(unittest.TestCase):
             b"totp_required",
         ):
             self.assertIn(token, body, token)
-        # Titok vagy szerveroldali mező ne legyen a statikus oldalba égetve.
+        # The secret or a server-side field must not be baked into the static page.
         for hidden in (
             b"totp_secret",
             b"totp_last_step",
@@ -5211,7 +5210,7 @@ class HttpTests(unittest.TestCase):
 
 
 class RegistrationHttpTests(unittest.TestCase):
-    """Nyilvános fiókkérés: külön, izolált alkalmazás saját beállításfájllal."""
+    """Public account request: a separate, isolated application with its own settings file."""
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -5370,7 +5369,7 @@ class RegistrationHttpTests(unittest.TestCase):
         data = json.loads(body)
         self.assertFalse(data["ok"])
         self.assertEqual(data["code"], "registration_disabled")
-        self.assertIn("nem engedélyezett", data["error"])
+        self.assertIn("not allowed", data["error"])
         self.assertNotIn("Set-Cookie", headers)
         self.assertIsNone(self.users.record("alice"))
         self.assertEqual(self.users.pending_records(), [])
@@ -5378,7 +5377,7 @@ class RegistrationHttpTests(unittest.TestCase):
             [row.get("reason") for row in self.audit_rows(
                 "registration_failed"
             )],
-            ["a fiókkérés ki van kapcsolva"],
+            ["account requests are disabled"],
         )
 
     def test_valid_registration_creates_pending_user_without_session(self) -> None:
@@ -5390,7 +5389,7 @@ class RegistrationHttpTests(unittest.TestCase):
         self.assertEqual(status, 200, body)
         data = json.loads(body)
         self.assertTrue(data["ok"])
-        self.assertIn("jóváhagyás", data["message"])
+        self.assertIn("approval", data["message"])
         self.assertNotIn("Set-Cookie", headers)
         self.assertNotIn("token", data)
 
@@ -5418,18 +5417,18 @@ class RegistrationHttpTests(unittest.TestCase):
 
     def test_registration_rejects_invalid_fields(self) -> None:
         self.enable()
-        # A közös üzenetküldő tesztek miatt bő keret kell: a korlát a
-        # captcha és a mezőellenőrzés előtt fogy.
+        # A wide quota is needed because of the shared message-sending tests: the
+        # limit is consumed before captcha and field validation.
         self.gw.register_rate = gateway.RateLimiter(window=600, maximum=1000)
         cases = (
-            ({}, "hiányos adatok"),
-            ({"user": "dave", "pass": "hosszu-jelszo-1"}, "hiányos adatok"),
+            ({}, "incomplete data"),
+            ({"user": "dave", "pass": "hosszu-jelszo-1"}, "incomplete data"),
             ({"user": "dave", "pass": "hosszu-jelszo-1",
-              "email": "nem-email", "captcha": None}, "Érvénytelen e-mail-cím."),
+              "email": "nem-email", "captcha": None}, "Invalid email address."),
             ({"user": "dave", "pass": "rovid",
-              "email": "d@e.co", "captcha": None}, "a jelszó"),
+              "email": "d@e.co", "captcha": None}, "the password"),
             ({"user": "nincs itt!", "pass": "hosszu-jelszo-1",
-              "email": "d@e.co", "captcha": None}, "felhasználónév"),
+              "email": "d@e.co", "captcha": None}, "the username"),
         )
         for obj, expected in cases:
             with self.subTest(obj=obj):
@@ -5455,9 +5454,9 @@ class RegistrationHttpTests(unittest.TestCase):
         self.assertEqual(status, 403, body)
         self.assertIn("Captcha", json.loads(body)["error"])
         self.assertNotIn("Set-Cookie", headers)
-        # A captcha kulcs hiánya hiányos adatnak számít (400), az üres
-        # csomag viszont érvénytelen captcha (403) -- egyik sem hoz létre
-        # fiókot.
+        # A missing captcha key counts as incomplete data (400), while an empty
+        # packet is an invalid captcha (403) -- neither creates an account.
+
         status, _, body = self.register_raw(
             {"user": "dave", "pass": "hosszu-jelszo-1", "email": "d@e.co"}
         )
@@ -5498,7 +5497,7 @@ class RegistrationHttpTests(unittest.TestCase):
         )
         self.assertEqual(status, 403, body)
         self.assertIn(
-            "érvénytelen kérés-eredet", json.loads(body)["error"]
+            "invalid request origin", json.loads(body)["error"]
         )
         self.assertNotIn("Set-Cookie", headers)
         self.assertIsNone(self.users.record("alice"))
@@ -5532,7 +5531,7 @@ class RegistrationHttpTests(unittest.TestCase):
 
     def test_registration_requires_ipv4(self) -> None:
         self.enable()
-        # A valódi, szigorú IPv4-ellenőrzést csak a kérés idejére cseréljük.
+        # We replace the real, strict IPv4 check only for the duration of the request.
         with mock.patch.object(gateway, "is_ipv4", return_value=False):
             status, _, body = self.post_json(
                 "/api/register",
@@ -5540,9 +5539,9 @@ class RegistrationHttpTests(unittest.TestCase):
                  "email": "a@b.co", "captcha": {}},
             )
         self.assertEqual(status, 400, body)
-        self.assertIn("csak IPv4", json.loads(body)["error"])
+        self.assertIn("IPv4", json.loads(body)["error"])
         self.assertIsNone(self.users.record("alice"))
-        # A mock nem szivárgott ki: a valódi ellenőrzés és a regisztráció él.
+        # The mock did not leak: the real check and registration are alive.
         self.assertTrue(gateway.is_ipv4("127.0.0.1"))
         status, _, body = self.register(
             "alice", "hosszu-jelszo-1", "a@b.co"
@@ -5582,7 +5581,7 @@ class RegistrationHttpTests(unittest.TestCase):
         )
         self.assertEqual(status, 429, body)
         self.assertEqual(headers.get("Retry-After"), "600")
-        self.assertIn("Túl sok fiókkérés", json.loads(body)["error"])
+        self.assertIn("Too many account requests", json.loads(body)["error"])
         self.assertIsNone(self.users.record("alice"))
         self.assertEqual(self.users.pending_records(), [])
 
@@ -5599,13 +5598,13 @@ class RegistrationHttpTests(unittest.TestCase):
         self.assertFalse(data["ok"])
         self.assertEqual(data["code"], "pending_approval")
         self.assertIs(data["pending"], True)
-        self.assertIn("jóváhagyás", data["error"])
-        self.assertIn("vár", data["error"])
+        self.assertIn("approval", data["error"])
+        self.assertIn("pending approval", data["error"])
         self.assertNotIn("Set-Cookie", headers)
         self.assertNotIn("token", data)
         self.assertNotIn("ticket", data)
         self.assertEqual(self.gw.effective_rules("alice"), [])
-        # A helyes jelszó nem számít hibás belépésnek: nincs fail2ban-tétel.
+        # The correct password does not count as a failed login: there is no fail2ban entry.
         pending_bans = [
             row for row in self.gw.fail2ban.snapshot()["pending"]
             if row["ip"] == "127.0.0.1"
@@ -5614,14 +5613,14 @@ class RegistrationHttpTests(unittest.TestCase):
         self.assertEqual(
             [row.get("reason") for row in self.audit_rows("login_failed")
              if row.get("user") == "alice"],
-            ["a fiók jóváhagyásra vár"],
+            ["the account is pending approval"],
         )
-        # Munkamenet nélkül a hozzáférés-kérés sem működik.
+        # Without a session the access request does not work either.
         status, _, body = self.post_json(
             "/api/access", {"rule": "web-only", "ttl": 60}
         )
         self.assertEqual(status, 400, body)
-        self.assertIn("munkamenet", json.loads(body)["error"])
+        self.assertIn("session", json.loads(body)["error"])
 
         status, _, body = self.login("alice", "rossz-jelszo-99")
         self.assertEqual(status, 403, body)
@@ -5629,7 +5628,7 @@ class RegistrationHttpTests(unittest.TestCase):
         self.assertNotIn("code", data)
         self.assertNotIn("pending", data)
         self.assertEqual(
-            data["error"], "Hibás felhasználónév vagy jelszó."
+            data["error"], "Invalid username or password."
         )
 
 
@@ -5783,7 +5782,7 @@ class RuleGroupStoreTests(unittest.TestCase):
             [rule.id for rule in store.persisted_rules()], ["web-only"]
         )
 
-        # A tisztított fájlból a whitespace-es változatok is eltűntek.
+        # The whitespace variants have disappeared from the cleaned file as well.
         with open(path, encoding="utf-8") as fh:
             stored = json.load(fh)["rules"]
         self.assertEqual(set(stored), {"web-only"})
@@ -5836,17 +5835,17 @@ class RuleGroupStoreTests(unittest.TestCase):
             }, fh)
         logs: list[str] = []
         store = gateway.RuleStore(path, catalog=CATALOG, logger=logs.append)
-        # Az első érvényes bejegyzés marad; a második nem írja felül.
+        # The first valid entry remains; the second does not overwrite it.
         self.assertEqual(store.get("dup").tcp, (80,))
         self.assertEqual(
             [rule.id for rule in store.persisted_rules()], ["dup"]
         )
         self.assertTrue(
-            any("ismétlődő szabály-azonosító" in line for line in logs),
+            any("duplicate rule identifier" in line for line in logs),
             logs,
         )
-        # A normalizálási ütközés parse hibának számít: nincs átírás és
-        # nincs biztonsági másolat, a fájl nyers tartalma megmarad.
+        # A normalization collision counts as a parse error: there is no rewrite
+        # and no backup, and the file's raw content remains.
         with open(path, encoding="utf-8") as fh:
             raw = json.load(fh)["rules"]
         self.assertIn(gateway.LEGACY_ADMIN_RULE_ID, raw)
@@ -5856,7 +5855,7 @@ class RuleGroupStoreTests(unittest.TestCase):
             "duplicate-normalized.json.admin-full-backup-*"
         )))
         self.assertTrue(
-            any("nem írom át" in line for line in logs), logs
+            any("not rewritten automatically" in line for line in logs), logs
         )
 
     def test_legacy_admin_id_is_filtered_from_user_and_group_rules(self) -> None:
@@ -5864,8 +5863,8 @@ class RuleGroupStoreTests(unittest.TestCase):
         self.groups.create("staff", {
             "label": "Staff", "rules": ["browse"], "members": ["alice"],
         })
-        # Régi fájlokban még szerepelhet a fenntartott azonosító. A betöltés
-        # kiszűri, a meglévő többi szabály és a rules_set jelző megmarad.
+        # The reserved identifier may still appear in old files. Loading filters
+        # it out; the other existing rules and the rules_set flag remain.
         with open(self.users.path, encoding="utf-8") as fh:
             users_raw = json.load(fh)
         users_raw["alice"]["rules"].append(gateway.LEGACY_ADMIN_RULE_ID)
@@ -5886,7 +5885,7 @@ class RuleGroupStoreTests(unittest.TestCase):
             self.groups.path, logger=lambda *_: None
         ).get("staff")
         self.assertEqual(group.rules, ("browse",))
-        # A szerkesztés nem akad el a kiszűrt azonosítón.
+        # Editing does not get stuck on the filtered identifier.
         self.users.set_metadata("alice", rules=("browse",))
         self.groups.update("staff", {
             "label": "Staff", "rules": ["browse"], "members": ["alice"],
@@ -5901,7 +5900,7 @@ class RuleGroupStoreTests(unittest.TestCase):
         )
 
     def test_whitespace_legacy_id_is_filtered_from_assignments(self) -> None:
-        """A users.json/groups.json whitespace-es változata is kiszűrve."""
+        """The whitespace variant of users.json/groups.json is filtered out as well."""
         self.users.add("alice", "hosszu-jelszo-1", rules=("browse",))
         self.groups.create("staff", {
             "label": "Staff", "rules": ["browse"], "members": ["alice"],
@@ -5945,9 +5944,9 @@ class RuleGroupStoreTests(unittest.TestCase):
         ):
             with self.assertRaises(gateway.RuleStoreError) as caught:
                 action()
-            self.assertIn("fenntartott", str(caught.exception))
-            self.assertNotIn("beépített", str(caught.exception))
-        # Admin sem kap automatikus szabályt.
+            self.assertIn("reserved", str(caught.exception))
+            self.assertNotIn("built-in", str(caught.exception))
+        # The admin gets no automatic rule either.
         self.users.add("root", "hosszu-jelszo-1", role=gateway.ROLE_ADMIN)
         root = self.users.record("root")
         self.assertEqual(self.rules.effective_for(root, []), [])
@@ -5971,12 +5970,12 @@ class RuleGroupStoreTests(unittest.TestCase):
         self.assertIsNone(store.get("bad"))
         with open(path, encoding="utf-8") as fh:
             raw = json.load(fh)["rules"]
-        # Hibás bejegyzés esetén nem írjuk át a fájlt.
+        # On a broken entry we do not rewrite the file.
         self.assertIn("services", raw["good"])
         self.assertFalse(
             list(Path(self.tmp.name).glob("broken-legacy.json.services-backup-*"))
         )
-        self.assertTrue(any("nem írom át" in line for line in logs), logs)
+        self.assertTrue(any("not rewritten automatically" in line for line in logs), logs)
 
     def test_port_rule_validation(self) -> None:
         with self.assertRaises(gateway.RuleStoreError):
@@ -6024,8 +6023,8 @@ class RuleGroupStoreTests(unittest.TestCase):
             ["browse", "dns-only"],
         )
         root_rules = [rule.id for rule in self.rules.effective_for(root, [])]
-        # Az admin sem kap automatikus hozzáférést: csak a kifejezetten
-        # kiosztott szabályok érvényesek.
+        # The admin gets no automatic access either: only the explicitly
+        # assigned rules are valid.
         self.assertEqual(root_rules, [])
         self.users.set_metadata("root", rules=("browse",))
         root = self.users.record("root")
@@ -6048,7 +6047,7 @@ class RuleGroupStoreTests(unittest.TestCase):
         self.assertEqual(self.groups.get("staff").rules, ())
 
     def test_legacy_fallback_is_forward_only(self) -> None:
-        """Kiosztás nélküli régi fiók nem örökölhet host (input) szabályt."""
+        """A legacy account without assignment cannot inherit a host (input) rule."""
         self.rules.create("host-ssh", {
             "label": "Host SSH", "direction": "input", "tcp": [22],
             "default_ttl": 60, "max_ttl": 600,
@@ -6063,7 +6062,7 @@ class RuleGroupStoreTests(unittest.TestCase):
             "label": "Only input", "collection": True,
             "members": ["host-ssh"],
         })
-        # Régi fiók: a users.json-ban nincs rules kulcs.
+        # Legacy account: there is no rules key in users.json.
         self.users.add("legacy", "hosszu-jelszo-1")
         legacy = self.users.record("legacy")
         self.assertEqual(legacy.rules, ())
@@ -6071,10 +6070,10 @@ class RuleGroupStoreTests(unittest.TestCase):
 
         effective = self.rules.effective_for(legacy, [])
         ids = [rule.id for rule in effective]
-        # Az ordinary forward szabályok (a forward full is) megmaradnak.
+        # The ordinary forward rules (including forward full) remain.
         self.assertIn("forward-web", ids)
         self.assertIn("forward-full", ids)
-        # Az input szabály és a input tagot tartalmazó gyűjtők kimaradnak.
+        # The input rule and collections containing an input member are left out.
         self.assertNotIn("host-ssh", ids)
         self.assertNotIn("mixed-col", ids)
         self.assertNotIn("input-col", ids)
@@ -6086,14 +6085,14 @@ class RuleGroupStoreTests(unittest.TestCase):
             )
         )
 
-        # A host szabály a fallbacken keresztül nem kérhető/engedélyezhető.
+        # The host rule cannot be requested/authorized through the fallback.
         for rule_id in ("host-ssh", "mixed-col", "input-col"):
             with self.subTest(rule_id=rule_id):
                 with self.assertRaises(gateway.AccessError):
                     self.rules.resolve_for(legacy, [], rule_id)
 
-        # Az effektív szabályokból képzett tűzfalelemek között nincs
-        # (IP, 22) input pár.
+        # Among the firewall elements built from the effective rules there is no
+        # (IP, 22) input pair.
         address = "192.168.50.20"
         firewall = gateway.Firewall(dry_run=True, logger=lambda *_: None)
         elements = [
@@ -6112,7 +6111,7 @@ class RuleGroupStoreTests(unittest.TestCase):
             elements,
         )
 
-        # Kifejezett kiosztással viszont választható és (IP, 22)-t ad.
+        # With an explicit assignment, however, it is selectable and gives (IP, 22).
         self.users.set_metadata("legacy", rules=("host-ssh",))
         assigned = self.users.record("legacy")
         self.assertTrue(assigned.rules_set)
@@ -6153,7 +6152,7 @@ class RuleGroupStoreTests(unittest.TestCase):
             [(firewall.input_tcp_set, f"{address} . 22")],
         )
 
-        # Csoporton keresztüli kifejezett kiosztás is működik.
+        # Explicit assignment through a group works too.
         self.users.set_metadata("legacy", rules=())
         group = self.groups.create("ssh-staff", {
             "label": "SSH", "rules": ["host-ssh"], "members": ["legacy"],
@@ -6171,7 +6170,7 @@ class RuleGroupStoreTests(unittest.TestCase):
             "host-ssh",
         )
 
-        # Az admin továbbra sem kap automatikus szabályt.
+        # The admin still gets no automatic rule.
         self.users.add(
             "root", "hosszu-jelszo-1", role=gateway.ROLE_ADMIN
         )
@@ -6213,7 +6212,7 @@ class RuleGroupStoreTests(unittest.TestCase):
              "max_ttl", "created"},
         )
         self.assertEqual(stored["members"], ["col-web", "col-dns"])
-        # A gyűjtőszabálynak nincs saját iránya a tárolt alakban sem.
+        # The collection rule has no direction of its own in the stored form either.
         for forbidden in ("direction", "tcp", "udp", "icmp", "full"):
             self.assertNotIn(forbidden, stored)
 
@@ -6249,7 +6248,7 @@ class RuleGroupStoreTests(unittest.TestCase):
             stored = json.load(fh)["rules"]
         self.assertEqual(stored["mpwerks-host"]["direction"], "input")
         self.assertEqual(stored["host-tcp-only"]["direction"], "input")
-        # A direction nélküli (régi) szabály továbbra is forward.
+        # A rule without direction (legacy) is still forward.
         default = self.rules.create("plain-forward", {
             "label": "Plain", "tcp": [25566],
         })
@@ -6272,31 +6271,31 @@ class RuleGroupStoreTests(unittest.TestCase):
         cases = (
             (
                 {"direction": "input", "full": True},
-                "host szabály nem lehet teljes hozzáférésű",
+                "a host rule cannot have full access",
             ),
             (
                 {"direction": "input", "icmp": True},
-                "host szabály nem tartalmazhat ICMP-t",
+                "a host rule cannot contain ICMP",
             ),
             (
                 {"direction": "input", "services": ["web"]},
-                "host szabály nem használhat szolgáltatáslistát",
+                "a host rule cannot use a service list",
             ),
             (
                 {"direction": "input"},
-                "host szabályhoz legalább egy TCP vagy UDP port kell",
+                "a host rule requires at least one TCP or UDP port",
             ),
             (
                 {"direction": "input", "tcp": [8100]},
-                "a 8100-as port (portál) nem nyitható meg host szabállyal",
+                "port 8100 (portal) cannot be opened with a host rule",
             ),
             (
                 {"direction": "input", "udp": [8100]},
-                "a 8100-as port (portál) nem nyitható meg host szabállyal",
+                "port 8100 (portal) cannot be opened with a host rule",
             ),
             (
                 {"direction": "oldalra", "tcp": [25566]},
-                "direction: forward vagy input érték kell",
+                "direction: must be forward or input",
             ),
         )
         for index, (payload, message) in enumerate(cases):
@@ -6305,8 +6304,8 @@ class RuleGroupStoreTests(unittest.TestCase):
                     self.rules.create(f"host-bad-{index}", payload)
                 self.assertEqual(str(caught.exception), message)
 
-        # Forward szabályoknál a teljes hozzáférés, az ICMP és a
-        # szolgáltatáslista továbbra is érvényes.
+        # For forward rules, full access, ICMP and the service list remain
+        # valid.
         self.rules.create("forward-full", {"label": "F", "full": True})
         self.rules.create("forward-icmp", {"label": "I", "icmp": True})
         legacy = self.rules.create("forward-legacy", {
@@ -6315,10 +6314,9 @@ class RuleGroupStoreTests(unittest.TestCase):
         self.assertEqual(legacy.direction, "forward")
         self.assertEqual(legacy.tcp, (80, 443))
 
-        # A 22-es port admin által létrehozott host szabállyal TCP-n és
-        # UDP-n is megnyitható. A szabály nem teljes hozzáférésű, és a
-        # tűzfal a külön input halmazokba teszi, soha nem a forward
-        # halmazokba.
+        # Port 22 can be opened over both TCP and UDP with a host rule created
+        # by the admin. The rule is not full access, and the firewall puts it
+        # into the separate input sets, never into the forward sets.
         fw = gateway.Firewall(dry_run=True, logger=lambda *_: None)
         host_cases = (
             ("host-ssh-tcp", "tcp", fw.input_tcp_set),
@@ -6350,8 +6348,8 @@ class RuleGroupStoreTests(unittest.TestCase):
             "label": "B", "direction": "input", "udp": [25566],
         })
         self.rules.create("forward-member", {"label": "F", "tcp": [80]})
-        # A gyűjtő payloadjában szereplő elavult/hibás irányt figyelmen
-        # kívül hagyjuk: kizárólag a tagok iránya dönt.
+        # We ignore the obsolete/invalid direction in the collection's payload:
+        # only the members' direction decides.
         mixed = self.rules.create("mixed-col", {
             "label": "Mixed", "collection": True,
             "direction": "oldalra",
@@ -6380,7 +6378,7 @@ class RuleGroupStoreTests(unittest.TestCase):
             mixed.public()["ports_label"],
             "TCP 80, 25566 · UDP 25566",
         )
-        # A gyűjtőnek nincs saját iránya a nyilvános vagy tárolt alakban.
+        # The collection has no direction of its own in the public or stored form.
         self.assertNotIn("direction", mixed.public())
         with open(self.rules.path, encoding="utf-8") as fh:
             stored = json.load(fh)["rules"]["mixed-col"]
@@ -6399,7 +6397,7 @@ class RuleGroupStoreTests(unittest.TestCase):
         self.assertEqual(loaded.input_udp, (25566,))
         self.assertEqual(loaded.grants, mixed.grants)
 
-        # Csak input tagok: a gyűjtő iránya input, engedélye csak input.
+        # Input members only: the collection's direction is input, its permission is input only.
         input_col = self.rules.create("input-col", {
             "label": "Input collection", "collection": True,
             "members": ["host-a", "host-b"],
@@ -6411,7 +6409,7 @@ class RuleGroupStoreTests(unittest.TestCase):
             [part.direction for part in input_col.grants], ["input"]
         )
 
-        # Egy tag is elég, és a csak forward tagok forward gyűjtőt adnak.
+        # One member is enough, and forward-only members give a forward collection.
         forward_col = self.rules.create("forward-col", {
             "label": "Forward collection", "collection": True,
             "members": ["forward-member"],
@@ -6423,15 +6421,15 @@ class RuleGroupStoreTests(unittest.TestCase):
             [part.direction for part in forward_col.grants], ["forward"]
         )
 
-        # A tag iránya a gyűjtő alatt is megváltozhat; a függő gyűjtők
-        # visszajönnek, hogy a szerver a munkameneteiket visszavonhassa.
+        # A member's direction can change under the collection too; the dependent
+        # collections come back so that the server can revoke their sessions.
         updated, dependents = self.rules.update_with_dependents("host-a", {
             "label": "A", "direction": "forward", "tcp": [25566],
         })
         self.assertEqual(updated.direction, "forward")
         self.assertEqual(set(dependents), {"mixed-col", "input-col"})
         refreshed = self.rules.get("mixed-col")
-        # host-a most forward, host-b továbbra is input, a forward tag mellett.
+        # Its host-a is now forward, host-b is still input, alongside the forward member.
         self.assertEqual(refreshed.direction, "mixed")
         self.assertEqual(refreshed.tcp, (80, 25566))
         self.assertEqual(refreshed.input_tcp, ())
@@ -6452,7 +6450,7 @@ class RuleGroupStoreTests(unittest.TestCase):
             "label": "Nested", "collection": True,
             "members": ["member-a", "member-b"],
         })
-        # Egyetlen tag is elég, forward és host (input) változatban is.
+        # A single member is enough, in both forward and host (input) variants.
         single = self.rules.create("single-member", {
             "label": "X", "collection": True, "members": ["member-a"],
         })
@@ -6470,44 +6468,44 @@ class RuleGroupStoreTests(unittest.TestCase):
         invalid = {
             "unknown member": (
                 {"label": "X", "members": ["member-a", "missing"]},
-                "ismeretlen szabály a gyűjtőszabályban: missing",
+                "unknown rule in the collection rule: missing",
             ),
             "full member": (
                 {"label": "X", "members": ["member-a", "member-full"]},
-                "teljes hozzáférésű szabályt: member-full",
+                "a collection rule cannot contain a full-access rule: member-full",
             ),
             "nested collection": (
                 {"label": "X", "members": ["member-a", "nested"]},
-                "másik gyűjtőszabályt: nested",
+                "a collection rule cannot contain another collection rule: nested",
             ),
             "duplicate members": (
                 {"label": "X", "members": ["member-a", "member-a"]},
-                "ismétlődő szabály-azonosító",
+                "duplicate rule identifier",
             ),
             "empty members": (
                 {"label": "X", "collection": True},
-                "members: 1–64 szabály-azonosítóból álló lista kell",
+                "members: a list of 1–64 rule identifiers is required",
             ),
             "ports with collection": (
                 {
                     "label": "X", "collection": True,
                     "members": ["member-a", "member-b"], "tcp": [80],
                 },
-                "nem adható meg port",
+                "a collection rule cannot have a port, ICMP or full access",
             ),
             "too many members": (
                 {
                     "label": "X", "collection": True,
                     "members": [f"r{index}" for index in range(65)],
                 },
-                "legfeljebb 64",
+                "members: a list of at most 64 elements is required",
             ),
             "self reference": (
                 {
                     "label": "X", "collection": True,
                     "members": ["member-a", "selfref"],
                 },
-                "nem tartalmazhatja önmagát",
+                "a collection rule cannot contain itself",
             ),
         }
         for index, (name, (payload, expected)) in enumerate(invalid.items()):
@@ -6602,8 +6600,8 @@ class RuleGroupStoreTests(unittest.TestCase):
         message = str(caught.exception)
         self.assertIn("col-a", message)
         self.assertIn("col-b", message)
-        self.assertIn("gyűjtőszabály", message)
-        # A gyűjtő törlése csak a gyűjtőt törli, a tagokat nem.
+        self.assertIn("collection rule", message)
+        # Deleting the collection deletes only the collection, not the members.
         self.rules.delete("col-a")
         self.assertIsNotNone(self.rules.get("member-a"))
         self.assertIsNotNone(self.rules.get("member-b"))
@@ -6613,7 +6611,7 @@ class RuleGroupStoreTests(unittest.TestCase):
         self.assertIsNone(self.rules.get("member-a"))
 
     def test_collection_member_cannot_become_full_or_collection(self) -> None:
-        """Egy tag nem válhat teljes hozzáférésűvé vagy gyűjtővé."""
+        """A member cannot become full access or a collection."""
         self.rules.create("guard-a", {"label": "A", "tcp": [80]})
         self.rules.create("guard-b", {"label": "B", "udp": [53]})
         self.rules.create("guard-c", {"label": "C", "tcp": [8080]})
@@ -6641,7 +6639,7 @@ class RuleGroupStoreTests(unittest.TestCase):
         self.assertIsNotNone(self.rules.get("guard-a"))
         self.assertFalse(self.rules.get("guard-a").collection)
 
-        # A tag portjának módosítása engedélyezett, és az unió követi.
+        # Changing the member's port is allowed, and the union follows.
         self.rules.update("guard-a", {
             "label": "A", "tcp": [8080], "collection": False,
         })
@@ -6707,7 +6705,7 @@ class RuleGroupStoreTests(unittest.TestCase):
         self.assertNotIn("direction", stored)
 
     def test_load_drops_invalid_persisted_collections(self) -> None:
-        """Hibás perzisztált gyűjtők ne jelenjenek meg és ne adjanak jogot."""
+        """Broken persisted collections should not appear and should not grant access."""
         path = os.path.join(self.tmp.name, "invalid-collections.json")
         base = {"default_ttl": 60, "max_ttl": 600, "created": 1}
 
@@ -6745,11 +6743,11 @@ class RuleGroupStoreTests(unittest.TestCase):
         self.assertEqual(store.get("valid-col").tcp, (80,))
         self.assertEqual(store.get("valid-col").udp, (53,))
         self.assertTrue(
-            any("kihagyott hibás gyűjtőszabály" in line for line in logs),
+            any("[rules] invalid collection rule skipped" in line for line in logs),
             logs,
         )
 
-        # Közvetlen és csoporton keresztüli kiosztás sem ad hozzáférést.
+        # Neither direct nor via-group assignment gives access.
         self.users.add(
             "invalid-direct", "hosszu-jelszo-1",
             rules=("bad-missing",),
@@ -6765,7 +6763,7 @@ class RuleGroupStoreTests(unittest.TestCase):
         self.assertEqual(store.effective_for(grouped, [group]), [])
         with self.assertRaises(gateway.AccessError) as caught:
             store.resolve_for(direct, [], "bad-missing")
-        self.assertIn("nem tartozik hozzád", str(caught.exception))
+        self.assertIn("does not belong to you", str(caught.exception))
 
     def test_load_mixed_collection_and_ignore_stale_direction(self) -> None:
         path = os.path.join(self.tmp.name, "mixed-collections.json")
@@ -6776,7 +6774,7 @@ class RuleGroupStoreTests(unittest.TestCase):
                 "label": "H", "direction": "input",
                 "tcp": [25566], "udp": [25566], **base,
             },
-            # Elavult/hibás direction a gyűjtőn: a tagok döntenek.
+            # Obsolete/invalid direction on the collection: the members decide.
             "lm-mixed": {
                 "label": "Mixed", "direction": "oldalra",
                 "members": ["lm-fwd", "lm-host"], **base,
@@ -6801,7 +6799,7 @@ class RuleGroupStoreTests(unittest.TestCase):
         )
         self.assertNotIn("direction", mixed.public())
 
-        # A gyűjtőn tárolt elavult direction nem írja felül a tagokat.
+        # The obsolete direction stored on the collection does not override the members.
         stale = store.get("lm-stale")
         self.assertEqual(stale.direction, "forward")
         self.assertEqual([part.direction for part in stale.grants], ["forward"])
@@ -6823,9 +6821,9 @@ class RuleGroupStoreTests(unittest.TestCase):
         )
         with self.assertRaises(gateway.AccessError) as caught:
             self.rules.resolve_for(outsider, [], "neg-col")
-        self.assertIn("nem tartozik hozzád", str(caught.exception))
+        self.assertIn("does not belong to you", str(caught.exception))
 
-        # Egy nem hozzá tartozó csoport szabálya sem nyitja meg.
+        # A rule of a group that does not belong to the user does not open it either.
         other_group = self.groups.create("neg-group", {
             "label": "Other", "rules": ["neg-col"], "members": [],
         })
@@ -6833,7 +6831,7 @@ class RuleGroupStoreTests(unittest.TestCase):
             self.rules.resolve_for(outsider, [other_group], "neg-col")
 
     def test_duplicate_keeps_suffix_for_long_label(self) -> None:
-        """80 karakteres név másolata is megkülönböztethető maradjon."""
+        """The copy of an 80-character name should remain distinguishable."""
         label = "H" * 80
         self.rules.create(
             "long-label", {"label": label, "tcp": [8080]}
@@ -6873,7 +6871,7 @@ class RuleGroupStoreTests(unittest.TestCase):
 
 
 class ServiceRuleStoreTests(unittest.TestCase):
-    """Szolgáltatás-szabályok: feloldás, perzisztencia, gyűjtő, reflect."""
+    """Service rules: resolution, persistence, collection, reflect."""
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -6887,7 +6885,7 @@ class ServiceRuleStoreTests(unittest.TestCase):
             "home/dns": {
                 "tcp": (53,), "udp": (53,), "target_host": "dns",
             },
-            # Domain-módú szolgáltatás: nincs WAN-port, proxy-domain van.
+            # Domain-mode service: no WAN port, there is a proxy domain.
             "home/web": {
                 "tcp": (), "udp": (), "target_host": "web",
                 "domain": "web.example.com",
@@ -6960,7 +6958,7 @@ class ServiceRuleStoreTests(unittest.TestCase):
         )
 
     def test_domain_service_rule_grants_domain_without_ports(self) -> None:
-        """Csak domain-módú szolgáltatás: nincs port, a domain a grant."""
+        """Domain-mode service only: no port, the domain is the grant."""
         rule = self.rules.create("web-rule", {
             "label": "Web", "service_refs": ["home/web"],
             "default_ttl": 60, "max_ttl": 600,
@@ -6973,7 +6971,7 @@ class ServiceRuleStoreTests(unittest.TestCase):
         self.assertEqual(rule.ports.label(), "Nincs port")
         self.assertEqual(rule.session_domains, ("web.example.com",))
 
-        # A számított mezők nem perzisztálódnak; betöltéskor újra feloldódnak.
+        # The computed fields are not persisted; they are re-resolved on load.
         with open(self.rules.path, encoding="utf-8") as fh:
             stored = json.load(fh)["rules"]["web-rule"]
         self.assertEqual(
@@ -7008,7 +7006,7 @@ class ServiceRuleStoreTests(unittest.TestCase):
         self.assertIsNone(self.rules.get("web-off-rule"))
 
     def test_domain_service_rename_changes_signature(self) -> None:
-        """A domain átnevezése a signature-ben is megjelenik."""
+        """Renaming the domain also appears in the signature."""
         rule = self.rules.create("web-rule", {
             "label": "Web", "service_refs": ["home/web"],
         })
@@ -7066,7 +7064,7 @@ class ServiceRuleStoreTests(unittest.TestCase):
         self.assertIsNone(
             manager.domain_user("192.168.50.20", "other.example.com")
         )
-        # A domain-szolgáltatás nem nyit nft-portot.
+        # The domain service does not open an nft port.
         self.assertEqual(authorized.grant_parts, ())
         self.assertEqual(firewall.granted, [("192.168.50.20", (), 120)])
 
@@ -7076,7 +7074,7 @@ class ServiceRuleStoreTests(unittest.TestCase):
                 "label": "Hiányzó", "service_refs": ["home/nincs"],
             })
         self.assertIn("home/nincs", str(caught.exception))
-        # Letiltott szolgáltatás: a visszahívás None-t ad.
+        # Disabled service: the callback returns None.
         self.ports["home/off"] = None
         with self.assertRaises(gateway.RuleStoreError) as caught:
             self.rules.create("disabled", {
@@ -7176,7 +7174,7 @@ class ServiceRuleStoreTests(unittest.TestCase):
         references = self.rules.service_references()
         self.assertEqual(references["home/mc"], ("col-combo", "col-service"))
 
-        # Beágyazott gyűjtő és teljes hozzáférésű tag továbbra is tiltott.
+        # Nested collection and full-access member are still forbidden.
         with self.assertRaises(gateway.RuleStoreError):
             self.rules.create("nested", {
                 "label": "Beágyazott", "collection": True,
@@ -7205,11 +7203,11 @@ class ServiceRuleStoreTests(unittest.TestCase):
         self.assertEqual(self.rules.get("svc-col").tcp, (25566,))
         with open(self.rules.path, encoding="utf-8") as fh:
             self.assertEqual(fh.read(), before)
-        # Ismételt hívás: nincs több változás.
+        # Repeated call: no further change.
         self.assertEqual(self.rules.reflect_services(), ())
 
     def test_service_signature_tracks_target_host_and_port(self) -> None:
-        """A hallgató portok változatlanok, a cél mégis más: változás."""
+        """The listening ports are unchanged but the target is different: a change."""
         rule = self.rules.create("svc", {
             "label": "MC", "service_refs": ["home/mc"],
         })
@@ -7220,7 +7218,7 @@ class ServiceRuleStoreTests(unittest.TestCase):
         self.rules.create("svc-col", {
             "label": "Gyűjtő", "collection": True, "members": ["svc"],
         })
-        # Csak a célhost változik; a feloldott hallgató port marad.
+        # Only the target host changes; the resolved listening port remains.
         self.ports["home/mc"] = {
             "tcp": (25565,), "udp": (), "target_host": "nas",
         }
@@ -7234,7 +7232,7 @@ class ServiceRuleStoreTests(unittest.TestCase):
             self.rules.get("svc-col").service_signature,
             (("home/mc", "tcp", 25565, "nas", 25565),),
         )
-        # Csak a célport változik (a hallgató port ugyanaz).
+        # Only the target port changes (the listening port is the same).
         self.ports["home/mc"] = {
             "tcp": (25565,), "udp": (), "target_host": "nas",
             "signature": (("tcp", 25565, "nas", 40000),),
@@ -7245,7 +7243,7 @@ class ServiceRuleStoreTests(unittest.TestCase):
             self.rules.get("svc").service_signature,
             (("home/mc", "tcp", 25565, "nas", 40000),),
         )
-        # A perzisztált alak továbbra sem tartalmaz számított mezőt.
+        # The persisted form still contains no computed field.
         records = self.rules.export_records()
         self.assertEqual(set(records["svc"]), {
             "label", "description", "service_refs", "default_ttl",
@@ -7264,8 +7262,8 @@ class ServiceRuleStoreTests(unittest.TestCase):
         records = self.rules.export_records()
         self.assertEqual(records["svc"]["service_refs"], ["home/mc"])
         self.assertNotIn("tcp", records["svc"])
-        # Az import csak az alakot ellenőrzi: az ismeretlen hivatkozás
-        # megengedett (az alagutak ugyanabban a csomagban jöhetnek).
+        # Import checks only the shape: an unknown reference is allowed (the
+        # tunnels may arrive in the same bundle).
         imported = self.rules.validate_import_records({
             "svc-import": {
                 "label": "Import", "service_refs": ["future/svc"],
@@ -7318,7 +7316,7 @@ class ServiceRuleStoreTests(unittest.TestCase):
 
 
 class RuleStoreConcurrencyTests(unittest.TestCase):
-    """A szabálytár zárolási versenyhelyzetei."""
+    """Locking races of the rule store."""
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -7345,7 +7343,7 @@ class RuleStoreConcurrencyTests(unittest.TestCase):
         )
 
     def test_nested_locked_and_create_do_not_deadlock(self) -> None:
-        """A _locked() újrabeléphető: a beágyazott create() nem akad meg."""
+        """_locked() is re-entrant: the nested create() does not stall."""
         store = self._store("nested-lock.json")
         done = threading.Event()
         errors = []
@@ -7358,7 +7356,7 @@ class RuleStoreConcurrencyTests(unittest.TestCase):
                             "nested-lock-rule",
                             {"label": "Nested", "tcp": [80]},
                         )
-            except BaseException as exc:  # a teszt szálából látható legyen
+            except BaseException as exc:  # visible from the test thread
                 errors.append(exc)
             finally:
                 done.set()
@@ -7366,19 +7364,19 @@ class RuleStoreConcurrencyTests(unittest.TestCase):
         thread = threading.Thread(target=work, daemon=True)
         thread.start()
         self.assertTrue(
-            done.wait(5), "a beágyazott _locked() holtpontot okozott"
+            done.wait(5), "the nested _locked() caused a deadlock"
         )
         thread.join(1)
         self.assertFalse(errors, errors)
         self.assertIsNotNone(store.get("nested-lock-rule"))
 
     def test_create_validates_member_change_under_one_lock(self) -> None:
-        """A tag módosítása nem csúszhat a validálás és a commit közé.
+        """Changing a member must not slip between validation and commit.
 
-        A régi kód a validálást a záron kívül végezte, ezért egy párhuzamos
-        delete()/update() érvénytelen (hiányzó, teljes vagy beágyazott tagú)
-        gyűjtőt hagyhatott a fájlban. A javított kódnak vagy meg kell
-        hiúsítania a létrehozást, vagy érvényes gyűjtőt szabad committálnia.
+        The old code performed validation outside the lock, so a concurrent
+        delete()/update() could leave an invalid (missing, full or nested-member)
+        collection in the file. The fixed code must either abort the creation
+        or commit a valid collection.
         """
         for action in ("delete", "full", "nested"):
             with self.subTest(action=action):
@@ -7417,8 +7415,8 @@ class RuleStoreConcurrencyTests(unittest.TestCase):
                     )
                     thread.start()
                     threads.append(thread)
-                    # A javított kód zárat tart, ezért a szál legfeljebb a
-                    # záron várakozhat; a régi kódnál itt befejeződik.
+                    # The fixed code holds the lock, so the thread can at most wait on
+                    # the lock; with the old code it finishes here.
                     finished.wait(0.5)
 
                 store.race_hook = hook
@@ -7435,11 +7433,11 @@ class RuleStoreConcurrencyTests(unittest.TestCase):
                     thread.join(5)
                     self.assertFalse(
                         thread.is_alive(),
-                        "a versenyző szál nem fejeződött be",
+                        "the racing thread did not finish",
                     )
 
-                # A fájlban maradt gyűjtő minden tagja létező, egyedi,
-                # nem teljes és nem gyűjtő szabály legyen.
+                # Every member of the collection left in the file must be an existing,
+                # unique, non-full and non-collection rule.
                 with open(store.path, encoding="utf-8") as fh:
                     raw = json.load(fh)["rules"]
                 for rule_id, item in raw.items():
@@ -7469,8 +7467,7 @@ class RuleStoreConcurrencyTests(unittest.TestCase):
                     self.assertFalse(loaded.full)
                     self.assertTrue(
                         errors,
-                        "a versenyző műveletnek a szülővédő miatt kell "
-                        "meghiúsulnia",
+                        "the racing operation must fail because of the parent guard",
                     )
                 else:
                     self.assertIsNone(fresh.get("race-col"))
@@ -7563,8 +7560,8 @@ class AdminHttpTests(unittest.TestCase):
         self.tools.clear_fail()
         self.tools.clear_json()
         self.tools.clear_chains()
-        # A beállítások és a drop napló közös a tesztek között; minden teszt
-        # ismert, üres állapotból induljon.
+        # The settings and the drop log are shared between tests; every test
+        # should start from a known, empty state.
         self.gw.settings.commit(
             {"preauth": [], "block": []}
         )
@@ -7577,7 +7574,7 @@ class AdminHttpTests(unittest.TestCase):
         self.reset_fail2ban()
 
     def reset_fail2ban(self) -> None:
-        """Friss, izolált fail2ban-állapot minden teszthez."""
+        """Fresh, isolated fail2ban state for every test."""
         path = os.path.join(self.tmp.name, "fail2ban.json")
         try:
             os.unlink(path)
@@ -7651,10 +7648,10 @@ class AdminHttpTests(unittest.TestCase):
         conn.close()
         return json.loads(body)
 
-    # -- kétfaktoros belépés ---------------------------------------------------
+    # -- two-factor login --------------------------------------------------
 
     def password_login(self, user: str, password: str, source: str = "127.0.0.1"):
-        """Jelszavas belépés nyers válasszal (a 2FA-jegyhez forrás-IP kell)."""
+        """Password login with a raw response (the 2FA ticket needs the source IP)."""
         _, _, body = self.get("/api/challenge", source=source)
         challenge = json.loads(body)
         return self.post(
@@ -7664,7 +7661,7 @@ class AdminHttpTests(unittest.TestCase):
         )
 
     def enroll_totp(self, user: str, password: str, source: str = "127.0.0.1"):
-        """Első 2FA-beállítás; (secret, ticket, headers, válasz)."""
+        """First 2FA setup; (secret, ticket, headers, response)."""
         status, _, body = self.password_login(user, password, source)
         self.assertEqual(status, 200, body)
         offer = json.loads(body)
@@ -7690,7 +7687,7 @@ class AdminHttpTests(unittest.TestCase):
         )
 
     def drop_totp_user(self, name: str) -> None:
-        """A teszt-specifikus felhasználó és a hozzá tartozó állapot törlése."""
+        """Delete the test-specific user and its associated state."""
         server.LOGIN_TICKETS.revoke_all()
         self.gw.sessions.revoke_user(name)
         self.gw.groups.remove_member_everywhere(name)
@@ -7747,8 +7744,8 @@ class AdminHttpTests(unittest.TestCase):
         def admin_post(path: str, payload: dict):
             return self.post(path, payload, cookie=cookie, source=source)
 
-        # Gyűjtő + csoport + közvetlen kiosztás: az előnézetnek mindhármat
-        # ugyanúgy mutatnia kell, mint a valódi portál /api/status.
+        # Collection + group + direct assignment: the preview must show all
+        # three the same way as the real portal's /api/status.
         status, _, body = admin_post("/api/admin/rules", {
             "action": "create", "id": "preview-col", "label": "Előnézet gyűjtő",
             "collection": True, "members": ["web-only", "host-ssh"],
@@ -7790,7 +7787,7 @@ class AdminHttpTests(unittest.TestCase):
         self.users.set_totp_required("preview-pending", True)
         self.addCleanup(self.users.remove, "preview-pending")
 
-        # Tiszta nft- és munkamenet-állapotból nyitjuk az előnézetet.
+        # We open the preview from a clean nft and session state.
         self.tools.clear()
         sessions_before = self.gw.sessions.count()
         status, headers, body = self.get(
@@ -7811,13 +7808,13 @@ class AdminHttpTests(unittest.TestCase):
             rule for rule in preview["rules"]
             if rule["id"] == "preview-col"
         )["collection"])
-        # A domainek és a TTL-korlátok is a portál-payloadban vannak.
+        # The domains and the TTL limits are in the portal payload too.
         self.assertIn("limits", preview)
         for rule in preview["rules"]:
             self.assertIn("max_ttl", rule)
             self.assertIn("domains", rule)
 
-        # Nem nyílt munkamenet és nem indult nft-művelet.
+        # No session was opened and no nft operation was started.
         self.assertEqual(self.gw.sessions.count(), sessions_before)
         self.assertFalse([
             row for row in self.gw.sessions.active_sessions()
@@ -7825,7 +7822,7 @@ class AdminHttpTests(unittest.TestCase):
         ])
         self.assertEqual(self.tools.script(), [])
 
-        # Az előnézet megnyitása audit-bejegyzést ír.
+        # Opening the preview writes an audit entry.
         entries = self.audit.read(limit=2000)
         self.assertTrue(any(
             item.get("event") == "admin_user_preview"
@@ -7834,7 +7831,7 @@ class AdminHttpTests(unittest.TestCase):
             for item in entries
         ))
 
-        # A tartalom pontosan a valódi portál-adat: ugyanaz, mint /api/status.
+        # The content is exactly the real portal data: the same as /api/status.
         user_cookie, _ = self.login(
             "previewer", "previewer-jelszo-1", source="127.0.0.9"
         )
@@ -7847,7 +7844,7 @@ class AdminHttpTests(unittest.TestCase):
         self.assertEqual(preview["rules"], real["rules"])
         self.assertEqual(preview["limits"], real["limits"])
 
-        # Jóváhagyásra váró fiók: üres szabálylista, pending jelző.
+        # Account pending approval: empty rule list, pending flag.
         status, _, body = self.get(
             "/api/admin/preview?user=preview-pending",
             cookie=cookie, source=source,
@@ -7895,9 +7892,8 @@ class AdminHttpTests(unittest.TestCase):
         self.assertEqual(row["ports_label"], "TCP 80, 443 · UDP 443")
         self.assertEqual([entry["port"] for entry in row["tcp"]], [80, 443])
         self.assertEqual([entry["port"] for entry in row["udp"]], [443])
-        # Az egyedi web szabály nem vár host SSH-t; a nézetben nincs külön
-        # host_ssh mező, a 22-es port csak közönséges input bejegyzésként
-        # jelenhet meg.
+        # The individual web rule does not wait for host SSH; there is no
+        # separate host_ssh field in the view, port 22 appears only as an ordinary input entry.
         self.assertNotIn("host_ssh", row)
         self.assertTrue(row["in_sync"], row)
         self.assertEqual(row["rules"][0]["label"], "Csak web")
@@ -7981,13 +7977,13 @@ class AdminHttpTests(unittest.TestCase):
         self.assertTrue(alice["id"])
         self.assertEqual(own["user"], "root")
 
-        # A saját munkamenet lezárása a Kilépés gomb feladata.
+        # Closing one's own session is the Logout button's job.
         status, _, body = self.post(
             "/api/admin/sessions", {"action": "terminate", "id": own["id"]},
             cookie=cookie, source="127.0.0.5",
         )
         self.assertEqual(status, 400, body)
-        self.assertIn("Kilépés", json.loads(body)["error"])
+        self.assertIn("Logout", json.loads(body)["error"])
 
         self.tools.clear()
         status, _, body = self.post(
@@ -7999,7 +7995,7 @@ class AdminHttpTests(unittest.TestCase):
         self.assertNotIn(
             "alice", [item["user"] for item in payload["sessions"]]
         )
-        self.assertIn("lezárva", payload["message"])
+        self.assertIn("terminated", payload["message"])
 
         status, _, body = self.get(
             "/api/status", cookie=user_cookie, source="127.0.0.2"
@@ -8178,7 +8174,7 @@ class AdminHttpTests(unittest.TestCase):
             source="127.0.0.2",
         )
         self.assertEqual(status, 403, body)
-        self.assertIn("Hibás", json.loads(body)["error"])
+        self.assertIn("Invalid", json.loads(body)["error"])
 
         status, _, body = self.post(
             "/api/admin/users",
@@ -8190,9 +8186,9 @@ class AdminHttpTests(unittest.TestCase):
 
     def test_admin_update_failure_revokes_and_restores_password(self) -> None:
         cookie = self.admin_cookie()
-        # Saját, friss felhasználó: a osztályszintű tárban más tesztek
-        # módosíthatják a jelszót, ezért a „resetme” használata
-        # teszt-sorrendtől függően elbukna.
+        # Own, fresh user: other tests can modify the password in the
+        # class-level store, so using "resetme" would fail depending on
+        # test order.
         name = "updatefail-user"
         self.users.remove(name)
         self.users.add(name, "updatefail-jelszo-1")
@@ -8205,7 +8201,7 @@ class AdminHttpTests(unittest.TestCase):
             original_metadata = self.users.set_metadata
 
             def failing_metadata(target, **kwargs):
-                raise gateway.UserStoreError("szimulált íráshiba")
+                raise gateway.UserStoreError("simulated write error")
 
             self.users.set_metadata = failing_metadata
             try:
@@ -8221,8 +8217,8 @@ class AdminHttpTests(unittest.TestCase):
                 self.users.set_metadata = original_metadata
             self.assertEqual(status, 400, body)
 
-            # A köztes hiba után a jelszó-hash és a must_change jelző az
-            # eredeti állapotra állt vissza, a munkamenet viszont megszűnt.
+            # After the intermediate error the password hash and the must_change
+            # flag returned to their original state, but the session was terminated.
             after = self.users.record(name)
             self.assertIsNotNone(after)
             self.assertEqual(after.salt, before.salt)
@@ -8320,16 +8316,16 @@ class AdminHttpTests(unittest.TestCase):
         self.assertNotIn(gateway.LEGACY_ADMIN_RULE_ID, status_rules)
         self.assertEqual(status_rules, ["host-ssh"])
 
-        # A fenntartott régi azonosító nem kérhető, még adminként sem.
+        # The reserved legacy identifier cannot be requested, even as admin.
         status, _, body = self.post(
             "/api/access", {"rule": gateway.LEGACY_ADMIN_RULE_ID, "ttl": 60},
             cookie=cookie, source="127.0.0.5",
         )
         self.assertEqual(status, 400, body)
-        self.assertIn("nem tartozik", json.loads(body)["error"])
+        self.assertIn("does not belong", json.loads(body)["error"])
 
-        # A kifejezetten kiosztott host SSH szabály viszont megnyitja a
-        # 22-es TCP-portot az input halmazban, teljes hozzáférés nélkül.
+        # The explicitly assigned host SSH rule, however, opens TCP port 22 in
+        # the input set, without full access.
         status, _, body = self.post(
             "/api/access", {"rule": "host-ssh", "ttl": 60},
             cookie=cookie, source="127.0.0.5",
@@ -8356,7 +8352,7 @@ class AdminHttpTests(unittest.TestCase):
             cookie=cookie,
         )
         self.assertEqual(status, 400, body)
-        self.assertIn("nem tartozik", json.loads(body)["error"])
+        self.assertIn("does not belong", json.loads(body)["error"])
 
     def test_admin_rule_mutations_audit_input_direction_and_sync_ports(self) -> None:
         cookie = self.admin_cookie()
@@ -8378,8 +8374,8 @@ class AdminHttpTests(unittest.TestCase):
             rules = self.gw.rules.get("host-audit")
             self.assertIsNotNone(rules)
             self.assertEqual(rules.direction, "input")
-            # A host portok azonnal a kerneloldali, csak bővülő védőhalmazba
-            # kerülnek (a portál nem üríti őket).
+            # Host ports immediately go into the kernel-side, add-only guard sets
+            # (the portal does not flush them).
             script = self.tools.script()
             self.assertIn(
                 "add element inet hatarvedelem host_service_tcp "
@@ -8431,9 +8427,9 @@ class AdminHttpTests(unittest.TestCase):
                 self.assertTrue(entries, event)
                 self.assertEqual(entries[-1].get("direction"), "input")
 
-            # A törlés auditja is hordozza az irányt, hogy a host és a
-            # forward szabály azonos portok mellett is megkülönböztethető
-            # legyen a naplóban.
+            # Deletion's audit also carries the direction, so that host and
+            # forward rules remain distinguishable with the same ports in the
+            # log.
             status, _, body = admin_post({
                 "action": "delete", "id": "host-audit-copy",
             })
@@ -8490,7 +8486,7 @@ class AdminHttpTests(unittest.TestCase):
         )
         self.assertEqual(status, 200, body)
 
-        # Részleges frissítés ne törölje a tagokat és a szabályokat.
+        # A partial update must not delete the members and the rules.
         status, _, body = self.post(
             "/api/admin/groups",
             {"action": "update", "id": "staff", "label": "Munkatársak"},
@@ -8623,14 +8619,14 @@ class AdminHttpTests(unittest.TestCase):
             combo["ports_label"], "TCP 53, 80, 443, 853 · UDP 53, 443 · ICMP"
         )
 
-        # Közvetlen felhasználói kiosztás.
+        # Direct user assignment.
         status, _, body = self.post(
             "/api/admin/users",
             {"action": "update", "name": "alice", "rules": ["col-combo"]},
             cookie=cookie, source=source,
         )
         self.assertEqual(status, 200, body)
-        # Csoporton keresztüli kiosztás (a csoport szabályai a tagra élnek).
+        # Assignment through a group (the group's rules live on the member).
         status, _, body = self.post(
             "/api/admin/users",
             {"action": "create", "name": "groupie",
@@ -8665,7 +8661,7 @@ class AdminHttpTests(unittest.TestCase):
             cookie=alice_cookie,
         )
         self.assertEqual(status, 400, body)
-        self.assertIn("legfeljebb", json.loads(body)["error"])
+        self.assertIn("at most", json.loads(body)["error"])
         status, _, body = self.post(
             "/api/access", {"rule": "col-combo", "ttl": 300},
             cookie=alice_cookie,
@@ -8677,8 +8673,8 @@ class AdminHttpTests(unittest.TestCase):
         self.assertEqual(granted["grant"]["udp"], [53, 443])
         self.assertTrue(granted["grant"]["icmp"])
         self.assertFalse(granted["grant"]["full"])
-        # A gyűjtő uniója pontosan a tagok TCP/UDP portjait és az ICMP-t
-        # engedélyezze, a kért 300 másodperces TTL-lel.
+        # The collection's union must allow exactly the members' TCP/UDP ports
+        # and ICMP, with the requested 300-second TTL.
         added = {
             line for line in self.tools.script()
             if line.startswith("add element inet hatarvedelem allowed_")
@@ -8787,7 +8783,7 @@ class AdminHttpTests(unittest.TestCase):
         self.assertGreaterEqual(int(latest.get("sessions_revoked", 0)), 1)
 
     def test_rule_available_detects_member_direction_change(self) -> None:
-        """Ugyanazok a portok, de más irány => más grants, újra kell választani."""
+        """The same ports but a different direction => different grants, the selection must be redone."""
         try:
             self.rules.create("rc-host", {
                 "label": "H", "direction": "input", "tcp": [25566],
@@ -8802,9 +8798,9 @@ class AdminHttpTests(unittest.TestCase):
             selected = self.rules.resolve_for(record, [], "rc-col")
             self.assertTrue(self.gw._rule_available("rulecheck", selected))
 
-            # A tag iránya azonos port mellett megváltozik: a feloldott
-            # engedély már a forward halmazba kerülne, ezért a régi
-            # választás érvénytelen.
+            # The member's direction changes with the same ports: the resolved
+            # permission would now go into the forward set, so the old selection
+            # is invalid.
             self.rules.update("rc-host", {
                 "label": "H", "direction": "forward", "tcp": [25566],
             })
@@ -8932,12 +8928,12 @@ class AdminHttpTests(unittest.TestCase):
         ))
 
     def test_update_revokes_collection_created_at_commit_point(self) -> None:
-        """A commit pontján létrejövő függő gyűjtő se maradjon engedélyezve.
+        """A dependent collection created at the commit point must not stay authorized either.
 
-        A régi szerver a függőlistát a módosítás előtt, külön zárral
-        olvasta. A hook a snapshot után hozza létre a gyűjtőt és engedélyezi
-        a munkamenetét, utánozva a versenyhelyzetet; a javított kód egy
-        záron belül látja a commit pontján létező gyűjtőt.
+        The old server read the dependent list before the modification, under a separate lock.
+        The hook creates the collection after the snapshot and authorizes
+        its session, imitating the race; the fixed code sees the collection
+        existing at the commit point within a single lock.
         """
         cookie = self.admin_cookie()
         source = "127.0.0.5"
@@ -9002,15 +8998,15 @@ class AdminHttpTests(unittest.TestCase):
         original_atomic = getattr(store, "update_with_dependents", None)
 
         def hooked_snapshot(rule_id: str) -> list[str]:
-            # A régi kód itt már elkészítette a (hiányos) pillanatképet.
+            # The old code had already prepared the (incomplete) snapshot here.
             result = original_snapshot(rule_id)
             if rule_id == "late-web":
                 fire()
             return result
 
         def hooked_atomic(rule_id: str, data: dict):
-            # Az új kód a zár megszerzése előtt hívja; a létrehozott
-            # gyűjtő így már a commit pontján létezik.
+            # The new code calls it before acquiring the lock; the created
+            # collection thus already exists at the commit point.
             if rule_id == "late-web":
                 fire()
             return original_atomic(rule_id, data)
@@ -9028,13 +9024,13 @@ class AdminHttpTests(unittest.TestCase):
             if original_atomic is not None:
                 store.__dict__.pop("update_with_dependents", None)
         self.assertEqual(status, 200, body)
-        self.assertTrue(fired, "a versenyző gyűjtő nem jött létre")
+        self.assertTrue(fired, "the racing collection was not created")
         self.assertTrue(authorized_before)
         self.assertFalse(any(
             row["user"] == "lateuser" and row["authorized"]
             and row["rule"] == "late-col"
             for row in self.gw.sessions.active_sessions()
-        ), "a közben létrehozott gyűjtő munkamenete a régi portokkal élt")
+        ), "the session of the collection created meanwhile lived on with the old ports")
 
     def test_duplicate_action_and_delete_guard(self) -> None:
         cookie = self.admin_cookie()
@@ -9074,7 +9070,7 @@ class AdminHttpTests(unittest.TestCase):
         })
         self.assertEqual(status, 200, body)
         result = json.loads(body)
-        self.assertEqual(result["message"], "Szabály duplikálva.")
+        self.assertEqual(result["message"], "Rule duplicated.")
         copy = next(rule for rule in result["rules"] if rule["id"] == "dup-web-copy")
         self.assertEqual(copy["label"], "Web — másolat")
         self.assertEqual(copy["tcp"], [80, 443])
@@ -9101,9 +9097,9 @@ class AdminHttpTests(unittest.TestCase):
         error = json.loads(body)["error"]
         self.assertIn("dup-collection", error)
         self.assertIn("dup-collection-copy", error)
-        self.assertIn("gyűjtőszabály", error)
+        self.assertIn("collection rule", error)
 
-        # A gyűjtő (és másolata) törölhető; a tagok megmaradnak.
+        # The collection (and its copy) can be deleted; the members remain.
         status, _, body = admin_post({
             "action": "delete", "id": "dup-collection-copy",
         })
@@ -9130,7 +9126,7 @@ class AdminHttpTests(unittest.TestCase):
             cookie=cookie, source="127.0.0.5",
         )
         self.assertEqual(status, 400, body)
-        self.assertIn("utolsó admin", json.loads(body)["error"])
+        self.assertIn("the last admin", json.loads(body)["error"])
 
     def test_admin_drop_log_filters(self) -> None:
         cookie = self.admin_cookie()
@@ -9257,7 +9253,7 @@ class AdminHttpTests(unittest.TestCase):
         self.assertEqual(status, 200, body)
         self.assertEqual(json.loads(body)["settings"]["preauth"], [])
 
-        # A mentett állapot újratöltve is megmarad.
+        # The saved state remains after reloading.
         self.gw.settings.load()
         self.assertEqual(self.gw.settings.snapshot()["preauth"], [])
 
@@ -9315,8 +9311,8 @@ class AdminHttpTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("text/html", headers["Content-Type"])
         page = body.decode("utf-8")
-        # A beállítások oldal csak a pre-auth szakaszt rendereli; a blokk
-        # felület eltűnt, és a Host SSH szakasz már nem létezik.
+        # The settings page renders only the pre-auth section; the block UI
+        # is gone, and the Host SSH section no longer exists.
         self.assertNotIn("renderSettingSection('block'", page)
         self.assertIn("renderSettingSection('preauth'", page)
         self.assertNotIn("Host SSH", page)
@@ -9331,7 +9327,7 @@ class AdminHttpTests(unittest.TestCase):
         self.assertNotIn("mindig blokkolt célok", page)
         self.assertNotIn("pre-auth és blokk listák üresek", page)
 
-        # A háttér és az API változatlanul kezeli a blokk szabályokat.
+        # The backend and the API handle the block rules unchanged.
         cookie = self.admin_cookie()
         status, _, body = self.post(
             "/api/admin/settings",
@@ -9412,13 +9408,13 @@ class AdminHttpTests(unittest.TestCase):
         )
         self.assertEqual(status, 200, body)
         data = json.loads(body)
-        self.assertEqual(data["message"], "A fail2ban beállításai mentve.")
+        self.assertEqual(data["message"], "Fail2ban settings saved.")
         self.assertEqual(data["fail2ban"]["max_attempts"], 4)
         self.assertEqual(data["fail2ban"]["window_seconds"], 120)
         self.assertEqual(data["fail2ban"]["ban_seconds"], 900)
 
-        # Nem alapértelmezett küszöbök, hogy a kikapcsolás utáni
-        # megőrzés ellenőrzése ne legyen tautologikus.
+        # Non-default thresholds so that checking persistence after disabling
+        # is not tautological.
         status, _, body = self.post(
             "/api/admin/fail2ban",
             {"action": "config", "drop_max": 7, "drop_ports": 9},
@@ -9485,7 +9481,7 @@ class AdminHttpTests(unittest.TestCase):
         )
         self.assertEqual(status, 200, body)
         data = json.loads(body)
-        self.assertEqual(data["message"], "192.0.2.50 letiltva.")
+        self.assertEqual(data["message"], "192.0.2.50 blocked.")
         bans = data["fail2ban"]["bans"]
         self.assertEqual(len(bans), 1)
         self.assertEqual(bans[0]["ip"], "192.0.2.50")
@@ -9501,8 +9497,8 @@ class AdminHttpTests(unittest.TestCase):
         self.assertEqual(events[0]["src"], "192.0.2.50")
         self.assertTrue(events[0]["manual"])
 
-        # A felület 5 másodpercenként GET-tel frissít; a friss listaérésnek is
-        # tartalmaznia kell a kézi tiltást, nem csak a POST válaszának.
+        # The UI refreshes with GET every 5 seconds; the fresh list must also
+        # contain the manual ban, not just the POST response.
         status, _, body = self.get(
             "/api/admin/fail2ban", cookie=cookie, source="127.0.0.5"
         )
@@ -9518,7 +9514,7 @@ class AdminHttpTests(unittest.TestCase):
             ["192.0.2.50"],
         )
 
-        # Újraindítás után a tiltás a fail2ban.json-ból töltődik vissza.
+        # After a restart the ban is reloaded from fail2ban.json.
         reloaded = fail2ban_mod.Fail2ban(
             self.fw,
             path=os.path.join(self.tmp.name, "fail2ban.json"),
@@ -9541,7 +9537,7 @@ class AdminHttpTests(unittest.TestCase):
         )
         self.assertEqual(status, 200, body)
         self.assertEqual(
-            json.loads(body)["message"], "192.0.2.50 tiltása feloldva."
+            json.loads(body)["message"], "Block on 192.0.2.50 lifted."
         )
         self.assertIn(
             "nft delete element inet hatarvedelem banned_v4 { 192.0.2.50 }",
@@ -9554,16 +9550,16 @@ class AdminHttpTests(unittest.TestCase):
         )
         self.assertEqual(status, 200, body)
         data = json.loads(body)
-        self.assertEqual(data["message"], "1 tiltás feloldva.")
+        self.assertEqual(data["message"], "1 blocks lifted.")
         self.assertEqual(data["fail2ban"]["banned_count"], 0)
 
     def test_early_403_drains_body_on_keepalive(self) -> None:
-        """A korai 403 után a keep-alive kapcsolat ne mérgeződjön el."""
+        """After the early 403, the keep-alive connection must not become poisoned."""
         payload = json.dumps(
             {"action": "ban", "ip": "192.0.2.77", "seconds": 600}
         )
 
-        # Nincs admin munkamenet: a guard a body kiolvasása előtt 403-at ad.
+        # There is no admin session: the guard returns 403 before reading the body.
         conn = self.conn(source="127.0.0.5")
         try:
             conn.request(
@@ -9584,8 +9580,8 @@ class AdminHttpTests(unittest.TestCase):
         finally:
             conn.close()
 
-        # Érvénytelen Origin: a guard átenged, de az origin-ellenőrzés a body
-        # kiolvasása előtt 403-at ad.
+        # Invalid Origin: the guard lets it through, but the origin check
+        # returns 403 before reading the body.
         cookie = self.admin_cookie()
         conn = self.conn(source="127.0.0.5")
         try:
@@ -9601,7 +9597,7 @@ class AdminHttpTests(unittest.TestCase):
             body = resp.read()
             self.assertEqual(resp.status, 403, body)
             data = json.loads(body)
-            self.assertEqual(data.get("error"), "érvénytelen kérés-eredet")
+            self.assertEqual(data.get("error"), "invalid request origin")
             self.assertNotIn("code", data)
 
             conn.request(
@@ -9638,7 +9634,7 @@ class AdminHttpTests(unittest.TestCase):
         data = json.loads(body)
         self.assertTrue(data.get("banned"))
         self.assertTrue(595 <= data["remaining"] <= 600)
-        self.assertIn("Túl sok sikertelen belépés", data["error"])
+        self.assertIn("Too many failed logins", data["error"])
 
         script = "\n".join(self.tools.script())
         self.assertIn(
@@ -9653,8 +9649,8 @@ class AdminHttpTests(unittest.TestCase):
         self.assertEqual(events[0]["user"], "alice")
         self.assertFalse(events[0]["manual"])
 
-        # A belépőoldal a tiltott állapotot 403-as, közös tiltásválaszból
-        # tudja meg; munkamenet-adat nem szivárog ki.
+        # The login page learns the blocked state from the 403 shared block
+        # response; session data does not leak.
         status, status_headers, body = self.get(
             "/api/status", source=source
         )
@@ -9669,7 +9665,7 @@ class AdminHttpTests(unittest.TestCase):
         self.assertEqual(status_data["ban_attempts"], 3)
         self.assertNotIn("user", status_data)
 
-        # A tiltott IP a helyes jelszóval is elutasításra kerül.
+        # The banned IP is rejected even with the correct password.
         _, _, challenge_body = self.get("/api/challenge", source=source)
         status, headers, body = self.post(
             "/api/login",
@@ -9743,7 +9739,7 @@ class AdminHttpTests(unittest.TestCase):
         data = json.loads(body)
         self.assertTrue(data["banned"])
         self.assertEqual(data["ban_source"], "drop")
-        self.assertIn("gyanús hálózati forgalmat", data["error"])
+        self.assertIn("suspicious network traffic", data["error"])
 
         cookie = self.admin_cookie()
         snapshot = self.fail2ban_state(cookie)
@@ -9756,7 +9752,7 @@ class AdminHttpTests(unittest.TestCase):
         self.assertIn("drop_window_seconds", snapshot)
         self.assertEqual(snapshot["limits"]["max_drop_max"], 10000)
 
-    # -- kétfaktoros belépés ---------------------------------------------------
+    # -- two-factor login --------------------------------------------------
 
     def test_admin_creates_user_with_totp_required(self) -> None:
         admin = self.admin_cookie()
@@ -9843,7 +9839,7 @@ class AdminHttpTests(unittest.TestCase):
         hashes = list(self.users.record(name).totp_recovery)
         self.assertEqual(len(hashes), 10)
 
-        # Nyitott verify-jegy: a resetnek ezt is érvénytelenítenie kell.
+        # Open verify ticket: reset must invalidate this too.
         status, _, body = self.password_login(name, password, source)
         self.assertEqual(status, 200, body)
         ticket = json.loads(body)["ticket"]
@@ -9939,7 +9935,7 @@ class AdminHttpTests(unittest.TestCase):
         self.users.set_totp_required("root", True)
         source = "127.0.0.5"
 
-        # Az első jelszavas lépés még nem ad munkamenetet.
+        # The first password step does not give a session yet.
         status, headers, body = self.password_login(
             "root", "root-jelszo-1", source
         )
@@ -9958,7 +9954,7 @@ class AdminHttpTests(unittest.TestCase):
         self.assertIn("Set-Cookie", headers)
         self.assertEqual(len(json.loads(body)["recovery_codes"]), 10)
 
-        # Beállítás után a jelszó csak jegyet ad, munkamenetet nem.
+        # After setup the password gives only a ticket, not a session.
         status, headers, body = self.password_login(
             "root", "root-jelszo-1", source
         )
@@ -9989,7 +9985,7 @@ class AdminHttpTests(unittest.TestCase):
         self.assertEqual(status, 200, body)
         self.assertTrue(json.loads(body)["ok"])
 
-    # -- fiókkérések (pending) -------------------------------------------------
+    # -- account requests (pending) ---------------------------------------
 
     def test_admin_registration_setting_toggle_without_nft(self) -> None:
         admin = self.admin_cookie()
@@ -10005,8 +10001,8 @@ class AdminHttpTests(unittest.TestCase):
         data = json.loads(body)
         self.assertTrue(data["ok"])
         self.assertIs(data["settings"]["registration_enabled"], True)
-        self.assertEqual(data["message"], "A fiókkérés beállítása mentve.")
-        # A beállítás nem megy át az nftables-en.
+        self.assertEqual(data["message"], "The account request setting was saved.")
+        # The setting does not go through nftables.
         self.assertEqual(self.tools.lines(), before)
 
         reloaded = gateway.settings_store.SettingsStore(
@@ -10040,7 +10036,7 @@ class AdminHttpTests(unittest.TestCase):
                     cookie=admin, source="127.0.0.5",
                 )
                 self.assertEqual(status, 400, body)
-                self.assertIn("igaz/hamis", json.loads(body)["error"])
+                self.assertIn("true/false", json.loads(body)["error"])
                 self.assertIs(
                     self.settings.snapshot()["registration_enabled"], False
                 )
@@ -10077,8 +10073,8 @@ class AdminHttpTests(unittest.TestCase):
             self.assertEqual(
                 data["settings"]["portal_domain"], "dropjak.z1.example.com"
             )
-            self.assertEqual(data["message"], "A Dropjak címe mentve.")
-            # A cím beállítása nem megy át az nftables-en.
+            self.assertEqual(data["message"], "The Dropjak address was saved.")
+            # Setting the address does not go through nftables.
             self.assertEqual(self.tools.lines(), before)
             reloaded = gateway.settings_store.SettingsStore(
                 self.settings.path, logger=lambda *_: None
@@ -10176,8 +10172,8 @@ class AdminHttpTests(unittest.TestCase):
         data = json.loads(body)
         self.assertTrue(data["ok"])
         self.assertEqual(data["settings"]["site_name"], "Északi Torony")
-        self.assertEqual(data["message"], "A tűzfal neve mentve.")
-        # A név mentése nem megy át az nftables-en.
+        self.assertEqual(data["message"], "The firewall name was saved.")
+        # Saving the name does not go through nftables.
         self.assertEqual(self.tools.lines(), before)
 
         reloaded = gateway.settings_store.SettingsStore(
@@ -10234,7 +10230,7 @@ class AdminHttpTests(unittest.TestCase):
         before = list(self.tools.lines())
         started = time.time()
 
-        # Bejelentkezés előtt a közlemény soha nem hagyja el a szervert.
+        # Before login the announcement never leaves the server.
         status, _, body = self.get("/api/status")
         self.assertEqual(status, 200, body)
         self.assertNotIn("motd", json.loads(body))
@@ -10252,23 +10248,23 @@ class AdminHttpTests(unittest.TestCase):
         self.assertEqual(
             data["settings"]["motd_expires_at"], "2999-01-01T00:00:00Z"
         )
-        self.assertEqual(data["message"], "A közlemény mentve.")
-        # A közlemény mentése nem megy át az nftables-en.
+        self.assertEqual(data["message"], "The announcement was saved.")
+        # Saving the announcement does not go through nftables.
         self.assertEqual(self.tools.lines(), before)
 
-        # Bejelentkezés nélkül az aktív közlemény sem hagyja el a szervert.
+        # Without login, even the active announcement does not leave the server.
         status, _, body = self.get("/api/status")
         self.assertEqual(status, 200, body)
         self.assertNotIn("motd", json.loads(body))
 
-        # Belépés után a portál megkapja; a belépés válasza is tartalmazza.
+        # After login the portal receives it; the login response contains it too.
         cookie, login_data = self.login("alice", "alice-jelszo-1")
         self.assertEqual(login_data["motd"], "Karbantartás 22:00")
         status, _, body = self.get("/api/status", cookie=cookie)
         self.assertEqual(status, 200, body)
         self.assertEqual(json.loads(body)["motd"], "Karbantartás 22:00")
 
-        # Lejárt közlemény: a mentés elfogadja, de a válaszból kimarad.
+        # Expired announcement: the save accepts it, but it is omitted from the response.
         status, _, body = self.post(
             "/api/admin/settings",
             {"action": "motd", "text": "Régi hír",
@@ -10281,7 +10277,7 @@ class AdminHttpTests(unittest.TestCase):
         self.assertNotIn("motd", json.loads(body))
         self.assertNotIn("Régi hír", json.loads(body).values())
 
-        # Állandó közlemény: üres lejárat.
+        # Permanent announcement: empty expiry.
         status, _, body = self.post(
             "/api/admin/settings",
             {"action": "motd", "text": "Állandó hír", "expires_at": ""},
@@ -10295,7 +10291,7 @@ class AdminHttpTests(unittest.TestCase):
         self.assertEqual(status, 200, body)
         self.assertEqual(json.loads(body)["motd"], "Állandó hír")
 
-        # Üres szöveg kikapcsolja (törli) a közleményt.
+        # Empty text disables (deletes) the announcement.
         status, _, body = self.post(
             "/api/admin/settings",
             {"action": "motd", "text": "", "expires_at": ""},
@@ -10315,7 +10311,7 @@ class AdminHttpTests(unittest.TestCase):
         for row in rows:
             self.assertEqual(row.get("user"), "root")
             self.assertEqual(row.get("target"), "motd")
-            # A közlemény szövege soha nem kerül a naplóba.
+            # The announcement's text never goes into the log.
             self.assertNotIn("text", row)
         self.assertEqual(
             rows[-1].get("motd_length"), len("Karbantartás 22:00")
@@ -10355,7 +10351,7 @@ class AdminHttpTests(unittest.TestCase):
         self.assertEqual(status, 200, body)
         data = json.loads(body)
         self.assertEqual(data["settings"]["proxy_domains"], ["z1.example.com"])
-        self.assertEqual(data["message"], "A proxy beállításai mentve.")
+        self.assertEqual(data["message"], "Proxy settings saved.")
         self.assertEqual(self.tools.lines(), before)
         rows = [
             row for row in audit_since(self.audit, started)
@@ -10378,8 +10374,8 @@ class AdminHttpTests(unittest.TestCase):
             self.settings.snapshot()["proxy_routes"][0]["name"], "owui"
         )
 
-        # Domain szabály csak létező bejegyzésre hivatkozhat, és amíg
-        # hivatkozik, a bejegyzés nem törölhető.
+        # A domain rule may reference only an existing entry, and while it
+        # references it, the entry cannot be deleted.
         status, _, body = self.post(
             "/api/admin/rules",
             {"action": "create", "id": "dom-x", "label": "X",
@@ -10387,7 +10383,7 @@ class AdminHttpTests(unittest.TestCase):
             cookie=admin, source="127.0.0.5",
         )
         self.assertEqual(status, 400, body)
-        self.assertIn("ismeretlen proxy-bejegyzés", json.loads(body)["error"])
+        self.assertIn("unknown proxy entry", json.loads(body)["error"])
         status, _, body = self.post(
             "/api/admin/rules",
             {"action": "create", "id": "dom-owui", "label": "OWUI",
@@ -10414,7 +10410,7 @@ class AdminHttpTests(unittest.TestCase):
             cookie=admin, source="127.0.0.5",
         )
         self.assertEqual(status, 400, body)
-        self.assertIn("domain szabály hivatkozik rá", json.loads(body)["error"])
+        self.assertIn("domain rule references it", json.loads(body)["error"])
         self.assertEqual(len(self.settings.snapshot()["proxy_routes"]), 1)
         status, _, body = self.post(
             "/api/admin/rules", {"action": "delete", "id": "dom-owui"},
@@ -10478,7 +10474,7 @@ class AdminHttpTests(unittest.TestCase):
         self.assertFalse(record.enabled)
         self.assertTrue(record.rules_set)
 
-        # Nyers pending admin: szerepköre admin és enabled, mégsem aktív admin.
+        # Raw pending admin: its role is admin and enabled, yet it is not an active admin.
         admin_name = "pendingadmin"
         self.addCleanup(self.drop_totp_user, admin_name)
         self.users.add(
@@ -10515,7 +10511,7 @@ class AdminHttpTests(unittest.TestCase):
         ]
         self.assertEqual(active_admins, ["root"])
 
-        # Az e-mail-cím nem szivárog a nyilvános végpontokra.
+        # The email address does not leak to the public endpoints.
         for path in ("/api/status", "/api/challenge"):
             status, _, payload = self.get(path)
             self.assertEqual(status, 200, payload)
@@ -10530,7 +10526,7 @@ class AdminHttpTests(unittest.TestCase):
         )
         self.assertEqual(status, 200, body)
         payload = json.loads(body)
-        self.assertEqual(payload["message"], "A fiókkérés jóváhagyva.")
+        self.assertEqual(payload["message"], "The account request was approved.")
         item = next(u for u in payload["users"] if u["name"] == name)
         self.assertFalse(item["pending"])
         self.assertTrue(item["enabled"])
@@ -10563,7 +10559,7 @@ class AdminHttpTests(unittest.TestCase):
         self.assertNotIn(email, dump)
         self.assertNotIn(password, dump)
 
-        # Jóváhagyás után jelszó + captcha munkamenetet ad, szabály nélkül.
+        # After approval, password + captcha gives a session, without rules.
         user_cookie, login_data = self.login(
             name, password, source="127.0.0.2"
         )
@@ -10579,7 +10575,7 @@ class AdminHttpTests(unittest.TestCase):
             cookie=admin, source="127.0.0.5",
         )
         self.assertEqual(status, 400, body)
-        self.assertIn("nem jóváhagyásra váró", json.loads(body)["error"])
+        self.assertIn("not a pending approval request", json.loads(body)["error"])
 
     def test_reject_pending_request_cleans_up(self) -> None:
         admin = self.admin_cookie()
@@ -10596,8 +10592,8 @@ class AdminHttpTests(unittest.TestCase):
             "label": "Elutasítandó kérelem", "rules": [], "members": [],
         })
         self.users.add(name, password, pending=True, email=email)
-        # A csoporttagságot közvetlenül állítjuk be, hogy az elutasítás
-        # takarítását vizsgálhassuk (a HTTP-úton ezt a guard tiltja).
+        # We set the group membership directly so that we can examine the
+        # rejection's cleanup (the guard forbids this over HTTP).
         self.groups.set_memberships(name, [group_id])
         self.assertEqual(
             [group.id for group in self.groups.groups_for(name)], [group_id]
@@ -10611,7 +10607,7 @@ class AdminHttpTests(unittest.TestCase):
         )
         self.assertEqual(status, 200, body)
         payload = json.loads(body)
-        self.assertEqual(payload["message"], "A fiókkérés elutasítva.")
+        self.assertEqual(payload["message"], "The account request was rejected.")
         self.assertIsNone(self.users.record(name))
         self.assertNotIn(name, [u["name"] for u in payload["users"]])
         self.assertEqual(self.groups.groups_for(name), [])
@@ -10634,7 +10630,7 @@ class AdminHttpTests(unittest.TestCase):
             cookie=admin, source="127.0.0.5",
         )
         self.assertEqual(status, 400, body)
-        self.assertIn("csak jóváhagyásra váró", json.loads(body)["error"])
+        self.assertIn("only a pending approval request", json.loads(body)["error"])
         self.assertIsNotNone(self.users.record("alice"))
 
     def test_pending_request_cannot_be_edited_or_grouped(self) -> None:
@@ -10660,7 +10656,7 @@ class AdminHttpTests(unittest.TestCase):
             cookie=admin, source="127.0.0.5",
         )
         self.assertEqual(status, 400, body)
-        self.assertIn("nem szerkeszthető", json.loads(body)["error"])
+        self.assertIn("cannot be edited", json.loads(body)["error"])
         record = self.users.record(name)
         self.assertTrue(record.pending)
         self.assertFalse(record.enabled)
@@ -10683,7 +10679,7 @@ class AdminHttpTests(unittest.TestCase):
         )
         self.assertEqual(status, 400, body)
         self.assertIn(
-            "nem rendelhető csoporthoz", json.loads(body)["error"]
+            "cannot be assigned to a group", json.loads(body)["error"]
         )
         self.assertEqual(self.groups.get(group_id).members, ())
         self.assertEqual(self.groups.groups_for(name), [])
@@ -10728,7 +10724,7 @@ class AdminHttpTests(unittest.TestCase):
                 )
                 self.assertEqual(status, 400, body)
                 self.assertIn(
-                    "utolsó aktív admin", json.loads(body)["error"]
+                    "last active admin", json.loads(body)["error"]
                 )
         root = self.users.record("root")
         self.assertEqual(root.role, gateway.ROLE_ADMIN)
@@ -10760,7 +10756,7 @@ class AdminHttpTests(unittest.TestCase):
         self.assertEqual(row["count"], payload["count"])
         self.assertEqual(row["severity"], "info")
 
-        # Az automatikus (manual nélküli) frissítés nem kerül a naplóba.
+        # Automatic (without manual) updates do not go into the log.
         status, _, body = self.get(
             "/api/admin/logs?limit=10", cookie=admin, source="127.0.0.5"
         )
@@ -10805,7 +10801,7 @@ class AdminHttpTests(unittest.TestCase):
         self.assertEqual(row["severity"], "warn")
         self.assertNotIn(password, json.dumps(rows, ensure_ascii=False))
 
-    # -- port proxy (3.11.0) -------------------------------------------------
+    # -- port proxy (3.11.0) ----------------------------------------------
 
     PORT_PROXY = {
         "label": "Minecraft", "proto": "tcp", "type": "forward",
@@ -10880,7 +10876,7 @@ class AdminHttpTests(unittest.TestCase):
         )
         self.assertEqual(rows[0]["flushed_ports"], "tcp/25565")
 
-        # Változatlan újramentésnél nincs conntrack-törlés.
+        # On an unchanged re-save there is no conntrack deletion.
         self.tools.clear()
         status, _, body = self.post(
             "/api/admin/settings",
@@ -10902,7 +10898,7 @@ class AdminHttpTests(unittest.TestCase):
             cookie=admin, source="127.0.0.5",
         )
         self.assertEqual(status, 400, body)
-        self.assertIn("fenntartott", json.loads(body)["error"])
+        self.assertIn("reserved", json.loads(body)["error"])
         rejected = [
             row for row in audit_since(self.audit, started)
             if row.get("event") == "admin_request_rejected"
@@ -10924,11 +10920,11 @@ class AdminHttpTests(unittest.TestCase):
 
 
 class ConfigFlashHttpTests(unittest.TestCase):
-    """Konfigurációs csomag export/import és gyári visszaállítás HTTP-n."""
+    """Configuration bundle export/import and factory reset over HTTP."""
 
-    # Statikus EC P-256 pár (2126-ig érvényes), SAN: z1.example.com és
-    # *.z1.example.com. Nem függünk a test_proxy_certs modultól, mert az
-    # ezt a modult importálja.
+    # Static EC P-256 pair (valid until 2126), SAN: z1.example.com and
+    # *.z1.example.com. We do not depend on the test_proxy_certs module,
+    # because that imports this module.
     KEY = """-----BEGIN PRIVATE KEY-----
 MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgN6i2etytxkXgL7a+
 Lu78ak5XqhofNa7yWA1/jvIPLS+hRANCAAS65bQqmYQQYIo6rXqiPhJe9TUd7Inu
@@ -11021,8 +11017,8 @@ dz674+jH6I8AVw==
         self.tools.clear_chains()
         self.gw.sessions.shutdown(reason="test")
         server.LOGIN_TICKETS.revoke_all()
-        # Üres, ismert állapot; a .env-ből létrehozott admin szerepét a
-        # provisioning-jelölő utánozza (a felület ilyenkor üresnek látja).
+        # Empty, known state; the role of the admin created from .env is
+        # imitated by the provisioning marker (the UI sees it as empty in this case).
         self.users.reset()
         self.users.add("root", "root-jelszo-1", role=gateway.ROLE_ADMIN)
         self.users.set_metadata(
@@ -11036,7 +11032,7 @@ dz674+jH6I8AVw==
         self.settings.reset()
         self.certs.reset()
         self.fail2ban.reset()
-        # A fájl létezzen a pillanatkép előtt: a puszta snapshot is menthet.
+        # The file must exist before the snapshot: a mere snapshot can save too.
         self.fail2ban.configure({})
         for name in os.listdir(self.tmp.name):
             if name.startswith("config-backup-"):
@@ -11147,7 +11143,7 @@ dz674+jH6I8AVw==
         ]
 
     def seed_site(self) -> None:
-        """Nem üres állapot: felhasználó, szabály, csoport, beállítás, tanúsítvány."""
+        """Non-empty state: user, rule, group, settings, certificate."""
         self.rules.create("web", {
             "label": "Web", "tcp": [80], "default_ttl": 120, "max_ttl": 600,
         })
@@ -11204,7 +11200,7 @@ dz674+jH6I8AVw==
         self.assertEqual(
             set(sections["fail2ban"]), set(server._FAIL2BAN_CONFIG_KEYS)
         )
-        # Naplók, munkamenetek, tiltások és futásidejű állapot nem kerülhet bele.
+        # Logs, sessions, bans and runtime state must not be included.
         for forbidden in (
             "audit", "sessions", "bans", "attempts", "drops", "logs",
             "orphan_unbans",
@@ -11302,7 +11298,7 @@ dz674+jH6I8AVw==
         self.assertNotIn("Első oldal", backup["sections"]["settings"]["site_name"])
 
     def test_import_resolves_service_rule_after_settings(self) -> None:
-        """A csomagban érkező új alagút + szolgáltatás-szabály azonnal oldódik."""
+        """The new tunnel + service rule arriving in the bundle resolves immediately."""
         old_wan = self.fw.wan_if
         self.fw.wan_if = "eth0"
         self.addCleanup(setattr, self.fw, "wan_if", old_wan)
@@ -11333,8 +11329,8 @@ dz674+jH6I8AVw==
         self.assertEqual(status, 200, body)
         rule = self.rules.get("import-svc")
         self.assertIsNotNone(rule)
-        # A beállítások előtti szabályírás után a reflect_services() a
-        # mentés részeként azonnal feloldja a hivatkozást.
+        # After writing the rule before the settings, reflect_services()
+        # resolves the reference immediately as part of the save.
         self.assertEqual(rule.service_tcp, (25565,))
         self.assertEqual(
             rule.service_signature,
@@ -11431,7 +11427,7 @@ dz674+jH6I8AVw==
             with self.subTest(label):
                 status, _, body = self.import_bundle(candidate, cookie=cookie)
                 self.assertEqual(status, 400, body)
-                self.assertIn("érvénytelen", json.loads(body)["error"])
+                self.assertIn("the bundle is invalid", json.loads(body)["error"])
                 self.assertEqual(self.state_snapshot(), before)
                 self.assertEqual(self.restart_calls, [])
         self.assertEqual(self.users.names(), ["root"])
@@ -11455,7 +11451,7 @@ dz674+jH6I8AVw==
         def flaky(data):
             calls.append(1)
             if len(calls) == 1:
-                raise RuntimeError("szimulált írási hiba")
+                raise RuntimeError("simulated write error")
             return original(data)
 
         started = time.time()
@@ -11464,12 +11460,12 @@ dz674+jH6I8AVw==
                 bundle, confirm="Régi", cookie=self.login()
             )
         self.assertEqual(status, 500, body)
-        self.assertIn("visszaállítva", json.loads(body)["error"])
+        self.assertIn("restored", json.loads(body)["error"])
         self.assertEqual(self.state_snapshot(), before)
         self.assertEqual(self.restart_calls, [])
         self.assertNotIn("bob", self.users.names())
         self.assertEqual(self.rules.persisted_rules(), [])
-        # A munkamenet a hibás import után is használható marad.
+        # The session remains usable after the failed import.
         self.assertEqual(self.gw.sessions.count(), 1)
         rows = self.audit_rows(started, "config_import_failed")
         self.assertTrue(
@@ -11522,7 +11518,7 @@ dz674+jH6I8AVw==
         self.assertEqual(len(rows), 1, rows)
         self.assertIn("errors", rows[0])
 
-        # Az újraindulás utáni .env-admin létrehozását utánozzuk.
+        # We imitate the .env admin creation after restart.
         with mock.patch.multiple(
             gateway, ADMIN_ENABLED=True, ADMIN_USER="envadmin",
             ADMIN_PASSWORD="env-jelszo-1", ADMIN_PASSWORD_FILE="",
@@ -11558,7 +11554,7 @@ dz674+jH6I8AVw==
         status, _, body = self.reset_config("Tesztoldal", cookie=cookie)
         self.assertEqual(status, 200, body)
 
-        # A reset utáni indulás újra létrehozza a provisioning admint.
+        # Startup after the reset recreates the provisioning admin.
         self.users.add("root", "root-jelszo-1", role=gateway.ROLE_ADMIN)
         self.users.set_metadata(
             "root",
@@ -11625,7 +11621,7 @@ class RateLimitHttpTests(unittest.TestCase):
 
 
 class TotpCliTests(unittest.TestCase):
-    """A ``server.py user totp-reset`` parancs viselkedése."""
+    """Behavior of the ``server.py user totp-reset`` command."""
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -11667,7 +11663,7 @@ class TotpCliTests(unittest.TestCase):
         result = self.run_cli("user", "totp-reset", "cliuser")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("cliuser", result.stdout)
-        self.assertIn("2FA alaphelyzetbe állítva", result.stdout)
+        self.assertIn("2FA reset", result.stdout)
         self.assert_no_secrets(result.stdout + result.stderr)
 
         data = json.loads(Path(self.users_path).read_text(encoding="utf-8"))
@@ -11679,7 +11675,7 @@ class TotpCliTests(unittest.TestCase):
         self.assertEqual(
             stat.S_IMODE(os.stat(self.users_path).st_mode), 0o600
         )
-        # A már betöltött példány is látja a változást (mtime-újratöltés).
+        # The already loaded instance also sees the change (mtime reload).
         record = self.users.record("cliuser")
         self.assertEqual(record.totp_secret, "")
         self.assertEqual(record.totp_last_step, -1)
@@ -11689,10 +11685,10 @@ class TotpCliTests(unittest.TestCase):
         result = self.run_cli("user", "totp-reset", "nincs-ilyen")
         self.assertEqual(result.returncode, 1)
         output = result.stdout + result.stderr
-        self.assertIn("Nincs ilyen felhasználó", output)
+        self.assertIn("No such user", output)
         self.assertIn("nincs-ilyen", output)
         self.assert_no_secrets(output)
-        # A meglévő felhasználó érintetlen maradt.
+        # The existing user remained untouched.
         self.assertTrue(self.users.record("cliuser").totp_secret)
 
     def test_cli_totp_reset_while_server_runs(self) -> None:
@@ -11737,14 +11733,14 @@ class TotpCliTests(unittest.TestCase):
 
         self.addCleanup(stop_server)
 
-        # A futó szerver gyorsítótára már tartalmazza a beállított titkot.
+        # The running server's cache already contains the configured secret.
         self.assertTrue(self.users.record("cliuser").totp_secret)
 
         result = self.run_cli("user", "totp-reset", "cliuser")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_no_secrets(result.stdout + result.stderr)
 
-        # mtime-alapú újratöltés: az élő példány a CLI írása után frissül.
+        # mtime-based reload: the live instance refreshes after the CLI write.
         record = self.users.record("cliuser")
         self.assertEqual(record.totp_secret, "")
         self.assertEqual(record.totp_last_step, -1)
@@ -11760,7 +11756,7 @@ class TotpCliTests(unittest.TestCase):
 
 
 class CliAuditTests(unittest.TestCase):
-    """A parancssori felhasználó- és fail2ban-műveletek auditja."""
+    """Audit of the command-line user and fail2ban operations."""
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -11793,9 +11789,9 @@ class CliAuditTests(unittest.TestCase):
         )
 
     def events(self, name: str) -> list[dict]:
-        # Az AuditLog.read esemény-szűrője részleges (családokhoz), itt
-        # viszont pontos egyezést akarunk: a cli_fail2ban_ban nem azonos a
-        # fail2ban_ban eseménnyel.
+        # AuditLog.read's event filter is partial (for event families), but here
+        # we want an exact match: cli_fail2ban_ban is not the same as the
+        # fail2ban_ban event.
         return [
             row for row in self.audit.read()
             if row.get("event") == name
@@ -11840,7 +11836,7 @@ class CliAuditTests(unittest.TestCase):
         self.assertEqual(len(failed), 1)
         self.assertEqual(failed[0]["action"], "del")
         self.assertEqual(failed[0]["target"], "cliuser2")
-        self.assertEqual(failed[0]["reason"], "nincs ilyen felhasználó")
+        self.assertEqual(failed[0]["reason"], "no such user")
 
         dump = Path(self.audit_path).read_text(encoding="utf-8")
         self.assertNotIn(first, dump)
@@ -11880,7 +11876,7 @@ class CliAuditTests(unittest.TestCase):
         self.assertEqual(cli_unbans[0]["target"], ip)
         self.assertTrue(cli_unbans[0]["removed"])
 
-        # Nem tiltott IP feloldása nem hiba, de naplózott művelet.
+        # Unbanning a non-banned IP is not an error, but a logged operation.
         result = self.run_cli("fail2ban", "unban", ip)
         self.assertEqual(result.returncode, 0, result.stderr)
         failed = self.events("cli_action_failed")
@@ -11891,7 +11887,7 @@ class CliAuditTests(unittest.TestCase):
 
 
 class StaticUiTests(unittest.TestCase):
-    """A fiókkérés és a QR-beiratkozás statikus frontend-jelölői."""
+    """Static frontend markers of the account request and QR enrollment."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -11905,7 +11901,7 @@ class StaticUiTests(unittest.TestCase):
             'data-i18n="Fiók kérése"',
         ):
             self.assertIn(token, self.source, token)
-        # Az admin beállítás jelölőnégyzete JS-ben épül: id: 'registration-enabled'.
+        # The admin setting's checkbox is built in JS: id: 'registration-enabled'.
         self.assertRegex(
             self.source,
             r"""id\s*[:=]\s*["']registration-enabled["']""",
@@ -11919,19 +11915,19 @@ class StaticUiTests(unittest.TestCase):
             self.assertIn(text, self.source, text)
 
     def test_access_ttl_defaults_to_hours_and_allows_long_grants(self) -> None:
-        # A hozzáférés hosszát mindig egész órában adjuk meg: nincs
-        # mértékegység-választó, és a perc-alapú ágak eltűntek.
+        # The access duration is always given in whole hours: there is no
+        # unit selector, and the minute-based branches are gone.
         self.assertNotIn('id="ttl-unit"', self.source)
         self.assertNotIn('<option value="min"', self.source)
         self.assertNotIn("ttlUnit", self.source)
         self.assertNotIn("ttlUnitFactor", self.source)
         self.assertNotIn("setTtlUnit", self.source)
-        # A régi 1440 perces (24 órás) felső korlát eltűnt; az admin űrlap
-        # a szerveroldali limitet követi, így egy hét is beállítható.
+        # The old 1440-minute (24-hour) upper limit is gone; the admin form
+        # follows the server-side limit, so even a week can be set.
         self.assertNotIn('max="1440"', self.source)
         self.assertNotIn("1440 perc = 24 óra", self.source)
         self.assertIn("max_ttl: 2592000", self.source)
-        # Az admin szabályűrlap egész órában kérdez, a tárolt érték másodperc.
+        # The admin rule form asks in whole hours; the stored value is seconds.
         self.assertIn("max: maxTtlHours", self.source)
         self.assertIn('Alapértelmezett idő (óra)', self.source)
         self.assertIn('Maximális idő (óra)', self.source)
@@ -11943,14 +11939,14 @@ class StaticUiTests(unittest.TestCase):
         self.assertIn("ttlDurationLabel", self.source)
         self.assertIn("ttlHours", self.source)
         self.assertIn("return '< 1 óra'", self.source)
-        # A régi, egy óránál rövidebb szabály külön üzenetet ad, kérés nélkül.
+        # The old rule shorter than one hour gives a separate message, without a request.
         self.assertIn("Number(rule.max_ttl) < 3600", self.source)
         self.assertIn("ttlEl.disabled = unavailable", self.source)
         self.assertIn("grantBtn.disabled = unavailable", self.source)
-        # A régi, perces megjelenítés nem maradt a szabályűrlapon.
+        # The old, minute-based display did not remain on the rule form.
         self.assertNotIn("Math.round(rule.default_ttl / 60)", self.source)
         self.assertNotIn("Math.round(rule.max_ttl / 60)", self.source)
-        # Az óra egész számú: nincs törtszámos lépés, és a beküldés is ellenőrzi.
+        # The hour is a whole number: there is no fractional step, and submission checks it too.
         self.assertIn("ttlEl.step = '1'", self.source)
         self.assertIn("ttlEl.inputMode = 'numeric'", self.source)
         self.assertIn("!Number.isInteger(rawTtl)", self.source)
@@ -11959,7 +11955,7 @@ class StaticUiTests(unittest.TestCase):
             'Ez a szabály legalább 1 órás időtartamot igényel.',
             self.source,
         )
-        # Az EN/DE fordítások ismerik az új órás alakokat.
+        # The EN/DE translations also know the new hour-based forms.
         for token in (
             r"Legfeljebb (< 1|[0-9.,]+) óra",
             r"([0-9.,]+) óra$",
@@ -11967,13 +11963,13 @@ class StaticUiTests(unittest.TestCase):
             "'< 1 óra': '< 1 Std.'",
         ):
             self.assertIn(token, self.source, token)
-        # A szerveroldali üzenetek is a formázott időtartamot használják.
+        # The server-side messages also use the formatted duration.
         gateway_source = (ROOT / "gateway.py").read_text(encoding="utf-8")
         server_source = (ROOT / "server.py").read_text(encoding="utf-8")
         self.assertIn("def format_duration(seconds)", gateway_source)
         self.assertIn("format_duration(rule.max_ttl)", gateway_source)
         self.assertIn("format_duration(MIN_TTL)", gateway_source)
-        self.assertIn('"Hozzáférés engedélyezve: "', server_source)
+        self.assertIn('"Access granted: "', server_source)
         self.assertIn("gateway.format_duration(ttl)", server_source)
         self.assertIn("gateway.format_duration(gateway.MAX_TTL)", server_source)
 
@@ -12045,11 +12041,11 @@ class StaticUiTests(unittest.TestCase):
             "A közlemény mentve.",
         ):
             self.assertIn(token, self.source, token)
-        # A közlemény szövege textContenttel kerül a DOM-ba, nem innerHTML-lel.
+        # The announcement's text goes into the DOM via textContent, not innerHTML.
         start = self.source.index("function showMotd(data)")
         end = self.source.index("\n}", start)
         self.assertNotIn("innerHTML", self.source[start:end])
-        # Az admin mező felső korlátja a szerveroldali limittel egyezik.
+        # The admin field's upper limit matches the server-side limit.
         self.assertIn("maxlength: 2000", self.source)
         en, de, _, _ = self._i18n_sections()
         for text, english, german in (
@@ -12067,7 +12063,7 @@ class StaticUiTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIn(f"'{text}': '{english}'", en)
                 self.assertIn(f"'{text}': '{german}'", de)
-        # A szerveroldali motd-hibák is fordulnak.
+        # The server-side motd errors are translated too.
         for text in (
             "motd: szöveg kell",
             "motd: legfeljebb 2000 karakter",
@@ -12080,8 +12076,8 @@ class StaticUiTests(unittest.TestCase):
                 self.assertIn(f"'{text}':", de)
 
     def test_motd_is_shown_once_per_login(self) -> None:
-        # A 30 másodperces poll a refreshAccessFromStatus()-ot hívja, az nem
-        # nyitja újra a közleményt; a kilépés nullázza a jelzőt.
+        # The 30-second poll calls refreshAccessFromStatus(), which does not
+        # reopen the announcement; logout resets the flag.
         show = self._js_function("showMotd", self.source)
         self.assertIn("if (motdShown ||", show)
         access = self._js_function("showAccess", self.source)
@@ -12101,7 +12097,7 @@ class StaticUiTests(unittest.TestCase):
         self.assertIn("hideMotd();", end)
 
     def test_motd_modal_behaviour_in_node(self) -> None:
-        """A modális megjeleníti a szöveget, zárható, és poll után sem nyílik újra."""
+        """The modal displays the text, can be closed, and does not reopen after polling."""
         show = self._js_function("showMotd", self.source)
         hide = self._js_function("hideMotd", self.source)
         script = (
@@ -12117,15 +12113,15 @@ showMotd(payload);
 const opened = { hidden: motdOverlay.hidden, text: motdTextEl.textContent };
 hideMotd();
 const closed = motdOverlay.hidden;
-// Ismételt status-poll (ugyanaz a belépés) nem nyitja újra.
+// Repeated status poll (same login) does not reopen.
 showMotd(payload);
 showMotd(payload);
 const afterPoll = motdOverlay.hidden;
-// Új belépés: a jelző nullázódik, az új közlemény megjelenik.
+// New login: the flag resets, the new announcement appears.
 motdShown = false;
 showMotd({ motd: 'Új hír' });
 const nextLogin = { hidden: motdOverlay.hidden, text: motdTextEl.textContent };
-// Üres vagy hiányzó közlemény nem nyit ablakot.
+// Empty or missing announcement does not open a window.
 motdShown = false;
 hideMotd();
 showMotd({ motd: '' });
@@ -12139,7 +12135,7 @@ process.stdout.write(JSON.stringify(
         )
         node = shutil.which("node")
         if node is None:
-            self.skipTest("node nem érhető el a JS-helper teszthez")
+            self.skipTest("node is not available for the JS helper test")
         result = subprocess.run(
             [node, "-e", script], capture_output=True, text=True, timeout=60,
         )
@@ -12169,14 +12165,14 @@ process.stdout.write(JSON.stringify(
             "Nem működik a QR? Írd be kézzel",
         ):
             self.assertIn(token, self.source, token)
-        # A kézi titok a QR-tartalék egy <details> blokkban van.
+        # The manual secret is in a <details> block as the QR fallback.
         self.assertIsNotNone(
             re.search(
                 r"<details\b[^>]*>.*?Nem működik a QR\? Írd be kézzel.*?</details>",
                 self.source, re.S,
             )
         )
-        # Nincs külső QR-CDN vagy qrcode-ra mutató script-forrás.
+        # There is no external QR CDN or script source pointing to qrcode.
         self.assertNotIn("cdn.", self.source.lower())
         self.assertIsNone(
             re.search(
@@ -12225,14 +12221,14 @@ process.stdout.write(JSON.stringify(
             with self.subTest(text=text):
                 self.assertIn(text, en, f"hiányzó angol fordítás: {text}")
                 self.assertIn(text, de, f"hiányzó német fordítás: {text}")
-        # Dinamikus darabszám és elutasítás-megerősítés mintája.
+        # Pattern for the dynamic count and rejection confirmation.
         for section in (pen, pde):
             self.assertIn("függő kérelem", section)
             self.assertIn("Elutasítod:", section)
 
 
     def test_legacy_rule_fallback_label_is_accurate(self) -> None:
-        """A kiosztás nélküli fiók címkéje csak a forward öröklést jelzi."""
+        """The label of an account without assignment indicates only forward inheritance."""
         for old in (
             "nincs beállítva (alap: mind)",
             "not set (default: all)",
@@ -12257,13 +12253,13 @@ process.stdout.write(JSON.stringify(
                 self.assertIn(source_text, self.source, source_text)
                 self.assertIn(f"'{source_text}': '{english}'", en, source_text)
                 self.assertIn(f"'{source_text}': '{german}'", de, source_text)
-        # A régi fallback csak kiosztás nélküli fiókra vonatkozik, ezért a
-        # csoportos öröklést külön címke jelzi.
+        # The old fallback applies only to an unassigned account, so group
+        # inheritance is indicated by a separate label.
         self.assertIn("(user.groups || []).length", self.source)
 
 
     def test_admin_password_generator_markup_and_translations(self) -> None:
-        """Az admin felhasználóűrlap jelszó-generátora és a hozzá tartozó UI."""
+        """Password generator of the admin user form and its associated UI."""
         for token in (
             "function secureRandomIndex(max)",
             "function generatePassword()",
@@ -12332,7 +12328,7 @@ process.stdout.write(JSON.stringify(
             "tr('másolat')",
         ):
             self.assertIn(token, self.source, token)
-        # A gyűjtő payloadja nem tartalmaz saját irányt.
+        # The collection payload contains no direction of its own.
         self.assertNotIn("direction,\n      default_ttl", self.source)
         en, de, pen, pde = self._i18n_sections()
         sources = (
@@ -12395,10 +12391,10 @@ process.stdout.write(JSON.stringify(
         ):
             with self.subTest(token=token):
                 self.assertIn(token, self.source)
-        # A domain szabály nem irány: nincs 'domain' opció az irányválasztóban.
+        # The domain rule is not a direction: there is no 'domain' option in the direction selector.
         self.assertNotIn("value: 'domain'", self.source)
-        # A hozzáférési kártyán csak egyedi szabálynál jelenik meg a Host
-        # jelzés; az admin listában a ruleKind() a gyűjtőt veszi előre.
+        # The Host marker appears on the access card only for an individual
+        # rule; in the admin list ruleKind() puts the collection first.
         self.assertEqual(
             self.source.count("!rule.collection && rule.direction === 'input'"),
             1,
@@ -12432,7 +12428,7 @@ process.stdout.write(JSON.stringify(
                 self.assertIn(
                     f"'{text}':", de, f"hiányzó német fordítás: {text}"
                 )
-        # A 22-es port tiltásának fordítása eltűnt; a 8100-as megmaradt.
+        # The translation of port 22's prohibition disappeared; port 8100's remained.
         for section in (en, de):
             self.assertNotIn(
                 "a 22-es port (SSH) nem nyitható meg host szabállyal",
@@ -12481,7 +12477,7 @@ process.stdout.write(JSON.stringify(
                 )
 
     def test_admin_cross_reference_links(self) -> None:
-        """Az admin oldalak entitásnevei belső hivatkozásként nyílnak meg."""
+        """The admin pages' entity names open as internal links."""
         for token in (
             "const ENTITY_TABS = { rule: 'rules', group: 'groups', "
             "user: 'users', domain: 'domains' };",
@@ -12496,8 +12492,8 @@ process.stdout.write(JSON.stringify(
             "row.dataset.route = full;",
         ):
             self.assertIn(token, self.source, token)
-        # Csoportok, felhasználók és munkamenetek közvetlenül hivatkoznak; a
-        # szabályoldal a ruleSummary-n keresztül (gyűjtőtagok, domainek).
+        # Groups, users and sessions reference directly; the rule page through
+        # ruleSummary (collection members, domains).
         for name in ("renderGroups", "renderUsers"):
             self.assertIn(
                 "entityList(", self._js_function(name, self.source), name
@@ -12522,7 +12518,7 @@ process.stdout.write(JSON.stringify(
                 self.assertIn(f"'{text}':", de, f"hiányzó német fordítás: {text}")
 
     def test_open_admin_entity_in_node(self) -> None:
-        """A szerkesztő csak a betöltés után nyílik; domainnél kiemelés van."""
+        """The editor opens only after loading; for a domain there is highlighting."""
         open_entity = self._js_function("openAdminEntity", self.source)
         tabs_match = re.search(
             r"const ENTITY_TABS = \{[^}]*\};", self.source
@@ -12535,7 +12531,7 @@ process.stdout.write(JSON.stringify(
             "let adminEdit = null;\n"
             "let adminDraft = { old: true };\n"
             "let adminFlash = { old: true };\n"
-            "let adminState = null;   // hideg gyorsítótár\n"
+            "let adminState = null;   // cold cache\n"
             "let ruleEditorOpened = false;\n"
             "const log = [];\n"
             "let editAtLoad = 'unset';\n"
@@ -12593,7 +12589,7 @@ process.stdout.write(JSON.stringify(
         )
         node = shutil.which("node")
         if node is None:
-            self.skipTest("node nem érhető el a JS-helper teszthez")
+            self.skipTest("node is not available for the JS helper test")
         result = subprocess.run(
             [node, "-e", script], capture_output=True, text=True, timeout=60,
         )
@@ -12669,7 +12665,7 @@ process.stdout.write(JSON.stringify(
         for source, english, german in pairs:
             self.assertIn(f"'{source}': '{english}'", en, source)
             self.assertIn(f"'{source}': '{german}'", de, source)
-        # A titkokra figyelmeztető szöveg mindhárom nyelven megvan.
+        # The warning text about secrets is present in all three languages.
         self.assertIn("password hashes", en)
         self.assertIn("private keys", en)
         self.assertIn("Passwort-Hashes", de)
@@ -12721,7 +12717,7 @@ process.stdout.write(JSON.stringify(out));
         )
         node = shutil.which("node")
         if node is None:
-            self.skipTest("node nem érhető el a JS-helper teszthez")
+            self.skipTest("node is not available for the JS helper test")
         result = subprocess.run(
             [node, "-e", script], capture_output=True, text=True, timeout=60,
         )
@@ -12738,7 +12734,7 @@ process.stdout.write(JSON.stringify(out));
         self.assertEqual(data["siteName"], "Teszt")
 
     def test_duplicate_label_localization_and_suffix(self) -> None:
-        """A másolat utótagja nyelvfüggetlenül tárolva, megjelenítéskor fordul."""
+        """The copy's suffix is stored language-independently, translated on display."""
         for token in (
             "function ruleDisplayLabel(label)",
             "function duplicateLabel(label)",
@@ -12750,7 +12746,7 @@ process.stdout.write(JSON.stringify(out));
             "label: duplicateLabel(rule.label)",
         ):
             self.assertIn(token, self.source, token)
-        # A kliens már nem a mindenkori nyelvű utótagot küldi el.
+        # The client no longer sends the suffix in the current language.
         self.assertNotIn(
             "rule.label + ' — ' + tr('másolat')", self.source
         )
@@ -12784,7 +12780,7 @@ process.stdout.write(JSON.stringify(out));
         )
         node = shutil.which("node")
         if node is None:
-            self.skipTest("node nem érhető el a JS-helper teszthez")
+            self.skipTest("node is not available for the JS helper test")
         result = subprocess.run(
             [node, "-e", script],
             capture_output=True, text=True, timeout=60,
@@ -12805,7 +12801,7 @@ process.stdout.write(JSON.stringify(out));
         )
 
     def test_rule_list_search_and_kind_helpers(self) -> None:
-        """A szabálylista keresője ékezet- és kisbetűfüggetlen, minden szóra illeszt."""
+        """The rule list's search is accent- and case-insensitive, matching every word."""
         kinds = re.search(r"const RULE_KINDS = \[.*?\];", self.source, re.S)
         self.assertIsNotNone(kinds)
         functions = "\n".join(
@@ -12847,7 +12843,7 @@ process.stdout.write(JSON.stringify({
         )
         node = shutil.which("node")
         if node is None:
-            self.skipTest("node nem érhető el a JS-helper teszthez")
+            self.skipTest("node is not available for the JS helper test")
         result = subprocess.run(
             [node, "-e", script], capture_output=True, text=True, timeout=60,
         )
@@ -12898,12 +12894,12 @@ process.stdout.write(JSON.stringify({
 
 
     def test_multi_select_ttl_hint_lists_all_rules_and_binding(self) -> None:
-        """Több kiválasztott szabálynál minden címke és a kötő szabály látszik."""
+        """With several selected rules, every label and the limiting rule are visible."""
         start = self.source.index("function ttlBounds()")
         end = self.source.index("function selectRule(", start)
         section = self.source[start:end]
-        # A függvény a kiválasztott szabályokat és a felső korlátot adó(ka)t
-        # is visszaadja; azonos maximum esetén mindet összegyűjti.
+        # The function also returns the selected rules and the rule(s)
+        # providing the upper limit; with equal maximums it collects all.
         self.assertIn("const capped = [];", section)
         self.assertIn("} else if (value === ruleCap) {", section)
         self.assertIn(
@@ -12915,8 +12911,8 @@ process.stdout.write(JSON.stringify({
             "const labels = rules.map(item => ruleDisplayLabel(item.label || item.id));",
             section,
         )
-        # Az egy szabályos forma változatlan, a több szabályos minden címkét
-        # kiírja (3 után +N-nel), a teljes lista pedig a title-ben van.
+        # The single-rule form is unchanged; the multiple-rule one writes every
+        # label (with +N after 3), and the full list is in the title.
         self.assertIn(
             "ttlHint.title = labels.length > 1 ? labels.join(' · ') : '';",
             section,
@@ -12930,12 +12926,12 @@ process.stdout.write(JSON.stringify({
             "text += ` · ${tr('felső korlát')}: ${names.join(', ')}`;",
             section,
         )
-        # A kötő szabályok listája csak szigorú részhalmaz esetén jelenik meg,
-        # így ha minden kiválasztott szabály kötő, a címkék nem ismétlődnek.
+        # The list of limiting rules appears only for a strict subset, so if
+        # every selected rule is limiting, the labels are not repeated.
         self.assertIn(
             "if (binding.length && binding.length < rules.length) {", section
         )
-        # Az időtartam beviteli mező mellett statikus mértékegység-suffix áll.
+        # A static unit suffix stands next to the duration input field.
         self.assertIn(
             '<span class="ttl-unit" data-i18n="óra">óra</span>', self.source
         )
@@ -12952,7 +12948,7 @@ process.stdout.write(JSON.stringify({
         self.assertIn(
             "text = tr(`Beállítható: ${min}–${max} óra`);", section
         )
-        # Egy óránál rövidebb szabály több kiválasztásnál többes számú üzenet.
+        # A rule shorter than one hour gives a plural message with multiple selections.
         self.assertIn("text = rules.length > 1", section)
         self.assertIn(
             "A kiválasztott szabályok közül legalább egy legalább 1 órás "
@@ -12977,7 +12973,7 @@ process.stdout.write(JSON.stringify({
                 self.assertIn(f"'{text}': '{german}'", de)
 
     def test_audit_event_select_manual_render_and_raw_code(self) -> None:
-        """Az eseményszűrő legördülő, a kézi betöltés pedig mindig rajzol."""
+        """The event filter is a dropdown, and manual loading always draws."""
         for token in (
             "const eventSelect = multiSelect({",
             "options: auditEventOptions(logFilter.events)",
@@ -12996,7 +12992,7 @@ process.stdout.write(JSON.stringify({
             "(esemény, felhasználó, IP, szabály, ok)';",
         ):
             self.assertIn(token, self.source, token)
-        # A régi szabad szöveges esemény-mező és annak Enter-kezelője eltűnt.
+        # The old free-text event field and its Enter handler are gone.
         self.assertNotIn("placeholder: tr('esemény')", self.source)
         self.assertNotIn(
             "for (const node of [eventInput, userInput, qInput])",
@@ -13012,7 +13008,7 @@ process.stdout.write(JSON.stringify({
         drops = self.source[drops_start:drops_end]
         self.assertIn("async function loadDrops(manual = false)", drops)
         self.assertIn("if (manual || !typing)", drops)
-        # A szűrő gombjai kézi betöltésként rajzolnak.
+        # The filter's buttons draw as manual loads.
         filter_start = self.source.index("function dropFiltersBar()")
         filter_end = self.source.index("function dropTimeCell(", filter_start)
         filter = self.source[filter_start:filter_end]
@@ -13034,12 +13030,12 @@ process.stdout.write(JSON.stringify({
                 self.assertIn(f"'{text}': '{german}'", de)
 
     def test_fail2ban_drop_metric_switches_and_disabled_rendering(self) -> None:
-        """A három jelzés külön kapcsolható; nincs 0 = kikapcsolva."""
+        """The three metrics can be toggled separately; there is no 0 = disabled."""
         start = self.source.index("function fail2banConfigForm(fb)")
         end = self.source.index("function fail2banBanForm(fb)", start)
         form = self.source[start:end]
-        # A tiltás hossza nem a belépés-csoportban van: a ban_seconds a
-        # drop-alapú tiltásokat is szabályozza, ezért közös csoportba került.
+        # The ban duration is not in the login group: ban_seconds also controls
+        # drop-based bans, so it went into a common group.
         enabled_start = form.index("'enabled', fb.enabled !== false")
         enabled_end = form.index("makeGroup(", enabled_start)
         enabled_group = form[enabled_start:enabled_end]
@@ -13080,11 +13076,11 @@ process.stdout.write(JSON.stringify({
             "tr('Mindkét drop-mérőszám ezt az időablakot használja.')",
         ):
             self.assertIn(token, form, token)
-        # A régi drop-mesterkapcsoló és a 0 = kikapcsolva mechanizmus eltűnt.
+        # The old drop master switch and the 0 = disabled mechanism are gone.
         self.assertNotIn("name: 'drop_enabled'", form)
         self.assertNotIn("drop_enabled: boolValue", form)
         self.assertNotIn("0 = kikapcsolva", self.source)
-        # A belépés és a drop-figyelés független a státuszkártyákon is.
+        # Login and drop monitoring are independent on the status cards too.
         self.assertIn(
             "const loginActive = fb.enabled !== false;", self.source
         )
@@ -13103,7 +13099,7 @@ process.stdout.write(JSON.stringify({
         self.assertIn("fb.drop_ports_active", self.source)
         self.assertIn("tr('csomagszám')", self.source)
         self.assertIn("tr('portszám')", self.source)
-        # A várakozó drop-táblában a kikapcsolt mérőszám nem / 0 alakot kap.
+        # In the pending drop table a disabled metric gets a / 0 form.
         pending_start = self.source.index("function fail2banDropPendingTable(")
         pending_end = self.source.index("async function fail2banUnban(", pending_start)
         pending = self.source[pending_start:pending_end]
@@ -13171,7 +13167,7 @@ process.stdout.write(JSON.stringify({
             with self.subTest(text=text):
                 self.assertIn(f"'{text}': '{english}'", en)
                 self.assertIn(f"'{text}': '{german}'", de)
-        # A kiváltott régi kulcsok már nem szerepelnek a fordításokban.
+        # The triggered old keys no longer appear in the translations.
         for removed in (
             "0 = kikapcsolva",
             "Drop-alapú tiltás",
@@ -13196,7 +13192,7 @@ process.stdout.write(JSON.stringify({
         access_branch = self.source[access_start:session_start]
         self.assertIn("refreshAccessFromStatus(data);", access_branch)
         self.assertIn("return;", access_branch)
-        # A módosítás nézetben a poll nem navigál és nem hívja a session-nézetet.
+        # In the modification view the poll does not navigate and does not call the session view.
         self.assertNotIn("showAccess(", access_branch)
         self.assertNotIn("showSession(", access_branch)
 
@@ -13224,19 +13220,19 @@ process.stdout.write(JSON.stringify({
             "updateTtlBounds();",
         ):
             self.assertIn(token, section, token)
-        # A folyamatban lévő érvényes kijelölést nem törli a poll, és a
-        # kártyák csak valódi katalógusváltozásnál rajzolódnak újra.
+        # The poll does not delete an in-progress valid selection, and the cards
+        # are redrawn only on a real catalog change.
         self.assertIn("catalogChanged", section)
         self.assertIn("revoked.size", section)
-        # A visszavonás azonnal látható a módosítás nézetben.
+        # Revocation is immediately visible in the modification view.
         self.assertIn(
             "Az új szabálydefiníció csak külön engedélyezéssel lép "
             "életbe; engedélyezd újra a hozzáférést.",
             section,
         )
 
-        # Engedélyezés előtt (pending) is megmarad a képernyő és a
-        # folyamatban lévő kijelölés; csak a katalógus változásakor rajzol.
+        # Before authorization (pending) the screen also remains and the
+        # in-progress selection remains; it draws only when the catalog changes.
         pending_start = self.source.index(
             "if (activeView !== 'access') showAccess(data);", refresh_start
         )
@@ -13281,8 +13277,8 @@ process.stdout.write(JSON.stringify({
             "showSessionMsg(sessionRevokedNotice);",
         ):
             self.assertIn(token, section, token)
-        # A visszavonási értesítés a session-nézetben is megmarad a
-        # következő pollok alatt, de új belépéskor/módosításkor törlődik.
+        # The revocation notice also remains in the session view during the
+        # next polls, but is cleared on a new login/modification.
         self.assertIn(
             "Az új szabálydefiníció csak külön engedélyezéssel lép "
             "életbe; a módosítás oldalon újra engedélyezheted.",
@@ -13324,8 +13320,8 @@ process.stdout.write(JSON.stringify({
             "showAccess(cachedAccessPayload());",
         ):
             self.assertIn(token, handler, token)
-        # Hálózati hibánál a gyorsítótárazott pillanatkép marad, de nem
-        # navigálunk el a session-nézetbe.
+        # On a network error the cached snapshot remains, but we do not
+        # navigate to the session view.
         self.assertNotIn("showSession(", handler)
         self.assertNotIn("location.", handler)
         helper_start = self.source.index("function cachedAccessPayload()")
@@ -13339,8 +13335,8 @@ process.stdout.write(JSON.stringify({
             self.assertIn(token, helper, token)
 
     def test_access_tab_round_trip_keeps_domain_chips(self) -> None:
-        """Admin fül után visszatérve a domain-chipek és a visszaszámlálás
-        megmaradnak: a kliens auth-állapota a hosts mezőt is őrzi."""
+        """Returning after the admin tab, the domain chips and the countdown
+        remain: the client's auth state also keeps the hosts field."""
         functions = "\n".join(
             self._js_function(name, self.source)
             for name in ("showSession", "renderAuth", "portChips", "chip")
@@ -13384,7 +13380,6 @@ function showSessionMsg() {}
 function updateTimer() {}
 function startSessionTimers() {}
 """ + functions + """
-
 const portGrant = { tcp: [8080], udp: [], icmp: false, full: false,
   direction: 'forward', label: 'TCP 8080' };
 const domainGrant = { tcp: [], udp: [], icmp: false, full: false,
@@ -13403,7 +13398,7 @@ function runScenario(payload) {
   showSession(payload);
   const before = sessionSvcs.children.map(textOf);
   const expiresAt = auth.expiresAt;
-  // Admin fül, majd a Hozzáférés fül kezelőjének kódja (index.html).
+  // Code of the admin tab, then of the Access tab handler (index.html).
   setView('admin');
   clearPreview(false);
   showSession({
@@ -13438,7 +13433,7 @@ process.stdout.write(JSON.stringify(out));
 """
         node = shutil.which("node")
         if node is None:
-            self.skipTest("node nem érhető el a JS-helper teszthez")
+            self.skipTest("node is not available for the JS helper test")
         result = subprocess.run(
             [node, "-e", script], capture_output=True, text=True, timeout=60,
         )
@@ -13504,7 +13499,7 @@ process.stdout.write(JSON.stringify(out));
 """
         node = shutil.which("node")
         if node is None:
-            self.skipTest("node nem érhető el a JS-helper teszthez")
+            self.skipTest("node is not available for the JS helper test")
         result = subprocess.run(
             [node, "-e", script],
             capture_output=True, text=True, timeout=60,
@@ -13553,7 +13548,7 @@ process.stdout.write(JSON.stringify(out));
 
 
 class VersionMetadataTests(unittest.TestCase):
-    """A verzió egyetlen forrásból, a VERSION fájlból származik."""
+    """The version comes from a single source, the VERSION file."""
 
     def test_version_file_and_gateway_agree(self) -> None:
         text = (ROOT / "VERSION").read_text(encoding="utf-8")
@@ -13565,14 +13560,14 @@ class VersionMetadataTests(unittest.TestCase):
     def test_changelog_top_matches_version(self) -> None:
         docs = (ROOT / "DOKUMENTACIO.md").read_text(encoding="utf-8")
         marker = '<a id="valtozasnaplo"></a>'
-        self.assertIn(marker, docs, "hiányzó változásnapló-szakasz")
+        self.assertIn(marker, docs, "missing changelog section")
         changelog = docs.split(marker, 1)[1]
         match = re.search(
             r"^### \[(\d+\.\d+\.\d+)\] - \d{4}-\d{2}-\d{2}$",
             changelog,
             re.M,
         )
-        self.assertIsNotNone(match, "hiányzó változásnapló-verziócím")
+        self.assertIsNotNone(match, "missing changelog version heading")
         self.assertEqual(match.group(1), gateway.APP_VERSION)
 
     def test_dockerfile_copies_version(self) -> None:
@@ -13588,8 +13583,8 @@ class VersionMetadataTests(unittest.TestCase):
             "builtins.open", mock.mock_open(read_data="2.9.0\n")
         ):
             self.assertEqual(gateway._read_version(), "2.9.0")
-        # Csak a szigorú x.y.z alak fogadható el; bármi más 0.0.0 lesz,
-        # így tetszőleges tartalom nem kerülhet a HTML-be.
+        # Only the strict x.y.z form is accepted; anything else becomes 0.0.0,
+        # so arbitrary content cannot get into the HTML.
         for content in (
             "2.9", "v2.9.0", "<script>", "", "2.9.0-rc1",
             "2.١.0", "２.10.0",
@@ -13604,7 +13599,7 @@ class VersionMetadataTests(unittest.TestCase):
 
 
 class TotpQrCodegenTests(unittest.TestCase):
-    """A beágyazott qrcodegen valódi mátrixot állít elő (node-dal)."""
+    """The embedded qrcodegen produces a real matrix (with node)."""
 
     URI = (
         "otpauth://totp/Dropjak:alice?"
@@ -13619,7 +13614,7 @@ class TotpQrCodegenTests(unittest.TestCase):
         "515bb2f497b44076afe4e11dcb51a5e6"
     )
 
-    @unittest.skipUnless(shutil.which("node"), "node nem érhető el")
+    @unittest.skipUnless(shutil.which("node"), "node is not available")
     def test_embedded_qrcodegen_matrix(self) -> None:
         source = (ROOT / "index.html").read_text(encoding="utf-8")
         start_marker = (
@@ -13661,8 +13656,8 @@ process.stdout.write(JSON.stringify({
   rows: rows
 }));
 """
-        # Az idézett index.html-ből kinyert könyvtár és a futtató szkript
-        # külön, a repón kívüli ideiglenes könyvtárba kerül.
+        # The library extracted from the quoted index.html and the runner
+        # script go into a separate temporary directory outside the repo.
         with tempfile.TemporaryDirectory(prefix="hv-qr-") as tmp:
             lib_path = os.path.join(tmp, "qrcodegen.js")
             script_path = os.path.join(tmp, "encode.js")
@@ -13689,7 +13684,7 @@ process.stdout.write(JSON.stringify({
 
 
 
-# ---------------------------------------------------- drop log és beállítások
+# ---------------------------------------------------- drop log and settings
 
 def _nl_attr(attr_type: int, payload: bytes) -> bytes:
     length = 4 + len(payload)
@@ -13841,7 +13836,7 @@ class DropLogParserTests(unittest.TestCase):
         self.assertEqual(dl.parse_netlink_buffer(b"\x00\x00"), [])
 
     def test_netlink_wire_format_is_native_endian(self) -> None:
-        """A netlink fejléc/attribútum natív, a csoport-azonosító viszont BE."""
+        """The netlink header/attribute is native, but the group identifier is BE."""
         dl = gateway.droplog
         raw = dl._nlmsg(0x0401, 0x0405, 7, b"\x00" * 4)
         self.assertEqual(raw[:4], struct.pack("=I", len(raw)))
@@ -13854,9 +13849,9 @@ class DropLogParserTests(unittest.TestCase):
         self.assertEqual(attr[4:], b"\x01\x00\x00\x00")
         bind = dl._config_message(dl.NFULNL_CFG_CMD_BIND, 5, 123)
         self.assertEqual(bind[:4], struct.pack("=I", len(bind)))
-        # nfgenmsg: family, version, majd a csoport __be16-ként.
+        # nfgenmsg: family, version, then the group as __be16.
         self.assertEqual(bind[16:20], b"\x00\x00\x00\x05")
-        # A mód üzenet copy_range mezője szintén __be32.
+        # The mode message's copy_range field is also __be32.
         mode = dl._mode_message(5, 124)
         self.assertEqual(mode[20:22], struct.pack("=H", 10))
         self.assertEqual(mode[22:24], struct.pack("=H", dl.NFULA_CFG_MODE))
@@ -13905,7 +13900,7 @@ class DropLogStoreTests(unittest.TestCase):
         self.assertEqual(len(self.store.read(before=now - 25)), 1)
         self.assertEqual(len(self.store.read(limit=1)), 1)
 
-        # A hiányzó kötelező mezők pótlódnak, a hosszú szöveg csonkolódik.
+        # Missing mandatory fields are filled in, long text is truncated.
         record = self.store.write({"src": "x" * 1000})
         self.assertEqual(record["reason"], "unknown")
         self.assertIn("ts", record)
@@ -13921,7 +13916,7 @@ class DropLogStoreTests(unittest.TestCase):
             "attempts": 12,
             "ban_until": now + 3600,
         })
-        # A tiltás alatt naplózott, csomagszintű találatok.
+        # Packet-level hits logged during the ban.
         for index in range(20):
             self.store.write({
                 "ts": now + 1 + index,
@@ -13938,7 +13933,7 @@ class DropLogStoreTests(unittest.TestCase):
         self.assertEqual(rows[0]["ts"], now + 20)
         self.assertEqual(rows[0]["last_dport"], 1019)
         self.assertEqual(rows[0]["group"], "ban")
-        # Más okú bejegyzéseket a szűrés nem érint.
+        # Entries with other reasons are not affected by the filter.
         self.store.write({
             "ts": now + 31,
             "src": "192.0.2.10",
@@ -14024,7 +14019,7 @@ class SettingsStoreTests(unittest.TestCase):
             entry={"label": "Kiosk", "dst": "192.168.50.10",
                    "proto": "tcp", "ports": [443, 80, 443]},
         )
-        # A prepare nem ír fájlt és nem módosítja a memóriabeli állapotot.
+        # prepare does not write a file and does not modify in-memory state.
         self.assertEqual(self.store.snapshot()["preauth"], [])
         self.assertFalse(os.path.exists(self.path))
         self.assertEqual(new["preauth"][0]["ports"], [80, 443])
@@ -14111,13 +14106,13 @@ class SettingsStoreTests(unittest.TestCase):
                 {"label": "X", "dst": "10.0.0.1", "proto": "tcp",
                  "ports": [80]},
             )
-        # Blokk cél nélkül is érvényes, ha nem a 80-as TCP-port.
+        # A block destination is valid without a target too, if it is not TCP port 80.
         new = self.store.prepare(
             "create", "block",
             entry={"label": "Minden DNS", "proto": "udp", "ports": [53]},
         )
         self.assertEqual(new["block"][0]["dst"], "")
-        # Pre-auth cél nélkül is érvényes: minden célra nyit.
+        # A pre-auth is valid without a destination too: it opens to every destination.
         any_dst = self.store.prepare(
             "create", "preauth",
             entry={"label": "Minden Minecraft", "proto": "tcp",
@@ -14126,7 +14121,7 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertEqual(any_dst["preauth"][0]["dst"], "")
 
     def test_preauth_direction_default_roundtrip_and_validation(self) -> None:
-        # A direction hiányában forward; az input érték körbejár a fájlon.
+        # Without direction it is forward; the input value round-trips through the file.
         created = self.store.prepare(
             "create", "preauth",
             entry={"label": "Forward", "proto": "tcp", "ports": [25565]},
@@ -14155,7 +14150,7 @@ class SettingsStoreTests(unittest.TestCase):
                         entry={"label": "Rossz", "proto": "tcp",
                                "ports": [80], "direction": value},
                     )
-        # A blokk bejegyzés nem kap direction mezőt.
+        # The block entry gets no direction field.
         blocked = self.store.prepare(
             "create", "block",
             entry={"label": "DNS", "proto": "udp", "ports": [53]},
@@ -14163,7 +14158,7 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertNotIn("direction", blocked["block"][0])
 
     def test_legacy_preauth_entry_without_direction_loads_forward(self) -> None:
-        # Régi firewall-settings.json: a direction mező még nem létezett.
+        # Old firewall-settings.json: the direction field did not exist yet.
         Path(self.path).write_text(json.dumps({
             "preauth": [{
                 "id": "legacy01", "label": "Régi", "dst": "",
@@ -14189,7 +14184,7 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertNotIn("host_ssh", snapshot)
         self.assertTrue(snapshot["error"])
 
-        # Egy sikeres mentés törli a hibát és felülírja a sérült fájlt.
+        # A successful save clears the error and overwrites the broken file.
         store.commit(store.prepare(
             "create", "preauth",
             entry={"label": "Kiosk", "dst": "192.168.50.10",
@@ -14202,8 +14197,8 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertEqual(len(fresh.snapshot()["preauth"]), 1)
 
     def test_legacy_host_ssh_key_is_ignored_on_load(self) -> None:
-        # A régi beállításfájl host_ssh kulcsa ismeretlen mező lett: betöltéskor
-        # csendben eldobjuk, hibát nem okoz, és a következő mentésből kimarad.
+        # The old settings file's host_ssh key became an unknown field: on load
+        # we silently drop it, it causes no error, and it is omitted from the next save.
         self.store.commit(self.store.prepare(
             "create", "preauth",
             entry={"label": "Kiosk", "dst": "192.168.50.10",
@@ -14335,8 +14330,8 @@ class SettingsStoreTests(unittest.TestCase):
                     self.store.set_site_name(value)
         self.assertEqual(self.store.snapshot()["site_name"], "")
 
-        # A régi fájlban nincs site_name: alapértelmezésként üresen töltődik,
-        # és a regisztrációs beállítás továbbra is olvasható.
+        # There is no site_name in the old file: it loads as empty by default,
+        # and the registration setting remains readable.
         Path(self.path).write_text(
             json.dumps({"registration_enabled": True}), encoding="utf-8"
         )
@@ -14347,7 +14342,7 @@ class SettingsStoreTests(unittest.TestCase):
         self.assertEqual(snapshot["site_name"], "")
         self.assertIs(snapshot["registration_enabled"], True)
 
-        # A 64 karakteres név érvényes, a mentés megőrzi.
+        # The 64-character name is valid; saving preserves it.
         maximum = "x" * gateway.settings_store.MAX_SITE_NAME
         self.assertEqual(
             legacy.set_site_name(maximum)["site_name"], maximum
@@ -14361,7 +14356,7 @@ class SettingsStoreTests(unittest.TestCase):
         )
         now = time.time()
 
-        # Állandó közlemény: üres lejárat.
+        # Permanent announcement: empty expiry.
         saved = self.store.set_motd("  Karbantartás 22:00  ", "")
         self.assertEqual(saved["motd_text"], "Karbantartás 22:00")
         self.assertEqual(saved["motd_expires_at"], "")
@@ -14370,7 +14365,7 @@ class SettingsStoreTests(unittest.TestCase):
             "Karbantartás 22:00",
         )
 
-        # Lejárt közlemény: a mentés nem hibázik, de a portál nem kapja meg.
+        # Expired announcement: saving does not fail, but the portal does not receive it.
         expired = self.store.set_motd("Régi hír", "2000-01-01T00:00:00Z")
         self.assertEqual(
             expired["motd_expires_at"], "2000-01-01T00:00:00Z"
@@ -14379,7 +14374,7 @@ class SettingsStoreTests(unittest.TestCase):
             gateway.settings_store.active_motd(expired, now), ""
         )
 
-        # Időzónás jövőbeli lejárat kanonikus UTC alakban tárolódik.
+        # A future expiry with a timezone is stored in canonical UTC form.
         future = self.store.set_motd(
             "Holnap", "2999-01-01T12:00:00+02:00"
         )
@@ -14390,7 +14385,7 @@ class SettingsStoreTests(unittest.TestCase):
             gateway.settings_store.active_motd(future, now), "Holnap"
         )
 
-        # A fájlból újratöltve is megmarad.
+        # It remains after reloading from the file.
         reloaded = gateway.settings_store.SettingsStore(
             self.path, logger=lambda *_: None
         )
@@ -14399,7 +14394,7 @@ class SettingsStoreTests(unittest.TestCase):
             reloaded.snapshot()["motd_expires_at"], "2999-01-01T10:00:00Z"
         )
 
-        # Üres szöveg kikapcsolja.
+        # Empty text disables it.
         cleared = self.store.set_motd("", "")
         self.assertEqual(cleared["motd_text"], "")
         self.assertEqual(
@@ -14419,26 +14414,26 @@ class SettingsStoreTests(unittest.TestCase):
             self.store.set_motd(
                 "x" * (gateway.settings_store.MAX_MOTD + 1), ""
             )
-        # A pontosan maximális hossz érvényes.
+        # Exactly the maximum length is valid.
         maximum = "x" * gateway.settings_store.MAX_MOTD
         self.assertEqual(
             self.store.set_motd(maximum, "")["motd_text"], maximum
         )
-        # Hibás mentés után az állapot változatlan.
+        # After a failed save the state is unchanged.
         with self.assertRaises(gateway.settings_store.SettingsError):
             self.store.set_motd("másik", "rossz")
         self.assertEqual(self.store.snapshot()["motd_text"], maximum)
 
 
 class HostSshPolicyRemovedTests(unittest.TestCase):
-    """A régi, állítható host SSH politika és a külön SSH-plumbing eltűnt."""
+    """The old, configurable host SSH policy and the separate SSH plumbing are gone."""
 
     def _text(self, name: str) -> str:
         return (ROOT / name).read_text(encoding="utf-8")
 
     def test_policy_switch_is_gone(self) -> None:
-        # A szimbólumneveket darabolva adjuk meg, hogy a forráskódban maradt
-        # előfordulásokra kereső ellenőrzés ne találjon hamis találatot.
+        # We give the symbol names split so that a search check for occurrences
+        # left in the source code does not produce a false hit.
         env_switch = "HV_" + "HOST_SSH"
         mode_symbol = "host_ssh" + "_mode"
         removed_symbols = (
@@ -14484,8 +14479,8 @@ class HostSshPolicyRemovedTests(unittest.TestCase):
             "tcp dport 22 ct state established,related "
             "ip saddr . tcp dport != @allowed_input_tcp"
         )
-        # A naplózó és az eldobó szabály is kizárólag a rendes host
-        # szabályból származó engedélyt nézi.
+        # Both the logging and the dropping rule consider only the permission
+        # coming from the ordinary host rule.
         self.assertEqual(nft.count(ssh_guard), 2)
         self.assertEqual(nft.count(ssh_guard + " drop"), 1)
         self.assertIn(ssh_guard + " limit rate 30/minute", nft)
@@ -14617,7 +14612,7 @@ class FirewallCustomTests(unittest.TestCase):
         self.assertFalse(
             any("ct original ip daddr" in line for line in preauth_lines)
         )
-        # Cél nélkül nincs széles related szabály.
+        # Without a destination there is no broad related rule.
         self.assertFalse(
             any("ct state related" in line for line in preauth_lines)
         )
@@ -14657,8 +14652,8 @@ class FirewallCustomTests(unittest.TestCase):
             line for line in self.tools.script()
             if "inet hatarvedelem preauth " in line
         ]
-        # A kikapcsolt pre-auth bejegyzés nem kerül be; csak a tiltott
-        # forrásokat mindenképp kizáró védőszabály marad.
+        # A disabled pre-auth entry is not included; only the guard rule that
+        # excludes the banned sources in any case remains.
         self.assertEqual(
             preauth_lines,
             ["add rule inet hatarvedelem preauth "
@@ -14675,7 +14670,7 @@ class FirewallCustomTests(unittest.TestCase):
                 preauth=[{"dst": "192.168.50.10", "proto": "tcp",
                           "ports": [80]}]
             )
-        # Blokk szabály LAN interfész nélkül is alkalmazható.
+        # A block rule can be applied without a LAN interface too.
         no_lan.apply_custom(
             block=[{"dst": "10.0.0.0/24", "proto": "udp", "ports": [53]}]
         )
@@ -14686,8 +14681,8 @@ class FirewallCustomTests(unittest.TestCase):
             )
 
     def test_preauth_input_rules_and_forward_compat(self) -> None:
-        """Input pre-auth a host felé acceptál; a direction nélküli régi
-        bejegyzés változatlanul a forward láncban marad."""
+        """Input pre-auth toward the host accepts; the legacy entry without
+        direction remains in the forward chain unchanged."""
         self.tools.clear()
         self.fw.apply_custom(preauth=[
             {"dst": "", "proto": "tcp", "ports": [25565]},
@@ -14737,7 +14732,7 @@ class FirewallCustomTests(unittest.TestCase):
             "ct original proto-dst 51820 accept",
             input_lines,
         )
-        # A host felé menő csomag nem DNAT-olt, és nincs NAT-kivétel sem.
+        # Packets going to the host are not DNATed, and there is no NAT exception either.
         self.assertFalse(
             any("ct status dnat" in line for line in input_lines)
         )
@@ -14745,7 +14740,7 @@ class FirewallCustomTests(unittest.TestCase):
             any("preauth_nat" in line and "8443" in line for line in lines)
         )
         self.assertFalse(any("9000" in line for line in lines))
-        # A direction nélküli bejegyzés a forward láncban renderelődik.
+        # An entry without direction renders in the forward chain.
         self.assertTrue(any(
             line.startswith("add rule inet hatarvedelem preauth ")
             and 'iifname "eth1" meta l4proto tcp '
@@ -14754,8 +14749,8 @@ class FirewallCustomTests(unittest.TestCase):
         ))
 
     def test_preauth_input_uses_the_known_interfaces(self) -> None:
-        """Input pre-auth LAN nélkül is működik, ha a WAN ismert; ha
-        egyik interfész sem ismert, magyar hibát ad."""
+        """Input pre-auth works without LAN too if the WAN is known; if
+        neither interface is known, it returns an error."""
         self.tools.clear()
         wan_only = gateway.Firewall(
             binary=str(self.tools.nft), logger=lambda *_: None,
@@ -14781,7 +14776,7 @@ class FirewallCustomTests(unittest.TestCase):
             lan_if="", wan_if="", lan_network=None,
         )
         with self.assertRaisesRegex(
-            gateway.FirewallError, "ismert LAN vagy WAN interfésszel"
+            gateway.FirewallError, "known LAN or WAN interface"
         ):
             no_iface.apply_custom(preauth=[{
                 "dst": "", "proto": "tcp", "ports": [8443],
@@ -14791,7 +14786,7 @@ class FirewallCustomTests(unittest.TestCase):
 
 
 class RulesetTemplateTests(unittest.TestCase):
-    """A telepített nftables sablon biztonsági sorrendje."""
+    """Security ordering of the installed nftables template."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -14839,9 +14834,9 @@ class RulesetTemplateTests(unittest.TestCase):
             "ip saddr . tcp dport @allowed_input_tcp "
             "tcp dport != 8100 accept"
         )
-        # A 22-es port szándékosan nincs kizárva a host elfogadásból: azt
-        # admin által létrehozott host szabály megnyithatja. Csak a 8100
-        # (portál) fenntartott, és az UDP elfogadás is csak azt zárja ki.
+        # Port 22 is intentionally not excluded from the host accept: a host
+        # rule created by the admin may open it. Only 8100 (portal) is
+        # reserved, and the UDP accept excludes only that.
         accept_line = input_chain.splitlines()[input_chain[:accept].count("\n")]
         self.assertIn("tcp dport != 8100", accept_line)
         self.assertNotIn("tcp dport != 22", accept_line)
@@ -14850,7 +14845,7 @@ class RulesetTemplateTests(unittest.TestCase):
             "udp dport != 8100 accept",
             input_chain,
         )
-        # A tiltás és a MAC-kötés előbb fut, mint a host elfogadás.
+        # The ban and the MAC binding run before the host accept.
         self.assertLess(input_chain.index("ip saddr @banned_v4 drop"), accept)
         self.assertLess(
             input_chain.index(
@@ -14859,7 +14854,7 @@ class RulesetTemplateTests(unittest.TestCase):
             ),
             accept,
         )
-        # A host TCP 80 megkerüli a portál-átirányítást.
+        # Host TCP 80 bypasses the portal redirect.
         self.assertLess(
             prerouting.index(
                 "ip saddr . ct original proto-dst @allowed_input_tcp return"
@@ -14870,7 +14865,7 @@ class RulesetTemplateTests(unittest.TestCase):
         )
 
     def test_host_revocation_guard_sets_and_order(self) -> None:
-        # A host portok csak bővülő kerneloldali halmazai.
+        # The host ports are add-only kernel-side sets.
         self.assertIn(
             "add set inet hatarvedelem host_service_tcp {\n"
             "    type inet_service",
@@ -14884,9 +14879,9 @@ class RulesetTemplateTests(unittest.TestCase):
         input_chain = self.text.split("chain input {", 1)[1].split(
             "chain prerouting {", 1
         )[0]
-        # A host-őr csomagszintű: az input lánc csak a kliens→host irányt
-        # látja, a portál-átirányított csomagok célportja pedig már 8100.
-        # Protokollonként egy naplózó és egy eldobó szabály.
+        # The host guard is packet-level: the input chain sees only the
+        # client→host direction, and the destination port of portal-redirected
+        # packets is already 8100. One logging and one dropping rule per protocol.
         tcp_guard = input_chain.index("tcp dport @host_service_tcp")
         udp_guard = input_chain.index("udp dport @host_service_udp")
         generic_accept = input_chain.index(
@@ -14911,20 +14906,20 @@ class RulesetTemplateTests(unittest.TestCase):
             ),
             2,
         )
-        # A TCP 22-es portot az általános host-őr szándékosan kiveszi: a
-        # host_service_tcp csak bővül, ezért a 22 bekerülhet egy host
-        # szabály miatt, és a kivétel nélkül a host-22 engedélyt is
-        # eldobná. A 22-t kizárólag a fenti SSH-specifikus őr kezeli.
+        # The general host guard intentionally excludes TCP port 22:
+        # host_service_tcp is add-only, so 22 can get in because of a host
+        # rule, and without the exception it would also drop the host-22
+        # permission. Only the SSH-specific guard above handles 22.
         tcp_guard_line = (
             "tcp dport @host_service_tcp tcp dport != 22 "
             "ct state established,related"
         )
         self.assertEqual(guard_block.count(tcp_guard_line), 2)
-        # Az UDP őr nem kap ilyen kivételt: az SSH-őr TCP-only, a UDP 22
-        # közönséges host-szabály-port.
+        # The UDP guard gets no such exception: the SSH guard is TCP-only, and
+        # UDP 22 is an ordinary host-rule port.
         self.assertNotIn("udp dport != 22", guard_block)
-        # Az eredeti tuple-ra épülő, széles forward-kivételek helyett a
-        # csomag szintű dport a kulcs; ezek nem szerepelhetnek az őrben.
+        # Instead of the broad forward exceptions built on the original tuple,
+        # the packet-level dport is the key; these must not appear in the guard.
         for forbidden in (
             "ct original",
             "meta l4proto",
@@ -14936,8 +14931,8 @@ class RulesetTemplateTests(unittest.TestCase):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, guard_block)
 
-        # A host-DNS established kivételei szűken, csak a 53-as portra
-        # érvényesek, és az őr előtt futnak.
+        # The host-DNS established exceptions are narrow, apply only to port
+        # 53, and run before the guard.
         dns_accepts = (
             'iifname "__LAN_IF__" tcp dport 53 ct state established,'
             "related ip saddr @allowed_v4 accept",
@@ -14956,10 +14951,10 @@ class RulesetTemplateTests(unittest.TestCase):
             input_chain.index("reason=dns-revoked"),
             input_chain.index(dns_accepts[0]),
         )
-        # A DHCP-elfogadás a host-őr előtt, pontosan egyszer szerepel az
-        # SSH-őr utáni szakaszban; a fail2ban-kivételként korábban álló
-        # azonos szabály változatlanul megmarad. A generikus established-
-        # accept után már nem lehet DHCP-elfogadás (a régi másolat törölve).
+        # The DHCP accept appears before the host guard, exactly once, in the
+        # section after the SSH guard; the identical rule formerly present as a
+        # fail2ban exception remains unchanged. After the general established-
+        # accept there can be no DHCP accept any more (the old copy is deleted).
         ssh_guard = input_chain.index("reason=ssh-revoked")
         dhcp_accept = (
             'iifname "__LAN_IF__" udp sport 68 udp dport 67 accept'
@@ -14972,20 +14967,20 @@ class RulesetTemplateTests(unittest.TestCase):
         )
         self.assertNotIn(dhcp_accept, input_chain[generic_accept:])
 
-        # Az SSH-őr után, de az általános established-accept előtt futnak,
-        # különben a meglévő kapcsolat megkerülné a host engedélyt.
+        # They run after the SSH guard but before the general established-accept,
+        # otherwise the existing connection would bypass the host permission.
         self.assertLess(ssh_guard, tcp_guard)
         self.assertLess(tcp_guard, udp_guard)
         self.assertLess(udp_guard, generic_accept)
         self.assertIn("reason=host-revoked", input_chain)
 
     def test_dns_revoked_guard_spares_authorized_host_tcp_53(self) -> None:
-        start = self.text.index("A meglévő TCP DNS-kapcsolat")
-        end = self.text.index("Meglévő SSH-kapcsolat")
+        start = self.text.index("An existing TCP DNS connection")
+        end = self.text.index("An existing SSH connection")
         block = self.text[start:end]
-        # A naplózó és az eldobó szabály is kiveszi az engedélyezett host
-        # TCP 53 kapcsolatot; a valódi jogosultságot a host_service_* őr
-        # ellenőrzi.
+        # Both the logging and the dropping rule exclude the permitted host
+        # TCP 53 connection; the actual entitlement is checked by the
+        # host_service_* guard.
         self.assertEqual(
             block.count("ip saddr . tcp dport != @allowed_input_tcp"),
             2,
@@ -15004,15 +14999,15 @@ class RulesetTemplateTests(unittest.TestCase):
         end = text.index("\n}", start)
         warning = text[start:end]
         for token in (
-            'log "FIGYELEM', "SSH", "22/TCP", "admin",
-            "HV_ADMIN_ENABLED", "HV_ADMIN_PASSWORD_FILE", "konzol",
+            'log "WARNING', "SSH", "22/TCP", "admin",
+            "HV_ADMIN_ENABLED", "HV_ADMIN_PASSWORD_FILE", "console",
         ):
             self.assertIn(token, warning, token)
         main = text[text.index("skip_firewall=$(env_bool HV_SKIP_FIREWALL 0)"):]
         self.assertLess(
             main.index("warn_lockout"), main.index("load_firewall")
         )
-        # A HV_SKIP_FIREWALL=1 ágban nincs figyelmeztetés (nincs tűzfal).
+        # In the HV_SKIP_FIREWALL=1 branch there is no warning (no firewall).
         skip_branch = main[
             main.index('if [ "$skip_firewall" = "1" ]; then'):
             main.index("else")
@@ -15033,8 +15028,8 @@ class RulesetTemplateTests(unittest.TestCase):
         ].split("; do", 1)[0]
         for set_name in ("allowed_input_tcp", "allowed_input_udp"):
             self.assertIn(set_name, flush_loop)
-        # A host_service_* halmazok add-only védőhalmazok: újraindításkor
-        # sem szabad őket kiüríteni.
+        # The host_service_* sets are add-only guard sets: they must not be
+        # flushed on restart either.
         self.assertNotIn("host_service_tcp", flush_loop)
         self.assertNotIn("host_service_udp", flush_loop)
 
@@ -15049,16 +15044,16 @@ class RulesetTemplateTests(unittest.TestCase):
         start = text.index(
             'if "$NFT_BIN" list set inet hatarvedelem host_ssh_v4'
         )
-        end = text.index("# A hoston korán betöltött", start)
+        end = text.index("# The fallback table loaded early on the host", start)
         block = text[start:end]
-        # A meglévő halmazt továbbra is csak a list set sikeressége után
-        # töröljük, és a sikeres törlést naplózzuk.
+        # We still delete the existing set only after the list set succeeds,
+        # and we log the successful deletion.
         self.assertIn("list set inet hatarvedelem host_ssh_v4", block)
         self.assertIn("delete set inet hatarvedelem host_ssh_v4", block)
-        self.assertIn('log "a régi host_ssh_v4 halmaz törölve"', block)
-        # Hiba esetén viszont nem szabad leállítani az indulást: a
-        # szabálykészlet már betöltődött, a portálnak el kell indulnia.
-        self.assertIn("FIGYELEM", block)
+        self.assertIn('log "old host_ssh_v4 set deleted"', block)
+        # On an error, however, startup must not stop: the ruleset is already
+        # loaded, and the portal must start.
+        self.assertIn("WARNING", block)
         self.assertNotIn("die ", block)
         self.assertNotIn("exit ", block)
 
@@ -15078,7 +15073,7 @@ class RulesetTemplateTests(unittest.TestCase):
             + function
             + "\nwarn_lockout\n"
         )
-        message = "nincs beállított induláskori admin"
+        message = "no startup admin credentials are configured"
 
         def run(enabled: str) -> str:
             env = os.environ.copy()
@@ -15092,8 +15087,8 @@ class RulesetTemplateTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             return result.stdout
 
-        # A gateway.py _env_bool() által elfogadott igaz értékek nem
-        # kelthetnek hamis kizárási figyelmeztetést.
+        # The true values accepted by gateway.py's _env_bool() must not raise a
+        # false lockout warning.
         for value in ("1", "true", "TRUE", "yes", "Yes", "on", "ON", " on "):
             with self.subTest(value=value):
                 self.assertNotIn(message, run(value))
@@ -15102,9 +15097,9 @@ class RulesetTemplateTests(unittest.TestCase):
                 self.assertIn(message, run(value))
 
     def test_banned_packets_are_logged_with_rate_limit(self) -> None:
-        # A tiltás alatti forgalom mintavételezve naplózódik, hogy a
-        # drop log mutassa a további próbálkozásokat; a portál ezeket a
-        # tiltás egyetlen eseményéhez rendeli.
+        # Traffic during the ban is sampled and logged so that the drop log shows
+        # further attempts; the portal associates these with the single event of
+        # the ban.
         self.assertIn('reason=fail2ban ', self.text)
         self.assertIn("ip saddr @banned_v4 limit rate", self.forward)
         self.assertLess(
@@ -15118,7 +15113,7 @@ class RulesetTemplateTests(unittest.TestCase):
 
 
 class FakeBanFirewall:
-    """A fail2ban tesztekhez elég tűzfal: hívásokat naplóz."""
+    """A firewall sufficient for the fail2ban tests: it logs calls."""
 
     def __init__(self) -> None:
         self.calls: list[tuple] = []
@@ -15178,7 +15173,7 @@ class Fail2banTests(unittest.TestCase):
         self.assertEqual(
             fail2ban_mod.normalize_ip(" 192.0.2.10 "), "192.0.2.10"
         )
-        # A portál saját 127.0.0.1-e kivétel; más loopback cím tesztelhető.
+        # The portal's own 127.0.0.1 is the exception; another loopback address can be tested.
         self.assertEqual(fail2ban_mod.normalize_ip("127.0.0.9"), "127.0.0.9")
 
     def test_auto_ban_after_threshold(self) -> None:
@@ -15211,9 +15206,9 @@ class Fail2banTests(unittest.TestCase):
         )
 
     def test_root_cli_save_preserves_state_owner(self) -> None:
-        # A CLI rootként fut, a portál viszont a szolgáltatásfelhasználóval.
-        # A mentésnek meg kell tartania a meglévő fájl tulajdonosát, különben
-        # a futó portál a következő mentésnél már nem tudná írni.
+        # The CLI runs as root, while the portal runs as the service user.
+        # Saving must preserve the existing file's owner, otherwise the running
+        # portal could no longer write it on the next save.
         self.manager.ban("192.0.2.20", 120, manual=True)
         info = os.stat(self.path)
         self.assertEqual(
@@ -15231,7 +15226,7 @@ class Fail2banTests(unittest.TestCase):
         self.assertEqual(calls[-1][1:], (info.st_uid, info.st_gid))
 
     def write_state(self, payload) -> None:
-        """A CLI-hoz hasonló külső, atomi fájlírás."""
+        """External, atomic file write similar to the CLI."""
         tmp = self.path + ".external"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(payload, fh)
@@ -15317,7 +15312,7 @@ class Fail2banTests(unittest.TestCase):
         self.assertIn(("unban", "192.0.2.30"), self.fw.calls)
         self.assertNotIn(("unban", "192.0.2.31"), self.fw.calls)
         self.assertEqual(snapshot["pending"], [])
-        # Kikapcsolva a további kísérletek nem tiltanak.
+        # When disabled, further attempts do not ban.
         for _ in range(5):
             self.assertIsNone(
                 self.manager.record_failure("192.0.2.32", "alice")
@@ -15397,7 +15392,7 @@ class Fail2banTests(unittest.TestCase):
         self.assertEqual(ban["detail"], "wan-drop")
         self.assertEqual(snapshot["drop_max"], 3)
 
-        # A forrás és a részlet a mentésből is visszatöltődik.
+        # The source and the detail are restored from the save too.
         reloaded = self.make_manager()
         ban = reloaded.snapshot()["bans"][0]
         self.assertEqual(ban["source"], "drop")
@@ -15436,7 +15431,7 @@ class Fail2banTests(unittest.TestCase):
         ip = "192.0.2.63"
         manager = self.make_manager(drop_max=3, drop_ports=10)
         manager.record_drop(ip, proto="tcp", dport=22, reason="input-wan")
-        # A régi esemény kívül kerül az időablakon, ezért nem számít.
+        # The old event falls outside the time window, so it does not count.
         manager._drop_events[ip]["events"][0] = (
             time.time() - manager._config["drop_window_seconds"] - 5,
             "tcp/22",
@@ -15466,8 +15461,8 @@ class Fail2banTests(unittest.TestCase):
         self.assertEqual(pending[0]["reason"], "input-lan")
 
     def test_lan_events_do_not_reach_the_packet_threshold(self) -> None:
-        # Egy kijelentkezett böngésző sok azonos portú próbát indít; ezek
-        # csak a portdiverzitáshoz számítanak, a csomagküszöbhöz nem.
+        # A logged-out browser starts many attempts with the same port; these
+        # count only toward port diversity, not toward the packet threshold.
         manager = self.make_manager(drop_max=2, drop_ports=10)
         ip = "192.0.2.71"
         for _ in range(5):
@@ -15478,7 +15473,7 @@ class Fail2banTests(unittest.TestCase):
         pending = manager.snapshot()["drop_pending"][0]
         self.assertEqual(pending["count"], 0)
         self.assertEqual(pending["events"], 5)
-        # A WAN-felőli események viszont a csomagküszöbhöz is számítanak.
+        # Events toward the WAN, however, also count toward the packet threshold.
         self.assertIsNone(manager.record_drop(
             ip, proto="tcp", dport=443, reason="input-wan"
         ))
@@ -15521,7 +15516,7 @@ class Fail2banTests(unittest.TestCase):
         bans = {row["ip"] for row in snapshot["bans"]}
         self.assertEqual(bans, {login_ip, "192.0.2.68"})
 
-        # Újra bekapcsolva a két mérőszámot a drop-számlálás ismét tilt.
+        # Re-enabled, the drop counting bans again on both metrics.
         manager.configure({
             "drop_count_enabled": True,
             "drop_ports_enabled": True,
@@ -15549,7 +15544,7 @@ class Fail2banTests(unittest.TestCase):
 
 
 class DropBanWiringTests(unittest.TestCase):
-    """A drop log és a fail2ban közötti szűrés."""
+    """Filtering between the drop log and fail2ban."""
 
     class CaptureFail2ban:
         def __init__(self) -> None:
@@ -15591,22 +15586,22 @@ class DropBanWiringTests(unittest.TestCase):
 
     def test_non_scanning_events_are_ignored(self) -> None:
         gw = self.make_gateway()
-        # Nem támadási okok: MAC/spoof/ipv6/fail2ban/DNS/SSH visszavonás.
+        # Non-attack reasons: MAC/spoof/ipv6/fail2ban/DNS/SSH revocation.
         for reason in (
             "mac", "spoof-lan", "spoof-wan", "ipv6", "fail2ban",
             "ssh-revoked", "dns-revoked", "container-spoof",
             "container-pivot", "ismeretlen", "",
         ):
             gw._on_drop(self.record(reason=reason))
-        # UDP-háttérzaj (mDNS, LLMNR, NetBIOS, DNS) nem számít.
+        # UDP background noise (mDNS, LLMNR, NetBIOS, DNS) does not count.
         gw._on_drop(self.record(proto="udp", dport=5353, reason="input-lan"))
         gw._on_drop(self.record(proto="udp", dport=53, reason="input-lan"))
         gw._on_drop(self.record(proto="icmp", dport=None, reason="input-wan"))
-        # A DNS és a portál TCP-portja kimarad.
+        # DNS and the portal's TCP port are skipped.
         gw._on_drop(self.record(proto="tcp", dport=53, reason="input-lan"))
         gw._on_drop(self.record(proto="tcp", dport=gateway.PORT,
                                 reason="input-lan"))
-        # Forrás nélküli esemény.
+        # Event without a source.
         gw._on_drop(self.record(src=""))
         self.assertEqual(gw.fail2ban.calls, [])
 
@@ -15632,7 +15627,7 @@ class DropBanWiringTests(unittest.TestCase):
             raise RuntimeError("callback hiba")
 
         listener.set_on_drop(boom)
-        # A visszahívás hibája nem szakítja meg az NFLOG feldolgozást.
+        # A callback failure does not interrupt NFLOG processing.
         listener._count_packet({"src": "192.0.2.82", "reason": "input-wan"})
         self.assertEqual(len(store.written), 2)
 

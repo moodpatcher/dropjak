@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""A 80-as port átirányítása (/api/proxy/redirect, Caddy http:// forward_auth).
+"""Redirecting port 80 (/api/proxy/redirect, Caddy http:// forward_auth).
 
-* döntési mátrix: gyökér, bekapcsolt bejegyzés, fedett/nem fedett ismeretlen
-  aldomain, idegen név és nyers IP; gyökér nélkül a régi viselkedés;
-* csak loopback peer; hibás Host (CRLF, szóköz, userinfo, túl hosszú) soha nem
-  ad saját nevünkön kívüli Location-t; port levágása; hibás URI.
+* decision matrix: root, enabled entry, covered/uncovered unknown
+  subdomain, foreign name and raw IP; without a root the old behaviour;
+* loopback peer only; a malformed Host (CRLF, space, userinfo, too long) never
+  gives a Location outside our own name; port stripping; malformed URI.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ class ProxyRedirectTests(unittest.TestCase):
             {"name": "gone", "port": 3003, "enabled": False,
              "root": tp.SECOND_DOMAIN},
         ])
-        # Csak az első gyökérnek van (root + *.root) feltöltött tanúsítványa.
+        # Only the first root has an uploaded certificate (root + *.root).
         certs = settings_store.CertStore(
             os.path.join(self.tmp.name, "certs"), logger=lambda *_: None
         )
@@ -99,14 +99,14 @@ class ProxyRedirectTests(unittest.TestCase):
             (tp.SECOND_DOMAIN, own(tp.SECOND_DOMAIN)),
             (tp.host("owui"), own(tp.host("owui"))),
             (tp.host("nas", tp.SECOND_DOMAIN), own(tp.host("nas", tp.SECOND_DOMAIN))),
-            # Ismeretlen vagy kikapcsolt, de a feltöltött *.root fedi: challenge.
+            # Unknown or disabled, but covered by the uploaded *.root: challenge.
             (tp.host("x"), own(tp.host("x"))),
             (tp.host("off"), own(tp.host("off"))),
-            # Nem fedett: a tartalmazó gyökér portálja, útvonal nélkül.
+            # Uncovered: the containing root's portal, without a path.
             (f"a.b.{tp.ROOT_DOMAIN}", (302, FIRST)),
             (tp.host("x", tp.SECOND_DOMAIN), (302, SECOND)),
             (tp.host("gone", tp.SECOND_DOMAIN), (302, SECOND)),
-            # Idegen név és nyers IP: az első gyökér.
+            # Foreign name and raw IP: the first root.
             ("evil.example.com", (302, FIRST)),
             ("88.198.151.195", (302, FIRST)),
             ("[2001:db8::1]", (302, FIRST)),
@@ -126,7 +126,7 @@ class ProxyRedirectTests(unittest.TestCase):
                     (308, f"https://{tp.host('owui')}/a/b?c=1"),
                 )
         self.assertEqual(self.redirect("88.198.151.195:80")[:2], (302, FIRST))
-        # Host fejléc, ha nincs X-Forwarded-Host.
+        # Host header when there is no X-Forwarded-Host.
         status, _, locations = self.raw(f"Host: {tp.host('owui')}:80\r\n".encode())
         self.assertEqual(status, 308)
         self.assertEqual(locations, [f"Location: https://{tp.host('owui')}/"])
@@ -139,7 +139,7 @@ class ProxyRedirectTests(unittest.TestCase):
                     self.redirect(tp.ROOT_DOMAIN, uri)[:2],
                     (308, f"https://{tp.ROOT_DOMAIN}/"),
                 )
-        # A // kezdetű útvonal is a saját hoston marad.
+        # A path starting with // also stays on our own host.
         self.assertEqual(
             self.redirect(tp.ROOT_DOMAIN, "//evil.com/x")[1],
             f"https://{tp.ROOT_DOMAIN}//evil.com/x",
@@ -160,7 +160,7 @@ class ProxyRedirectTests(unittest.TestCase):
                 status, location, _ = self.redirect(name)
                 self.assertEqual(status, 302)
                 self.assertIn(location, (FIRST, SECOND))
-        # CRLF: sorátfűzés (obs-fold) és külön fejlécsor sem juthat át.
+        # CRLF: neither obs-fold nor a separate header line may get through.
         for block in (
             b"X-Forwarded-Host: evil.com\r\n Location: https://evil.com/\r\n",
             b"X-Forwarded-Host: evil.com\r\nX-Forwarded-Uri: /\r\n"
@@ -196,16 +196,16 @@ class ProxyRedirectTests(unittest.TestCase):
         self.settings.set_portal_domain(portal)
         addCleanup = self.addCleanup
         addCleanup(self.settings.set_portal_domain, "")
-        # Bejegyzés nélkül a gyökér nem irányít a portálra (nincs tanúsítványa).
+        # Without an entry the root does not redirect to the portal (it has no certificate).
         for name in (tp.ROOT_DOMAIN, tp.SECOND_DOMAIN):
             with self.subTest(host=name):
                 self.assertEqual(self.redirect(name)[:2], (404, None))
-        # Az ismeretlen aldomain viszont a portálra megy.
+        # An unknown subdomain, however, goes to the portal.
         self.assertEqual(
             self.redirect(tp.host("x", tp.SECOND_DOMAIN))[:2],
             (302, f"https://{portal}/"),
         )
-        # Gyökérre szóló bejegyzéssel a gyökér saját szolgáltatást kap.
+        # With an entry for the root, the root gets its own service.
         snap = self.settings.snapshot()
         self.settings.set_proxy(
             snap["proxy_domains"],

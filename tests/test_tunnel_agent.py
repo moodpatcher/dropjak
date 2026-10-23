@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Dropjak otthoni tunnel-ügynök: egység- és csomagszintű tesztek.
+"""Dropjak home tunnel agent: unit and package-level tests.
 
-Az egységtesztek a ``deploy/tunnel-agent/agent.py``-t töltik be (a könyvtárnév
-miatt importlib-mel), és subprocess/socket/urllib hívásokat mockolnak. A
-csomagszintű teszt a ``tests/tunnel_agent_netns.py``-t futtatja ``unshare
--rn`` alatt; ha a névtér vagy az nft/ip nem érhető el, a teszt kimarad.
+The unit tests load ``deploy/tunnel-agent/agent.py`` (with importlib because
+of the directory name) and mock subprocess/socket/urllib calls. The
+package-level test runs ``tests/tunnel_agent_netns.py`` under ``unshare -rn``;
+if the namespace or nft/ip is not available, the test is skipped.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ _spec.loader.exec_module(agent)
 
 KEY = base64.b64encode(b"k" * 32).decode()
 
-# Az ügynök neve a csomagolt agent.json címkéjéből és azonosítójából jön:
+# The agent name comes from the packaged agent.json label and id:
 # dropjak-tunnel-agent-<label-slug>-<id>.
 DEFAULT_AGENT = {"id": "home-1", "label": "Home"}
 DEFAULT_AGENT_NAME = "dropjak-tunnel-agent-home-home-1"
@@ -231,7 +231,7 @@ class RulesetTests(unittest.TestCase):
                                     ["eth1"], ["10.77.0.1"], ["10.89.1.1"])
 
     def test_resolver_nameservers_are_allowed(self) -> None:
-        # Rootless Podmanban a DNS a hálózati átjáró, nem a Docker 127.0.0.11.
+        # In rootless Podman DNS is the network gateway, not Docker's 127.0.0.11.
         rules = self.rules()
         self.assertIn("ip daddr 10.89.1.1 udp dport 53 accept", rules)
         self.assertIn("ip daddr 10.89.1.1 tcp dport 53 accept", rules)
@@ -318,7 +318,7 @@ class RulesetTests(unittest.TestCase):
             'iifname "wg0" tcp dport 41002 dnat ip to 172.31.0.5:80',
         ):
             self.assertIn(line, rules)
-        # Determinisztikus sorrend: a hálózatok neve szerint (postrouting).
+        # Deterministic order: by network name (postrouting).
         postrouting = rules[rules.index("chain postrouting"):]
         self.assertLess(postrouting.index('oifname "eth1"'),
                         postrouting.index('oifname "eth2"'))
@@ -333,8 +333,8 @@ class RulesetTests(unittest.TestCase):
                                  ["eth1", "eth2"], ["10.77.0.1"], [])
 
     def test_single_interface_string_stays_compatible(self) -> None:
-        # Régi hívók egyetlen interfésznevet adnak; a szolgáltatás saját
-        # iface mezője nélkül is erre az interfészre renderelődik.
+        # Old callers pass a single interface name; without the service's own
+        # iface field it still renders for this interface.
         config = agent.validate_config(base_config())
         entries = [{"id": "mc", "proto": "tcp", "tunnel_port": 41001,
                     "ip": "172.30.0.5", "target_port": 25565}]
@@ -429,8 +429,8 @@ class ResolutionTests(unittest.TestCase):
         self.assertEqual(entries[0]["iface"], "eth2")
 
     def test_gateway_and_out_of_subnet_targets_are_rejected(self) -> None:
-        # 172.30.0.1 a Docker-híd (a host), .0/.255 a hálózat/cím a saját
-        # cím, 10.0.0.5 pedig egyetlen csatolt alhálózaton sem található.
+        # 172.30.0.1 is the Docker bridge (the host), .0/.255 are the network/broadcast
+        # address, and 10.0.0.5 cannot be found on any attached subnet.
         for target in ("172.30.0.1", "172.30.0.0", "172.30.0.255",
                        "172.30.0.2", "10.0.0.5"):
             with self.subTest(target):
@@ -624,21 +624,21 @@ class WireGuardTests(unittest.TestCase):
 
 @unittest.skipUnless(
     all(shutil.which(tool) for tool in ("unshare", "nsenter", "nft", "ip")),
-    "nincs unshare/nsenter/nft/ip",
+    "missing unshare/nsenter/nft/ip",
 )
 class TunnelAgentPacketTests(unittest.TestCase):
     def test_ruleset_forwards_mapped_ports_and_contains_the_container(
             self) -> None:
         probe = subprocess.run(["unshare", "-rn", "true"], capture_output=True)
         if probe.returncode != 0:
-            self.skipTest("a user namespace nem elérhető")
+            self.skipTest("the user namespace is not available")
         result = subprocess.run(
             ["unshare", "-rn", sys.executable, str(HELPER)],
             capture_output=True, text=True, timeout=240,
         )
         if result.returncode != 0 and not result.stdout.strip():
             if "Operation not permitted" in result.stderr:
-                self.skipTest("a névtérben nem engedélyezett: "
+                self.skipTest("not permitted in the namespace: "
                               + result.stderr[-200:])
             self.fail(result.stderr[-3000:])
         report = json.loads(result.stdout)
@@ -652,7 +652,7 @@ class TunnelAgentPacketTests(unittest.TestCase):
 
 
 class IpForwardTests(unittest.TestCase):
-    """A sysctl idempotens: előre beállított értéknél nem ír (rootless EROFS)."""
+    """The sysctl is idempotent: it does not write when the value is already set (rootless EROFS)."""
 
     def run_with(self, value: str) -> list:
         calls: list = []
@@ -775,7 +775,7 @@ sys.exit(0)
 
 
 class SelfInstallTests(unittest.TestCase):
-    """Interaktív, egyhálózatos telepítő: számozott lista, TTY-n kérdez."""
+    """Interactive, single-network installer: numbered list, prompts on a TTY."""
 
     DEFAULT_NETWORKS = {
         "bridge": "bridge",
@@ -851,7 +851,7 @@ class SelfInstallTests(unittest.TestCase):
             f'echo "$@" >> "{systemctl_log}"\n'
             "exit 0\n")
         systemctl.chmod(0o755)
-        # A valódi Podman ne befolyásolja a rootless-felismerést.
+        # The real Podman must not influence rootless detection.
         podman = bin_dir / "podman"
         podman.write_text("#!/bin/sh\nexit 1\n")
         podman.chmod(0o755)
@@ -1012,7 +1012,7 @@ class SelfInstallTests(unittest.TestCase):
             self.assert_single_network(compose, "playitgg-net")
             calls = log.read_text()
             self.assertIn("compose up -d --build", calls)
-            self.assertIn("compose -f", calls)  # compose config -q ellenőrzés
+            self.assertIn("compose -f", calls)  # compose config -q check
             self.assertIn("playitgg-net", result.stdout)
             self.assertIn("exactly one network", result.stdout)
             # The exact delete command is printed after a successful install.
@@ -1332,7 +1332,7 @@ class SelfInstallTests(unittest.TestCase):
 
     def test_default_prefers_existing_playitgg_net(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            # Nem fut playit konténer, de a playitgg-net hálózat létezik.
+            # No playit container runs, but the playitgg-net network exists.
             result, target, _, _ = self.run_installer(tmp, containers={})
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assert_single_network(
@@ -1444,9 +1444,9 @@ class SelfInstallTests(unittest.TestCase):
             self.assertTrue((target / "compose.yml").is_file())
             self.assertEqual(log.read_text().count("compose up -d --build"), 2)
 
-    @unittest.skipIf(os.geteuid() == 0, "rootként a rendszerkönyvtár az alap")
+    @unittest.skipIf(os.geteuid() == 0, "the system directory is the default as root")
     def test_rootless_install_does_not_create_helper(self) -> None:
-        """Rootless Podman/Docker: nincs hálózat-egyeztető segéd/timer."""
+        """Rootless Podman/Docker: no network-reconcile helper/timer."""
         with tempfile.TemporaryDirectory() as tmp:
             result, _, _, _ = self.run_installer(
                 tmp, DROPJAK_LIB_DIR="", DROPJAK_SYSTEMD_UNIT_DIR="")
@@ -1471,7 +1471,7 @@ class SelfInstallTests(unittest.TestCase):
 
 
 class ContainmentCheckTests(unittest.TestCase):
-    """A check-containment.sh pontosan egy bridge-hálózatot követel."""
+    """check-containment.sh requires exactly one bridge network."""
 
     NETWORKS = {
         "bridge": "bridge",

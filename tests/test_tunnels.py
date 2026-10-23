@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""WireGuard-alagút (3.20): beállítások, nft-szabályok, ügynök-kezelés, API.
+"""WireGuard tunnel (3.20): settings, nft rules, agent management, API.
 
-A tesztek nem nyúlnak sem a rendszer tűzfalához, sem a host WireGuard-
-interfészéhez: az nft és a wg/ip hívásokat elfogott vagy dry-run
-végrehajtás helyettesíti.
+The tests touch neither the system firewall nor the host WireGuard
+interface: the nft and wg/ip calls are replaced by captured or dry-run
+execution.
 """
 
 from __future__ import annotations
@@ -95,7 +95,7 @@ def domain_service(service_id: str = "web",
                    domain: str = "web.example.com",
                    target_host: str = "web", mappings=None,
                    **over) -> dict:
-    """Domaines (Caddy mögötti) szolgáltatás: egy TCP, üres hallgató porttal."""
+    """Domain-mode (behind Caddy) service: one TCP, with an empty listen port."""
     entry = service(
         service_id=service_id, target_host=target_host,
         mappings=mappings if mappings is not None else [
@@ -108,7 +108,7 @@ def domain_service(service_id: str = "web",
 
 def domain_state(services, domains=("example.com",), routes=(),
                  portal_domain: str = "") -> dict:
-    """validate_state bemenet proxy-gyökérrel és alagút-szolgáltatásokkal."""
+    """validate_state input with a proxy root and tunnel services."""
     return {
         "proxy_domains": list(domains),
         "proxy_routes": list(routes),
@@ -118,7 +118,7 @@ def domain_state(services, domains=("example.com",), routes=(),
 
 
 class TunnelSettingsTests(unittest.TestCase):
-    """A tunnels szakasz validációja a meglévő beállítási szabályokkal."""
+    """Validation of the tunnels section with the existing settings rules."""
 
     def test_defaults_and_normalization(self) -> None:
         self.assertEqual(
@@ -167,7 +167,7 @@ class TunnelSettingsTests(unittest.TestCase):
             )})
 
     def test_listen_ports_shared_with_port_proxies(self) -> None:
-        # Ugyanaz a protokoll és port ütközik a port proxyval.
+        # The same protocol and port collides with the port proxy.
         with self.assertRaises(settings_store.SettingsError):
             settings_store.validate_state({
                 "port_proxies": [proxy_entry()],
@@ -175,7 +175,7 @@ class TunnelSettingsTests(unittest.TestCase):
                     mappings=[mapping("tcp", "25565", "25565")]
                 )])]),
             })
-        # A "both" mindkét protokollt foglalja.
+        # "both" reserves both protocols.
         with self.assertRaises(settings_store.SettingsError):
             settings_store.validate_state({
                 "port_proxies": [proxy_entry(proto="udp")],
@@ -183,7 +183,7 @@ class TunnelSettingsTests(unittest.TestCase):
                     mappings=[mapping("both", "25565", "25565")]
                 )])]),
             })
-        # Két ügynök ugyanazt a hallgató portot nem kaphatja.
+        # Two agents cannot get the same listen port.
         with self.assertRaises(settings_store.SettingsError):
             settings_store.validate_state({"tunnels": tunnels(agents=[
                 agent(services=[service()]),
@@ -192,7 +192,7 @@ class TunnelSettingsTests(unittest.TestCase):
                     services=[service(service_id="mc2")],
                 ),
             ])})
-        # Eltérő protokollon ugyanaz a port megengedett.
+        # The same port is allowed on a different protocol.
         result = settings_store.validate_state({
             "port_proxies": [proxy_entry(proto="udp")],
             "tunnels": tunnels(agents=[agent(services=[service()])]),
@@ -203,7 +203,7 @@ class TunnelSettingsTests(unittest.TestCase):
         first = agent(services=[service(mappings=[
             mapping("tcp", "8000-8099", "18000-18099"),
         ])])
-        # Ugyanaz a protokoll a tartományon belül ütközik.
+        # The same protocol collides within the range.
         with self.assertRaises(settings_store.SettingsError):
             settings_store.validate_state({"tunnels": tunnels(agents=[
                 first,
@@ -215,7 +215,7 @@ class TunnelSettingsTests(unittest.TestCase):
                     )],
                 ),
             ])})
-        # UDP ugyanazon a porton nem ütközik a TCP tartománnyal.
+        # UDP on the same port does not collide with the TCP range.
         result = settings_store.validate_state({"tunnels": tunnels(agents=[
             first,
             agent(
@@ -227,7 +227,7 @@ class TunnelSettingsTests(unittest.TestCase):
             ),
         ])})
         self.assertEqual(len(result["tunnels"]["agents"]), 2)
-        # A "both" a tartomány mindkét protokollját lefoglalja.
+        # "both" reserves both protocols of the range.
         with self.assertRaises(settings_store.SettingsError):
             settings_store.validate_state({"tunnels": tunnels(agents=[
                 first,
@@ -253,7 +253,7 @@ class TunnelSettingsTests(unittest.TestCase):
                 "port_proxies": [proxy_entry(proto="udp", listen_port=wg)],
                 "tunnels": tunnels(agents=[agent()]),
             })
-        # TCP ugyanazon a porton nem ütközik; kikapcsolt ügynöknél sem.
+        # TCP on the same port does not collide; nor does a disabled agent.
         settings_store.validate_state({
             "port_proxies": [proxy_entry(proto="tcp", listen_port=wg)],
             "tunnels": tunnels(agents=[agent()]),
@@ -273,7 +273,7 @@ class TunnelSettingsTests(unittest.TestCase):
                         mappings=[mapping("tcp", str(port), "9000")]
                     )])
                 ])})
-        # A tartomány belsejében lévő fenntartott port is hiba.
+        # A reserved port inside the range is also an error.
         for listen, target in (
             ("8090-8110", "19090-19110"),
             ("8000-8010", "20-30"),
@@ -294,7 +294,7 @@ class TunnelSettingsTests(unittest.TestCase):
         for port in (1023, 65536, 80, settings_store.PORTAL_PORT):
             with self.assertRaises(settings_store.SettingsError):
                 settings_store.validate_state({"tunnels": tunnels(port=port)})
-        # Két szolgáltatás ugyanazt a hallgató portot nem kaphatja.
+        # Two services cannot get the same listen port.
         with self.assertRaises(settings_store.SettingsError):
             settings_store.validate_state({"tunnels": tunnels(agents=[
                 agent(services=[
@@ -304,7 +304,7 @@ class TunnelSettingsTests(unittest.TestCase):
             ])})
 
     def test_mapping_pairing_and_conflicts(self) -> None:
-        # Tartomány-tartomány párosítás index szerint.
+        # Range-to-range pairing by index.
         ports = settings_store.tunnel_service_ports(service(mappings=[
             mapping("tcp", "8000-8002", "18000-18002"),
         ]))
@@ -314,7 +314,7 @@ class TunnelSettingsTests(unittest.TestCase):
         )
         self.assertTrue(all(p["tunnel_port"] == p["listen_port"]
                             for p in ports))
-        # Eltérő hossz elutasítva, egy célport több hallgatóhoz sem jó.
+        # A different length is rejected; one target port cannot serve several listeners.
         for listen, target in (("8000-8002", "18000-18003"),
                                ("8000-8002", "18000")):
             with self.assertRaises(settings_store.SettingsError):
@@ -323,14 +323,14 @@ class TunnelSettingsTests(unittest.TestCase):
                         mappings=[mapping("tcp", listen, target)]
                     )])
                 ])})
-        # 256 portnál több nem képezhető le.
+        # More than 256 ports cannot be mapped.
         with self.assertRaises(settings_store.SettingsError):
             settings_store.validate_state({"tunnels": tunnels(agents=[
                 agent(services=[service(
                     mappings=[mapping("tcp", "1-300", "2000-2299")]
                 )])
             ])})
-        # Ügynök szintű hatékony portkorlát.
+        # Effective per-agent port limit.
         with self.assertRaises(settings_store.SettingsError):
             settings_store.validate_state({"tunnels": tunnels(agents=[
                 agent(services=[
@@ -345,7 +345,7 @@ class TunnelSettingsTests(unittest.TestCase):
                     for i in range(2)
                 ])
             ])})
-        # Ismétlődő protokoll ugyanazon a porton hiba.
+        # A repeated protocol on the same port is an error.
         with self.assertRaises(settings_store.SettingsError):
             settings_store.validate_state({"tunnels": tunnels(agents=[
                 agent(services=[service(mappings=[
@@ -353,7 +353,7 @@ class TunnelSettingsTests(unittest.TestCase):
                     mapping("tcp", "8000", "9000"),
                 ])])
             ])})
-        # tcp + udp ugyanarra a célportra "both"-ra olvad.
+        # tcp + udp to the same target port merge into "both".
         merged = settings_store.agent_services_expanded(agent(services=[service(
             mappings=[
                 mapping("tcp", "8000", "9000"),
@@ -363,7 +363,7 @@ class TunnelSettingsTests(unittest.TestCase):
         self.assertEqual(len(merged), 1)
         self.assertEqual(merged[0]["proto"], "both")
         self.assertEqual(merged[0]["tunnel_port"], 8000)
-        # Eltérő célport ugyanazon a hallgató porton hiba.
+        # A different target port on the same listen port is an error.
         with self.assertRaises(settings_store.SettingsError):
             settings_store.validate_state({"tunnels": tunnels(agents=[
                 agent(services=[service(mappings=[
@@ -371,7 +371,7 @@ class TunnelSettingsTests(unittest.TestCase):
                     mapping("udp", "8000", "9001"),
                 ])])
             ])})
-        # Két szolgáltatás tcp/udp párja szintén összeolvad.
+        # The tcp/udp pair of two services also merges.
         merged = settings_store.agent_services_expanded(agent(services=[
             service(service_id="a", mappings=[mapping("tcp", "8000", "9000")]),
             service(service_id="b", mappings=[mapping("udp", "8000", "9000")]),
@@ -380,7 +380,7 @@ class TunnelSettingsTests(unittest.TestCase):
                          [("both", 8000)])
 
     def test_ordered_port_pairing_and_canonical_round_trip(self) -> None:
-        # A listák a beírt sorrendben párosulnak: 8000 -> 9001, nem 9000.
+        # The lists pair in the order entered: 8000 -> 9001, not 9000.
         result = settings_store.validate_state({"tunnels": tunnels(agents=[
             agent(services=[service(mappings=[
                 mapping("tcp", "8000,8001", "9001,9000"),
@@ -398,14 +398,14 @@ class TunnelSettingsTests(unittest.TestCase):
             [(p["listen_port"], p["target_port"]) for p in ports],
             [(8000, 9001), (8001, 9000)],
         )
-        # A kanonikus tárolás páronként rendez, és mindkét oldalt ugyanbben
-        # a sorrendben írja ki; a visszaolvasás stabil.
+        # Canonical storage sorts pairwise and writes both sides in the same
+        # order; reading it back is stable.
         again = settings_store.validate_state(result)
         self.assertEqual(
             again["tunnels"]["agents"][0]["services"][0]["mappings"], stored
         )
-        # Vegyes lista és tartomány: a tartomány felfelé bővül, de a
-        # listaelemek sorrendje számít a párosításnál.
+        # Mixed list and range: the range expands upward, but the
+        # order of list items matters for pairing.
         mixed = settings_store.validate_state({"tunnels": tunnels(agents=[
             agent(services=[service(mappings=[
                 mapping("tcp", "8002-8003,8000", "9001,9000,9002"),
@@ -423,7 +423,7 @@ class TunnelSettingsTests(unittest.TestCase):
             [(p["listen_port"], p["target_port"]) for p in mixed_ports],
             [(8000, 9002), (8002, 9001), (8003, 9000)],
         )
-        # Ismétlődő célport megengedett: több hallgató port ugyanoda.
+        # A repeated target port is allowed: several listen ports to the same place.
         duplicate_target = settings_store.validate_state({"tunnels": tunnels(
             agents=[agent(services=[service(mappings=[
                 mapping("tcp", "8000,8001", "9000,9000"),
@@ -440,7 +440,7 @@ class TunnelSettingsTests(unittest.TestCase):
                  "tunnel_port": 8001},
             ],
         )
-        # Ismétlődő hallgató port hiba: azonos pár is, eltérő cél is.
+        # A repeated listen port is an error: same pair or different target alike.
         for target in ("9000,9000", "9000,9001"):
             with self.assertRaises(settings_store.SettingsError):
                 settings_store.validate_state({"tunnels": tunnels(agents=[
@@ -465,7 +465,7 @@ class TunnelSettingsTests(unittest.TestCase):
                 {"proto": "both", "listen": "25565", "target": "25565"},
             ],
         })
-        # A régi, hibás alak továbbra is fail-closed.
+        # The old, malformed shape remains fail-closed.
         with self.assertRaises(settings_store.SettingsError):
             settings_store.validate_state({"tunnels": tunnels(agents=[
                 agent(services=[{
@@ -520,7 +520,7 @@ class TunnelSettingsTests(unittest.TestCase):
                         mappings=[mapping(proto, "8000", "9000")]
                     )])
                 ])})
-        # Üres vagy hiányzó leképezéslista hiba.
+        # An empty or missing mapping list is an error.
         missing = service()
         del missing["mappings"]
         for broken in (missing, service(mappings=[])):
@@ -528,7 +528,7 @@ class TunnelSettingsTests(unittest.TestCase):
                 settings_store.validate_state({"tunnels": tunnels(agents=[
                     agent(services=[broken])
                 ])})
-        # Vessző, szóköz, pontosvessző és gondolatjel is elfogadott.
+        # Comma, space, semicolon and dash are all accepted.
         ports = settings_store.tunnel_service_ports(service(mappings=[
             mapping("tcp", "8000, 8001;8002–8004", "18000 18001;18002—18004"),
         ]))
@@ -573,7 +573,7 @@ class TunnelSettingsTests(unittest.TestCase):
             internal, settings_store.TUNNEL_DOMAIN_PORT_LOW
         )
         self.assertLessEqual(internal, settings_store.TUNNEL_DOMAIN_PORT_HIGH)
-        # Újravalidálás megtartja az explicit belső portot.
+        # Revalidation keeps the explicit internal port.
         again = settings_store.validate_state(result)["tunnels"][
             "agents"][0]["services"][0]
         self.assertEqual(again["mappings"][0]["listen"], str(internal))
@@ -585,19 +585,19 @@ class TunnelSettingsTests(unittest.TestCase):
         ]))
         row = result["tunnels"]["agents"][0]["services"][0]
         self.assertEqual(row["challenge"]["triggers"], ["always"])
-        # Üres feltétellista: nincs challenge, a kulcs elmarad.
+        # Empty trigger list: no challenge, the key is omitted.
         cleared = settings_store.validate_state(domain_state([
             domain_service(challenge={"triggers": []}),
         ]))["tunnels"]["agents"][0]["services"][0]
         self.assertNotIn("challenge", cleared)
-        # Nem domaines szolgáltatáshoz nem adható challenge.
+        # A challenge cannot be given for a non-domain service.
         with self.assertRaises(settings_store.SettingsError):
             settings_store.validate_state({"tunnels": tunnels(agents=[
                 agent(services=[service(
                     challenge={"triggers": ["always"]}
                 )])
             ])})
-        # Ismeretlen feltétel és rossz időköz ugyanúgy hiba.
+        # An unknown trigger and a bad interval are errors alike.
         for challenge in (
             {"triggers": ["unknown"]},
             {"triggers": ["interval"], "interval_hours": 0},
@@ -611,15 +611,15 @@ class TunnelSettingsTests(unittest.TestCase):
 
     def test_domain_must_be_strict_subdomain(self) -> None:
         bad = (
-            "web",                       # nincs pont
+            "web",                       # no dot
             "*.example.com",             # wildcard
             "web.example.com:443",       # port
-            "http://web.example.com",    # séma
-            "-web.example.com",          # kötőjeles kezdet
-            "web..example.com",          # üres címke
-            "web.example.com.",          # záró pont
-            "example.com",               # maga a gyökér
-            "other.test",                # nem a gyökér alatt
+            "http://web.example.com",    # scheme
+            "-web.example.com",          # leading hyphen
+            "web..example.com",          # empty label
+            "web.example.com.",          # trailing dot
+            "example.com",               # the root itself
+            "other.test",                # not under the root
         )
         for domain in bad:
             with self.subTest(domain=domain):
@@ -632,7 +632,7 @@ class TunnelSettingsTests(unittest.TestCase):
         self,
     ) -> None:
         routes = [{"name": "nas", "root": "example.com", "port": 80}]
-        # Portálcím és proxy-bejegyzés hostja sem lehet szolgáltatás-domain.
+        # Neither the portal address nor a proxy entry host can be a service domain.
         for domain in ("portal.example.com", "nas.example.com"):
             with self.subTest(domain=domain):
                 with self.assertRaises(settings_store.SettingsError):
@@ -641,13 +641,13 @@ class TunnelSettingsTests(unittest.TestCase):
                         routes=routes,
                         portal_domain="portal.example.com",
                     ))
-        # Két szolgáltatás azonos domainje (kis-nagybetűtől függetlenül) hiba.
+        # The same domain on two services (case-insensitive) is an error.
         with self.assertRaises(settings_store.SettingsError):
             settings_store.validate_state(domain_state([
                 domain_service(service_id="a", domain="web.example.com"),
                 domain_service(service_id="b", domain="WEB.example.com"),
             ]))
-        # A leghosszabb illeszkedő gyökér alá kell esnie.
+        # It must fall under the longest matching root.
         result = settings_store.validate_state(domain_state(
             [domain_service(domain="web.sub.example.com")],
             domains=("example.com", "sub.example.com"),
@@ -659,22 +659,22 @@ class TunnelSettingsTests(unittest.TestCase):
 
     def test_domain_requires_single_tcp_mapping_and_target(self) -> None:
         cases = {
-            "két leképezés": domain_service(mappings=[
+            "two mappings": domain_service(mappings=[
                 mapping("tcp", "", "8080"), mapping("tcp", "", "8081"),
             ]),
             "udp": domain_service(mappings=[mapping("udp", "", "8080")]),
             "both": domain_service(mappings=[mapping("both", "", "8080")]),
-            "két célport": domain_service(mappings=[
+            "two target ports": domain_service(mappings=[
                 mapping("tcp", "", "8080,8081"),
             ]),
-            "két belső port": domain_service(mappings=[
+            "two internal ports": domain_service(mappings=[
                 mapping("tcp", "41000,41001", "8080"),
             ]),
-            "célhost nélkül": domain_service(target_host=""),
-            "célport 22": domain_service(mappings=[
+            "without target host": domain_service(target_host=""),
+            "target port 22": domain_service(mappings=[
                 mapping("tcp", "", "22"),
             ]),
-            "fenntartott belső port": domain_service(mappings=[
+            "reserved internal port": domain_service(mappings=[
                 mapping("tcp", str(settings_store.PORTAL_PORT), "8080"),
             ]),
         }
@@ -700,7 +700,7 @@ class TunnelSettingsTests(unittest.TestCase):
         self.assertEqual(ports[0], settings_store.TUNNEL_DOMAIN_PORT_LOW + 1)
         self.assertEqual(ports[1], settings_store.TUNNEL_DOMAIN_PORT_LOW + 2)
         self.assertEqual(len(set(ports)), 2)
-        # A fenntartott portok (WG, portál) nem kaphatók ki.
+        # Reserved ports (WG, portal) cannot be handed out.
         self.assertNotIn(result["tunnels"]["port"], ports)
         self.assertNotIn(settings_store.PORTAL_PORT, ports)
         with mock.patch.object(
@@ -732,7 +732,7 @@ class TunnelSettingsTests(unittest.TestCase):
 
 
 class TunnelFirewallTests(unittest.TestCase):
-    """nft: sablon sorrend, WireGuard-port és szintetikus DNAT."""
+    """nft: template ordering, WireGuard port and synthetic DNAT."""
 
     def setUp(self) -> None:
         self.fw = gateway.Firewall(
@@ -837,7 +837,7 @@ class TunnelFirewallTests(unittest.TestCase):
         self.assertFalse(any(
             "portproxy_input" in rule for rule in rules
         ))
-        # Kikapcsolt ügynök egyetlen szabályt sem ad.
+        # A disabled agent yields no rule at all.
         self.assertEqual(gateway.tunnel_proxy_entries(
             tunnels(agents=[agent(enabled=False, services=[service()])])
         ), [])
@@ -850,8 +850,8 @@ class TunnelFirewallTests(unittest.TestCase):
         ])])
         self.fw.replace_custom((), (), tunnels=state)
         script = self.scripts[-1]
-        # A forward engedély a sablon ct original szabálya: a portál-
-        # engedély az alagútra is kötelező, nincs preauth-kikerülés.
+        # The forward grant is the template's ct original rule: the portal
+        # grant is mandatory for the tunnel too, with no preauth bypass.
         self.assertIn(
             "ct original ip saddr . ct original proto-dst @allowed_tcp",
             (ROOT / "deploy" / "hatarvedelem.nft").read_text(
@@ -892,8 +892,8 @@ class TunnelFirewallTests(unittest.TestCase):
                 f"meta mark set {self.fw.fwd_mark} accept",
                 script,
             )
-        # A LAN irány szándékosan nem nyílik meg, és nincs cél nélküli
-        # related szabály (az minden kapcsolódó forgalmat átengedne).
+        # The LAN direction is deliberately not opened, and there is no
+        # destination-less related rule (that would let all related traffic through).
         self.assertNotIn('preauth iifname "eth1" ct status dnat', script)
         self.assertNotIn("preauth ct state related", script)
 
@@ -923,7 +923,7 @@ class TunnelFirewallTests(unittest.TestCase):
         self.assertEqual(gateway.tunnel_public_preauth(tunnels(agents=[
             agent(enabled=False, services=[service(public=True)]),
         ])), [])
-        # Ismert WAN interfész nélkül a szabály nem alkalmazható.
+        # Without a known WAN interface the rule cannot be applied.
         firewall = gateway.Firewall(
             dry_run=True, logger=lambda *_: None,
             lan_if="eth1", wan_if="",
@@ -985,7 +985,7 @@ class TunnelFirewallTests(unittest.TestCase):
 
 
 class FakeRunner:
-    """ip/wg helyettesítő: a hívást és a stdin tartalmát rögzíti."""
+    """ip/wg stand-in: records the call and the stdin content."""
 
     def __init__(self, handler):
         self.handler = handler
@@ -1002,7 +1002,7 @@ class FakeRunner:
 
 
 class TunnelManagerTests(unittest.TestCase):
-    """A dropjak0 interfész, peerek, kulcsfájlok és állapot."""
+    """The dropjak0 interface, peers, key files and status."""
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -1047,7 +1047,7 @@ class TunnelManagerTests(unittest.TestCase):
         self.assertEqual(calls[0], [
             "ip", "link", "add", "dropjak0", "type", "wireguard"
         ])
-        # replace: a cím idempotensen állítható (újraindított névtér).
+        # replace: the address can be set idempotently (restarted namespace).
         self.assertEqual(calls[1], [
             "ip", "addr", "replace", "10.77.0.1/24", "dev", "dropjak0"
         ])
@@ -1110,11 +1110,11 @@ class TunnelManagerTests(unittest.TestCase):
 
     def test_failure_is_isolated(self) -> None:
         manager, _ = self.manager(
-            lambda args, input: OSError("nincs ip")
+            lambda args, input: OSError("no ip")
         )
         self.assertFalse(manager.reconcile(tunnels(agents=[agent()])))
         self.assertTrue(manager.error)
-        # A hiba után a portál tovább működik; az állapot elérhető.
+        # After the failure the portal keeps working; status is available.
         status = manager.status(tunnels(agents=[agent()]))
         self.assertEqual(status["agents"][0]["online"], False)
 
@@ -1163,12 +1163,12 @@ class TunnelManagerTests(unittest.TestCase):
         self.assertEqual(row["last_handshake"], 900)
         self.assertEqual(row["rx_bytes"], 100)
         self.assertEqual(row["tx_bytes"], 200)
-        # 180 másodpercnél régebbi kézfogás offline.
+        # A handshake older than 180 seconds is offline.
         status = manager.status(
             tunnels(agents=[agent(public_key=public)]), now=2000.0
         )
         self.assertFalse(status["agents"][0]["online"])
-        # Ügynök nélkül nincs wg-hívás.
+        # Without agents there is no wg call.
         _, runner = self.manager(handler)
         status = manager.status(settings_store.default_tunnels())
         self.assertEqual(status["agents"], [])
@@ -1205,7 +1205,7 @@ def _solve(challenge: dict) -> dict:
 
 
 class FakeTunnelManager:
-    """wg/ip nélküli ügynök-kezelő az API-tesztekhez."""
+    """Agent manager without wg/ip for the API tests."""
 
     def __init__(self) -> None:
         self.error = ""
@@ -1242,7 +1242,7 @@ class FakeTunnelManager:
 
 
 class TunnelHttpTests(unittest.TestCase):
-    """Admin műveletek, konfiguráció-letöltés és ügynök-szinkron."""
+    """Admin operations, config download and agent sync."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -1325,7 +1325,7 @@ class TunnelHttpTests(unittest.TestCase):
         self.gw.tunnels = FakeTunnelManager()
         self.restart_calls: list[float] = []
 
-    # -- HTTP segédek ---------------------------------------------------------
+    # -- HTTP helpers ---------------------------------------------------------
 
     def get(self, path: str, cookie: str = "", source: str = "127.0.0.1",
             headers: dict | None = None):
@@ -1389,7 +1389,7 @@ class TunnelHttpTests(unittest.TestCase):
         self.gw.settings.commit({"tunnels": tunnels(agents=agents, **over)})
 
     def tcp_listener(self) -> int:
-        """Egy helyi TCP-hallgató portja; a teszt végén bezárul."""
+        """Port of a local TCP listener; closed at the end of the test."""
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.bind(("127.0.0.1", 0))
         listener.listen(8)
@@ -1397,14 +1397,14 @@ class TunnelHttpTests(unittest.TestCase):
         return listener.getsockname()[1]
 
     def udp_listener(self) -> int:
-        """Egy helyi UDP-hallgató portja, amely nem válaszol a próbára."""
+        """Port of a local UDP listener that does not answer the probe."""
         listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         listener.bind(("127.0.0.1", 0))
         self.addCleanup(listener.close)
         return listener.getsockname()[1]
 
     def free_port(self, kind: str = "tcp") -> int:
-        """Egy pillanatnyira szabad helyi port (a kötés után azonnal zárva)."""
+        """A momentarily free local port (closed immediately after binding)."""
         probe = socket.socket(
             socket.AF_INET,
             socket.SOCK_STREAM if kind == "tcp" else socket.SOCK_DGRAM,
@@ -1423,12 +1423,12 @@ class TunnelHttpTests(unittest.TestCase):
         self.assertEqual(status, 403)
 
     def proxy_target(self, host: str):
-        """A kéréskezelő _proxy_target döntése a futó szerver gw-jével."""
+        """Handler._proxy_target decision with the running server's gw."""
         handler = object.__new__(server.Handler)
         handler.server = self.app
         return handler._proxy_target(host)
 
-    # -- állapot és admin műveletek ------------------------------------------
+    # -- state and admin operations ------------------------------------------
 
     def test_state_hides_secrets_and_shows_status(self) -> None:
         self.seed([agent(services=[service()])])
@@ -1472,12 +1472,12 @@ class TunnelHttpTests(unittest.TestCase):
         self.assertEqual(row["id"], "home")
         self.assertGreaterEqual(row["last_sync"], 4)
         self.assertLessEqual(row["last_sync"], 7)
-        # A végpont csak olvas: a beállítás és az nft/WireGuard állapot
-        # változatlan marad.
+        # The endpoint is read-only: the settings and the nft/WireGuard state
+        # remain unchanged.
         self.assertEqual(self.gw.settings.snapshot(), before)
         self.assertEqual(self.gw.tunnels.reconciled, reconciled)
 
-        # Soha nem szinkronizált ügynöknél a mező None.
+        # For a never-synced agent the field is None.
         self.gw.tunnel_sync_times.clear()
         status, _, body = self.get(
             "/api/admin/tunnels/status", cookie=cookie, source="127.0.0.5"
@@ -1635,7 +1635,7 @@ class TunnelHttpTests(unittest.TestCase):
         error = json.loads(body)
         self.assertFalse(error["ok"])
         self.assertEqual(error["field"], "listen_port")
-        self.assertIn("fenntartott", error["error"])
+        self.assertIn("reserved", error["error"])
 
         status, _, body = self.admin_post(
             "/api/admin/settings",
@@ -1646,7 +1646,7 @@ class TunnelHttpTests(unittest.TestCase):
         self.assertEqual(status, 400, body)
         self.assertEqual(json.loads(body)["field"], "agents")
 
-        # A port proxy és az alagút közös hallgatóport-névtere.
+        # The port proxy and the tunnel share one listen-port namespace.
         self.gw.settings.commit({
             "port_proxies": [proxy_entry()],
             "tunnels": tunnels(agents=[agent()]),
@@ -1685,7 +1685,7 @@ class TunnelHttpTests(unittest.TestCase):
             "service_id": "mc",
         })
         self.assertEqual(status, 404, body)
-        self.assertEqual(json.loads(body)["error"], "tunnel: nincs ilyen ügynök")
+        self.assertEqual(json.loads(body)["error"], "tunnel: no such agent")
 
         self.seed([agent(services=[service()])])
         status, _, body = post({
@@ -1694,7 +1694,7 @@ class TunnelHttpTests(unittest.TestCase):
         })
         self.assertEqual(status, 404, body)
         self.assertEqual(
-            json.loads(body)["error"], "tunnel: nincs ilyen szolgáltatás"
+            json.loads(body)["error"], "tunnel: no such service"
         )
 
         self.seed([agent(enabled=False, services=[service()])])
@@ -1704,7 +1704,7 @@ class TunnelHttpTests(unittest.TestCase):
         })
         self.assertEqual(status, 409, body)
         self.assertEqual(
-            json.loads(body)["error"], "tunnel: az ügynök ki van kapcsolva"
+            json.loads(body)["error"], "tunnel: the agent is disabled"
         )
 
         self.seed([agent(services=[service(enabled=False)])])
@@ -1715,7 +1715,7 @@ class TunnelHttpTests(unittest.TestCase):
         self.assertEqual(status, 409, body)
         self.assertEqual(
             json.loads(body)["error"],
-            "tunnel: a szolgáltatás ki van kapcsolva",
+            "tunnel: the service is disabled",
         )
 
         status, _, body = post({
@@ -1747,13 +1747,13 @@ class TunnelHttpTests(unittest.TestCase):
         self.assertEqual(data["service"]["id"], "mc")
         self.assertEqual(data["results"], [{
             "proto": "tcp", "listen": port, "target": "mc:25565",
-            "ok": True, "detail": "csatlakozás létrejött",
+            "ok": True, "detail": "connection established",
         }])
-        self.assertEqual(data["summary"], "a szolgáltatás elérhető")
-        # A teszt nem ír beállítást és nem alkalmaz nftables-szabályt.
+        self.assertEqual(data["summary"], "service reachable")
+        # The test writes no settings and applies no nftables rule.
         self.assertEqual(before, self.gw.settings.snapshot())
         self.assertEqual(reconciled, len(self.gw.tunnels.reconciled))
-        # Az audit csak azonosítókat, portokat és eredményjelzőket tartalmaz.
+        # The audit contains only identifiers, ports and result flags.
         entries = []
         with open(self.audit.path, encoding="utf-8") as fh:
             for line in fh:
@@ -1794,18 +1794,18 @@ class TunnelHttpTests(unittest.TestCase):
         self.assertEqual(status, 200, body)
         data = json.loads(body)
         self.assertFalse(data["results"][0]["ok"])
-        self.assertEqual(data["results"][0]["detail"], "elutasítva")
-        self.assertIn("nem érhető el", data["summary"])
+        self.assertEqual(data["results"][0]["detail"], "refused")
+        self.assertIn("service unreachable", data["summary"])
 
-        # Determinisztikus időtúllépés: a próbát magát helyettesítjük, így
-        # a rövid teszt nem függ a hálózat elérhetetlenségének módjától.
+        # Deterministic timeout: we replace the probe itself, so the short
+        # test does not depend on how the network is unreachable.
         with mock.patch.object(
             server.Handler, "_tunnel_test_address",
             lambda _self, _agent: "127.0.0.1",
         ), mock.patch.object(
             server.Handler, "_tunnel_probe_tcp",
             staticmethod(lambda _a, _p: {
-                "ok": False, "detail": "időtúllépés",
+                "ok": False, "detail": "timeout",
             }),
         ):
             status, _, body = self.admin_post(
@@ -1817,7 +1817,7 @@ class TunnelHttpTests(unittest.TestCase):
         self.assertEqual(status, 200, body)
         row = json.loads(body)["results"][0]
         self.assertFalse(row["ok"])
-        self.assertEqual(row["detail"], "időtúllépés")
+        self.assertEqual(row["detail"], "timeout")
 
     def test_service_test_udp_no_reply_and_icmp_refused(self) -> None:
         silent = self.udp_listener()
@@ -1846,9 +1846,9 @@ class TunnelHttpTests(unittest.TestCase):
             self.assertTrue(data["results"][0]["ok"])
             self.assertEqual(
                 data["results"][0]["detail"],
-                "kiküldve, UDP-válasz nem várható",
+                "sent, no UDP reply expected",
             )
-            self.assertEqual(data["summary"], "a szolgáltatás elérhető")
+            self.assertEqual(data["summary"], "service reachable")
 
             status, _, body = self.admin_post(
                 "/api/admin/settings",
@@ -1859,8 +1859,8 @@ class TunnelHttpTests(unittest.TestCase):
         self.assertEqual(status, 200, body)
         data = json.loads(body)
         self.assertFalse(data["results"][0]["ok"])
-        self.assertEqual(data["results"][0]["detail"], "elutasítva (ICMP)")
-        self.assertIn("nem érhető el", data["summary"])
+        self.assertEqual(data["results"][0]["detail"], "refused (ICMP)")
+        self.assertIn("service unreachable", data["summary"])
 
     def test_service_test_caps_mappings_and_runs_concurrently(self) -> None:
         ports = [self.free_port("tcp") for _ in range(5)]
@@ -1876,7 +1876,7 @@ class TunnelHttpTests(unittest.TestCase):
         def slow(_address, port):
             calls.append(port)
             time.sleep(0.4)
-            return {"ok": True, "detail": "csatlakozás létrejött"}
+            return {"ok": True, "detail": "connection established"}
 
         with mock.patch.object(
             server.Handler, "_tunnel_test_address",
@@ -1894,11 +1894,11 @@ class TunnelHttpTests(unittest.TestCase):
             elapsed = time.monotonic() - started
         self.assertEqual(status, 200, body)
         data = json.loads(body)
-        # Legfeljebb négy leképezés; a többit a válasz jelzi.
+        # At most four mappings; the response indicates the rest.
         self.assertEqual(len(data["results"]), 4)
         self.assertEqual(len(calls), 4)
-        self.assertIn("csak az első 4 leképezés", data["summary"])
-        # Párhuzamosan futnak: négy 0,4 s-os próba jóval 1,6 s alatt végez.
+        self.assertIn("only the first 4 mappings", data["summary"])
+        # They run concurrently: four 0.4 s probes finish well under 1.6 s.
         self.assertLess(elapsed, 1.2)
 
 
@@ -1931,7 +1931,7 @@ class TunnelHttpTests(unittest.TestCase):
         ):
             self.assertNotIn(secret, text)
 
-    # -- ügynök konfiguráció és szinkron -------------------------------------
+    # -- agent config and sync -----------------------------------------------
 
     def test_config_download_contents_and_headers(self) -> None:
         self.seed(
@@ -2028,7 +2028,7 @@ class TunnelHttpTests(unittest.TestCase):
             headers.get("Content-Disposition"),
             'attachment; filename="dropjak-agent-home.sh"',
         )
-        # Egyetlen fájl: shell-előtag, utána a tar.gz csomag.
+        # A single file: a shell prefix, then the tar.gz package.
         marker = b"__DROPJAK_PAYLOAD__\n"
         self.assertTrue(body.startswith(b"#!/bin/sh\n"), body[:20])
         split = body.index(marker) + len(marker)
@@ -2039,7 +2039,7 @@ class TunnelHttpTests(unittest.TestCase):
             header,
             (ROOT / "deploy" / "tunnel-agent" / "selfinstall.sh").read_bytes(),
         )
-        # A script feje érvényes sh szintaxis (a bináris farok nélkül).
+        # The script header is valid sh syntax (without the binary trailer).
         check = subprocess.run(
             ["sh", "-n"], input=header, capture_output=True, timeout=10,
         )
@@ -2064,8 +2064,8 @@ class TunnelHttpTests(unittest.TestCase):
         self.assertNotIn("host.docker.internal", compose)
         self.assertNotIn("internal: true", compose)
         self.assertNotIn("egress", compose)
-        # A csomag statikus sablonja fix példanevet tartalmaz; a telepítő a
-        # futtatáskor agent.json-ból származtatja a valódi nevet.
+        # The package's static template contains a fixed example name; the installer
+        # derives the real name from agent.json at run time.
         self.assertIn("container_name: dropjak-tunnel-agent-home-home-1",
                       compose)
         self.assertIn("dropjak-tunnel-agent-<label-slug>-<id>", compose)
@@ -2074,7 +2074,7 @@ class TunnelHttpTests(unittest.TestCase):
             agent_py,
             (ROOT / "deploy" / "tunnel-agent" / "agent.py").read_bytes(),
         )
-        # Ugyanazok a jogosultságok, mint a Config végpontnál.
+        # The same permissions as at the Config endpoint.
         status, _, _ = self.get("/api/admin/tunnels/home/bundle")
         self.assertEqual(status, 403)
         status, _, _ = self.get(
@@ -2169,7 +2169,7 @@ class TunnelHttpTests(unittest.TestCase):
             )
         self.assertEqual(status, 429)
         self.assertEqual(headers.get("Retry-After"), "5")
-        # Idő elteltével újra kiszolgálható.
+        # After some time it can be served again.
         self.gw.tunnel_sync_times["home"] = (
             time.monotonic() - tunnel_mod.ONLINE_SECONDS
         )
@@ -2182,12 +2182,12 @@ class TunnelHttpTests(unittest.TestCase):
             )
         self.assertEqual(status, 200)
 
-    # -- domaines alagút-szolgáltatások --------------------------------------
+    # -- domain-mode tunnel services ------------------------------------------
 
     def prepare_domain(self, services, domains=("example.com",)) -> None:
-        # A commit a teljes állapotot cseréli; a proxy-gyökereket ugyanabban
-        # a lépésben kell megadni, különben a domaines szolgáltatás nem
-        # validálható.
+        # commit replaces the whole state; the proxy roots must be given in the
+        # same step, otherwise the domain-mode service cannot be
+        # validated.
         self.gw.settings.commit({
             **self.gw.settings.snapshot(),
             "proxy_domains": list(domains),
@@ -2208,8 +2208,8 @@ class TunnelHttpTests(unittest.TestCase):
         ])
         names = self.gw.rules.domain_names()
         self.assertIn("web.example.com", names)
-        # A letiltott szolgáltatás domainje is látszik, hogy a
-        # törlés/letiltás életciklus-korlátja hivatkozhasson rá.
+        # The domain of a disabled service is also visible so that the
+        # delete/disable lifecycle guard can refer to it.
         self.assertIn("off.example.com", names)
 
     def test_domain_target_resolves_only_enabled_services(self) -> None:
@@ -2235,14 +2235,14 @@ class TunnelHttpTests(unittest.TestCase):
         self.assertLessEqual(
             target["port"], settings_store.TUNNEL_DOMAIN_PORT_HIGH
         )
-        # Letiltott szolgáltatás és ismeretlen aldomain nem oldódik fel.
+        # A disabled service and an unknown subdomain do not resolve.
         self.assertEqual(
             self.proxy_target("off.example.com"), (None, "")
         )
         self.assertEqual(
             self.proxy_target("unknown.example.com"), (None, "")
         )
-        # Domain nélküli ügynök nem ad találatot.
+        # An agent without a domain yields no match.
         self.gw.settings.reset()
         self.assertIsNone(server._tunnel_domain_target(
             self.gw.settings.snapshot(), "pub.example.com"
@@ -2264,7 +2264,7 @@ class TunnelHttpTests(unittest.TestCase):
         self.assertEqual(target["challenge"], challenge)
         plain, _ = self.proxy_target("plain.example.com")
         self.assertNotIn("challenge", plain)
-        # A publikus cél challenge-se a kérést captcha-oldalra tereli.
+        # A public target's challenge redirects the request to a captcha page.
         status, _, body = self.get("/api/proxy/auth", headers={
             "X-Forwarded-Host": "pub.example.com",
             "X-Forwarded-For": "203.0.113.10",
@@ -2386,10 +2386,10 @@ class TunnelHttpTests(unittest.TestCase):
             with self.subTest(action=payload["action"]):
                 status, body = post(payload)
                 self.assertEqual(status, 400, body)
-                self.assertIn("domain szabály hivatkozik rá", body["error"])
+                self.assertIn("a domain rule references it", body["error"])
 
-        # A letiltás mindig engedélyezett (fail-closed), még hivatkozó
-        # domain-szabály mellett is; csak a törlés/domain-váltás tiltott.
+        # Disabling is always allowed (fail-closed), even with a referencing
+        # domain rule; only deletion/domain change is forbidden.
         allowed = [
             {"action": "tunnel_agent_update", "id": "home",
              "enabled": False},
@@ -2410,7 +2410,7 @@ class TunnelHttpTests(unittest.TestCase):
             with self.subTest(action=payload["action"]):
                 status, body = post(payload)
                 self.assertEqual(status, 200, body)
-        # A hivatkozó szabály törlése után a domain eltávolítása is engedett.
+        # After the referencing rule is deleted, removing the domain is also allowed.
         self.gw.rules.delete("dom")
         status, body = post(blocked[-1])
         self.assertEqual(status, 200, body)
@@ -2441,15 +2441,15 @@ class TunnelHttpTests(unittest.TestCase):
         saved = self.gw.settings.snapshot()["tunnels"]["agents"][0][
             "services"][0]
         self.assertEqual(saved["challenge"], challenge)
-        # A részleges mentés nem érinti a többi mezőt.
+        # A partial save does not affect the other fields.
         for key in ("label", "target_host", "enabled", "public", "domain",
                     "mappings"):
             self.assertEqual(saved[key], before[key], key)
         target, _ = self.proxy_target("web.example.com")
         self.assertEqual(target["challenge"], challenge)
 
-        # A domain elhagyásakor a challenge is törlődik, a mentés nem
-        # akad meg a domain nélküli challenge validációján.
+        # When the domain is removed the challenge is deleted too, and the save
+        # does not get stuck on validating a challenge without a domain.
         status, body = post({
             "action": "tunnel_service_save", "agent_id": "home", "id": "web",
             "domain": "", "mappings": [
@@ -2462,7 +2462,7 @@ class TunnelHttpTests(unittest.TestCase):
         self.assertEqual(saved["domain"], "")
         self.assertNotIn("challenge", saved)
 
-    # -- konfigurációs csomag és visszaállítás -------------------------------
+    # -- config bundle and restore --------------------------------------------
 
     def test_bundle_roundtrip_and_version_migration(self) -> None:
         self.seed([agent(services=[service()])])
@@ -2490,7 +2490,7 @@ class TunnelHttpTests(unittest.TestCase):
             settings_store.default_tunnels(),
         )
 
-        # A 2-es csomag régi, egyportos szolgáltatás-alakja betöltéskor migrál.
+        # The old single-port service shape of a version 2 bundle migrates on load.
         old_shape = json.loads(json.dumps(bundle))
         old_shape["sections"]["settings"]["tunnels"]["agents"][0]["services"] = [{
             "id": "mc", "label": "Minecraft", "proto": "tcp",
@@ -2537,7 +2537,7 @@ class TunnelHttpTests(unittest.TestCase):
         self.assertEqual(fake.removed, 1)
         self.assertEqual(len(self.restart_calls), 1)
 
-    # -- szolgáltatás-szabályok ----------------------------------------------
+    # -- service rules --------------------------------------------------------
 
     def _service_rule(self, cookie: str, rule_id: str = "mc-rule",
                       refs=None, **over) -> dict:
@@ -2573,10 +2573,10 @@ class TunnelHttpTests(unittest.TestCase):
             }],
         )
         self.assertEqual(
-            rule["ports_label"], "Szolgáltatás: Minecraft (TCP 25565)"
+            rule["ports_label"], "Service: Minecraft (TCP 25565)"
         )
 
-        # Módosítás és duplikálás: a hivatkozások megmaradnak.
+        # Update and duplicate: the references are kept.
         status, _, body = self.admin_post(
             "/api/admin/rules",
             {"action": "update", "id": "mc-rule", "label": "MC (új)",
@@ -2606,7 +2606,7 @@ class TunnelHttpTests(unittest.TestCase):
         self.assertEqual(copied["service_refs"], ["home/mc"])
         self.assertEqual(copied["tcp"], [25565])
 
-        # A napló tartalmazza a hivatkozásokat.
+        # The log contains the references.
         status, _, body = self.get(
             "/api/admin/logs?limit=200&event=admin_rule_updated",
             cookie=cookie, source="127.0.0.5",
@@ -2627,7 +2627,7 @@ class TunnelHttpTests(unittest.TestCase):
             self.assertEqual(status, 200, body)
 
     def test_domain_service_rule_api_grants_domain_through_proxy(self) -> None:
-        """Domain-módú szolgáltatás szolgáltatás-szabályként is választható."""
+        """A domain-mode service can also be selected as a service rule."""
         self.prepare_domain([
             domain_service(
                 service_id="web", domain="web.example.com",
@@ -2652,12 +2652,12 @@ class TunnelHttpTests(unittest.TestCase):
         }])
         self.assertEqual(
             rule_payload["ports_label"],
-            "Szolgáltatás: Minecraft (web.example.com)",
+            "Service: Minecraft (web.example.com)",
         )
-        # A statikus címke a domaint mutatja a hiányzó port helyett.
+        # The static label shows the domain instead of the missing port.
         self.assertEqual(
             server.Handler._services_label(rule_payload["services"]),
-            "Szolgáltatás: Minecraft (web.example.com)",
+            "Service: Minecraft (web.example.com)",
         )
         rule = self.gw.rules.get("web-rule")
         self.assertEqual(rule.grants, ())
@@ -2680,10 +2680,10 @@ class TunnelHttpTests(unittest.TestCase):
             )
         )
 
-        # Átnevezés: a UI a belső hallgató portot változatlanul hagyja, ezért
-        # csak a domain-sor változik. A signature és a feloldott domain
-        # frissül, a munkamenet visszavonódik, a régi pillanatkép
-        # érvénytelenné válik.
+        # Rename: the UI leaves the internal listening port unchanged, so
+        # only the domain row changes. The signature and the resolved domain
+        # are refreshed, the session is revoked, and the old snapshot
+        # becomes invalid.
         stored = self.gw.settings.snapshot()["tunnels"]["agents"][0][
             "services"
         ][0]
@@ -2722,13 +2722,13 @@ class TunnelHttpTests(unittest.TestCase):
     def test_domain_service_rename_keeps_listen_and_revokes_old_domain(
         self,
     ) -> None:
-        """UI-szerű átnevezés: a belső listen változatlan, mégis visszavon.
+        """UI-like rename: the internal listen is unchanged, yet it revokes.
 
-        A valódi felület a domain szerkesztésekor a meglévő belső
-        hallgató portot küldi vissza, így a portalapú változásérzékelés
-        nem jelezne. A domainnek a hatékony leképezés részeként kell
-        változást okoznia: a régi munkamenet a régi domainre ne maradjon
-        érvényes, az új belépés viszont az új domainre működjön.
+        The real interface sends back the existing internal listening port
+        when editing the domain, so the port-based change detection would
+        not notice. The domain must count as part of the effective mapping:
+        the old session must not stay valid for the old domain, while the
+        new login must work for the new domain.
         """
         self.prepare_domain([
             domain_service(
@@ -2763,7 +2763,7 @@ class TunnelHttpTests(unittest.TestCase):
             "alice",
         )
 
-        # Pontosan az UI payloadja: domain csere, listen és cél változatlan.
+        # Exactly the UI payload: domain swap, listen and target unchanged.
         status, _, body = self.admin_post(
             "/api/admin/settings",
             {"action": "tunnel_service_save", "agent_id": "home",
@@ -2793,7 +2793,7 @@ class TunnelHttpTests(unittest.TestCase):
         )
         self.assertIn(("domain", 0, "web2.example.com", 0), new_sig)
 
-        # Az új belépés a friss szabállyal már az új domaint nyitja.
+        # The new login with the fresh rule already opens the new domain.
         fresh = self.gw.sessions.login("alice", "192.168.50.20")
         current = self.gw.rules.get("web-rule")
         authorized = self.gw.sessions.authorize(
@@ -2811,7 +2811,7 @@ class TunnelHttpTests(unittest.TestCase):
                 "192.168.50.20", "web.example.com"
             )
         )
-        # A választás megőrzi a szolgáltatás-hivatkozást a megjelenítéshez.
+        # The selection keeps the service reference for display.
         self.assertEqual(
             authorized.selections()[0].service_refs, ("home/web",)
         )
@@ -2839,7 +2839,7 @@ class TunnelHttpTests(unittest.TestCase):
         self.assertEqual(status, 400, body)
         self.assertIsNone(self.gw.rules.get("mixed"))
 
-        # Letiltott szolgáltatásra nem hozható létre szabály.
+        # A rule cannot be created for a disabled service.
         self.seed([agent(services=[service(enabled=False)])])
         status, _, body = self.admin_post(
             "/api/admin/rules",
@@ -2862,7 +2862,7 @@ class TunnelHttpTests(unittest.TestCase):
         self.gw.rules.create("manual", {"label": "Manual", "tcp": [80]})
         self.gw.users.set_metadata("alice", rules=("manual",))
 
-        # Létrehozás közvetlen felhasználói és csoportos kiosztással.
+        # Creation with direct user and group assignment.
         self._service_rule(
             cookie, "svc-rule", users=["alice"], groups=["staff"]
         )
@@ -2875,7 +2875,7 @@ class TunnelHttpTests(unittest.TestCase):
         self.assertIn("svc-rule", self.gw.groups.get("staff").rules)
         self.assertNotIn("svc-rule", self.gw.users.record("bob").rules)
 
-        # Módosítás: pontosan a küldött listák érvényesülnek.
+        # Update: exactly the submitted lists take effect.
         status, _, body = self.admin_post(
             "/api/admin/rules",
             {"action": "update", "id": "svc-rule", "label": "MC",
@@ -2888,8 +2888,8 @@ class TunnelHttpTests(unittest.TestCase):
         self.assertIn("svc-rule", self.gw.users.record("bob").rules)
         self.assertNotIn("svc-rule", self.gw.groups.get("staff").rules)
 
-        # Csoporton keresztüli kiosztás: a tag effektív szabályai között
-        # megjelenik, a csoport többi szabálya érintetlen.
+        # Assignment through a group: it appears among the member's effective
+        # rules, while the group's other rules are untouched.
         self._service_rule(
             cookie, "grp-rule", users=[], groups=["staff"]
         )
@@ -2904,7 +2904,7 @@ class TunnelHttpTests(unittest.TestCase):
         self.assertIn("manual", effective)
         self.assertNotIn("svc-rule", effective)
 
-        # A kihagyott users/groups mező nem változtat a kiosztásokon.
+        # An omitted users/groups field does not change the assignments.
         status, _, body = self.admin_post(
             "/api/admin/rules",
             {"action": "update", "id": "grp-rule", "label": "Csoport",
@@ -2914,7 +2914,7 @@ class TunnelHttpTests(unittest.TestCase):
         self.assertEqual(status, 200, body)
         self.assertIn("grp-rule", self.gw.groups.get("staff").rules)
 
-        # Érvénytelen felhasználó: a szabály nem jön létre.
+        # Invalid user: the rule is not created.
         status, _, body = self.admin_post(
             "/api/admin/rules",
             {"action": "create", "id": "bad-user", "label": "Bad",
@@ -2925,8 +2925,8 @@ class TunnelHttpTests(unittest.TestCase):
         self.assertEqual(status, 400, body)
         self.assertIsNone(self.gw.rules.get("bad-user"))
 
-        # Az audit egy bejegyzésben összegzi a hozzáadott/eltávolított
-        # felhasználókat és csoportokat.
+        # The audit summarizes the added/removed users and groups in one
+        # entry.
         status, _, body = self.get(
             "/api/admin/logs?limit=200&event=admin_rule_updated",
             cookie=cookie, source="127.0.0.5",
@@ -2956,7 +2956,7 @@ class TunnelHttpTests(unittest.TestCase):
         )
         self.assertTrue(authorized.authorized)
 
-        # A törlés továbbra is tiltott, amíg szabály hivatkozik rá.
+        # Deletion remains forbidden while a rule references it.
         guard_payloads = (
             {"action": "tunnel_service_delete", "agent_id": "home",
              "id": "mc"},
@@ -2969,17 +2969,17 @@ class TunnelHttpTests(unittest.TestCase):
                 )
                 self.assertEqual(status, 400, body)
                 error = json.loads(body)["error"]
-                self.assertIn("szabály", error)
+                self.assertIn("rule references", error)
                 self.assertIn("mc-rule", error)
                 self.assertIn("MC szabály", error)
-        # A tiltott műveletek után az ügynök és a szolgáltatás megmaradt.
+        # After the forbidden operations the agent and the service remain.
         stored = self.gw.settings.snapshot()["tunnels"]
         self.assertEqual(len(stored["agents"]), 1)
         self.assertTrue(stored["agents"][0]["enabled"])
         self.assertTrue(stored["agents"][0]["services"][0]["enabled"])
 
-        # A hivatkozott szolgáltatás letiltása engedélyezett (fail-closed):
-        # a szabály hozzáférése megszűnik, a munkamenet bontódik.
+        # Disabling the referenced service is allowed (fail-closed):
+        # the rule's access ceases and the session is torn down.
         service_payload = {
             "action": "tunnel_service_save", "agent_id": "home",
             "id": "mc", "label": "Minecraft", "target_host": "mc",
@@ -2991,7 +2991,7 @@ class TunnelHttpTests(unittest.TestCase):
         )
         self.assertEqual(status, 200, body)
         payload = json.loads(body)
-        self.assertIn("letiltva", payload.get("message", ""))
+        self.assertIn("disabled", payload.get("message", ""))
         self.assertGreaterEqual(int(payload.get("sessions_revoked", 0)), 1)
         stored = self.gw.settings.snapshot()["tunnels"]
         self.assertFalse(stored["agents"][0]["services"][0]["enabled"])
@@ -3001,7 +3001,7 @@ class TunnelHttpTests(unittest.TestCase):
             self.gw.sessions.validate(session.token, "192.168.50.20")
         )
 
-        # Visszakapcsolás: a szabály feloldott portjai helyreállnak.
+        # Re-enabling: the rule's resolved ports are restored.
         service_payload["enabled"] = True
         status, _, body = self.admin_post(
             "/api/admin/settings", service_payload, cookie=cookie
@@ -3011,8 +3011,8 @@ class TunnelHttpTests(unittest.TestCase):
         self.assertTrue(stored["agents"][0]["services"][0]["enabled"])
         self.assertEqual(self.gw.rules.get("mc-rule").service_tcp, (25565,))
 
-        # A hivatkozott ügynök letiltása is engedélyezett, és bontja a
-        # hivatkozó szabály munkamenetét.
+        # Disabling the referenced agent is also allowed, and it tears down
+        # the session of the referencing rule.
         current = self.gw.rules.get("mc-rule")
         session = self.gw.sessions.login("alice", "192.168.50.20")
         self.assertTrue(
@@ -3028,8 +3028,8 @@ class TunnelHttpTests(unittest.TestCase):
         )
         self.assertEqual(status, 200, body)
         payload = json.loads(body)
-        self.assertIn("letiltva", payload.get("message", ""))
-        self.assertIn("megszűnt", payload.get("message", ""))
+        self.assertIn("disabled", payload.get("message", ""))
+        self.assertIn("ceased", payload.get("message", ""))
         self.assertGreaterEqual(int(payload.get("sessions_revoked", 0)), 1)
         self.assertEqual(self.gw.rules.get("mc-rule").service_tcp, ())
         self.assertFalse(self.gw._rule_available("alice", current))
@@ -3037,7 +3037,7 @@ class TunnelHttpTests(unittest.TestCase):
             self.gw.sessions.validate(session.token, "192.168.50.20")
         )
 
-        # Visszakapcsolás után a hozzáférés újra feloldható.
+        # After re-enabling, access can be resolved again.
         status, _, body = self.admin_post(
             "/api/admin/settings",
             {"action": "tunnel_agent_update", "id": "home",
@@ -3048,7 +3048,7 @@ class TunnelHttpTests(unittest.TestCase):
         self.assertTrue(self.gw.settings.snapshot()["tunnels"]["agents"][0]["enabled"])
         self.assertEqual(self.gw.rules.get("mc-rule").service_tcp, (25565,))
 
-        # Törlés hivatkozás mellett továbbra is 400.
+        # Deletion with a reference still returns 400.
         status, _, body = self.admin_post(
             "/api/admin/settings",
             {"action": "tunnel_agent_delete", "id": "home"},
@@ -3056,7 +3056,7 @@ class TunnelHttpTests(unittest.TestCase):
         )
         self.assertEqual(status, 400, body)
 
-        # A hivatkozó szabály törlése után a műveletek engedélyezettek.
+        # After the referencing rule is deleted, the operations are allowed.
         status, _, body = self.admin_post(
             "/api/admin/rules", {"action": "delete", "id": "mc-rule"},
             cookie=cookie,
@@ -3108,7 +3108,7 @@ class TunnelHttpTests(unittest.TestCase):
         payload = json.loads(body)
         self.assertEqual(payload.get("service_rules_refreshed"), "mc-rule")
         self.assertGreaterEqual(int(payload.get("sessions_revoked", 0)), 1)
-        # A szabály feloldott portja és a munkamenet is frissült/bontódott.
+        # The rule's resolved port and the session were refreshed/torn down.
         self.assertEqual(self.gw.rules.get("mc-rule").service_tcp, (25566,))
         self.assertIsNone(
             self.gw.sessions.validate(session.token, "192.168.50.20")
@@ -3128,7 +3128,7 @@ class TunnelHttpTests(unittest.TestCase):
         )
         self.assertTrue(authorized.authorized)
 
-        # Csak a célhost változik; a hallgató port marad 25565.
+        # Only the target host changes; the listen port stays 25565.
         status, _, body = self.admin_post(
             "/api/admin/settings",
             {"action": "tunnel_service_save", "agent_id": "home",
@@ -3145,11 +3145,11 @@ class TunnelHttpTests(unittest.TestCase):
         self.assertIsNone(
             self.gw.sessions.validate(session.token, "192.168.50.20")
         )
-        # A régi, célhost-váltás előtti szabálypillanatkép a döntéskor már
-        # nem érvényes (a hallgató portok azonosak, az aláírás más).
+        # The old rule snapshot from before the target-host change is no longer
+        # valid at decision time (the listen ports are identical, the signature differs).
         self.assertFalse(self.gw._rule_available("alice", old_rule))
 
-        # Csak a célport változik: a hallgató port továbbra is 25565.
+        # Only the target port changes: the listen port remains 25565.
         current = self.gw.rules.get("mc-rule")
         session = self.gw.sessions.login("alice", "192.168.50.20")
         authorized = self.gw.sessions.authorize(

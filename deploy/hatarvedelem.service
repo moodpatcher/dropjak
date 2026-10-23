@@ -1,8 +1,8 @@
 [Unit]
-Description=Dropjak — hálózati belépőkapu
+Description=Dropjak — network gateway
 Documentation=file:///opt/hatarvedelem/README.md
-# A tűzfalszabályok külön, korán induló unitban vannak. A portál csak
-# akkor indul el, ha azok betöltődtek.
+# The firewall rules are in a separate, early-starting unit. The portal only
+# starts once those have been loaded.
 After=network.target hatarvedelem-firewall.service
 Wants=network.target
 Requires=hatarvedelem-firewall.service
@@ -22,11 +22,11 @@ Environment=HV_AUDIT_LOG=/var/lib/hatarvedelem/audit.jsonl
 Environment=HV_AUDIT_MAX_BYTES=10485760
 Environment=HV_AUDIT_KEEP=5
 Environment=HV_SERVICES_FILE=/opt/hatarvedelem/services.json
-# Induláskori admin fiók (opcionális). Ha bekapcsolod, mindhárom sor kell.
-# A jelszó a unit fájlban egyszerű szövegként szerepel; a fájl legyen 0600.
+# Startup admin account (optional). If you enable it, all three lines are required.
+# The password is stored in the unit file as plain text; the file must be 0600.
 # Environment=HV_ADMIN_ENABLED=1
 # Environment=HV_ADMIN_USER=admin
-# Environment=HV_ADMIN_PASSWORD=valtoztasd-meg
+# Environment=HV_ADMIN_PASSWORD=change-me
 Environment=HV_PORTAL_URL=__PORTAL_URL__
 Environment=HV_NFT_TABLE=hatarvedelem
 Environment=HV_NFT_SET=allowed_v4
@@ -41,19 +41,19 @@ RestartSec=2
 
 StateDirectory=hatarvedelem
 StateDirectoryMode=0750
-# A WireGuard-kulcsok 0600-os ideiglenes fájljai ide kerülnek; a portál
-# nem rootként fut, ezért a systemd hozza létre a jogával (ProtectSystem
-# mellett a /run egyébként nem írható).
+# The 0600 temporary files for the WireGuard keys go here; the portal
+# does not run as root, so systemd creates them with its privileges (with
+# ProtectSystem, /run is otherwise not writable).
 RuntimeDirectory=dropjak
 RuntimeDirectoryMode=0700
 UMask=0077
 
-# A szerver nem root: csak az nftables-hez és a 80-as porthoz kell képesség.
+# The server is not root: privileges are only needed for nftables and port 80.
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 NoNewPrivileges=yes
 
-# Kármentesítés.
+# Sandboxing.
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectSystem=strict
@@ -61,8 +61,8 @@ ProtectHome=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
-# A ProtectProc/ProcSubset csak systemd 247-től elérhető; a RHEL 8 és az
-# Ubuntu 20.04 systemd-je még nem ismeri, ezért nincsenek itt.
+# ProtectProc/ProcSubset is only available from systemd 247; the systemd
+# on RHEL 8 and Ubuntu 20.04 does not know it yet, so it is not here.
 ReadOnlyPaths=/opt/hatarvedelem
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 RestrictNamespaces=yes

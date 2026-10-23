@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-"""A fail2ban F9 konzisztencia-javításainak tesztjei.
+"""Tests for fail2ban's F9 consistency fixes.
 
-F9 három hibát fed le:
+F9 covers three bugs:
 
-* az eviction (``MAX_BANS``) eddig csak a memóriából dobta ki a legrégebbi
-  tiltást, a kernel-elem a TTL-ig élt;
-* a ``sync()`` a hátralévő időt legalább 60 másodpercre emelte;
-* a ``configure()`` részleges hibája köztes állapotot hagyhatott, és a
-  mentési rollback elveszíthette a memóriarekordot.
+* eviction (``MAX_BANS``) previously only removed the oldest ban from memory,
+  the kernel element lived until the TTL;
+* ``sync()`` raised the remaining time to at least 60 seconds;
+* a partial failure of ``configure()`` could leave an intermediate state, and
+  the save rollback could lose the in-memory record.
 
-A tesztek nem nyúlnak valódi nftables-hez: a hamis tűzfal a hívásokat
-naplózza, és a ``banned_v4`` halmazt egy szótárral utánozza. Az auditot
-egy apró rekorder helyettesíti, így a teszt nem függ a gateway modultól.
+The tests do not touch real nftables: the fake firewall logs the calls and
+imitates the ``banned_v4`` set with a dictionary. The audit is replaced by a
+tiny recorder, so the test does not depend on the gateway module.
 
-Futtatás a projekt gyökeréből:
+Run from the project root:
 
     python3 -m unittest discover -s tests -p 'test_fail2ban*.py' -v
 """
@@ -34,16 +34,16 @@ sys.path.insert(0, str(ROOT))
 import fail2ban as fail2ban_mod  # noqa: E402
 
 
-# ------------------------------------------------------------------ segédek
+# ------------------------------------------------------------------ helpers
 
 
 class FakeFail2banFirewall:
-    """A fail2ban tesztek hamis tűzfala.
+    """The fake firewall of the fail2ban tests.
 
-    A ``ban_fail`` és ``unban_fail`` predikátumok cím (és ban esetén TTL)
-    alapján döntenek a hibáról. A ``kernel`` szótár a ``banned_v4`` halmaz
-    tartalmát utánozza, hogy az eviction és a sync hatása ellenőrizhető
-    legyen.
+    The ``ban_fail`` and ``unban_fail`` predicates decide on failure by
+    address (and, for a ban, by TTL). The ``kernel`` dictionary imitates the
+    contents of the ``banned_v4`` set so that the effect of eviction and sync
+    can be checked.
     """
 
     def __init__(self) -> None:
@@ -56,21 +56,21 @@ class FakeFail2banFirewall:
     def ban(self, ip: str, ttl: int) -> None:
         self.calls.append(("ban", ip, ttl))
         if self.ban_fail(ip, ttl):
-            raise RuntimeError("nft ban hiba")
+            raise RuntimeError("nft ban error")
         self.kernel[ip] = ttl
 
     def unban(self, ip: str) -> None:
         self.calls.append(("unban", ip))
         if self.unban_fail(ip):
-            raise RuntimeError("nft unban hiba")
-        # A hiányzó elem törlése nem hiba, ahogy a valódi Firewallnál sem.
+            raise RuntimeError("nft unban error")
+        # Deleting a missing element is not an error, just like with the real Firewall.
         self.kernel.pop(ip, None)
 
     def sync_bans(self, elements) -> None:
         elements = list(elements)
         self.calls.append(("sync", elements))
         if self.sync_fail:
-            raise RuntimeError("nft sync hiba")
+            raise RuntimeError("nft sync error")
         self.kernel = dict(elements)
 
     def sync_proxy_bans(self, elements) -> None:
@@ -78,7 +78,7 @@ class FakeFail2banFirewall:
 
 
 class RecordingAudit:
-    """Az audit-eseményeket memóriában gyűjtő helyettesítő."""
+    """Replacement that collects audit events in memory."""
 
     def __init__(self) -> None:
         self.events: list[tuple[str, dict]] = []
@@ -132,7 +132,7 @@ class EvictionTests(Fail2banConsistencyBase):
             self.manager.ban("192.0.2.2", 600, manual=True)
             self.manager.ban("192.0.2.3", 600, manual=True)
 
-        # A legrégebbi kernel-elem is felszabadult, nem csak a memória.
+        # The oldest kernel element was released too, not just memory.
         self.assertNotIn("192.0.2.1", self.fw.kernel)
         self.assertIn("192.0.2.3", self.fw.kernel)
         self.assertIn(("unban", "192.0.2.1"), self.fw.calls)
@@ -153,7 +153,7 @@ class EvictionTests(Fail2banConsistencyBase):
             self.fw.unban_fail = lambda ip: ip == "192.0.2.11"
             view = self.manager.ban("192.0.2.13", 600, manual=True)
 
-        # Az új védő tiltás a feloldási hiba ellenére is létrejött.
+        # The new protective ban was created despite the release failure.
         self.assertEqual(view["ip"], "192.0.2.13")
         self.assertIn("192.0.2.13", self.fw.kernel)
         self.assertIn("192.0.2.11", self.fw.kernel)
@@ -166,7 +166,7 @@ class EvictionTests(Fail2banConsistencyBase):
         self.assertEqual(failed[-1]["ip"], "192.0.2.11")
         self.assertTrue(failed[-1]["queued"])
 
-        # A hiba megszűnte után a következő snapshot kitisztítja a sort.
+        # Once the error is gone, the next snapshot clears the queue.
         self.fw.unban_fail = lambda ip: False
         self.manager.snapshot()
         self.assertEqual(self.manager._orphan_unbans, [])
@@ -208,7 +208,7 @@ class SyncTtlTests(Fail2banConsistencyBase):
 
         sync_calls = [call for call in self.fw.calls if call[0] == "sync"]
         self.assertEqual(len(sync_calls), 1)
-        # 5 másodperc maradt: pontosan 5 kerül a kernelbe, nem MIN_BAN.
+        # 5 seconds remained: exactly 5 goes into the kernel, not MIN_BAN.
         self.assertEqual(sync_calls[0][1], [("192.0.2.31", 5)])
         self.assertEqual(self.fw.kernel, {"192.0.2.31": 5})
         self.assertNotIn("192.0.2.32", self.manager._bans)
@@ -221,7 +221,7 @@ class SyncTtlTests(Fail2banConsistencyBase):
             self.manager.ban("192.0.2.72", 600, manual=True)
 
         self.assertEqual(self.manager._orphan_unbans, ["192.0.2.71"])
-        # A sync_bans() az egész halmazt üríti, ezért az árva elem eltűnik.
+        # sync_bans() empties the whole set, so the orphan element disappears.
         self.assertTrue(self.manager.sync())
         self.assertEqual(self.manager._orphan_unbans, [])
         self.assertEqual(set(self.fw.kernel), {"192.0.2.72"})
@@ -245,22 +245,22 @@ class ConfigureAtomicityTests(Fail2banConsistencyBase):
             with self.assertRaises(fail2ban_mod.Fail2banError) as caught:
                 self.manager.configure({"enabled": False})
 
-        # A hibaüzenet a sikertelen címek számát nevezi meg.
-        self.assertIn("1 cím", str(caught.exception))
-        # A konfiguráció változatlan maradt.
+        # The error message names the number of failed addresses.
+        self.assertIn("1 addresses", str(caught.exception))
+        # The configuration remained unchanged.
         self.assertTrue(self.manager._config["enabled"])
         with open(self.path, encoding="utf-8") as fh:
             self.assertTrue(json.load(fh)["config"]["enabled"])
-        # Mindkét rekord a memóriában maradt.
+        # Both records remained in memory.
         self.assertEqual(
             set(self.manager._bans), {"192.0.2.41", "192.0.2.42"}
         )
-        # A sikeresen felszabadított tiltás pontos hátralévő idővel jött
-        # vissza (7 mp), nem MIN_BAN-nal.
+        # The successfully released ban came back with the exact remaining
+        # time (7 s), not with MIN_BAN.
         self.assertIn(("ban", "192.0.2.41", 7), self.fw.calls)
         self.assertNotIn(("ban", "192.0.2.42", 9), self.fw.calls)
         self.assertEqual(self.fw.kernel.get("192.0.2.41"), 7)
-        # A feloldási hiba miatt a második elem a kernelben maradt.
+        # Because of the release failure the second element remained in the kernel.
         self.assertIn("192.0.2.42", self.fw.kernel)
 
         failed = self.audit.find("fail2ban_bans_release_failed")
@@ -274,7 +274,7 @@ class ConfigureAtomicityTests(Fail2banConsistencyBase):
 
         def broken_save(raise_errors: bool = False) -> bool:
             if raise_errors:
-                raise fail2ban_mod.Fail2banError("mentési hiba")
+                raise fail2ban_mod.Fail2banError("save error")
             return True
 
         with mock.patch.object(
@@ -287,13 +287,13 @@ class ConfigureAtomicityTests(Fail2banConsistencyBase):
                 with self.assertRaises(fail2ban_mod.Fail2banError):
                     self.manager.configure({"enabled": False})
 
-        # A kernel-visszaállítás hibája ellenére a memóriarekord megmarad.
+        # Despite the kernel restore failure the in-memory record remains.
         self.assertIn("192.0.2.51", self.manager._bans)
         self.assertEqual(
             self.manager._bans["192.0.2.51"]["until"], 3009.0
         )
         self.assertTrue(self.manager._config["enabled"])
-        # A rollback a pontos hátralévő idővel próbálta visszatenni.
+        # The rollback tried to put it back with the exact remaining time.
         self.assertIn(("ban", "192.0.2.51", 9), self.fw.calls)
         self.assertTrue(self.manager._error)
         restored = self.audit.find("fail2ban_ban_restore_failed")

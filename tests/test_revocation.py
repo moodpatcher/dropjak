@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
-"""Az audit F1/F2 javításainak tesztjei.
+"""Tests for the audit's F1/F2 fixes.
 
-F1: a sikertelen tűzfal-visszavonás nem vész el, hanem korlátozott,
-növekvő várakozású újrapróbálkozó sorba kerül; a munkamenet azonnal
-megszűnik, és a ``revoke_ip`` munkamenet nélkül is felderíti az árva
-elemeket.
+F1: a failed firewall revocation is not lost but goes into a retry queue with
+bounded, increasing backoff; the session disappears immediately, and
+``revoke_ip`` discovers the orphaned elements even without a session.
 
-F2: a ``HV_FLUSH_ON_START`` ugyanazt az igaz/hamis értelmezést használja,
-mint a többi logikai változó, és kikapcsolt ürítés esetén alapértelmezésben
-mégis egyezteti a dinamikus halmazokat (kivéve a kifejezett, nem biztonságos
-``HV_ALLOW_STALE_GRANTS_ON_START=1`` opt-int).
+F2: ``HV_FLUSH_ON_START`` uses the same truthy/falsy interpretation as the
+other boolean variables, and with the flush disabled it still reconciles the
+dynamic sets by default (except for the explicit, unsafe
+``HV_ALLOW_STALE_GRANTS_ON_START=1`` opt-in).
 
-A tesztek nem nyúlnak valódi nftables-hez: a F1 tesztek apró hamis
-tűzfalat használnak, a felderítés tesztje pedig a test_gateway FakeTools
-segédjét.
+The tests do not touch real nftables: the F1 tests use a small fake
+firewall, and the discovery test uses the test_gateway FakeTools helper.
 """
 
 from __future__ import annotations
@@ -31,8 +29,8 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-# A FakeTools a meglévő tesztekből származik; a discovery a tests
-# könyvtárat teszi az importútra, ezért ez közvetlenül elérhető.
+# FakeTools comes from the existing tests; discovery puts the tests
+# directory on the import path, so this is directly reachable.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import gateway  # noqa: E402
@@ -60,7 +58,7 @@ def make_rule(
 
 
 class FlakyFirewall:
-    """A első N ``revoke_all`` hívást elbukó, egyébként sikeres tűzfal."""
+    """A firewall that fails the first N ``revoke_all`` calls and is otherwise successful."""
 
     def __init__(self, failures: int = 0) -> None:
         self.failures = failures
@@ -80,13 +78,13 @@ class FlakyFirewall:
         )
         if self.failures > 0:
             self.failures -= 1
-            raise gateway.FirewallError("átmeneti nft hiba")
+            raise gateway.FirewallError("transient nft error")
 
     def revoke_exact(self, ip: str, grants=()) -> None:
         self.exact_calls.append((ip, tuple(grants)))
         if self.failures > 0:
             self.failures -= 1
-            raise gateway.FirewallError("átmeneti nft hiba")
+            raise gateway.FirewallError("transient nft error")
 
     def grant_all(self, ip: str, grants, ttl: int) -> None:
         self.grant_calls.append((ip, tuple(grants), ttl))
@@ -100,16 +98,17 @@ class RecordingFlushFirewall:
     def flush(self) -> None:
         self.flush_calls += 1
         if self.fail:
-            raise gateway.FirewallError("nft flush hiba")
+            raise gateway.FirewallError("nft flush error")
 
 
 class LockRaceFirewall:
-    """Discovery törlés közben egy authorize() versenyét szimulálja.
+    """Simulates the race of an authorize() during a discovery deletion.
 
-    A retry alatt induló authorize() csak akkor tud a discovery elé
-    kerülni, ha a retry nem tartja a munkamenet-zárat. A hamis tűzfal a
-    nem blokkoló zárszerzéssel észleli ezt, és a hibás esetben megvárja,
-    hogy az authorize() engedélyt adjon, majd a discovery törli azt is.
+    An authorize() started during the retry can only get ahead of the
+    discovery if the retry does not hold the session lock. The fake
+    firewall detects this with a non-blocking lock acquisition, and in the
+    faulty case it waits for the authorize() to grant, then the discovery
+    deletes that too.
     """
 
     def __init__(self, manager) -> None:
@@ -130,7 +129,7 @@ class LockRaceFirewall:
     ) -> None:
         if self.fail_once:
             self.fail_once = False
-            raise gateway.FirewallError("kezdeti nft hiba")
+            raise gateway.FirewallError("initial nft error")
         if not discover:
             bucket = self.elements.setdefault(ip, set())
             if only_grants:
@@ -139,9 +138,9 @@ class LockRaceFirewall:
             else:
                 bucket.clear()
             return
-        # Ha a retry a zár alatt fut, a nem blokkoló szerzés False-t ad,
-        # mert ugyanaz a szál tartja a zárat. Ha nem, megkapjuk, majd
-        # elengedjük, hogy az authorize() beszaladhasson.
+        # If the retry runs under the lock, the non-blocking acquisition returns
+        # False, because the same thread holds the lock. If not, we get it, then
+        # release it so the authorize() can run in.
         acquired = self.manager._lock.acquire(blocking=False)
         self.lock_held_during_revoke = not acquired
         self.revoke_entered.set()
@@ -239,7 +238,7 @@ class PendingRevocationTests(RevocationTestBase):
         self, manager: gateway.SessionManager, firewall: FlakyFirewall
     ) -> None:
         before = len(firewall.revoke_calls)
-        # Bőven a lejárat és a hátralévő backoff után járunk.
+        # We are well past the expiry and the remaining backoff.
         manager.reap_once(now=time.time() + 1_000_000)
         self.assertEqual(manager.pending_count(), 0)
         self.assertGreater(len(firewall.revoke_calls), before)
@@ -287,13 +286,13 @@ class PendingRevocationTests(RevocationTestBase):
 
         self.assertEqual(manager.revoke_ip(IP, reason="fail2ban"), 1)
         self._assert_revoked_and_queued(manager, session)
-        # A revoke_ip munkamenet nélkül is felderít, ezért discover=True.
+        # revoke_ip discovers even without a session, hence discover=True.
         self.assertTrue(firewall.revoke_calls[-1][2])
         self._retry_and_assert_cleared(manager, firewall)
 
     def test_reaper_failure_is_queued_and_retried(self) -> None:
-        # Az első hiba a lejáratkori visszavonásé; a reap_once a saját
-        # újrapróbálkozását is lefuttatja, ezért két hibát injektálunk.
+        # The first failure is the revocation at expiry; reap_once also runs its
+        # own retry, so we inject two failures.
         firewall = FlakyFirewall(failures=2)
         manager = self.make_manager(firewall)
         session = self.login_and_authorize(manager, make_rule("web"))
@@ -314,25 +313,26 @@ class PendingRevocationTests(RevocationTestBase):
             )
         )
 
-        # A harmadik hívás már sikerül; a sor kiürül.
+        # The third call already succeeds; the queue drains.
         self._retry_and_assert_cleared(manager, firewall)
 
     def test_reauth_failure_drops_session_and_never_grants(self) -> None:
-        # Az első hiba a pontos, részleges törlésé, a második a teljes
-        # takarításé; ilyenkor a régi+új unió a függő sorba kerül.
+        # The first failure belongs to the exact, partial deletion, the second to
+        # the full cleanup; in that case the union of old and new goes into the
+        # pending queue.
         firewall = FlakyFirewall(failures=2)
         manager = self.make_manager(firewall)
         session = self.login_and_authorize(manager, make_rule("web"))
         self.assertEqual(len(firewall.grant_calls), 1)
 
-        # A tűzfalhiba nem klienshiba: a szerver 503-mal válaszol rá.
+        # A firewall error is not a client error: the server answers it with 503.
         with self.assertRaises(gateway.FirewallError):
             manager.authorize(
                 session.token, IP, make_rule("icmp", tcp=(), icmp=True), 60
             )
 
-        # A régi munkamenet nem maradhat engedélyre hivatkozva, és új
-        # engedély sem került a kernelbe.
+        # The old session must not remain referenced by a grant, and no new
+        # grant got into the kernel either.
         self.assertIsNone(manager.validate(session.token, IP))
         self.assertEqual(manager.count(), 0)
         self.assertEqual(len(firewall.grant_calls), 1)
@@ -346,7 +346,7 @@ class PendingRevocationTests(RevocationTestBase):
         operations = [row["operation"] for row in self.firewall_errors()]
         self.assertIn("authorize_revoke", operations)
 
-        # Az újrapróbálkozás a háttérben letisztítja a régi grantot.
+        # The retry cleans up the old grant in the background.
         manager.reap_once(now=time.time() + 3600)
         self.assertEqual(manager.pending_count(), 0)
 
@@ -369,7 +369,7 @@ class PendingRevocationTests(RevocationTestBase):
         firewall = FlakyFirewall(failures=1)
         manager = self.make_manager(firewall)
         rule = make_rule("web")
-        # Kézileg sikertelen visszavonás ugyanarra az IP-re.
+        # A manually failed revocation for the same IP.
         self.assertFalse(manager._revoke_access(IP, (rule.ports,)))
         self.assertEqual(manager.pending_count(), 1)
 
@@ -378,10 +378,10 @@ class PendingRevocationTests(RevocationTestBase):
         calls_before = len(firewall.revoke_calls)
         conntrack_before = len(self.conntrack_lines())
 
-        # Az új munkamenet grantja teljesen lefedi a régi bejegyzést.
-        # Ilyenkor nincs mit törölni: a bejegyzés megszűnik, a tűzfalhoz
-        # nem megy újabb hívás, és az új munkamenet conntrack kapcsolatai
-        # is érintetlenek maradnak.
+        # The new session's grant fully covers the old entry.
+        # In that case there is nothing to delete: the entry disappears, no
+        # further call goes to the firewall, and the new session's conntrack
+        # connections also remain untouched.
         manager._retry_pending_revocations(time.time() + 10)
         self.assertEqual(len(firewall.revoke_calls), calls_before)
         self.assertEqual(manager.pending_count(), 0)
@@ -391,9 +391,9 @@ class PendingRevocationTests(RevocationTestBase):
     def test_empty_non_discovery_entry_retries_unconditional_cleanup(self) -> None:
         firewall = FlakyFirewall(failures=1)
         manager = self.make_manager(firewall)
-        # Üres grantlista mellett is lehet sikertelen a teljes/ICMP/MAC
-        # elemek törlése; ezt a retrynak újra kell próbálnia, nem szabad
-        # csak azért eldobni a bejegyzést, mert nincs portgrant.
+        # Even with an empty grant list, deleting the full/ICMP/MAC elements can
+        # fail; the retry must try that again, it must not drop the entry just
+        # because there is no port grant.
         self.assertFalse(manager._revoke_access(IP, ()))
         self.assertEqual(manager.pending_count(), 1)
         calls_before = len(firewall.revoke_calls)
@@ -422,9 +422,9 @@ class PendingRevocationTests(RevocationTestBase):
         exact_before = len(firewall.exact_calls)
         conntrack_before = len(self.conntrack_lines())
 
-        # Csak a régi TCP 80 törlődik; a TCP 443 az új munkameneté. A
-        # részleges törlés pontos, elemszintű művelet (revoke_exact), nem
-        # teljes revoke_all.
+        # Only the old TCP 80 is deleted; TCP 443 belongs to the new session. The
+        # partial deletion is an exact, element-level operation (revoke_exact),
+        # not a full revoke_all.
         manager._retry_pending_revocations(time.time() + 10)
         self.assertEqual(manager.pending_count(), 0)
         self.assertEqual(len(firewall.revoke_calls), calls_before)
@@ -472,8 +472,8 @@ class PendingRevocationTests(RevocationTestBase):
         manager = self.make_manager(firewall)
         rule = make_rule("new", tcp=(443,))
         session = self.login_and_authorize(manager, rule)
-        # Fail2ban/pánik esetén a revoke_ip felderítést kér, miközben az
-        # IP-hez aktív munkamenet tartozik.
+        # In case of fail2ban/panic, revoke_ip asks for discovery while an
+        # active session belongs to the IP.
         self.assertFalse(
             manager._revoke_access(IP, (rule.ports,), discover=True)
         )
@@ -481,16 +481,16 @@ class PendingRevocationTests(RevocationTestBase):
         calls_before = len(firewall.revoke_calls)
         conntrack_before = len(self.conntrack_lines())
 
-        # Aktív munkamenet mellett nincs felderítés (az a 443-at is
-        # törölné), és a bejegyzés is megmarad.
+        # With an active session there is no discovery (that would delete 443
+        # too), and the entry also remains.
         manager._retry_pending_revocations(time.time() + 10)
         self.assertEqual(len(firewall.revoke_calls), calls_before)
         self.assertEqual(manager.pending_count(), 1)
         self.assertEqual(len(self.conntrack_lines()), conntrack_before)
         self.assertIsNotNone(manager.validate(session.token, IP))
 
-        # A munkamenet megszűnése után a felderítés lefut és a bejegyzés
-        # kiürül.
+        # After the session disappears the discovery runs and the entry
+        # drains.
         manager.terminate(session.sid)
         self.assertEqual(manager.pending_count(), 1)
         calls_after_terminate = len(firewall.revoke_calls)
@@ -509,7 +509,7 @@ class PendingRevocationTests(RevocationTestBase):
         firewall = LockRaceFirewall(None)
         manager = self.make_manager(firewall)
         firewall.manager = manager
-        # Kezdeti sikertelen discovery: függő bejegyzés.
+        # Initial failed discovery: pending entry.
         self.assertFalse(manager._revoke_access(IP, (), discover=True))
         self.assertEqual(manager.pending_count(), 1)
 
@@ -518,11 +518,11 @@ class PendingRevocationTests(RevocationTestBase):
         errors: list[BaseException] = []
 
         def _authorize() -> None:
-            # Csak akkor indul, amikor a retry már a tűzfal-hívásban van.
+            # It starts only when the retry is already in the firewall call.
             firewall.revoke_entered.wait(5.0)
             try:
                 manager.authorize(token, IP, rule, 60)
-            except BaseException as exc:  # a szál hibáját a teszt jelzi
+            except BaseException as exc:  # the test reports the thread's error
                 errors.append(exc)
 
         thread = threading.Thread(target=_authorize)
@@ -535,7 +535,7 @@ class PendingRevocationTests(RevocationTestBase):
         self.assertTrue(firewall.lock_held_during_revoke)
         self.assertEqual(manager.pending_count(), 0)
         self.assertIsNotNone(manager.validate(token, IP))
-        # A discovery után engedélyezett munkamenet grantja megmaradt.
+        # The grant of the session authorized after the discovery remained.
         self.assertIn(rule.ports, firewall.elements.get(IP, set()))
 
     def test_retry_audit_is_sampled_not_every_attempt(self) -> None:
@@ -549,7 +549,7 @@ class PendingRevocationTests(RevocationTestBase):
         now = time.time()
         for index in range(1, 6):
             manager._retry_pending_revocations(now + index * 10000)
-        # 5 sikertelen újrapróbálkozásból csak a 3. auditált.
+        # Out of 5 failed retries only the 3rd is audited.
         self.assertEqual(len(self.firewall_errors()), initial + 1)
         self.assertEqual(manager.pending_count(), 1)
 
@@ -562,8 +562,8 @@ class PendingRevocationTests(RevocationTestBase):
                 manager._revoke_access(f"10.0.0.{index + 1}", ())
             )
         self.assertEqual(manager.pending_count(), 3)
-        # A tele sor eseménye a meglévő, címkézett firewall_error esemény,
-        # ezért az audit-UI nem igényel új címkét.
+        # The event of the full queue is the existing, labelled firewall_error
+        # event, so the audit UI needs no new label.
         rows = [
             row for row in self.audit.read(event="firewall_error")
             if row.get("operation") == "revoke_all_ledger_full"
@@ -595,7 +595,7 @@ class DiscoveryTests(RevocationTestBase):
         )
         manager = self.make_manager(firewall)
 
-        # Nincs munkamenet: a grantlista üres, a felderítésnek kell törölnie.
+        # There is no session: the grant list is empty, the discovery must delete.
         self.assertEqual(manager.revoke_ip(IP), 0)
 
         deletes = tools.deletes()
@@ -612,7 +612,7 @@ class DiscoveryTests(RevocationTestBase):
             f"{{ {IP} . 443 }}",
         ):
             self.assertIn(expected, deletes)
-        # Más IP elemét nem törli.
+        # It does not delete another IP's element.
         self.assertFalse(
             any(OTHER_IP in line for line in deletes), deletes
         )
@@ -635,7 +635,7 @@ class StartupFlushTests(unittest.TestCase):
         cases = {
             "1": True, "true": True, "TRUE": True, "yes": True,
             " on ": True, "0": False, "false": False, "off": False,
-            "": True, "ismeretlen": True,
+            "": True, "unknown": True,
         }
         for raw, expected in cases.items():
             with self.subTest(raw=raw):
@@ -672,8 +672,8 @@ class StartupFlushTests(unittest.TestCase):
             instance._startup_flush()
         self.assertEqual(firewall.flush_calls, 1)
         text = "\n".join(str(call) for call in logged.call_args_list)
-        self.assertIn("HV_FLUSH_ON_START hatásos értéke: 0", text)
-        self.assertIn("memóriabeli", text)
+        self.assertIn("effective value of HV_FLUSH_ON_START: 0", text)
+        self.assertIn("in-memory", text)
         self.assertEqual(
             instance.audit.read(event="firewall_error"), []
         )
@@ -689,9 +689,9 @@ class StartupFlushTests(unittest.TestCase):
             instance._startup_flush()
         self.assertEqual(firewall.flush_calls, 0)
         text = "\n".join(str(call) for call in logged.call_args_list)
-        self.assertIn("FIGYELEM", text)
+        self.assertIn("WARNING", text)
         self.assertIn("HV_ALLOW_STALE_GRANTS_ON_START=1", text)
-        self.assertIn("munkamenet nélkül", text)
+        self.assertIn("without a session", text)
 
     def test_enabled_flush_flushes(self) -> None:
         firewall = RecordingFlushFirewall()
@@ -750,8 +750,8 @@ class EntrypointFlushParsingTests(unittest.TestCase):
         for value in ("0", "false", "off", "OFF"):
             with self.subTest(value=value):
                 self.assertEqual(self._run(value), "0")
-        # Üres/ismeretlen/beállítatlan: az alapértelmezés (itt 1).
-        for value in ("", "ismeretlen", None):
+        # Empty/unknown/unset: the default (here 1).
+        for value in ("", "unknown", None):
             with self.subTest(value=value):
                 self.assertEqual(self._run(value), "1")
 
@@ -769,21 +769,21 @@ class EntrypointFlushParsingTests(unittest.TestCase):
             '&& [ "$allow_stale_grants" = "1" ]',
             self.text,
         )
-        # Az ürítő ciklus a biztonságos ágban marad, és a hiba továbbra is
-        # leállítja az indulást.
+        # The flush loop remains in the safe branch, and the error still stops
+        # startup.
         block_start = self.text.index("flush_on_start=$(env_bool")
-        block_end = self.text.index("# A korábbi verziók host_ssh_v4", block_start)
+        block_end = self.text.index("# The host_ssh_v4 set from earlier versions", block_start)
         block = self.text[block_start:block_end]
         self.assertIn('for hv_set in', block)
-        self.assertIn('|| die "a(z) $hv_set halmaz ürítése nem sikerült"', block)
+        self.assertIn('|| die "failed to flush set $hv_set"', block)
         self.assertIn("HV_ALLOW_STALE_GRANTS_ON_START=1", block)
 
 
 class EntrypointBooleanFlagsTests(unittest.TestCase):
-    """N3: minden logikai kapcsoló az env_bool() értelmezését használja.
+    """N3: every boolean switch uses env_bool()'s interpretation.
 
-    A korábbi pontos ``= "1"`` összehasonlítások a ``true``/``yes``/``on``
-    értékeket figyelmen kívül hagyták (a watchdog esetében épp fordítva).
+    The earlier exact ``= "1"`` comparisons ignored the ``true``/``yes``/``on``
+    values (and for the watchdog it was the other way round).
     """
 
     @classmethod
@@ -826,8 +826,8 @@ class EntrypointBooleanFlagsTests(unittest.TestCase):
             for value in ("0", "false", "no", "off", "OFF"):
                 with self.subTest(name=name, value=value):
                     self.assertEqual(self._run(name, default, value), "0")
-            # Üres/ismeretlen/beállítatlan: az alapértelmezés.
-            for value in ("", "ismeretlen", None):
+            # Empty/unknown/unset: the default.
+            for value in ("", "unknown", None):
                 with self.subTest(name=name, value=value):
                     self.assertEqual(self._run(name, default, value), default)
 
@@ -848,8 +848,8 @@ class EntrypointBooleanFlagsTests(unittest.TestCase):
                 self.assertNotIn(old, self.text)
 
     def test_compose_forwards_boolean_flags(self) -> None:
-        # A Compose-whitelist továbbítja a biztonságos alapértelmezésű
-        # opt-int és a watchdog kapcsolóját is.
+        # The Compose whitelist forwards both the safe-default opt-in and the
+        # watchdog switch.
         self.assertIn(
             "HV_ALLOW_STALE_GRANTS_ON_START: "
             "${HV_ALLOW_STALE_GRANTS_ON_START:-0}",
@@ -859,11 +859,11 @@ class EntrypointBooleanFlagsTests(unittest.TestCase):
             "HV_FIREWALL_WATCHDOG: ${HV_FIREWALL_WATCHDOG:-1}",
             self.compose,
         )
-        # A mintafájl figyelmeztet a nem biztonságos opt-inra, és leírja a
-        # watchdog kikapcsolását.
+        # The example file warns about the unsafe opt-in and documents disabling
+        # the watchdog.
         self.assertIn("HV_ALLOW_STALE_GRANTS_ON_START=0", self.env_example)
         self.assertIn(
-            "1: NEM biztonságos; az újraindítás előtti", self.env_example
+            "1: NOT safe; kernel grants from before the restart", self.env_example
         )
         self.assertIn("HV_FIREWALL_WATCHDOG=1", self.env_example)
 

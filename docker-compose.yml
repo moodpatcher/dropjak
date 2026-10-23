@@ -1,12 +1,12 @@
 # Dropjak — Docker Compose
 #
-# A .env fájlt a .env.example alapján kell létrehozni. A kötelező értékeket
-# (HV_LAN_IF, HV_WAN_IF, HV_LAN_NET, HV_PORTAL_NET) a belépési pont
-# ellenőrzi, hiányzó beállításnál a konténer nem indul el.
+# The .env file must be created from .env.example. The required values
+# (HV_LAN_IF, HV_WAN_IF, HV_LAN_NET, HV_PORTAL_NET) are checked by the
+# entrypoint; the container does not start if a setting is missing.
 #
-# Fontos: a konténer network_mode: host módban fut, mert a VM forward-láncát
-# kell szabályoznia. Emiatt nincs ports: leképezés, és a portál a host PORT
-# portján (alapból 8100) hallgat.
+# Important: the container runs in network_mode: host because it must manage
+# the VM's forward chain. Therefore there is no ports: mapping, and the portal
+# listens on the host's PORT port (8100 by default).
 services:
   hatarvedelem:
     build:
@@ -14,16 +14,16 @@ services:
     image: hatarvedelem:2
     restart: unless-stopped
     network_mode: host
-    # Szándékosan nincs init: true. A tini rootként futna, de CAP_KILL nélkül
-    # nem tudná továbbítani a SIGTERM-et a 999-es UID-n futó portálnak. A
-    # belépési pont exec-elve a portált teszi PID 1-gyé, és az kezeli a
-    # SIGTERM-et, így a docker stop tisztán lezárja a folyamatot.
+    # Deliberately no init: true. tini would run as root, but without CAP_KILL
+    # it could not forward SIGTERM to the portal running as UID 999. The
+    # entrypoint execs the portal to become PID 1, and it handles SIGTERM,
+    # so docker stop shuts down the process cleanly.
     read_only: true
 
-    # A konténer csak a szükséges képességeket kapja. A CHOWN/DAC_OVERRIDE/
-    # FOWNER/SETUID/SETGID kizárólag a belépési pontnak kell: a kötet
-    # jogosultságának rendezéséhez és a setpriv-vel történő felhasználóváltáshoz.
-    # A portál folyamata már csak NET_ADMIN és NET_BIND_SERVICE képességgel fut.
+    # The container only gets the necessary capabilities. CHOWN/DAC_OVERRIDE/
+    # FOWNER/SETUID/SETGID are needed exclusively by the entrypoint: to fix the
+    # volume permissions and to switch user with setpriv.
+    # The portal process itself only runs with NET_ADMIN and NET_BIND_SERVICE.
     cap_drop:
       - ALL
     cap_add:
@@ -35,52 +35,51 @@ services:
       - SETUID
       - SETGID
 
-    # Az ip_forward a HOSTON kell bekapcsolva lennie. A compose sysctls
-    # beállítást szándékosan nem használunk: host-hálózat mellett a runc
-    # elutasítja a net.* sysctl-eket. A docker/setup-host.sh tartósan
-    # rögzíti a /etc/sysctl.d/90-hatarvedelem.conf fájlban.
+    # ip_forward must be enabled on the HOST. We deliberately do not use the
+    # compose sysctls setting: with host networking, runc rejects net.* sysctls.
+    # docker/setup-host.sh permanently records it in /etc/sysctl.d/90-hatarvedelem.conf.
 
     environment:
       HV_LAN_IF: ${HV_LAN_IF:-}
       HV_WAN_IF: ${HV_WAN_IF:-}
       HV_LAN_NET: ${HV_LAN_NET:-}
-      # Csak visszafelé kompatibilis alapérték a HV_PORTAL_NET-hez; SSH-t
-      # önmagában nem engedélyez (ahhoz TCP 22-t nyitó host szabály kell).
+      # Backward-compatible base value for HV_PORTAL_NET only; SSH is not
+      # enabled by it alone (that needs a host rule opening TCP 22).
       HV_MGMT_NET: ${HV_MGMT_NET:-}
-      # A portál forrás-hálózata. Üresen a HV_MGMT_NET értékét használja.
-      # Nyilvános portálhoz: HV_PORTAL_NET=0.0.0.0/0.
+      # The portal source network. When empty, the value of HV_MGMT_NET is used.
+      # For a public portal: HV_PORTAL_NET=0.0.0.0/0.
       HV_PORTAL_NET: ${HV_PORTAL_NET:-}
-      # Induláskori admin fiók. HV_ADMIN_ENABLED=1 esetén a konténer
-      # létrehozza a felhasználót, vagy a megadott jelszóra frissíti.
-      # FIGYELEM: admin fiók nélkül a portál Admin panelje elérhetetlen, és a
-      # host SSH zárva marad. Az első indulás előtt állítsd be a fiókot; a
-      # portálon hozz létre és rendelj hozzá egy TCP 22-t engedélyező host
-      # (input) szabályt, és tartsd nyitva a szolgáltatói konzolt.
+      # Startup admin account. With HV_ADMIN_ENABLED=1 the container
+      # creates the user, or updates it to the given password.
+      # WARNING: without an admin account the portal's Admin panel is unreachable, and
+      # host SSH stays closed. Set up the account before the first start; create
+      # and assign a host (input) rule allowing TCP 22 on the portal, and keep
+      # the provider console open.
       HV_ADMIN_ENABLED: ${HV_ADMIN_ENABLED:-0}
       HV_ADMIN_USER: ${HV_ADMIN_USER:-}
       HV_ADMIN_PASSWORD: ${HV_ADMIN_PASSWORD:-}
-      # Biztonságosabb alternatíva: csak olvasható fájl (Docker secret).
-      # Ha a fájl meg van adva, a HV_ADMIN_PASSWORD helyett ezt használja.
+      # Safer alternative: a read-only file (Docker secret).
+      # If the file is given, it is used instead of HV_ADMIN_PASSWORD.
       HV_ADMIN_PASSWORD_FILE: ${HV_ADMIN_PASSWORD_FILE:-}
       PORT: ${PORT:-8100}
       HV_PORTAL_URL: ${HV_PORTAL_URL:-}
       HV_SERVICES_FILE: ${HV_SERVICES_FILE:-/opt/hatarvedelem/services.json}
-      # Állapotfájlok a köteten. A szabályokat, csoportokat és a hozzájuk
-      # tartozó hozzárendeléseket az admin felület kezeli.
+      # State files on the volume. The rules, groups and their
+      # assignments are managed by the admin interface.
       HV_RULES: ${HV_RULES:-/var/lib/hatarvedelem/rules.json}
       HV_GROUPS: ${HV_GROUPS:-/var/lib/hatarvedelem/groups.json}
       HV_AUDIT_LOG: ${HV_AUDIT_LOG:-/var/lib/hatarvedelem/audit.jsonl}
       HV_AUDIT_MAX_BYTES: ${HV_AUDIT_MAX_BYTES:-10485760}
       HV_AUDIT_KEEP: ${HV_AUDIT_KEEP:-5}
-      # Alapértelmezett hozzáférési idő; a felhasználó a portálon egész
-      # órában választhat, legfeljebb 30 napig. A MIN/MAX csak szűkítheti
-      # a tartományt.
+      # Default access duration; the user can choose in whole
+      # hours on the portal, up to 30 days. MIN/MAX can only narrow
+      # the range.
       HV_SESSION_TTL: ${HV_SESSION_TTL:-3600}
       HV_MIN_TTL: ${HV_MIN_TTL:-60}
       HV_MAX_TTL: ${HV_MAX_TTL:-2592000}
       HV_AUTH_TTL: ${HV_AUTH_TTL:-600}
-      # A TOTP 2FA otpauth:// URI issuer/címkéje, ha a portálon nincs
-      # beállított tűzfalnév (alapból Dropjak).
+      # The issuer/label of the TOTP 2FA otpauth:// URI, if no
+      # firewall name is set in the portal (Dropjak by default).
       HV_TOTP_ISSUER: ${HV_TOTP_ISSUER:-Dropjak}
       HV_CHALLENGE_TTL: ${HV_CHALLENGE_TTL:-600}
       HV_POW_DIFFICULTY: ${HV_POW_DIFFICULTY:-4}
@@ -88,53 +87,53 @@ services:
       HV_RATE_WINDOW: ${HV_RATE_WINDOW:-60}
       HV_RATE_MAX: ${HV_RATE_MAX:-10}
       HV_FLUSH_ON_START: ${HV_FLUSH_ON_START:-1}
-      # Alapértelmezés: 0 (biztonságos). 1 esetén az újraindítás előtti
-      # kernel-engedélyek munkamenet nélkül, a TTL-ig (akár 30 napig)
-      # életben maradhatnak; ez kifejezetten NEM biztonságos.
+      # Default: 0 (safe). If 1, kernel grants from before the restart
+      # can stay alive without a session until the TTL (up to 30 days);
+      # this is explicitly NOT safe.
       HV_ALLOW_STALE_GRANTS_ON_START: ${HV_ALLOW_STALE_GRANTS_ON_START:-0}
-      # Drop log: az nftables által eldobott csomagok NFLOG-csoportja és a
-      # JSONL-napló a state-köteten. HV_DROP_LOG=0 esetén a portál nem
-      # figyeli a csoportot (az nft-szabályok naplózása megmarad).
+      # Drop log: the NFLOG group of packets dropped by nftables and the
+      # JSONL log on the state volume. With HV_DROP_LOG=0 the portal does not
+      # listen on the group (nft rule logging remains).
       HV_DROP_LOG: ${HV_DROP_LOG:-1}
       HV_DROP_LOG_GROUP: ${HV_DROP_LOG_GROUP:-5}
       HV_DROP_LOG_PATH: ${HV_DROP_LOG_PATH:-/var/lib/hatarvedelem/drops.jsonl}
       HV_DROP_LOG_MAX_BYTES: ${HV_DROP_LOG_MAX_BYTES:-10485760}
       HV_DROP_LOG_KEEP: ${HV_DROP_LOG_KEEP:-5}
-      # A felületen beállított pre-auth/blokk szabályok.
+      # The pre-auth/block rules configured in the interface.
       HV_SETTINGS: ${HV_SETTINGS:-/var/lib/hatarvedelem/firewall-settings.json}
-      # Fail2ban: a sikertelen belépések számlálása és a forrás-IP tiltása.
-      # A küszöb, az időablak és a tiltás hossza a felületen is állítható;
-      # ezek csak az első indulás alapértékei.
+      # Fail2ban: counting failed logins and banning the source IP.
+      # The threshold, time window and ban length can also be set in the interface;
+      # these are only the initial defaults for the first start.
       HV_FAIL2BAN: ${HV_FAIL2BAN:-1}
       HV_FAIL2BAN_MAX: ${HV_FAIL2BAN_MAX:-5}
       HV_FAIL2BAN_WINDOW: ${HV_FAIL2BAN_WINDOW:-600}
       HV_FAIL2BAN_BAN: ${HV_FAIL2BAN_BAN:-3600}
       HV_FAIL2BAN_STATE: ${HV_FAIL2BAN_STATE:-/var/lib/hatarvedelem/fail2ban.json}
-      # Drop-alapú tiltás: bejelentkezés nélküli portszkennerek/botok.
-      # Első indulásnál mindkét mérőszámot kapuzza; futásidőben külön
-      # kapcsolhatók. A küszöb legalább 1, nincs 0 = kikapcsolva mód.
+      # Drop-based banning: port scanners/bots without a login.
+      # Gates both metrics at first start; they can be toggled separately
+      # at runtime. The threshold is at least 1, there is no 0 = disabled mode.
       HV_FAIL2BAN_DROP: ${HV_FAIL2BAN_DROP:-1}
       HV_FAIL2BAN_DROP_COUNT_ENABLED: ${HV_FAIL2BAN_DROP_COUNT_ENABLED:-1}
       HV_FAIL2BAN_DROP_PORTS_ENABLED: ${HV_FAIL2BAN_DROP_PORTS_ENABLED:-1}
       HV_FAIL2BAN_DROP_MAX: ${HV_FAIL2BAN_DROP_MAX:-120}
       HV_FAIL2BAN_DROP_PORTS: ${HV_FAIL2BAN_DROP_PORTS:-12}
       HV_FAIL2BAN_DROP_WINDOW: ${HV_FAIL2BAN_DROP_WINDOW:-180}
-      # Proxy-alapú tiltás: a domain proxy 401-es válaszai; csak a 80/443-at
-      # zárja. Futásidőben a felületen állítható.
+      # Proxy-based banning: the domain proxy's 401 responses; only closes
+      # 80/443. Can be set at runtime in the interface.
       HV_FAIL2BAN_PROXY: ${HV_FAIL2BAN_PROXY:-1}
       HV_FAIL2BAN_PROXY_MAX: ${HV_FAIL2BAN_PROXY_MAX:-20}
       HV_FAIL2BAN_PROXY_WINDOW: ${HV_FAIL2BAN_PROXY_WINDOW:-600}
-      # A forward-jelölés; a Docker DOCKER-USER guard ehhez igazodik.
+      # The forward mark; the Docker DOCKER-USER guard matches this.
       HV_FWD_MARK: ${HV_FWD_MARK:-0x44524a4b}
       HV_COOKIE_SECURE: ${HV_COOKIE_SECURE:-0}
       HV_DRY_RUN: ${HV_DRY_RUN:-0}
-      # A tűzfal-figyelő ki-/bekapcsolása (0: kikapcsolva).
+      # Enable/disable the firewall watchdog (0: disabled).
       HV_FIREWALL_WATCHDOG: ${HV_FIREWALL_WATCHDOG:-1}
-      # 1: a tűzfal megnyitja a TCP 80/443-at a caddy proxy-szolgáltatásnak
-      # (COMPOSE_PROFILES=proxy mellett). Lásd a .env.example fájlt.
+      # 1: the firewall opens TCP 80/443 for the caddy proxy service
+      # (together with COMPOSE_PROFILES=proxy). See the .env.example file.
       HV_PROXY: ${HV_PROXY:-0}
-      # A Caddy admin API Unix socketje a caddy-admin köteten; a portál ezen
-      # indítja újra a Caddyt az ACME kikapcsolásakor (gyorsítótár-ürítés).
+      # The Caddy admin API Unix socket is on the caddy-admin volume; the portal
+      # restarts Caddy through it when ACME is disabled (cache flush).
       HV_CADDY_ADMIN: ${HV_CADDY_ADMIN:-/run/caddy-admin/admin.sock}
       HV_SKIP_FIREWALL: ${HV_SKIP_FIREWALL:-0}
       HV_RUN_AS_ROOT: ${HV_RUN_AS_ROOT:-0}
@@ -146,15 +145,15 @@ services:
 
     volumes:
       - hatarvedelem-state:/var/lib/hatarvedelem
-      # A Caddy admin socketje; csak ez a két konténer csatolja.
+      # The Caddy admin socket; only these two containers mount it.
       - caddy-admin:/run/caddy-admin
-      # A host időzónája (a challenge "daily" feltétele helyi éjfélt
-      # használ; nélküle a konténer UTC-ben fut). A kép tzdata nélkül is
-      # olvassa, csak olvasható gyökér mellett is működik.
+      # The host timezone (the challenge "daily" condition uses local midnight;
+      # without it the container runs in UTC). The image reads it even
+      # without tzdata, and it works with a read-only root as well.
       - /etc/localtime:/etc/localtime:ro
 
-    # A gyökérfájlrendszer csak olvasható; a sablon ideiglenes fájlja a
-    # /run tmpfs-en jön létre.
+    # The root filesystem is read-only; the template's temporary file is
+    # created on the /run tmpfs.
     tmpfs:
       - /run:size=1m,mode=0755
       - /tmp:size=16m,mode=1777
@@ -174,12 +173,12 @@ services:
       options:
         tag: hatarvedelem
 
-  # Portállal védett aldomain-proxy automatikus HTTPS-sel. Csak a
-  # COMPOSE_PROFILES=proxy beállítással indul; a 80/443 megnyitásához a
-  # HV_PROXY=1 is kell. A Caddyfile statikus: az útvonalakat és a
-  # jogosultságot kérésenként a portál loopback-végpontjai adják. Az admin API
-  # csak a caddy-admin kötet Unix socketjén érhető el (TCP-port nincs); a
-  # portál ezen kéri a leállást, amit a restart: unless-stopped újraindít.
+  # Portal-protected subdomain proxy with automatic HTTPS. Only starts with
+  # the COMPOSE_PROFILES=proxy setting; HV_PROXY=1 is also needed to open
+  # 80/443. The Caddyfile is static: the paths and authorization are provided
+  # per request by the portal's loopback endpoints. The admin API is reachable
+  # only through the Unix socket on the caddy-admin volume (no TCP port); the
+  # portal requests the stop through it, which restart: unless-stopped restarts.
   caddy:
     image: caddy:2.10.2-alpine
     profiles: ["proxy"]

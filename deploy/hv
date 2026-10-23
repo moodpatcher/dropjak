@@ -1,5 +1,5 @@
 #!/bin/bash
-# Dropjak — helyi kezelőparancs a VM-en.
+# Dropjak — local management command on the VM.
 set -euo pipefail
 
 APP=/root/hatarvedelem
@@ -10,22 +10,22 @@ cd "$APP"
 
 usage() {
     cat <<'EOF'
-Használat: hv <parancs>
+Usage: hv <command>
 
-  status            konténer, portál és nft halmazok állapota
-  logs              naplók követése (Ctrl+C kilép)
-  restart           újraindítás a .env újraolvasásával
-  rebuild           újraépítés és indítás (kód / kezdő szabályokat adó services.json után)
-  edit              a .env szerkesztése
-  services          a services.json szerkesztése (kezdő szabályok/migráció; utána hv rebuild)
-  users             felhasználók listája
-  add <név> [--no-must-change]   új felhasználó (jelszót interaktívan kér)
-  passwd <név> [--no-must-change] jelszócsere (interaktívan)
-  del <név>         felhasználó törlése
-  backup            mentés a /root/hatarvedelem-backups könyvtárba
-  test              helyi unit- és HTTP-tesztek
-  e2e               teljes teszt a hvclient névtérből (kb. 2 perc)
-  where             a fontos fájlok és helyek listája
+  status            status of the container, portal and nft sets
+  logs              follow logs (Ctrl+C to exit)
+  restart           restart, re-reading .env
+  rebuild           rebuild and start (after code / services.json providing the initial rules)
+  edit              edit .env
+  services          edit services.json (initial rules/migration; then hv rebuild)
+  users             list users
+  add <name> [--no-must-change]   new user (prompts for password interactively)
+  passwd <name> [--no-must-change] change password (interactively)
+  del <name>        delete user
+  backup            back up to /root/hatarvedelem-backups
+  test              local unit and HTTP tests
+  e2e               full test from the hvclient namespace (about 2 minutes)
+  where             list important files and locations
 EOF
 }
 
@@ -33,7 +33,7 @@ need_name() {
     local command=$1
     shift
     if [ "$#" -ne 1 ]; then
-        echo "Használat: hv $command <név>" >&2
+        echo "Usage: hv $command <name>" >&2
         exit 2
     fi
 }
@@ -55,12 +55,12 @@ case "${1:-}" in
         echo
         port=$(portal_port)
         if curl -sS -m 5 -o /dev/null "http://127.0.0.1:${port}/api/status"; then
-            echo "portál: HTTP 200 (${port})"
+            echo "portal: HTTP 200 (${port})"
         else
-            echo "portál: NEM VÁLASZOL (${port})" >&2
+            echo "portal: NOT RESPONDING (${port})" >&2
         fi
         echo
-        echo "nftables halmazok:"
+        echo "nftables sets:"
         nft list sets inet hatarvedelem 2>/dev/null \
             | grep -E '^[[:space:]]*set |elements' || true
         ;;
@@ -79,7 +79,7 @@ case "${1:-}" in
             if command -v nano >/dev/null 2>&1; then editor=nano; else editor=vi; fi
         fi
         "$editor" "$APP/.env"
-        echo "Módosítás után: hv restart"
+        echo "After changes: hv restart"
         ;;
     services)
         editor=${EDITOR:-}
@@ -87,7 +87,7 @@ case "${1:-}" in
             if command -v nano >/dev/null 2>&1; then editor=nano; else editor=vi; fi
         fi
         "$editor" "$APP/services.json"
-        echo "Módosítás után: hv rebuild"
+        echo "After changes: hv rebuild"
         ;;
     users)
         server_cli user list
@@ -95,7 +95,7 @@ case "${1:-}" in
     add)
         shift
         if [ "$#" -lt 1 ]; then
-            echo "Használat: hv add <név> [--no-must-change]" >&2
+            echo "Usage: hv add <name> [--no-must-change]" >&2
             exit 2
         fi
         docker compose exec --user hatarvedelem hatarvedelem \
@@ -104,7 +104,7 @@ case "${1:-}" in
     passwd)
         shift
         if [ "$#" -lt 1 ]; then
-            echo "Használat: hv passwd <név> [--no-must-change]" >&2
+            echo "Usage: hv passwd <name> [--no-must-change]" >&2
             exit 2
         fi
         docker compose exec --user hatarvedelem hatarvedelem \
@@ -120,18 +120,18 @@ case "${1:-}" in
         chmod 700 "$BACKUPS"
         ts=$(date +%Y%m%d-%H%M%S)
         tar -czf "$BACKUPS/hatarvedelem-$ts.tar.gz" -C /root hatarvedelem
-        # A teljes állapot: users.json, rules.json, groups.json, auditnapló
-        # és a rotált naplófájlok. A .lock fájlok is bekerülhetnek; ezek
-        # visszaállításkor ártalmatlanok.
+        # The complete state: users.json, rules.json, groups.json, audit log
+        # and the rotated log files. .lock files may also be included; these
+        # are harmless on restore.
         if [ -d "$STATE_VOLUME" ]; then
             tar -czf "$BACKUPS/hatarvedelem-state-$ts.tar.gz" -C "$STATE_VOLUME" .
             state_backup="$BACKUPS/hatarvedelem-state-$ts.tar.gz"
         else
-            echo "FIGYELEM: az állapotkötet nem található: $STATE_VOLUME" >&2
+            echo "WARNING: state volume not found: $STATE_VOLUME" >&2
             state_backup=""
         fi
         chmod 600 "$BACKUPS/hatarvedelem-$ts.tar.gz"
-        echo "Mentés kész:"
+        echo "Backup complete:"
         echo "  $BACKUPS/hatarvedelem-$ts.tar.gz"
         if [ -n "$state_backup" ]; then
             chmod 600 "$state_backup"
@@ -145,14 +145,14 @@ case "${1:-}" in
         python3 "$APP/tests/e2e_vm.py"
         ;;
     where)
-        # A helyi útmutató a DOKUMENTACIO.md 2. szakasza (a következő horgonyig).
+        # The local guide is section 2 of DOKUMENTACIO.md (up to the next anchor).
         awk '/^## 2\. /{p=1} p&&/^<a id=/{exit} p' "$APP/DOKUMENTACIO.md"
         ;;
     ""|help|-h|--help)
         usage
         ;;
     *)
-        echo "Ismeretlen parancs: $1" >&2
+        echo "Unknown command: $1" >&2
         echo >&2
         usage >&2
         exit 2

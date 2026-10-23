@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Statikus és node-tesztek a hozzáférés-választó gyorsgombjaihoz.
+"""Static and node tests for the access selector's shortcut buttons.
 
-A teszt nem indít böngészőt: a ``Mind kijelölése`` és a ``Max`` gomb
-jelölőit, a HU/EN/DE feliratokat, valamint a tiszta kiválasztás-/TTL-
-segédfüggvényeket ellenőrzi. A számításokat valódi node-dal futtatjuk,
-mint a test_audit_ui és a test_tunnel_ui esetében.
+The test starts no browser: it checks the markers of the ``Mind kijelölése``
+(select all) and ``Max`` buttons, the HU/EN/DE labels, and the pure
+selection/TTL helper functions. The computations run with real node, as in
+test_audit_ui and test_tunnel_ui.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ def _js_function(name: str, source: str) -> str:
         rf"function {re.escape(name)}\([^)]*\) \{{.*?\n\}}", source, re.S
     )
     if match is None:
-        raise AssertionError(f"hiányzó JS függvény: {name}")
+        raise AssertionError(f"missing JS function: {name}")
     return match.group(0)
 
 
@@ -35,7 +35,7 @@ class AccessBulkUiMarkupTests(unittest.TestCase):
         cls.source = INDEX_PATH.read_text(encoding="utf-8")
 
     def test_select_all_and_max_buttons(self) -> None:
-        # Valódi gombok, nem űrlapot küldő elemek.
+        # Real buttons, not elements that submit a form.
         self.assertIn(
             '<button id="rules-select-all" class="ghost small" type="button" '
             'data-i18n="Mind kijelölése">Mind kijelölése</button>',
@@ -46,7 +46,7 @@ class AccessBulkUiMarkupTests(unittest.TestCase):
             'data-i18n="Max" data-i18n-aria-label="Maximális időtartam beállítása">Max</button>',
             self.source,
         )
-        # A kijelölés-gomb a szabálylista fejlécében, a Max a TTL-mező mellett.
+        # The select-all button is in the rule list header, Max next to the TTL field.
         head = self.source.index('class="access-head"')
         rules = self.source.index('id="rules"', head)
         self.assertLess(self.source.index('id="rules-select-all"'), rules)
@@ -55,7 +55,7 @@ class AccessBulkUiMarkupTests(unittest.TestCase):
         self.assertLess(
             self.source.index('id="ttl-max"'), self.source.index("</div>", ttl_row)
         )
-        # A mező saját korlátai egész órák.
+        # The field's own bounds are whole hours.
         self.assertIn('min="1" max="720" step="1"', self.source)
 
     def test_new_strings_are_translated(self) -> None:
@@ -76,13 +76,13 @@ class AccessBulkUiMarkupTests(unittest.TestCase):
 
 
 class AccessBulkHelpersNodeTests(unittest.TestCase):
-    """A kiválasztás és a legnagyobb óraszám valódi node-futtatással."""
+    """Selection and the maximum hour count with real node execution."""
 
     @classmethod
     def setUpClass(cls) -> None:
         cls.source = INDEX_PATH.read_text(encoding="utf-8")
 
-    @unittest.skipUnless(shutil.which("node"), "node nem érhető el")
+    @unittest.skipUnless(shutil.which("node"), "node is not available")
     def test_helpers(self) -> None:
         functions = "\n".join(
             _js_function(name, self.source)
@@ -106,23 +106,23 @@ const rules = [
 ];
 auth = { limits: { min_ttl: 60, max_ttl: 7200 }, rules };
 selectedRuleIds = ['a', 'b'];
-assert.strictEqual(selectionMaxHours(), 1); // 5400 mp -> 1 óra
+assert.strictEqual(selectionMaxHours(), 1); // 5400 s -> 1 hour
 selectedRuleIds = ['b'];
-assert.strictEqual(selectionMaxHours(), 2); // 7200 mp -> 2 óra
+assert.strictEqual(selectionMaxHours(), 2); // 7200 s -> 2 hours
 selectedRuleIds = ['a', 'b', 'c'];
-assert.strictEqual(selectionMaxHours(), 1); // 3600 mp -> 1 óra
+assert.strictEqual(selectionMaxHours(), 1); // 3600 s -> 1 hour
 selectedRuleIds = [];
-assert.strictEqual(selectionMaxHours(), 2); // nincs kijelölés: limits.max_ttl
-// A szigorúbb globális korlát nyer a szabály max_ttl-je felett.
+assert.strictEqual(selectionMaxHours(), 2); // nothing selected: limits.max_ttl
+// The stricter global limit wins over the rule's max_ttl.
 auth = { limits: { min_ttl: 60, max_ttl: 3600 }, rules };
 selectedRuleIds = ['b'];
 assert.strictEqual(selectionMaxHours(), 1);
-// Egy óránál rövidebb szabály: lefelé kerekítés után a mező minimuma.
+// A rule shorter than one hour: after rounding down, the field minimum.
 auth = { limits: { min_ttl: 60, max_ttl: 7200 },
   rules: [{ id: 'short', max_ttl: 1800 }] };
 selectedRuleIds = ['short'];
 assert.strictEqual(selectionMaxHours(), 1);
-// Hiányzó/invalid max_rules esetén a szerver korlátja (16) él.
+// With a missing/invalid max_rules the server limit (16) applies.
 auth = { limits: { min_ttl: 60, max_ttl: 7200, max_rules: 3 }, rules };
 assert.strictEqual(selectionLimit(), 3);
 auth = { limits: { min_ttl: 60, max_ttl: 7200 }, rules };
@@ -130,16 +130,16 @@ assert.strictEqual(selectionLimit(), 16);
 
 const catalog = [{ id: 'a' }, { id: 'b' }, { id: 'c' }, { id: 'd' }];
 assert.deepStrictEqual(selectAllIds(catalog, [], 3), ['a', 'b', 'c']);
-// A meglévő kijelölés megmarad, a maradék a korlátig egészül ki.
+// The existing selection is kept and topped up to the limit.
 assert.deepStrictEqual(selectAllIds(catalog, ['d'], 3), ['d', 'a', 'b']);
 assert.deepStrictEqual(selectAllIds(catalog, ['d'], 6), ['d', 'a', 'b', 'c']);
-// Idempotens: a második hívás ugyanazt adja, az inputot nem módosítja.
+// Idempotent: a second call returns the same and does not modify the input.
 const once = selectAllIds(catalog, [], 3);
 const keep = ['a'];
 selectAllIds(catalog, keep, 3);
 assert.deepStrictEqual(keep, ['a']);
 assert.deepStrictEqual(selectAllIds(catalog, once, 3), once);
-// Ismeretlen (időközben törölt) azonosító kiesik.
+// An unknown (meanwhile deleted) identifier drops out.
 assert.deepStrictEqual(selectAllIds([{ id: 'a' }], ['x'], 16), ['a']);
 process.stdout.write(JSON.stringify({ ok: true }));
 """

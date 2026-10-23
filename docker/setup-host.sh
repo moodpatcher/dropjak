@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
 #
-# Dropjak — host előkészítése a Dockeres telepítéshez
+# Dropjak — preparing the host for the Docker deployment
 #
-# Ez a szkript a HOSTON fut, rootként. Egyetlen dolga, hogy a boot korai
-# szakaszában is tiltva legyen a forward-forgalom, mielőtt a Docker daemon
-# és a konténer elindul:
+# This script runs ON THE HOST, as root. Its only job is to block forwarded
+# traffic even in the early boot phase, before the Docker daemon and the
+# container start:
 #
-#   - /etc/nftables/hatarvedelem-boot.nft  (policy drop a forward-láncon)
+#   - /etc/nftables/hatarvedelem-boot.nft  (policy drop on the forward chain)
 #   - /etc/systemd/system/hatarvedelem-boot.service
 #   - /etc/sysctl.d/90-hatarvedelem.conf   (net.ipv4.ip_forward = 1,
-#     net.ipv4.conf.all.route_localnet = 1 az input port proxy
-#     127.0.0.1-es céljához; a 127/8 csomagokat a loopback_guard lánc
-#     minden nem-loopback interfészen eldobja)
+#     net.ipv4.conf.all.route_localnet = 1 for the input port proxy's
+#     127.0.0.1 destination; the loopback_guard chain drops 127/8 packets
+#     on every non-loopback interface)
 #
-# A konténer a saját szabályainak betöltése után törli a boot-táblát, így
-# a végleges szabályok veszik át a helyét.
+# After loading its own rules, the container deletes the boot table, so the
+# final rules take over.
 #
-# Használat:  sudo ./docker/setup-host.sh
+# Usage:  sudo ./docker/setup-host.sh
 #
-# A szkript idempotens: többszöri futtatás után is ugyanaz az állapot.
+# The script is idempotent: repeated runs leave the same state.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -28,21 +28,21 @@ BOOT_NFT=/etc/nftables/hatarvedelem-boot.nft
 BOOT_UNIT=/etc/systemd/system/hatarvedelem-boot.service
 SYSCTL_FILE=/etc/sysctl.d/90-hatarvedelem.conf
 
-die() { printf 'HIBA: %s\n' "$*" >&2; exit 1; }
+die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 info() { printf '[hatarvedelem] %s\n' "$*"; }
 
-[ "$(id -u)" -eq 0 ] || die "rootként futtasd: sudo $0"
+[ "$(id -u)" -eq 0 ] || die "run as root: sudo $0"
 
 [ -r "$REPO_DIR/deploy/hatarvedelem-boot.nft" ] \
-    || die "hiányzó fájl: $REPO_DIR/deploy/hatarvedelem-boot.nft"
+    || die "missing file: $REPO_DIR/deploy/hatarvedelem-boot.nft"
 [ -r "$REPO_DIR/deploy/hatarvedelem-boot.service" ] \
-    || die "hiányzó fájl: $REPO_DIR/deploy/hatarvedelem-boot.service"
+    || die "missing file: $REPO_DIR/deploy/hatarvedelem-boot.service"
 
-# ------------------------------------------------------------- nft telepítése
+# ------------------------------------------------------------- installing nft
 
 NFT_BIN=$(command -v nft 2>/dev/null || true)
 if [ -z "$NFT_BIN" ]; then
-    info "az nftables nincs telepítve, telepítem"
+    info "nftables is not installed, installing it"
     if command -v dnf >/dev/null 2>&1; then
         dnf install -y nftables
     elif command -v yum >/dev/null 2>&1; then
@@ -53,19 +53,19 @@ if [ -z "$NFT_BIN" ]; then
     elif command -v zypper >/dev/null 2>&1; then
         zypper --non-interactive install nftables
     else
-        die "nem találom a csomagkezelőt; telepítsd kézzel az nftables csomagot"
+        die "no package manager found; install the nftables package manually"
     fi
     NFT_BIN=$(command -v nft 2>/dev/null || true)
 fi
-[ -n "$NFT_BIN" ] || die "az nft telepítés után sem található"
+[ -n "$NFT_BIN" ] || die "nft cannot be found even after installation"
 
 if ! command -v systemctl >/dev/null 2>&1; then
-    die "ez a szkript systemd-t feltételez"
+    die "this script assumes systemd"
 fi
 
 info "nft: $NFT_BIN"
 
-# --------------------------------------------------------------- fájlok
+# --------------------------------------------------------------- files
 
 install -d -m 0755 /etc/nftables
 install -m 0600 "$REPO_DIR/deploy/hatarvedelem-boot.nft" "$BOOT_NFT"
@@ -74,7 +74,7 @@ TMP_UNIT=$(mktemp)
 trap 'rm -f "$TMP_UNIT"' EXIT
 sed "s|__NFT_BIN__|$NFT_BIN|g" \
     "$REPO_DIR/deploy/hatarvedelem-boot.service" >"$TMP_UNIT"
-grep -q '__[A-Z0-9_]*__' "$TMP_UNIT" && die "a unitban helyőrző maradt"
+grep -q '__[A-Z0-9_]*__' "$TMP_UNIT" && die "a placeholder remained in the unit"
 install -m 0644 "$TMP_UNIT" "$BOOT_UNIT"
 
 if command -v restorecon >/dev/null 2>&1; then
@@ -84,12 +84,13 @@ fi
 # --------------------------------------------------------------- sysctl
 
 cat >"$SYSCTL_FILE" <<'EOF'
-# Dropjak: a VM átjáróként továbbítja a kliensek forgalmát.
-# A tényleges engedélyezést az nftables allowed_v4 halmaza végzi.
+# Dropjak: the VM forwards the clients' traffic as a gateway.
+# The actual permission is granted by the nftables allowed_v4 set.
 net.ipv4.ip_forward = 1
-# Az input port proxy a csak 127.0.0.1-en figyelő célhoz (például a Docker
-# 127.0.0.1-re publikált portjához) 127.0.0.1-re DNAT-ol. A kívülről érkező
-# 127/8 célú/forrású csomagokat az nft loopback_guard lánca eldobja.
+# The input port proxy DNATs to 127.0.0.1 for targets listening only there
+# (for example a Docker port published on 127.0.0.1). Packets arriving from
+# outside with a 127/8 destination/source are dropped by the nft loopback_guard
+# chain.
 net.ipv4.conf.all.route_localnet = 1
 EOF
 chmod 0644 "$SYSCTL_FILE"
@@ -102,37 +103,38 @@ else
     echo 1 >/proc/sys/net/ipv4/conf/all/route_localnet 2>/dev/null || true
 fi
 if [ "$(cat /proc/sys/net/ipv4/ip_forward 2>/dev/null || echo 0)" != "1" ]; then
-    info "FIGYELEM: a net.ipv4.ip_forward most nem kapcsolható be; újraindítás után igen."
+    info "WARNING: net.ipv4.ip_forward cannot be enabled right now; it will be after a reboot."
 fi
 
 # --------------------------------------------------------------- unit
 
 systemctl daemon-reload
 
-# Ha a Docker már fut, a konténer szabályai védik a forward-láncot; a
-# boot-tábla azonnali betöltése megszakítaná a már belépett klienseket.
-# Ebben az esetben csak engedélyezzük, a következő bootkor lép életbe.
+# If Docker is already running, the container's rules protect the forward
+# chain; loading the boot table immediately would interrupt clients that are
+# already connected. In that case we only enable it; it takes effect at the
+# next boot.
 if systemctl is-active --quiet docker.service 2>/dev/null; then
     systemctl enable hatarvedelem-boot.service >/dev/null
-    info "a Docker már fut: a boot-táblát most nem töltöm be, hogy ne szakítsam meg a forgalmat."
-    info "a következő újraindításkor már a Docker előtt lép életbe."
+    info "Docker is already running: the boot table is not loaded now, so that traffic is not interrupted."
+    info "it will take effect before Docker on the next reboot."
 else
-    "$NFT_BIN" -c -f "$BOOT_NFT" || die "érvénytelen boot-szabályfájl"
+    "$NFT_BIN" -c -f "$BOOT_NFT" || die "invalid boot rule file"
     systemctl enable --now hatarvedelem-boot.service
     systemctl is-active --quiet hatarvedelem-boot.service \
-        || die "a hatarvedelem-boot.service nem indult el"
-    info "a korai forward-tiltás aktív."
+        || die "hatarvedelem-boot.service did not start"
+    info "early forward blocking is active."
 fi
 
-# --------------------------------------------------------------- figyelmeztetés
+# --------------------------------------------------------------- warning
 
 for svc in firewalld ufw; do
     if systemctl is-active --quiet "$svc" 2>/dev/null; then
-        info "FIGYELEM: a(z) $svc aktív a hoston. Az nftables-tábláink ettől"
-        info "         függetlenül működnek, de más Docker-konténerek forward-forgalmát"
-        info "         a hatarvedelem szabályai is érinthetik. Dedikált átjárón ajánlott."
+        info "WARNING: $svc is active on the host. Our nftables tables work"
+        info "         independently of it, but other Docker containers' forwarded"
+        info "         traffic may also be affected by the hatarvedelem rules. A dedicated gateway is recommended."
     fi
 done
 
-info "kész."
-info "Következő lépés: cp .env.example .env, szerkesztés, majd docker compose up -d --build"
+info "done."
+info "Next step: cp .env.example .env, edit it, then docker compose up -d --build"

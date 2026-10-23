@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Az N4 hibajavítás tesztjei: a visszavonás a munkamenet-zár alatt fut.
+"""Tests for the N4 fix: revocation runs under the session lock.
 
-A ``logout()``, ``terminate()``, ``revoke_user()``, ``revoke_rule()`` és
-``reap_once()`` korábban a munkamenet eltávolítása után, a ``self._lock``
-elengedése után hívta a tűzfalat. Egy párhuzamos ``authorize()`` így a
-kettő közé ékelődhetett, és a visszavonás az éppen kiadott engedélyt is
-törölhette. A javítás a tűzfal-mutációt ugyanazon zár alatt végzi, és ha az
-IP-hez marad aktív munkamenet, csak a nem átfedő grantokat törli
-(``only_grants=True``), conntrack-ürítés nélkül.
+``logout()``, ``terminate()``, ``revoke_user()``, ``revoke_rule()`` and
+``reap_once()`` previously called the firewall after removing the session and
+after releasing ``self._lock``. A concurrent ``authorize()`` could thus slip
+between the two, and the revocation could delete the grant that had just been
+issued. The fix performs the firewall mutation under the same lock, and if an
+active session remains for the IP, it deletes only the non-overlapping grants
+(``only_grants=True``), without a conntrack flush.
 
-A tesztek determinisztikusak: nincs szál, nincs alvás. A hamis tűzfal a
-hívás pillanatában ellenőrzi, hogy a ``SessionManager._lock`` zarolva van-e
-és hogy a várt szálon fut-e a hívás.
+The tests are deterministic: no threads, no sleeps. The fake firewall checks
+at call time whether ``SessionManager._lock`` is locked and whether the call
+runs on the expected thread.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ OTHER_IP = "203.0.113.10"
 
 
 def forward_ports(*tcp: int) -> gateway.Ports:
-    """Egy forward irányú, TCP-portokból álló grant."""
+    """A forward-direction grant consisting of TCP ports."""
     return gateway.Ports(tcp=tuple(tcp), direction="forward")
 
 
@@ -48,7 +48,7 @@ def make_session(
     expires: float | None = None,
     authorized: bool = True,
 ) -> gateway.Session:
-    """Egy engedélyezett (vagy függő) munkamenet a valódi dataclassból."""
+    """An authorized (or pending) session from the real dataclass."""
     now = time.time()
     return gateway.Session(
         token=token,
@@ -67,11 +67,11 @@ def make_session(
 
 
 class RecordingFirewall:
-    """A ``revoke_all`` hívásokat rögzítő, zárállapotot ellenőrző tűzfal.
+    """A firewall that records ``revoke_all`` calls and checks the lock state.
 
-    A hívás pillanatában AssertionError-t dob, ha a munkamenet-zár nincs
-    tartva, vagy ha a hívás nem a várt (fő) szálon fut. Így a hibás
-    zárolási sorrend azonnal, determinisztikusan megbukik.
+    It raises AssertionError at call time if the session lock is not held, or
+    if the call does not run on the expected (main) thread. A wrong locking
+    order thus fails immediately and deterministically.
     """
 
     def __init__(self) -> None:
@@ -92,11 +92,11 @@ class RecordingFirewall:
         locked = self.manager is None or self.manager._lock.locked()
         if not locked:
             raise AssertionError(
-                "a firewall.revoke_all nem a SessionManager._lock alatt futott"
+                "firewall.revoke_all did not run under SessionManager._lock"
             )
         if threading.get_ident() != self.expected_thread:
             raise AssertionError(
-                "a firewall.revoke_all nem a várt szálon futott"
+                "firewall.revoke_all did not run on the expected thread"
             )
         self.lock_states.append(locked)
         self.thread_ids.append(threading.get_ident())
@@ -105,14 +105,14 @@ class RecordingFirewall:
         )
         if self.fail_next:
             self.fail_next = False
-            raise gateway.FirewallError("szimulált nft hiba")
+            raise gateway.FirewallError("simulated nft error")
 
     def grant_all(self, ip: str, grants, ttl: int) -> None:
-        raise AssertionError("a teszt nem vár grant_all hívást")
+        raise AssertionError("the test does not expect a grant_all call")
 
 
 class LockScopeTestBase(unittest.TestCase):
-    """Közös segédek: valódi SessionManager, hamis tűzfal, figyelt conntrack."""
+    """Shared helpers: real SessionManager, fake firewall, observed conntrack."""
 
     def setUp(self) -> None:
         self.firewall = RecordingFirewall()
@@ -132,12 +132,12 @@ class LockScopeTestBase(unittest.TestCase):
         return True
 
     def insert_session(self, session: gateway.Session) -> None:
-        """Munkamenet közvetlen beillesztése (a login egy-IP-szabálya nélkül)."""
+        """Insert a session directly (without login's one-IP rule)."""
         with self.manager._lock:
             self.manager._sessions[session.token] = session
 
     def assert_locked_sole_call(self, *, only_grants: bool) -> None:
-        """Pontosan egy, a zár alatt futó revoke_all hívás ellenőrzése."""
+        """Assert exactly one revoke_all call, running under the lock."""
         self.assertEqual(len(self.firewall.calls), 1)
         self.assertTrue(self.firewall.lock_states[0])
         self.assertEqual(
@@ -149,7 +149,7 @@ class LockScopeTestBase(unittest.TestCase):
 
 
 class LockScopeTests(LockScopeTestBase):
-    """A tűzfal-hívás minden érintett műveletnél a _lock alatt fut."""
+    """The firewall call runs under _lock for every affected operation."""
 
     def test_logout_revokes_under_lock(self) -> None:
         session = make_session("token-logout")
@@ -193,11 +193,11 @@ class LockScopeTests(LockScopeTestBase):
 
 
 class PartialGrantTests(LockScopeTestBase):
-    """Aktív munkamenet mellett csak a nem átfedő grantok törlődnek."""
+    """With an active session, only the non-overlapping grants are deleted."""
 
     def test_logout_revokes_only_non_overlapping_grants(self) -> None:
-        # Az első munkamenet 80-at és 8080-at kapott; a második (ugyanarra
-        # az IP-re) 80-at és 443-at. A 80 közös, ezért csak a 8080 törlendő.
+        # The first session got 80 and 8080; the second (for the same
+        # IP) got 80 and 443. 80 is shared, so only 8080 must be deleted.
         first = make_session("token-first", tcp=(80, 8080))
         second = make_session("token-second", tcp=(80, 443))
         self.insert_session(first)
@@ -212,16 +212,16 @@ class PartialGrantTests(LockScopeTestBase):
         self.assertTrue(only_grants)
         self.assertEqual(grants, (forward_ports(8080),))
         self.assertTrue(self.firewall.lock_states[0])
-        # Részleges törlésnél a conntrack-hoz nem szabad nyúlni.
+        # A partial deletion must not touch conntrack.
         self.assertEqual(self.flush_calls, [])
-        # A második munkamenet érintetlen marad.
+        # The second session remains untouched.
         self.assertIsNotNone(self.manager.validate(second.token, IP))
         self.assertIsNone(self.manager.validate(first.token, IP))
 
     def test_logout_skips_firewall_when_remaining_session_covers_all(self) -> None:
-        # Az első munkamenet csak 80-at kapott, a második 80-at és 443-at:
-        # a maradó munkamenet minden elemet lefed, ezért nincs tűzfal-hívás
-        # és nincs conntrack-ürítés sem.
+        # The first session got only 80, the second 80 and 443: the remaining
+        # session covers every element, so there is no firewall call and no
+        # conntrack flush either.
         first = make_session("token-covered-first", tcp=(80,))
         second = make_session("token-covered-second", tcp=(80, 443))
         self.insert_session(first)
@@ -234,8 +234,8 @@ class PartialGrantTests(LockScopeTestBase):
         self.assertIsNotNone(self.manager.validate(second.token, IP))
 
     def test_partial_revoke_failure_queues_only_remainder(self) -> None:
-        # Ha a részleges törlés hibázik, csak a nem átfedő grant kerül a
-        # függő sorba, és conntrack-ürítés ilyenkor sem történik.
+        # If the partial deletion fails, only the non-overlapping grant goes into
+        # the pending queue, and no conntrack flush happens in that case either.
         first = make_session("token-fail-first", tcp=(80, 8080))
         second = make_session("token-fail-second", tcp=(80, 443))
         self.insert_session(first)
@@ -255,7 +255,7 @@ class PartialGrantTests(LockScopeTestBase):
 
 
 class FullRevokeTests(LockScopeTestBase):
-    """Aktív munkamenet nélkül a teljes visszavonás és a flush is lefut."""
+    """Without an active session both the full revocation and the flush run."""
 
     def test_logout_without_remaining_session_flushes_conntrack(self) -> None:
         session = make_session("token-only", tcp=(80,))
@@ -284,7 +284,7 @@ class FullRevokeTests(LockScopeTestBase):
 
 
 class RetryOutsideLockTests(LockScopeTestBase):
-    """A reap_once a függő újrapróbálkozást a zár elengedése után hívja."""
+    """reap_once calls the pending retry after releasing the lock."""
 
     def test_reap_once_retries_pending_outside_lock(self) -> None:
         observed: dict[str, object] = {}

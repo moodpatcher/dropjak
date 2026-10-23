@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""A Caddy tanúsítvány-gyorsítótárának ürítése az admin API-n át.
+"""Flushing Caddy's certificate cache through the admin API.
 
-* ``CaddyAdmin``: elérhetőség-ellenőrzés (GET /config/admin), kért
-  újraindítás (POST /stop) egyszer és csak kérésre, újrapróbálás
-  visszalépéssel, a jelzőfájl túléli a portál újraindítását, a /stop
-  közben érkezett kérés nem vész el; mindez egy hamis Unix socketes
-  admin szerverrel;
-* admin API: az ACME be→ki váltása és az ACME melletti tanúsítványfeltöltés
-  kér újraindítást, más mentés nem; az admin állapot tartalmazza a Caddy
-  állapotát;
-* a Caddyfile és a compose: admin API csak a közös kötet Unix socketjén.
+* ``CaddyAdmin``: reachability check (GET /config/admin), requested
+  restart (POST /stop) once and only on request, retry with backoff, the
+  flag file survives a portal restart, and a request arriving during /stop
+  is not lost; all of this with a fake Unix-socket admin server;
+* admin API: switching ACME on→off and uploading a certificate while ACME
+  is on request a restart, no other save does; the admin state includes
+  Caddy's state;
+* the Caddyfile and the compose file: admin API only on the shared volume's
+  Unix socket.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ import test_proxy_certs as tpc  # noqa: E402
 
 
 class FakeCaddy(socketserver.ThreadingUnixStreamServer):
-    """Hamis Caddy admin API: rögzíti a kéréseket, a válaszkód állítható."""
+    """Fake Caddy admin API: records the requests, the response code is settable."""
 
     daemon_threads = True
 
@@ -127,7 +127,7 @@ class CaddyAdminTests(unittest.TestCase):
         self.assertEqual(admin.run_once(), 5.0)
         self.assertEqual(fake.requests, [("POST", "/stop")])
         self.assertEqual(admin.snapshot()["error"], "")
-        # A sikeres kör a visszalépést is nullázza.
+        # A successful round also resets the backoff.
         fake.close()
         self.fake = None
         self.assertEqual(admin.run_once(), 2.0)
@@ -148,7 +148,7 @@ class CaddyAdminTests(unittest.TestCase):
     def test_pending_flag_survives_portal_restart(self) -> None:
         fake = self.start_fake()
         server.CaddyAdmin(self.sock, self.flag).request_restart()
-        # Új portálfolyamat: a jelzőfájlból tudja, hogy még tartozik a /stop.
+        # New portal process: it knows from the flag file that the /stop is still owed.
         admin = server.CaddyAdmin(self.sock, self.flag)
         self.assertTrue(admin.snapshot()["pending"])
         admin.run_once()
@@ -184,7 +184,7 @@ class CaddyAdminTests(unittest.TestCase):
                 if fake.requests:
                     break
                 threading.Event().wait(0.01)
-            # A szál most 60 s-ig várna; a kérés azonnal felébreszti.
+            # The thread would now wait 60 s; the request wakes it immediately.
             admin.request_restart()
             for _ in range(200):
                 if not admin.snapshot()["pending"]:
@@ -209,7 +209,7 @@ class RecordingCaddy:
 
 
 class CaddyRestartHttpTests(unittest.TestCase):
-    """Melyik admin művelet kér Caddy-újraindítást."""
+    """Which admin operation requests a Caddy restart."""
 
     setUpClass = classmethod(tpc.CertAdminHttpTests.setUpClass.__func__)
     tearDownClass = classmethod(
@@ -240,17 +240,17 @@ class CaddyRestartHttpTests(unittest.TestCase):
         caddy = self.gw.caddy = RecordingCaddy()
         try:
             cookie = self.admin()
-            data = self.acme(cookie, True)  # be→be
+            data = self.acme(cookie, True)  # on→on
             self.assertEqual(caddy.calls, 0)
             self.assertEqual(data["caddy"]["reachable"], True)
-            self.upload(cookie)  # ACME mellett: a gyorsítótár elsőbbsége
+            self.upload(cookie)  # with ACME on: the cache takes precedence
             self.assertEqual(caddy.calls, 1)
-            self.acme(cookie, False)  # be→ki
+            self.acme(cookie, False)  # on→off
             self.assertEqual(caddy.calls, 2)
-            self.acme(cookie, False)  # ki→ki
-            self.upload(cookie)  # ACME nélkül nincs mit üríteni
+            self.acme(cookie, False)  # off→off
+            self.upload(cookie)  # without ACME there is nothing to flush
             self.assertEqual(caddy.calls, 2)
-            self.acme(cookie, True)  # ki→be: a /data-ból tölt, nem kell
+            self.acme(cookie, True)  # off→on: loads from /data, no need
             self.assertEqual(caddy.calls, 2)
         finally:
             del self.gw.caddy
@@ -271,7 +271,7 @@ class CaddyAdminDeployTests(unittest.TestCase):
                  if line.strip().startswith("admin ")]
         self.assertEqual(admin, ["admin unix//run/caddy-admin/admin.sock|0666"])
         self.assertIn("grace_period 5s", text)
-        # A kikapcsolt ACME-t továbbra is az ask kapuzza.
+        # Disabled ACME is still gated by ask.
         self.assertIn("ask http://127.0.0.1:{$PORT:8100}/api/proxy/ask", text)
 
     def test_compose_shares_admin_volume_only(self) -> None:

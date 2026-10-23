@@ -3,76 +3,76 @@
     {
       "id": "web",
       "label": "Web",
-      "description": "Böngészés HTTP és HTTPS fölött",
+      "description": "Browsing over HTTP and HTTPS",
       "tcp": [80, 443],
       "udp": [443]
     },
     {
       "id": "dns",
       "label": "DNS",
-      "description": "Névfeloldás, hagyományos és titkosított DNS",
+      "description": "Name resolution, traditional and encrypted DNS",
       "tcp": [53, 853],
       "udp": [53, 853]
     },
     {
       "id": "mail",
       "label": "E-mail",
-      "description": "SMTP, IMAP és POP3, a titkosított változatokkal",
+      "description": "SMTP, IMAP and POP3, including encrypted variants",
       "tcp": [25, 110, 143, 465, 587, 993, 995]
     },
     {
       "id": "ssh",
       "label": "SSH",
-      "description": "Távoli szerverek elérése SSH-val",
+      "description": "Accessing remote servers via SSH",
       "tcp": [22]
     },
     {
       "id": "vpn",
       "label": "VPN",
-      "description": "IPsec, OpenVPN és WireGuard",
+      "description": "IPsec, OpenVPN and WireGuard",
       "tcp": [1194],
       "udp": [500, 4500, 1194, 51820]
     },
     {
       "id": "icmp",
       "label": "Ping",
-      "description": "ICMP echo hálózati diagnosztikához",
+      "description": "ICMP echo for network diagnostics",
       "icmp": true
     },
     {
       "id": "all",
-      "label": "Teljes hozzáférés",
-      "description": "Minden port és protokoll, korlátozás nélkül",
+      "label": "Full access",
+      "description": "All ports and protocols, without restriction",
       "all": true
     }
   ],
   "scenarios": [
     {
       "id": "browse",
-      "label": "Böngészés",
-      "description": "Web és DNS",
+      "label": "Browsing",
+      "description": "Web and DNS",
       "services": ["web", "dns"],
       "default_ttl": 3600,
       "default": true
     },
     {
       "id": "work",
-      "label": "Munka",
-      "description": "Web, DNS és e-mail",
+      "label": "Work",
+      "description": "Web, DNS and email",
       "services": ["web", "dns", "mail"],
       "default_ttl": 28800
     },
     {
       "id": "admin",
-      "label": "Rendszergazda",
-      "description": "Web, DNS, SSH és ping",
+      "label": "Administrator",
+      "description": "Web, DNS, SSH and ping",
       "services": ["web", "dns", "ssh", "icmp"],
       "default_ttl": 7200
     },
     {
       "id": "full",
-      "label": "Teljes",
-      "description": "Korlátozatlan internet",
+      "label": "Full",
+      "description": "Unrestricted internet",
       "services": ["all"],
       "default_ttl": 3600
     }

@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Dropjak — eldobott csomagok naplója NFLOG-on keresztül.
+Dropjak — log of dropped packets via NFLOG.
 
-Az nftables ``log ... group N`` szabályai a kernel NFLOG (nfnetlink_log)
-mechanizmusán keresztül küldik el a csomag fejlécét és payloadját. Ez a
-modul egy nyers NETLINK_NETFILTER socketen köti be a megadott csoportot,
-feldolgozza a csomagokat, és JSON Lines fájlba írja őket.
+The nftables ``log ... group N`` rules send the packet header and payload
+through the kernel NFLOG (nfnetlink_log) mechanism. This module binds the
+given group on a raw NETLINK_NETFILTER socket, processes the packets and
+writes them to a JSON Lines file.
 
-Miért NFLOG: a konténer csak NET_ADMIN képességgel fut, és nincs
-CAP_SYSLOG-ja, ezért a kernel dmesg / /dev/kmsg naplója nem használható.
-Az NFLOG-hoz csak NET_ADMIN kell, és a kernel a csomagokat közvetlenül a
-portál folyamatának küldi.
+Why NFLOG: the container runs only with NET_ADMIN and has no CAP_SYSLOG, so
+the kernel dmesg / /dev/kmsg log cannot be used. NFLOG requires only
+NET_ADMIN, and the kernel sends packets directly to the portal process.
 
-A napló nem tartalmazza a teljes csomagot: csak az IPv4 fejléc, a
-transzportportok, az interfész, a forrás-MAC és az nft prefix (ok) kerül
-a fájlba. A fájl 0600 jogosultsággal készül, és méretkorláttal rotálódik.
+The log does not contain the whole packet: only the IPv4 header, the
+transport ports, the interface, the source MAC and the nft prefix (reason)
+go into the file. The file is created with 0600 permissions and is rotated
+with a size limit.
 """
 
 from __future__ import annotations
@@ -82,27 +82,28 @@ def _default_log(message: str) -> None:
 _REASON_RE = re.compile(r"reason=([A-Za-z0-9_.:-]+)")
 _MAX_STRING = 256
 
-# A fail2ban tiltás tényét a portál egyetlen eseményként írja a naplóba
-# (reason=fail2ban, event=ban). A tiltás alatt eldobott csomagokat a tűzfal
-# mintavételezve naplózza (reason=fail2ban), a read() viszont ezeket a tiltás
-# egyetlen sorához kapcsolja, így a felület nem kap csomagonkénti sort.
+# The portal writes the fact of a fail2ban ban to the log as a single event
+# (reason=fail2ban, event=ban). Packets dropped during the ban are logged by
+# the firewall on a sampled basis (reason=fail2ban), but read() attaches
+# these to the single ban row, so the UI does not get one row per packet.
 BAN_EVENT_REASON = "fail2ban"
 BAN_EVENT_KIND = "ban"
 
-# A felület kétféle sort különböztet meg: a hétköznapi eldobások "DROP",
-# a fail2ban által tiltott források (és a tiltás utáni kísérletek)
-# "fail2ban" címkét kapnak. A nyers kernel-ok (reason) változatlanul
-# megmaradnak, és a részletes JSON-ban láthatók.
+# The UI distinguishes two row types: ordinary drops get "DROP", sources
+# banned by fail2ban (and attempts after the ban) get the "fail2ban" label.
+# The raw kernel reasons stay unchanged and are visible in the detailed
+# JSON.
 BAN_GROUP = "ban"
 DROP_GROUP = "drop"
-# A proxy tiltóoldala (401): alkalmazásszintű sor, nem csomag; a portál írja
-# közvetlenül a tárba, ezért a fail2ban drop-jelzéseit nem táplálja.
+# The proxy block page (401): an application-level row, not a packet; the
+# portal writes it directly to the store, so it does not feed fail2ban's
+# drop signals.
 PROXY_DROP_REASON = "proxy-unauthorized"
 PROXY_GROUP = "proxy"
 
 
 def reason_group(reason: str) -> str:
-    """A sor felületi kategóriája: fail2ban, proxy vagy DROP."""
+    """The row's UI category: fail2ban, proxy or DROP."""
     reason = str(reason or "").strip().lower()
     if reason == BAN_EVENT_REASON:
         return BAN_GROUP
@@ -111,7 +112,7 @@ def reason_group(reason: str) -> str:
     return DROP_GROUP
 
 
-# --------------------------------------------------------------- NFLOG állandók
+# --------------------------------------------------------------- NFLOG constants
 
 NETLINK_NETFILTER = 12
 NFNL_SUBSYS_ULOG = 4
@@ -179,15 +180,15 @@ def _align(value: int, alignment: int) -> int:
 
 def _nlmsg(msg_type: int, flags: int, seq: int, payload: bytes) -> bytes:
     length = _NLMSG_HDRLEN + len(payload)
-    # A netlink fejléc és az attribútum-fejlécek natív bájtsorrendűek
-    # (__u32/__u16), NEM hálózatiak. A "!" használata x86-on némán
-    # eldobott üzeneteket okoz: a kernel a hossz-mezőt fordítva olvassa.
+    # The netlink header and attribute headers are native-endian
+    # (__u32/__u16), NOT network byte order. Using "!" on x86 silently
+    # causes dropped messages: the kernel reads the length field byte-swapped.
     header = struct.pack("=IHHII", length, msg_type, flags, seq, 0)
     return header + payload
 
 
 def _nfgenmsg(family: int, res_id: int) -> bytes:
-    # A struct nfgenmsg res_id mezője __be16 (hálózati bájtsorrendű).
+    # The struct nfgenmsg res_id field is __be16 (network byte order).
     return struct.pack("=BB", family, NFNETLINK_V0) + struct.pack(
         "!H", res_id & 0xFFFF
     )
@@ -218,7 +219,7 @@ def _ifname(index: int) -> str:
 
 
 def _parse_ipv4(packet: bytes) -> dict:
-    """Az IPv4 fejléc és a TCP/UDP portok kiolvasása a payloadból."""
+    """Parse the IPv4 header and TCP/UDP ports from the payload."""
     if len(packet) < 20:
         return {}
     version = packet[0] >> 4
@@ -234,7 +235,7 @@ def _parse_ipv4(packet: bytes) -> dict:
         "proto": _PROTO_NAMES.get(protocol, f"ip-{protocol}"),
         "length": total_length or len(packet),
     }
-    # A nem első töredékben nincsenek értelmezhető transzportportok.
+    # Non-first fragments have no parsable transport ports.
     if fragment_offset:
         return result
     if protocol in (6, 17) and len(packet) >= ihl + 4:
@@ -258,14 +259,14 @@ def _parse_attrs(payload: bytes, offset: int) -> dict[int, bytes]:
 
 
 def parse_packet_message(payload: bytes, now: float | None = None) -> dict | None:
-    """Egy NFULNL_MSG_PACKET üzenet törzsének feldolgozása.
+    """Process the body of an NFULNL_MSG_PACKET message.
 
-    A bemenet az nlmsghdr UTÁNI rész (nfgenmsg + attribútumok). A visszaadott
-    szótár közvetlenül a drop log fájlba írható.
+    The input is the part AFTER the nlmsghdr (nfgenmsg + attributes). The
+    returned dictionary can be written directly to the drop log file.
     """
     if len(payload) < 4:
         return None
-    # nfgenmsg: nfgen_family, version, res_id. A csoport a res_id-ban van.
+    # nfgenmsg: nfgen_family, version, res_id. The group is in res_id.
     attrs = _parse_attrs(payload, 4)
     raw_payload = attrs.get(NFULA_PAYLOAD, b"")
     ip = _parse_ipv4(raw_payload)
@@ -337,11 +338,11 @@ def parse_packet_message(payload: bytes, now: float | None = None) -> dict | Non
 
 
 def parse_netlink_buffer(data: bytes, now: float | None = None) -> list[dict]:
-    """Egy netlink recv() pufferben lévő üzenetek feldolgozása.
+    """Process the messages in one netlink recv() buffer.
 
-    Visszaadott elemek:
+    Returned items:
       {"kind": "packet", "record": {...}}
-      {"kind": "ack", "error": 0 vagy negatív errno}
+      {"kind": "ack", "error": 0 or a negative errno}
       {"kind": "done"}
     """
     items: list[dict] = []
@@ -389,8 +390,8 @@ def _mode_message(
 ) -> bytes:
     msg_type = (NFNL_SUBSYS_ULOG << 8) | NFULNL_MSG_CONFIG
     mode = struct.pack("!IBB", copy_range, NFULNL_COPY_PACKET, 0)
-    # A qthreshold=1 minden csomagot azonnal továbbít, így a napló valós
-    # időben látszik; a timeout (1/100 mp) csak biztonsági háló.
+    # qthreshold=1 forwards every packet immediately, so the log appears in
+    # real time; the timeout (1/100 s) is only a safety net.
     payload = (
         _nfgenmsg(0, group)
         + _nla(NFULA_CFG_MODE, mode)
@@ -400,10 +401,10 @@ def _mode_message(
     return _nlmsg(msg_type, NLM_F_REQUEST | NLM_F_ACK, seq, payload)
 
 
-# ------------------------------------------------------------------ naplótár
+# ------------------------------------------------------------------ log store
 
 class DropLog:
-    """JSON Lines drop-napló, az AuditLog mintájára rotálva."""
+    """JSON Lines drop log, rotated following the AuditLog pattern."""
 
     def __init__(
         self,
@@ -433,12 +434,12 @@ class DropLog:
             except FileNotFoundError:
                 continue
             except OSError as exc:
-                self.log(f"[drop log] rotáció nem sikerült: {exc}")
+                self.log(f"[drop log] rotation failed: {exc}")
                 return
         try:
             os.replace(self.path, f"{self.path}.1")
         except OSError as exc:
-            self.log(f"[drop log] rotáció nem sikerült: {exc}")
+            self.log(f"[drop log] rotation failed: {exc}")
 
     @staticmethod
     def _clean(entry: dict) -> dict:
@@ -477,7 +478,7 @@ class DropLog:
                 finally:
                     os.close(fd)
         except OSError as exc:
-            self.log(f"[drop log] írási hiba: {exc}")
+            self.log(f"[drop log] write error: {exc}")
         return record
 
     def _files(self) -> list[str]:
@@ -554,20 +555,20 @@ class DropLog:
             except FileNotFoundError:
                 continue
             except OSError as exc:
-                self.log(f"[drop log] olvasási hiba ({path}): {exc}")
+                self.log(f"[drop log] read error ({path}): {exc}")
         rows = self._collapse_fail2ban(rows)
         rows.sort(key=lambda item: float(item.get("ts", 0)), reverse=True)
         return rows[:limit]
 
     @staticmethod
     def _collapse_fail2ban(rows: list[dict]) -> list[dict]:
-        """A tiltás alatti csomagokat a tiltás egyetlen sorába vonja.
+        """Fold packets from during a ban into the single ban row.
 
-        A tűzfal a tiltás alatt mintavételezve naplóz, hogy látszódjon, ha a
-        tiltott forrás tovább próbálkozik. A read() ezeket a tiltás
-        eseményéhez rendeli, és egyetlen összesített sort ad vissza. Ha a
-        naplóban nincs tiltás-esemény (régi bejegyzések), forrásonként egy
-        ``event=ban-drop`` sor készül.
+        The firewall logs on a sampled basis during a ban so that continued
+        attempts from the banned source are visible. read() attributes these
+        to the ban event and returns a single aggregated row. If the log has
+        no ban event (older entries), one ``event=ban-drop`` row is created
+        per source.
         """
         plain: list[dict] = []
         bans: list[dict] = []
@@ -616,8 +617,9 @@ class DropLog:
             when = ts_of(packet)
             target: dict | None = None
             for state in by_src.get(src, []):
-                # A tiltás-esemény a nft-művelet után íródik, ezért egy
-                # rövid türelmi idővel a határ előtti csomag is hozzákapcsolható.
+                # The ban event is written after the nft operation, so with a
+                # short grace period a packet from just before the boundary
+                # can still be attached.
                 if ts_of(state) - 5.0 <= when and (
                     not until_of(state) or when <= until_of(state) + 60.0
                 ):
@@ -650,8 +652,8 @@ class DropLog:
             if state["packets"]:
                 if state["event"] == BAN_EVENT_KIND:
                     state["ban_ts"] = ts_of(state)
-                # A sor a legutóbbi találat idejére kerül, hogy az
-                # automatikus frissítésnél a tetejére kerüljön.
+                # The row is timestamped at the latest hit so that it moves
+                # to the top on automatic refresh.
                 state["ts"] = state["last_drop"]
                 state["time"] = _utc_iso(state["ts"])
             else:
@@ -661,15 +663,15 @@ class DropLog:
         return out
 
 
-# ------------------------------------------------------------------- figyelő
+# ------------------------------------------------------------------- listener
 
 class DropLogListener:
-    """Az NFLOG csoportot figyelő szál.
+    """Thread listening on the NFLOG group.
 
-    A start() akkor tér vissza sikeresen, ha a csoport kötése megtörtént.
-    Ha a kernel nem támogatja az NFLOG-ot, vagy a csoportot más folyamat
-    használja, a hiba a status()-ban látható; a portál ettől függetlenül
-    működik tovább (a tűzfal nem függ a naplózástól).
+    start() returns successfully only once the group has been bound. If the
+    kernel does not support NFLOG, or the group is in use by another process,
+    the error is visible in status(); the portal keeps working regardless
+    (the firewall does not depend on logging).
     """
 
     def __init__(
@@ -695,7 +697,7 @@ class DropLogListener:
         self.on_drop = None
 
     def set_on_drop(self, callback) -> None:
-        """Visszahívás minden egyes rögzített drop eseményhez."""
+        """Callback for every recorded drop event."""
         self.on_drop = callback
 
     def _count_packet(self, record: dict) -> None:
@@ -703,11 +705,11 @@ class DropLogListener:
             self._received += 1
         try:
             self.store.write(record)
-        except Exception as exc:  # a naplózás ne állítsa meg a figyelőt
+        except Exception as exc:  # logging must not stop the listener
             with self._lock:
                 self._write_errors += 1
                 self._error = str(exc)
-            self.log(f"[drop log] csomag írása nem sikerült: {exc}")
+            self.log(f"[drop log] failed to write packet: {exc}")
         else:
             with self._lock:
                 self._written += 1
@@ -715,8 +717,8 @@ class DropLogListener:
         if callback is not None:
             try:
                 callback(record)
-            except Exception as exc:  # a visszahívás ne állítsa meg a figyelőt
-                self.log(f"[drop log] drop-feldolgozás nem sikerült: {exc}")
+            except Exception as exc:  # the callback must not stop the listener
+                self.log(f"[drop log] drop processing failed: {exc}")
 
     def _handle(self, data: bytes) -> None:
         for item in parse_netlink_buffer(data):
@@ -734,7 +736,7 @@ class DropLogListener:
 
     def _send_config(self, sock: socket.socket) -> None:
         seq = int(time.time()) & 0x7FFFFFFF
-        # A PF_BIND visszafelé kompatibilis; a hiba nem végzetes.
+        # PF_BIND is backwards compatible; the error is not fatal.
         pf_bind = _nlmsg(
             (NFNL_SUBSYS_ULOG << 8) | NFULNL_MSG_CONFIG,
             NLM_F_REQUEST,
@@ -765,8 +767,8 @@ class DropLogListener:
                 elif item["kind"] == "ack":
                     error = int(item.get("error") or 0)
                     if error:
-                        # A PF_BIND hibája (pl. EINVAL régi kernelnél) nem
-                        # akadálya a csoport kötésének.
+                        # A PF_BIND error (e.g. EINVAL on an old kernel) does
+                        # not prevent binding the group.
                         if item.get("seq") == seq:
                             continue
                         raise OSError(
@@ -777,7 +779,7 @@ class DropLogListener:
 
     def start(self) -> bool:
         if not self.enabled:
-            self._error = "a drop log ki van kapcsolva (HV_DROP_LOG=0)"
+            self._error = "the drop log is disabled (HV_DROP_LOG=0)"
             return False
         if self._thread is not None and self._thread.is_alive():
             return True
@@ -788,10 +790,10 @@ class DropLogListener:
                 socket.AF_NETLINK, socket.SOCK_RAW, NETLINK_NETFILTER
             )
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
-            # A nl_pid=0 a kernelre bízza az egyedi port-azonosítót. A
-            # getpid() nem használható: host-hálózatnézetben a konténer
-            # PID 1-je ütközhet a host systemd ugyanilyen azonosítójú
-            # netlink socketjeivel (EADDRINUSE).
+            # nl_pid=0 lets the kernel pick the unique port identifier.
+            # getpid() cannot be used: in the host network view the
+            # container's PID 1 may collide with the host systemd's netlink
+            # sockets that use the same identifier (EADDRINUSE).
             sock.bind((0, 0))
             sock.settimeout(1.0)
             self._send_config(sock)
@@ -805,7 +807,7 @@ class DropLogListener:
                 self._running = False
                 self._error = str(exc)
             self.log(
-                "[drop log] FIGYELEM: az NFLOG figyelő nem indult el: " f"{exc}"
+                "[drop log] WARNING: the NFLOG listener did not start: " f"{exc}"
             )
             return False
         with self._lock:
@@ -818,7 +820,7 @@ class DropLogListener:
         self._thread = thread
         thread.start()
         self.log(
-            f"[drop log] NFLOG csoport {self.group} figyelése elindult "
+            f"[drop log] listening on NFLOG group {self.group} started "
             f"({self.store.path})"
         )
         return True
@@ -838,7 +840,7 @@ class DropLogListener:
                 with self._lock:
                     self._running = False
                     self._error = str(exc)
-                self.log(f"[drop log] figyelő hiba: {exc}")
+                self.log(f"[drop log] listener error: {exc}")
                 break
             self._handle(data)
         with self._lock:
@@ -875,7 +877,7 @@ class DropLogListener:
 
 
 class DropLogService:
-    """A tár és a figyelő együtt; ezt használja a Gateway."""
+    """The store and the listener together; used by the Gateway."""
 
     def __init__(
         self,

@@ -373,11 +373,11 @@ def _sync_port(config: dict) -> int:
 
 
 def _resolver_ips(path: str = "/etc/resolv.conf") -> list[str]:
-    """A konténer DNS-kiszolgálói (az nftables output ezeket engedi).
+    """The container's DNS servers (the nftables output allows these).
 
-    Dockerben ez 127.0.0.11, rootless Podmanban a hálózati átjáró
-    (például 10.89.1.1); a /proc/sys csak olvasható, de a resolv.conf
-    olvasható, ezért innen vesszük a címeket.
+    In Docker this is 127.0.0.11, in rootless Podman the network gateway
+    (for example 10.89.1.1); /proc/sys is read-only, but resolv.conf
+    is readable, so the addresses are taken from here.
     """
     try:
         text = Path(path).read_text(encoding="utf-8", errors="replace")
@@ -462,7 +462,7 @@ def render_ruleset(config: dict, services: list[dict], endpoint_ips: list[str],
         "\t\ttype filter hook output priority filter; policy drop;",
         '\t\toifname "lo" accept',
     ]
-    # Docker beépített DNS-e és a resolv.conf névfeloldói (Podman átjáró).
+    # Docker's built-in DNS and the resolv.conf name servers (Podman gateway).
     for ip in sorted(set(dns_ips) | {"127.0.0.11"}):
         lines.append(f"\t\tip daddr {ip} udp dport 53 accept")
         lines.append(f"\t\tip daddr {ip} tcp dport 53 accept")
@@ -532,8 +532,8 @@ class Agent:
     def _set_ip_forward(self) -> None:
         path = Path("/proc/sys/net/ipv4/ip_forward")
         try:
-            # A compose sysctls beállíthatja előre; rootless Podmanban a
-            # /proc/sys csak olvasható, ilyenkor az írás EROFS lenne.
+            # The compose sysctls may set it in advance; under rootless Podman
+            # /proc/sys is read-only, so writing would fail with EROFS.
             if path.read_text(encoding="ascii").strip() == "1":
                 return
             path.write_text("1\n")
@@ -638,11 +638,11 @@ class Agent:
     def check_target(self, service_id: str, ip: str, dev: str) -> None:
         """Only container addresses on the chosen bridge subnet are targets.
 
-        A Docker-híd átjárója (alapból a hálózat .1-es címe) a hostot képviseli,
-        ezért nem lehet alagútcél: különben a felhőből a host szolgáltatásai
-        (például SSH) elérhetők lennének. A hálózati/broadcast cím és az ügynök
-        saját címe ugyanígy tiltott. A vizsgálat a kiválasztott interfész
-        azon alhálózatára fut, amelyik tartalmazza a célt.
+        The Docker bridge gateway (by default the network's .1 address) represents the host,
+        so it cannot be a tunnel target: otherwise the host's services
+        (for example SSH) would be reachable from the cloud. The network/broadcast address and the agent's
+        own address are forbidden in the same way. The check runs on the selected interface's
+        subnet that contains the target.
         """
         address = ipaddress.IPv4Address(ip)
         candidates = [

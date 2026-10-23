@@ -1,44 +1,45 @@
 #!/usr/bin/env python3
 """
-Dropjak — bejelentkezési brute-force védelem (fail2ban).
+Dropjak — login brute-force protection (fail2ban).
 
-A portál a sikertelen jelszavas belépéseket forrás-IP szerint számolja egy
-csúszóablakban. Ha egy IP eléri a beállított küszöböt, a tűzfal a
-``banned_v4`` halmazba teszi: a forrás csomagjai a forward-láncban és a
-host input láncában is eldobódnak. A portál és a DHCP kivétel: a tiltott
-kliens még látja a tiltás okát, és a címe nem veszik el.
+The portal counts failed password logins per source IP in a sliding window.
+When an IP reaches the configured threshold, the firewall places it in the
+``banned_v4`` set: the source's packets are dropped in the forward chain
+and in the host input chain as well. The portal and DHCP are exceptions: a
+banned client still sees the reason for the ban, and its address is not
+taken away.
 
-Ugyanez a számláló a bejelentkezés nélküli, engedély nélküli TCP-forgalmat
-is figyeli (``record_drop``). A portszkennerek és botok így akkor is
-tiltás alá kerülnek, ha soha nem próbálnak belépni: a tiltás a csúszóablakban
-összegyűlt eldobott csomagok száma vagy a különböző célportok száma alapján
-indul. A DNS és a portál forgalma nem számít.
+The same counter also watches unauthenticated, unauthorized TCP traffic
+(``record_drop``). Port scanners and bots thus fall under a ban even if they
+never try to log in: the ban starts based on the number of dropped packets
+collected in the sliding window or on the number of distinct destination
+ports. DNS and portal traffic is not counted.
 
-A negyedik jelzés a domain proxy jogosulatlan (401) válaszait számolja
-(``record_proxy_unauthorized``). Ennek tiltása szűkebb: az IP a
-``proxy_banned_v4`` halmazba kerül, amely csak a host TCP 80/443-át zárja
-(mindent, amit a Caddy szolgál ki). A portál saját portja és minden más
-hozzáférés marad, így a kliens a sima portálon továbbra is beléphet. A
-proxy-tiltás külön nyilvántartásban él: a teljes tiltással együtt is
-létezhet, és egyik feloldása sem érinti a másikat.
+The fourth signal counts unauthorized (401) responses of the domain proxy
+(``record_proxy_unauthorized``). Its ban is narrower: the IP is placed in
+the ``proxy_banned_v4`` set, which only closes the host's TCP 80/443
+(everything Caddy serves). The portal's own port and every other access
+remain, so the client can still log in through the plain portal. The proxy
+ban lives in a separate registry: it can coexist with a full ban, and
+releasing one does not affect the other.
 
-A figyelt jelzések egymástól függetlenül kapcsolhatók: a sikertelen
-belépéseké (``enabled``), az eldobott csomagoké (``drop_count_enabled``),
-a különböző célportoké (``drop_ports_enabled``) és a jogosulatlan
-proxykéréseké (``proxy_enabled``). Egyik kapcsoló sem függ a
-másiktól, és a küszöbök nem lehetnek nullák: a kikapcsolás egyetlen módja a
-kapcsoló. A ``drop_enabled`` mező csak visszamenőleges kompatibilitás miatt
-szerepel a kimenetben; értéke a két drop-mérőszám VAGY kapcsolata.
+The watched signals can be toggled independently: failed logins
+(``enabled``), dropped packets (``drop_count_enabled``), distinct
+destination ports (``drop_ports_enabled``) and unauthorized proxy requests
+(``proxy_enabled``). No toggle depends on another, and thresholds cannot be
+zero: the only way to disable is the toggle. The ``drop_enabled`` field
+appears in the output only for backward compatibility; its value is the OR
+of the two drop metrics.
 
-A tiltás a beállított ideig tart; a kernel timeoutja akkor is lejáratja,
-ha a portál közben leáll. A tiltások a state-kötetben, 0600 jogosultságú
-JSON-fájlban maradnak meg, és induláskor visszatöltődnek. A folyamatban
-lévő próbálkozások csak memóriában vannak: egy újraindítás után a számláló
-nulláról indul, ami nem gyengíti a védelmet (a tiltás megmarad).
+A ban lasts for the configured time; the kernel timeout expires it even if
+the portal stops in the meantime. Bans persist in the state volume, in a
+0600 JSON file, and are reloaded on startup. In-flight attempts are kept in
+memory only: after a restart the counter starts from zero, which does not
+weaken protection (the ban remains).
 
-A modul szándékosan nem nyúl közvetlenül az nftables-hez: a Firewall
-objektumon keresztül dolgozik, és a tartós állapotot csak a sikeres
-kernelművelet után írja.
+The module deliberately does not touch nftables directly: it works through
+the Firewall object and writes persistent state only after a successful
+kernel operation.
 """
 
 from __future__ import annotations
@@ -64,26 +65,26 @@ MIN_WINDOW = 30
 MAX_WINDOW = 24 * 60 * 60
 MIN_BAN = 60
 MAX_BAN = 30 * 24 * 60 * 60
-# A küszöbök nem lehetnek nullák: a mérőszámot kizárólag a saját
-# kapcsolója kapcsolja ki. A számláló legfeljebb MAX_DROP_EVENTS eseményt
-# tárol IP-nként; ennél nagyobb küszöböt nem lehet elérni, ezért a maximum
-# ugyanaz.
+# Thresholds cannot be zero: a metric is disabled only by its own toggle.
+# The counter stores at most MAX_DROP_EVENTS events per IP; a larger
+# threshold can never be reached, hence the maximum is the same.
 MIN_DROP_MAX = 1
 MAX_DROP_MAX = 10000
 MIN_DROP_PORTS = 1
 MAX_DROP_PORTS = 4096
 MIN_DROP_WINDOW = 30
 MAX_DROP_WINDOW = 24 * 60 * 60
-# A domain proxy jogosulatlan (401) válaszai; az időablak a belépésekével
-# azonos tartományú.
+# Unauthorized (401) responses of the domain proxy; the time window has the
+# same range as for logins.
 MIN_PROXY_MAX = 1
 MAX_PROXY_MAX = 10000
 MAX_BANS = 4096
 MAX_TRACKED_IPS = 4096
 MAX_DROP_EVENTS = 10000
-# Az evictionkor sikertelenül feloldott kernel-elemek újrapróbálási sora
-# legfeljebb ennyi címet tart. A sor nem perzisztált, és nem nőhet
-# korlátlanul: ha megtelik, a legrégebbi árva elem a TTL lejártáig marad.
+# The retry queue for kernel elements that failed to release during
+# eviction holds at most this many addresses. The queue is not persisted
+# and cannot grow without bound: if it fills up, the oldest orphan element
+# remains until its TTL expires.
 MAX_ORPHAN_UNBANS = 256
 
 
@@ -101,12 +102,12 @@ def _env_int(name: str, default: int, minimum: int = 0) -> int:
 def _env_int_in_range(
     name: str, default: int, minimum: int, maximum: int
 ) -> int:
-    """Egész környezeti érték; érvénytelen vagy tartományon kívüli -> default.
+    """Integer environment value; invalid or out of range -> default.
 
-    A küszöböknél a 0 érvénytelen: a mérőszámot csak a saját kapcsolója
-    kapcsolhatja ki. Ezért a nulla (és a negatív) értéket nem szabad
-    átengedni vagy 0-ra vágni, mert az csendben kikapcsolná a védelmet;
-    ilyenkor az alapérték marad.
+    For thresholds 0 is invalid: a metric can only be disabled by its own
+    toggle. Therefore zero (and negative) values must not be accepted or
+    clamped to 0, because that would silently disable protection; in such
+    cases the default remains.
     """
     raw = os.environ.get(name, "").strip()
     if not raw:
@@ -136,13 +137,13 @@ def _clamp(value: int, minimum: int, maximum: int) -> int:
 
 
 def _drop_metric_state(config: dict) -> tuple[bool, bool]:
-    """A két drop-mérőszám aktív állapota (csomagszám, különböző portok).
+    """Active state of the two drop metrics (packet count, distinct ports).
 
-    Mindkét mérőszám kizárólag a saját kapcsolójától függ; a ``drop_enabled``
-    csak számított kompatibilitási mező, ezért itt nem kapuz. A küszöb
-    védőfeltétel: érvényes konfigurációban sosem 0, de egy korábbról
-    betöltött vagy kézzel módosított érték se kapcsolhasson be mérőszámot
-    nulla küszöbbel.
+    Both metrics depend solely on their own toggle; ``drop_enabled`` is only
+    a computed compatibility field, so it does not gate here. The threshold
+    is a safety guard: it is never 0 in a valid configuration, but a value
+    loaded from an earlier version or edited by hand must not enable a
+    metric with a zero threshold either.
     """
     count_active = (
         bool(config.get("drop_count_enabled", True))
@@ -165,10 +166,10 @@ DEFAULT_WINDOW = _clamp(
 DEFAULT_BAN = _clamp(
     _env_int("HV_FAIL2BAN_BAN", 3600, MIN_BAN), MIN_BAN, MAX_BAN
 )
-# Hálózati forgalom alapú tiltás: a portál a drop logból számolja az
-# engedély nélküli csomagokat. A küszöböt vagy a különböző portok számát
-# elérve az IP bekerül a banned_v4 halmazba. A portszám-alapú feltétel a
-# portszkennereket fogja meg, a darabszám-alapú az ismételt próbálkozásokat.
+# Network traffic based ban: the portal counts unauthorized packets from
+# the drop log. On reaching the threshold or the number of distinct ports,
+# the IP enters the banned_v4 set. The port-count condition catches port
+# scanners, the packet-count condition catches repeated attempts.
 DEFAULT_DROP_ENABLED = _env_bool("HV_FAIL2BAN_DROP", True)
 DEFAULT_DROP_COUNT_ENABLED = _env_bool(
     "HV_FAIL2BAN_DROP_COUNT_ENABLED", True
@@ -187,8 +188,8 @@ DEFAULT_DROP_WINDOW = _clamp(
     MIN_DROP_WINDOW,
     MAX_DROP_WINDOW,
 )
-# Proxy-alapú tiltás: a /api/proxy/auth 401-es válaszai a valódi kliens-IP
-# szerint. Csak a host TCP 80/443-át zárja (proxy_banned_v4).
+# Proxy based ban: 401 responses of /api/proxy/auth by real client IP.
+# It only closes the host's TCP 80/443 (proxy_banned_v4).
 DEFAULT_PROXY_ENABLED = _env_bool("HV_FAIL2BAN_PROXY", True)
 DEFAULT_PROXY_MAX = _env_int_in_range(
     "HV_FAIL2BAN_PROXY_MAX", 20, MIN_PROXY_MAX, MAX_PROXY_MAX
@@ -199,8 +200,8 @@ DEFAULT_PROXY_WINDOW = _clamp(
     MAX_WINDOW,
 )
 
-# A portál saját, helyi forgalmát (healthcheck, helyi adminisztráció) nem
-# tiltjuk le automatikusan. A 127.0.0.0/8 többi címe (tesztkörnyezet) marad.
+# The portal's own local traffic (healthcheck, local administration) is not
+# banned automatically. The rest of 127.0.0.0/8 (test environment) remains.
 _AUTO_EXEMPT = {"127.0.0.1"}
 
 
@@ -209,40 +210,40 @@ def _default_log(message: str) -> None:
 
 
 class Fail2banError(ValueError):
-    """Érvénytelen beállítás, cím vagy sikertelen tűzfal-művelet."""
+    """Invalid configuration, address or failed firewall operation."""
 
 
 def normalize_ip(value) -> str:
-    """A tiltható IPv4-cím ellenőrzése és kanonikus alakja.
+    """Validate and canonicalize a bannable IPv4 address.
 
-    A portál saját loopback címe (127.0.0.1), a 0.0.0.0, a multicast és a
-    broadcast cím nem tiltható: ezek vagy a portál saját forgalmát érintenék,
-    vagy nem értelmezhető források. A többi 127.0.0.0/8 cím (pl. teszt-
-    források) tiltható marad.
+    The portal's own loopback address (127.0.0.1), 0.0.0.0, multicast and
+    broadcast addresses cannot be banned: they would either affect the
+    portal's own traffic or are uninterpretable sources. The rest of
+    127.0.0.0/8 (e.g. test sources) remains bannable.
     """
     if not isinstance(value, str):
-        raise Fail2banError("érvénytelen IP-cím")
+        raise Fail2banError("invalid IP address")
     try:
         address = ipaddress.ip_address(value.strip())
     except ValueError as exc:
-        raise Fail2banError(f"érvénytelen IP-cím: {value.strip()[:64]}") from exc
+        raise Fail2banError(f"invalid IP address: {value.strip()[:64]}") from exc
     if address.version != 4:
-        raise Fail2banError("csak IPv4-cím tiltható le")
+        raise Fail2banError("only IPv4 addresses can be banned")
     if str(address) == "127.0.0.1":
-        raise Fail2banError("a helyi (loopback) cím nem tiltható le")
+        raise Fail2banError("the local (loopback) address cannot be banned")
     if address.is_unspecified:
-        raise Fail2banError("a 0.0.0.0 cím nem tiltható le")
+        raise Fail2banError("the 0.0.0.0 address cannot be banned")
     if address.is_multicast:
-        raise Fail2banError("a multicast cím nem tiltható le")
+        raise Fail2banError("the multicast address cannot be banned")
     if str(address) == "255.255.255.255":
-        raise Fail2banError("a broadcast cím nem tiltható le")
+        raise Fail2banError("the broadcast address cannot be banned")
     return str(address)
 
 
 def validate_config(data, current: dict | None = None) -> dict:
-    """A fail2ban-beállítások ellenőrzése; hiányzó mező a jelenlegi marad."""
+    """Validate fail2ban settings; a missing field keeps the current value."""
     if not isinstance(data, dict):
-        raise Fail2banError("a beállítás JSON-objektum kell")
+        raise Fail2banError("settings must be a JSON object")
     defaults = {
         "enabled": DEFAULT_ENABLED,
         "max_attempts": DEFAULT_MAX_ATTEMPTS,
@@ -258,84 +259,84 @@ def validate_config(data, current: dict | None = None) -> dict:
         "proxy_max": DEFAULT_PROXY_MAX,
         "proxy_window_seconds": DEFAULT_PROXY_WINDOW,
     }
-    # A mentett fájlból hiányzó új mezők az alapértéket kapják; a
-    # jelenlegi konfiguráció értékei maradnak, ha a kérés nem írja felül.
+    # New fields missing from the saved file get the default value; current
+    # configuration values remain unless the request overrides them.
     current = {**defaults, **(current or {})}
     enabled = data.get("enabled", current["enabled"])
     if not isinstance(enabled, bool):
-        raise Fail2banError("az enabled mező igaz/hamis érték kell")
-    # A drop_enabled csak visszamenőleges kompatibilitási bemenet: a régi
-    # API/gyorsítótárazott UI a false értékkel kapcsolta ki a drop-alapú
-    # tiltást. Ilyenkor mindkét mérőszám-kapcsolót kikényszerítjük; a true
-    # érték nem kapcsol be semmit, mert a mérőszámok külön kapcsolhatók.
+        raise Fail2banError("the enabled field must be a boolean")
+    # drop_enabled is only a backward-compatibility input: the old API or a
+    # cached UI used the false value to disable drop-based banning. In that
+    # case both metric toggles are forced off; a true value does not enable
+    # anything, because the metrics are toggled separately.
     legacy_drop = None
     if "drop_enabled" in data:
         legacy_drop = data["drop_enabled"]
         if not isinstance(legacy_drop, bool):
-            raise Fail2banError("a drop_enabled mező igaz/hamis érték kell")
+            raise Fail2banError("the drop_enabled field must be a boolean")
     drop_count_enabled = data.get(
         "drop_count_enabled", current["drop_count_enabled"]
     )
     if not isinstance(drop_count_enabled, bool):
         raise Fail2banError(
-            "a drop_count_enabled mező igaz/hamis érték kell"
+            "the drop_count_enabled field must be a boolean"
         )
     drop_ports_enabled = data.get(
         "drop_ports_enabled", current["drop_ports_enabled"]
     )
     if not isinstance(drop_ports_enabled, bool):
         raise Fail2banError(
-            "a drop_ports_enabled mező igaz/hamis érték kell"
+            "the drop_ports_enabled field must be a boolean"
         )
     if legacy_drop is False:
         drop_count_enabled = False
         drop_ports_enabled = False
     proxy_enabled = data.get("proxy_enabled", current["proxy_enabled"])
     if not isinstance(proxy_enabled, bool):
-        raise Fail2banError("a proxy_enabled mező igaz/hamis érték kell")
+        raise Fail2banError("the proxy_enabled field must be a boolean")
 
     def integer(name: str, label: str, minimum: int, maximum: int) -> int:
         raw = data.get(name, current[name])
         if isinstance(raw, bool) or not isinstance(raw, int):
-            raise Fail2banError(f"{label}: egész szám kell")
+            raise Fail2banError(f"{label}: must be an integer")
         if raw < minimum or raw > maximum:
             raise Fail2banError(
-                f"{label}: {minimum} és {maximum} között lehet"
+                f"{label}: must be between {minimum} and {maximum}"
             )
         return raw
 
     return {
         "enabled": enabled,
         "max_attempts": integer(
-            "max_attempts", "a próbálkozások száma", MIN_ATTEMPTS, MAX_ATTEMPTS
+            "max_attempts", "number of attempts", MIN_ATTEMPTS, MAX_ATTEMPTS
         ),
         "window_seconds": integer(
-            "window_seconds", "az időablak", MIN_WINDOW, MAX_WINDOW
+            "window_seconds", "the time window", MIN_WINDOW, MAX_WINDOW
         ),
         "ban_seconds": integer(
-            "ban_seconds", "a tiltás hossza", MIN_BAN, MAX_BAN
+            "ban_seconds", "the ban duration", MIN_BAN, MAX_BAN
         ),
         "drop_enabled": drop_count_enabled or drop_ports_enabled,
         "drop_count_enabled": drop_count_enabled,
         "drop_ports_enabled": drop_ports_enabled,
         "drop_max": integer(
-            "drop_max", "a hálózati küszöb", MIN_DROP_MAX, MAX_DROP_MAX
+            "drop_max", "the network threshold", MIN_DROP_MAX, MAX_DROP_MAX
         ),
         "drop_ports": integer(
-            "drop_ports", "a különböző portok száma",
+            "drop_ports", "the number of distinct ports",
             MIN_DROP_PORTS, MAX_DROP_PORTS,
         ),
         "drop_window_seconds": integer(
-            "drop_window_seconds", "a hálózati időablak",
+            "drop_window_seconds", "the network time window",
             MIN_DROP_WINDOW, MAX_DROP_WINDOW,
         ),
         "proxy_enabled": proxy_enabled,
         "proxy_max": integer(
-            "proxy_max", "a jogosulatlan proxykérések száma",
+            "proxy_max", "the number of unauthorized proxy requests",
             MIN_PROXY_MAX, MAX_PROXY_MAX,
         ),
         "proxy_window_seconds": integer(
-            "proxy_window_seconds", "a proxy időablak",
+            "proxy_window_seconds", "the proxy time window",
             MIN_WINDOW, MAX_WINDOW,
         ),
     }
@@ -362,7 +363,7 @@ def _ban_view(record: dict, now: float | None = None) -> dict:
 
 
 class Fail2ban:
-    """A sikertelen belépések számlálása és a forrás-IP-k tiltása."""
+    """Count failed logins and ban source IPs."""
 
     def __init__(
         self,
@@ -391,10 +392,10 @@ class Fail2ban:
         self.log = logger
         self._on_ban = on_ban
         self._lock = threading.RLock()
-        # A drop_enabled paraméter csak első indulású kapu: a HV_FAIL2BAN_DROP
-        # (vagy a programozott konstruktorhívás) false értéke mindkét
-        # mérőszámot kikapcsolja. Futásidőben a mérőszámok egymástól
-        # függetlenül kapcsolhatók.
+        # The drop_enabled parameter is only an initial-startup gate: a false
+        # value of HV_FAIL2BAN_DROP (or of a programmatic constructor call)
+        # disables both metrics. At runtime the metrics can be toggled
+        # independently.
         if not drop_enabled:
             drop_count_enabled = False
             drop_ports_enabled = False
@@ -417,57 +418,58 @@ class Fail2ban:
                 proxy_window_seconds, MIN_WINDOW, MAX_WINDOW
             ),
         }
-        # IP -> {"times": [timestamp, ...], "user": str}; nem perzisztált.
+        # IP -> {"times": [timestamp, ...], "user": str}; not persisted.
         self._attempts: dict[str, dict] = {}
         # IP -> {"events": [(timestamp, "proto/port"), ...], "reason": str};
-        # nem perzisztált, mint a belépési próbálkozások.
+        # not persisted, like login attempts.
         self._drop_events: dict[str, dict] = {}
         self._drop_event_count = 0
-        # IP -> ban rekord; perzisztált.
+        # IP -> ban record; persisted.
         self._bans: dict[str, dict] = {}
-        # IP -> a 401-es proxyválaszok időbélyegei; nem perzisztált.
+        # IP -> timestamps of 401 proxy responses; not persisted.
         self._proxy_hits: dict[str, list[float]] = {}
-        # IP -> proxy-tiltás (csak TCP 80/443) rekordja; perzisztált, a
-        # teljes tiltástól független nyilvántartás.
+        # IP -> proxy ban record (TCP 80/443 only); persisted, a registry
+        # independent of the full ban.
         self._proxy_bans: dict[str, dict] = {}
-        # Az evictionkor sikertelenül feloldott kernel-elemek címei. Nem
-        # perzisztált; a következő műveleteknél újrapróbáljuk a törlést,
-        # hogy ne maradjon láthatatlan, akár 30 napig élő tiltás.
+        # Addresses of kernel elements that failed to release during
+        # eviction. Not persisted; deletion is retried on the next
+        # operations, so that no invisible ban lives for up to 30 days.
         self._orphan_unbans: list[str] = []
         self._error = ""
-        # A legutóbb látott fájl-azonosító. A CLI külön folyamatként írja a
-        # fail2ban.json-t; ha a fájl megváltozott, a portál a következő
-        # műveletnél újratölti, hogy a felület ne mutasson elavult listát.
+        # The most recently seen file identifier. The CLI writes fail2ban.json
+        # as a separate process; if the file changed, the portal reloads it on
+        # the next operation so the UI does not show a stale list.
         self._disk_stamp: tuple[int, int, int] | None = None
         self.load()
 
-    # -- állapot ---------------------------------------------------------------
+    # -- state -----------------------------------------------------------------
 
     def _write_audit(self, event: str, **fields) -> None:
-        """Nem kötelező naplóbejegyzés; hiba esetén sem blokkol."""
+        """Optional audit entry; does not block even on error."""
         if self.audit is None:
             return
         try:
             self.audit.write(event, **fields)
         except Exception as exc:
-            self.log(f"[napló] {event} írása nem sikerült: {exc}")
+            self.log(f"[audit] failed to write {event}: {exc}")
 
     def _queue_orphan_unban_locked(
         self, address: str, exc: Exception
     ) -> bool:
-        """Egy sikertelen eviction-feloldás felvétele a korlátozott sorba.
+        """Add a failed eviction release to the bounded queue.
 
-        Visszaadja, hogy a cím bekerült-e a sorba. A sor tele lehet, mert
-        nem nőhet korlátlanul; ilyenkor hangosan naplózunk és auditálunk,
-        mert az árva kernel-elem a timeout lejártáig érvényben maradhat.
+        Returns whether the address was added to the queue. The queue may be
+        full because it cannot grow without bound; in that case we log and
+        audit loudly, because the orphan kernel element may remain in force
+        until the timeout expires.
         """
         if address in self._orphan_unbans:
             return True
         if len(self._orphan_unbans) >= MAX_ORPHAN_UNBANS:
             self.log(
-                f"[fail2ban] HIBA: az árva tiltás-feloldási sor tele van "
-                f"({MAX_ORPHAN_UNBANS}); a(z) {address} kernel-eleme a "
-                "timeout lejártáig érvényben maradhat"
+                f"[fail2ban] ERROR: the orphan unban queue is full "
+                f"({MAX_ORPHAN_UNBANS}); the kernel element of {address} may "
+                "remain in force until the timeout expires"
             )
             self._write_audit(
                 "fail2ban_ban_evict_failed",
@@ -487,10 +489,10 @@ class Fail2ban:
         return True
 
     def _discard_orphan_locked(self, address: str) -> None:
-        """A cím törlése az árva-sorból egy sikeres ban után.
+        """Remove the address from the orphan queue after a successful ban.
 
-        A ``Firewall.ban`` előbb törli, majd újra létrehozza a kernel-
-        elemet, ezért a korábbi árva elem ezzel megszűnt.
+        ``Firewall.ban`` deletes and then recreates the kernel element, so the
+        former orphan element is gone.
         """
         try:
             self._orphan_unbans.remove(address)
@@ -498,12 +500,13 @@ class Fail2ban:
             pass
 
     def _retry_orphan_unbans_locked(self) -> None:
-        """A korábban sikertelen eviction-feloldások újrapróbálása.
+        """Retry previously failed eviction releases.
 
-        A sor elejéről haladunk, és az első hibánál megállunk: egy tartósan
-        hibás tűzfal mellett így nem pörög folyamatosan a hívási lánc. A
-        sikertelen cím a sorban marad. Ha a cím közben újra tiltás alá
-        került, a kernel-elem már élő, ezért csak a sort tisztítjuk.
+        We proceed from the head of the queue and stop at the first error: with
+        a persistently failing firewall this keeps the call chain from
+        spinning. The failed address stays in the queue. If the address has
+        been banned again in the meantime, the kernel element is already live,
+        so only the queue is cleaned.
         """
         while self._orphan_unbans:
             address = self._orphan_unbans[0]
@@ -514,8 +517,8 @@ class Fail2ban:
                 self.firewall.unban(address)
             except Exception as exc:
                 self.log(
-                    f"[fail2ban] a(z) {address} árva tiltásának feloldása "
-                    f"még nem sikerült: {exc}"
+                    f"[fail2ban] failed to release orphan ban of {address}: "
+                    f"{exc}"
                 )
                 return
             self._orphan_unbans.pop(0)
@@ -528,23 +531,23 @@ class Fail2ban:
         return (info.st_ino, info.st_mtime_ns, info.st_size)
 
     def _refresh_locked(self) -> None:
-        """A fájl külső (CLI) módosításának átvétele a memóriába.
+        """Adopt external (CLI) file modifications into memory.
 
-        A portál minden saját mentés után frissíti a pecsétet, ezért ez a
-        normál működésben nem tölt újra. Ha a CLI rootként módosítja a
-        tiltáslistát, a következő snapshot/művelet már a fájl szerinti
-        állapotot látja. Sérült vagy eltűnt fájlnál a memóriabeli állapot
-        marad (a kernelben lévő tiltások ettől még élnek).
+        The portal updates the stamp after each of its own saves, so this does
+        not reload in normal operation. If the CLI (as root) modifies the ban
+        list, the next snapshot/operation already sees the file's state. With
+        a corrupt or missing file the in-memory state remains (bans in the
+        kernel still live regardless).
         """
         if self._file_stamp() != self._disk_stamp:
             self.load()
 
     def load(self) -> None:
-        """A fail2ban.json betöltése.
+        """Load fail2ban.json.
 
-        Sérült fájl esetén a konfiguráció a környezeti alapértékre áll, a
-        tiltáslista üres lesz. Ez nem nyit utat: a hozzáférés továbbra is
-        fail-closed, csak a korábbi tiltások nem töltődnek vissza.
+        With a corrupt file the configuration falls back to the environment
+        defaults and the ban list becomes empty. This does not open a way in:
+        access remains fail-closed, only earlier bans are not reloaded.
         """
         stamp = self._file_stamp()
         try:
@@ -560,32 +563,32 @@ class Fail2ban:
                 self._error = str(exc)
                 self._disk_stamp = stamp
             self.log(
-                f"[fail2ban] FIGYELEM: a(z) {self.path} nem olvasható, "
-                f"a tiltáslista üres: {exc}"
+                f"[fail2ban] WARNING: {self.path} cannot be read, "
+                f"the ban list is empty: {exc}"
             )
             self._write_audit("fail2ban_load_error", reason=str(exc))
             return
         if not isinstance(raw, dict):
             with self._lock:
-                self._error = "a fájl JSON-objektum kell"
+                self._error = "the file must be a JSON object"
                 self._disk_stamp = stamp
             self.log(
-                f"[fail2ban] FIGYELEM: a(z) {self.path} formátuma hibás, "
-                "a tiltáslista üres"
+                f"[fail2ban] WARNING: {self.path} has an invalid format, "
+                "the ban list is empty"
             )
             self._write_audit(
-                "fail2ban_load_error", reason="a fájl JSON-objektum kell"
+                "fail2ban_load_error", reason="the file must be a JSON object"
             )
             return
         config = dict(self._config)
         raw_config = raw.get("config")
         if isinstance(raw_config, dict):
             migrated = dict(raw_config)
-            # Régi állapot migrálása: a 0 küszöb korábban az adott mérőszámot
-            # kapcsolta ki. Ilyenkor ne az egész konfiguráció essen vissza az
-            # alapértékre: csak azt a mérőszámot kapcsoljuk ki, és a küszöbét
-            # állítjuk vissza az alapértékre. A kifejezetten mentett
-            # drop_enabled=false továbbra is mindkét mérőszámot kikapcsolja.
+            # Migrate old state: a threshold of 0 used to disable the given
+            # metric. In that case do not fall the whole configuration back to
+            # defaults: disable only that metric and restore its threshold to
+            # the default. An explicitly saved drop_enabled=false still
+            # disables both metrics.
             for threshold_key, flag_key, default_threshold in (
                 ("drop_max", "drop_count_enabled", DEFAULT_DROP_MAX),
                 ("drop_ports", "drop_ports_enabled", DEFAULT_DROP_PORTS),
@@ -605,8 +608,8 @@ class Fail2ban:
                 config = validate_config(migrated, config)
             except Fail2banError as exc:
                 self.log(
-                    f"[fail2ban] FIGYELEM: érvénytelen mentett beállítás, "
-                    f"alapértelmezés használata: {exc}"
+                    f"[fail2ban] WARNING: invalid saved settings, "
+                    f"using defaults: {exc}"
                 )
                 self._write_audit(
                     "fail2ban_load_error", reason=str(exc)
@@ -623,7 +626,7 @@ class Fail2ban:
             if len(bans) >= MAX_BANS:
                 break
             bans[record["ip"]] = record
-        # A régi fájlban nincs proxy_bans: üres lista.
+        # The old file has no proxy_bans: empty list.
         proxy_bans: dict[str, dict] = {}
         raw_proxy = raw.get("proxy_bans", [])
         if not isinstance(raw_proxy, list):
@@ -708,13 +711,13 @@ class Fail2ban:
         }
 
     def _state_owner(self, directory: str) -> tuple[int, int] | None:
-        """A mentett fájl tulajdonosa.
+        """Owner of the saved file.
 
-        A portál a state-köteten a szolgáltatásfelhasználóval fut, a CLI
-        viszont rootként indul. Ha a root CLI felülírná a fájlt, az a root
-        tulajdonába kerülne, és a futó portál a következő mentésnél már nem
-        tudná írni. Ezért a meglévő fájl (vagy új fájlnál a könyvtár)
-        tulajdonosát megtartjuk.
+        The portal runs as the service user on the state volume, while the CLI
+        starts as root. If the root CLI overwrote the file, it would become
+        root-owned and the running portal could no longer write it on the next
+        save. Therefore we keep the owner of the existing file (or, for a new
+        file, of the directory).
         """
         for candidate in (self.path, directory):
             try:
@@ -764,14 +767,14 @@ class Fail2ban:
                 raise
         except OSError as exc:
             self._error = str(exc)
-            self.log(f"[fail2ban] FIGYELEM: a(z) {self.path} mentése nem sikerült: {exc}")
+            self.log(f"[fail2ban] WARNING: failed to save {self.path}: {exc}")
             if raise_errors:
-                raise Fail2banError(f"a tiltáslista mentése nem sikerült: {exc}") from exc
+                raise Fail2banError(f"failed to save the ban list: {exc}") from exc
             return False
         self._error = ""
         return True
 
-    # -- számlálás -------------------------------------------------------------
+    # -- counting --------------------------------------------------------------
 
     def _prune_attempts_locked(self, now: float) -> None:
         window = self._config["window_seconds"]
@@ -792,7 +795,7 @@ class Fail2ban:
     def _prune_drop_events_locked(
         self, now: float, only: str | None = None
     ) -> None:
-        """A hálózati események csúszóablakának karbantartása."""
+        """Maintain the sliding window of network events."""
         window = self._config["drop_window_seconds"]
         targets = [only] if only is not None else list(self._drop_events)
         for ip in targets:
@@ -820,11 +823,11 @@ class Fail2ban:
             return
         try:
             self._on_ban(record)
-        except Exception as exc:  # a tiltás akkor is érvényes marad
-            self.log(f"[fail2ban] a tiltás utókezelése nem sikerült: {exc}")
+        except Exception as exc:  # the ban remains valid regardless
+            self.log(f"[fail2ban] failed to post-process the ban: {exc}")
 
     def record_failure(self, ip: str, user: str = "") -> dict | None:
-        """Sikertelen belépés rögzítése; tiltás esetén a rekordot adja vissza."""
+        """Record a failed login; returns the record if it caused a ban."""
         try:
             address = normalize_ip(ip)
         except Fail2banError:
@@ -875,17 +878,17 @@ class Fail2ban:
         reason: str = "",
         count_total: bool = True,
     ) -> dict | None:
-        """Egy engedély nélküli/gyanús csomag rögzítése.
+        """Record an unauthorized/suspicious packet.
 
-        A portál a drop logból hívja minden olyan eldobott csomagra, amely
-        nem a portál saját forgalma. A tiltás akkor indul, ha az IP a
-        beállított időablakban eléri a csomagszám-küszöböt, vagy elegendő
-        különböző célportot próbál elérni (portszkennelés).
+        The portal calls this from the drop log for every dropped packet that
+        is not the portal's own traffic. The ban starts when the IP reaches
+        the packet-count threshold within the configured time window, or
+        tries enough distinct destination ports (port scanning).
 
-        A ``count_total=False`` események csak a különböző portok számához
-        járulnak hozzá. A LAN-felőli ``no-grant``/``input-lan`` forgalomnál
-        ez a helyes: egy kijelentkezett böngésző is sok TCP-próbát indít,
-        de jellemzően csak néhány célporton.
+        Events with ``count_total=False`` only contribute to the distinct port
+        count. This is correct for LAN-side ``no-grant``/``input-lan``
+        traffic: even a logged-out browser makes many TCP attempts, but
+        typically on only a few destination ports.
         """
         try:
             address = normalize_ip(ip)
@@ -915,10 +918,10 @@ class Fail2ban:
                 if existing["until"] > now:
                     return None
                 del self._bans[address]
-            # Csak olyan eseményt tárolunk, amely valamelyik aktív
-            # mérőszámhoz hozzá tud járulni. Kikapcsolt portmérőnél a
-            # portinformációt sem őrizzük meg, és a LAN-esemény (amely nem
-            # számít a csomagküszöbhöz) semleges.
+            # Store only events that can contribute to an active metric. With
+            # the port metric disabled, port information is not kept either,
+            # and the LAN event (which does not count toward the packet
+            # threshold) is neutral.
             counted = bool(count_total) and count_active
             port_key = key if ports_active and "/" in key else ""
             if not counted and not port_key:
@@ -929,9 +932,9 @@ class Fail2ban:
             }
             events = entry["events"]
             events.append((now, port_key, counted))
-            # A korlátot mindkét aktív küszöbhöz méretezzük, hogy egy kicsi
-            # drop_max ne vágja le a nagy drop_ports által igényelt
-            # eseménysort.
+            # Size the cap to both active thresholds so that a small drop_max
+            # does not truncate the event sequence required by a large
+            # drop_ports.
             cap = min(
                 max(
                     count_active * (self._config["drop_max"] + 1),
@@ -971,13 +974,13 @@ class Fail2ban:
         return view
 
     def record_proxy_unauthorized(self, ip: str) -> dict | None:
-        """Egy jogosulatlan (401) domain-proxy válasz rögzítése.
+        """Record an unauthorized (401) domain-proxy response.
 
-        A ``/api/proxy/auth`` hívja a valódi kliens-IP-vel (a Caddy XFF-
-        értéke), csak privát bejegyzés 401-es válaszánál. A teljesen vagy
-        proxyra tiltott IP nem számít tovább. A sikeres proxykérés a
-        számlálót nem nullázza: a drop-számlálókhoz hasonlóan csak a
-        csúszóablak felejt. Küszöbnél a tiltás csak a TCP 80/443-at zárja.
+        ``/api/proxy/auth`` calls this with the real client IP (Caddy's XFF
+        value), only on a 401 response for a private entry. An IP that is
+        fully or proxy banned is no longer counted. A successful proxy request
+        does not reset the counter: like the drop counters, only the sliding
+        window forgets. At the threshold the ban closes only TCP 80/443.
         """
         try:
             address = normalize_ip(ip)
@@ -1030,28 +1033,28 @@ class Fail2ban:
     def _proxy_ban_locked(
         self, address: str, seconds: int, attempts: int = 0
     ) -> dict:
-        """Proxy-tiltás (proxy_banned_v4): kernel -> memória -> mentés."""
+        """Proxy ban (proxy_banned_v4): kernel -> memory -> save."""
         seconds = _clamp(int(seconds), MIN_BAN, MAX_BAN)
         now = time.time()
         try:
             self.firewall.proxy_ban(address, seconds)
         except Exception as exc:
             raise Fail2banError(
-                f"a(z) {address} proxy-tiltása nem sikerült: {exc}"
+                f"failed to proxy-ban {address}: {exc}"
             ) from exc
         existing = self._proxy_bans.get(address)
         if len(self._proxy_bans) >= MAX_BANS and existing is None:
             oldest = min(
                 self._proxy_bans.values(), key=lambda row: row["since"]
             )
-            # shortcut: a sikertelen kernel-feloldás nem kerül újrapróbálási
-            # sorba (a timeout lejáratja); ha ez számít, az árva-sor kell.
+            # shortcut: a failed kernel release is not put on the retry queue
+            # (the timeout expires it); if that matters, the orphan queue is needed.
             try:
                 self.firewall.proxy_unban(oldest["ip"])
             except Exception as exc:
                 self.log(
-                    f"[fail2ban] a(z) {oldest['ip']} kikerülő proxy-"
-                    f"tiltásának kernel-feloldása nem sikerült: {exc}"
+                    f"[fail2ban] kernel release failed for expiring proxy "
+                    f"ban of {oldest['ip']}: {exc}"
                 )
             del self._proxy_bans[oldest["ip"]]
             self._write_audit(
@@ -1076,7 +1079,7 @@ class Fail2ban:
         return record
 
     def proxy_banned(self, ip: str) -> dict | None:
-        """Az IP aktív proxy-tiltása (csak TCP 80/443), vagy None."""
+        """The IP's active proxy ban (TCP 80/443 only), or None."""
         try:
             address = normalize_ip(ip)
         except Fail2banError:
@@ -1093,10 +1096,10 @@ class Fail2ban:
             return _ban_view(record, now)
 
     def last_hit(self, ip: str, proxy_only: bool = False) -> float:
-        """Az IP függő (időablakon belüli) számlálóinak legutóbbi találata.
+        """Latest hit of the IP's pending (within-window) counters.
 
-        Csak olvas (a proxy challenge-feltételeihez); 0, ha egyik aktív
-        számláló sem fut rá. ``proxy_only``: csak a proxy-401-ek.
+        Read-only (for the proxy challenge conditions); 0 if no active counter
+        applies. ``proxy_only``: only proxy 401s.
         """
         try:
             address = normalize_ip(ip)
@@ -1128,7 +1131,7 @@ class Fail2ban:
         return max(stamps, default=0.0)
 
     def _kernel_ban(self, record: dict, ttl: int) -> None:
-        """Egy felszabadított rekord visszaállítása a saját halmazába."""
+        """Restore a released record into its own set."""
         if record.get("source") == "proxy":
             self.firewall.proxy_ban(record["ip"], ttl)
         else:
@@ -1141,7 +1144,7 @@ class Fail2ban:
         )
 
     def record_success(self, ip: str) -> None:
-        """Sikeres belépés után a próbálkozások nullázása (a tiltás marad)."""
+        """Reset attempts after a successful login (the ban remains)."""
         try:
             address = normalize_ip(ip)
         except Fail2banError:
@@ -1150,7 +1153,7 @@ class Fail2ban:
             self._attempts.pop(address, None)
 
     def banned(self, ip: str) -> dict | None:
-        """Az IP aktív tiltása, vagy None."""
+        """The IP's active ban, or None."""
         try:
             address = normalize_ip(ip)
         except Fail2banError:
@@ -1180,17 +1183,17 @@ class Fail2ban:
     ) -> dict:
         seconds = _clamp(int(seconds), MIN_BAN, MAX_BAN)
         now = time.time()
-        # Előbb a korábbi evictionökből visszamaradt árva elemeket
-        # próbáljuk törölni; ez nem blokkolhatja az új védő tiltást.
+        # First try to delete orphan elements left over from earlier
+        # evictions; this must not block the new protective ban.
         self._retry_orphan_unbans_locked()
         try:
             self.firewall.ban(address, seconds)
         except Exception as exc:
             raise Fail2banError(
-                f"a(z) {address} tűzfal-tiltása nem sikerült: {exc}"
+                f"firewall ban failed for {address}: {exc}"
             ) from exc
-        # A ban() a kernelben felülírja az esetleges korábbi elemet, ezért
-        # az ehhez a címhez tartozó árva bejegyzés már nem takarítható.
+        # ban() overwrites any earlier element in the kernel, so the orphan
+        # entry for this address is no longer recoverable.
         self._discard_orphan_locked(address)
         existing = self._bans.get(address)
         since = existing["since"] if existing is not None else now
@@ -1217,8 +1220,8 @@ class Fail2ban:
             oldest = min(
                 self._bans.values(), key=lambda row: row["since"]
             )
-            # A memóriarekord eldobása előtt a kernel-elemet is fel kell
-            # oldani, különben egy láthatatlan tiltás maradna a TTL-ig.
+            # The kernel element must be released before dropping the memory
+            # record, otherwise an invisible ban would remain until the TTL.
             kernel_released = True
             try:
                 self.firewall.unban(oldest["ip"])
@@ -1226,14 +1229,14 @@ class Fail2ban:
                 kernel_released = False
                 self._queue_orphan_unban_locked(oldest["ip"], exc)
                 self.log(
-                    f"[fail2ban] FIGYELEM: a(z) {oldest['ip']} kikerülő "
-                    f"tiltásának kernel-feloldása nem sikerült: {exc}; "
-                    "a következő műveleteknél újrapróbáljuk"
+                    f"[fail2ban] WARNING: kernel release failed for expiring "
+                    f"ban of {oldest['ip']}: {exc}; "
+                    "will retry on the next operations"
                 )
             del self._bans[oldest["ip"]]
             self.log(
-                f"[fail2ban] a tiltáslista megtelt; a legrégebbi bejegyzés "
-                f"({oldest['ip']}) kikerült a nyilvántartásból"
+                f"[fail2ban] ban list is full; the oldest entry "
+                f"({oldest['ip']}) was evicted from the registry"
             )
             self._write_audit(
                 "fail2ban_ban_evicted",
@@ -1254,17 +1257,17 @@ class Fail2ban:
         manual: bool = True,
         user: str = "",
     ) -> dict:
-        """Kézi tiltás; a tiltás a megadott vagy az alapértelmezett ideig tart."""
+        """Manual ban; the ban lasts for the given or the default duration."""
         address = normalize_ip(ip)
         if seconds in (None, ""):
             seconds = 0
         if isinstance(seconds, bool) or not isinstance(seconds, int):
-            raise Fail2banError("a tiltás hossza egész szám (másodperc) kell")
+            raise Fail2banError("the ban duration must be an integer (seconds)")
         if seconds <= 0:
             seconds = self._config["ban_seconds"]
         if seconds < MIN_BAN or seconds > MAX_BAN:
             raise Fail2banError(
-                f"a tiltás hossza {MIN_BAN} és {MAX_BAN} másodperc között lehet"
+                f"the ban duration must be between {MIN_BAN} and {MAX_BAN} seconds"
             )
         with self._lock:
             self._refresh_locked()
@@ -1276,10 +1279,10 @@ class Fail2ban:
         return view
 
     def unban(self, ip: str, proxy: bool = False) -> bool:
-        """Egy tiltás feloldása a kernelben és a nyilvántartásban.
+        """Release a ban in the kernel and in the registry.
 
-        ``proxy=True`` csak a proxy-tiltást (TCP 80/443) oldja fel, egyébként
-        csak a teljes tiltást; a másik fajta érintetlen marad.
+        ``proxy=True`` releases only the proxy ban (TCP 80/443), otherwise
+        only the full ban; the other kind remains untouched.
         """
         address = normalize_ip(ip)
         with self._lock:
@@ -1293,7 +1296,7 @@ class Fail2ban:
                     self.firewall.unban(address)
             except Exception as exc:
                 raise Fail2banError(
-                    f"a(z) {address} tiltásának feloldása nem sikerült: {exc}"
+                    f"failed to release the ban of {address}: {exc}"
                 ) from exc
             if known:
                 del bans[address]
@@ -1301,7 +1304,7 @@ class Fail2ban:
         return known
 
     def unban_all(self) -> int:
-        """Minden tiltás feloldása; a feloldott bejegyzések számát adja."""
+        """Release all bans; returns the number of released entries."""
         removed = 0
         with self._lock:
             self._refresh_locked()
@@ -1311,7 +1314,7 @@ class Fail2ban:
                     self.firewall.unban(address)
                 except Exception as exc:
                     self.log(
-                        f"[fail2ban] a(z) {address} feloldása nem sikerült: {exc}"
+                        f"[fail2ban] failed to release {address}: {exc}"
                     )
                     continue
                 del self._bans[address]
@@ -1321,8 +1324,7 @@ class Fail2ban:
                     self.firewall.proxy_unban(address)
                 except Exception as exc:
                     self.log(
-                        f"[fail2ban] a(z) {address} proxy-feloldása nem "
-                        f"sikerült: {exc}"
+                        f"[fail2ban] proxy release failed for {address}: {exc}"
                     )
                     continue
                 del self._proxy_bans[address]
@@ -1332,7 +1334,7 @@ class Fail2ban:
         return removed
 
     def reset(self) -> None:
-        """A tiltásállapot és a fájl törlése (factory reset)."""
+        """Delete the ban state and the file (factory reset)."""
         with self._lock:
             self._bans.clear()
             self._proxy_bans.clear()
@@ -1348,20 +1350,18 @@ class Fail2ban:
             self._error = ""
 
     def configure(self, data: dict) -> dict:
-        """Beállítások módosítása.
+        """Modify settings.
 
-        A három jelzés független: a sikertelen belépés figyelésének
-        kikapcsolása csak a belépés-alapú, a két drop-mérőszám együttes
-        kikapcsolása csak a drop-alapú automatikus tiltásokat szabadítja
-        fel. A kézi tiltások mindig megmaradnak. A sorrend:
-        kernel -> mentés -> memória.
+        The three signals are independent: disabling failed-login monitoring
+        releases only login-based bans, disabling both drop metrics together
+        releases only drop-based automatic bans. Manual bans always remain.
+        The order is: kernel -> save -> memory.
 
-        A felszabadítás best-effort: minden szükséges feloldást
-        megkísérlünk. Ha bármelyik nem sikerült, a beállítás változatlan
-        marad; a már felszabadított tiltásokat a pontos hátralévő idővel
-        visszaállítjuk, és a memóriarekordjaikat akkor is visszatesszük,
-        ha az újratiltás nem sikerült. Így nem marad néma, részleges
-        állapot. A mentés hibája esetén ugyanez a visszaállítás fut.
+        Release is best-effort: every necessary release is attempted. If any
+        of them fails, the setting remains unchanged; bans already released
+        are restored with the exact remaining time, and their memory records
+        are put back even if the re-ban fails. Thus no silent, partial state
+        remains. If saving fails, the same rollback runs.
         """
         with self._lock:
             self._refresh_locked()
@@ -1383,8 +1383,7 @@ class Fail2ban:
                     except Exception as exc:
                         failed.append((dict(record), exc))
                         self.log(
-                            f"[fail2ban] a(z) {address} proxy-feloldása nem "
-                            f"sikerült: {exc}"
+                            f"[fail2ban] proxy release failed for {address}: {exc}"
                         )
                         continue
                     released.append(dict(record))
@@ -1405,16 +1404,15 @@ class Fail2ban:
                     except Exception as exc:
                         failed.append((dict(record), exc))
                         self.log(
-                            f"[fail2ban] a(z) {address} feloldása nem "
-                            f"sikerült: {exc}"
+                            f"[fail2ban] failed to release {address}: {exc}"
                         )
                         continue
                     released.append(dict(record))
                     del self._bans[address]
             if failed:
-                # A konfiguráció nem változott. A már felszabadított
-                # tiltásokat a pontos hátralévő idővel állítjuk vissza; a
-                # memóriarekord mindenképp visszakerül.
+                # The configuration did not change. Bans already released
+                # are restored with the exact remaining time; the memory
+                # record is always put back.
                 restored = 0
                 for record in released:
                     remaining = max(1, int(record["until"] - time.time()))
@@ -1424,8 +1422,7 @@ class Fail2ban:
                     except Exception as exc:
                         self._error = str(exc)
                         self.log(
-                            f"[fail2ban] a(z) {record['ip']} visszaállítása "
-                            f"nem sikerült: {exc}"
+                            f"[fail2ban] failed to restore {record['ip']}: {exc}"
                         )
                         self._write_audit(
                             "fail2ban_ban_restore_failed",
@@ -1440,8 +1437,8 @@ class Fail2ban:
                     restored=restored,
                 )
                 raise Fail2banError(
-                    "a tiltások felszabadítása nem sikerült "
-                    f"({len(failed)} cím); a beállítás változatlan maradt"
+                    "failed to release bans "
+                    f"({len(failed)} addresses); the setting remains unchanged"
                 )
             previous = dict(self._config)
             self._config = new_config
@@ -1456,24 +1453,23 @@ class Fail2ban:
                     except Exception as exc:
                         self._error = str(exc)
                         self.log(
-                            f"[fail2ban] a(z) {record['ip']} visszaállítása "
-                            f"nem sikerült: {exc}"
+                            f"[fail2ban] failed to restore {record['ip']}: {exc}"
                         )
                         self._write_audit(
                             "fail2ban_ban_restore_failed",
                             ip=record["ip"],
                             reason=str(exc),
                         )
-                    # A rekordot a sikertelen újratiltás után is vissza kell
-                    # tenni: a felület ne felejtse el a tiltást.
+                    # The record must be put back even after a failed re-ban:
+                    # the UI must not forget the ban.
                     self._bans_of(record)[record["ip"]] = record
                 raise
             if not new_config["enabled"]:
                 self._attempts.clear()
-            # A drop mesterállapota, bármelyik mérőszám-kapcsoló vagy a
-            # küszöbök változása után a régi számlálók nem érvényesek az új
-            # konfiguráció alatt. A belépés-figyelés kikapcsolása önmagában
-            # nem érinti a drop-számlálókat.
+            # After a change to the drop master state, any metric toggle or
+            # the thresholds, the old counters are not valid under the new
+            # configuration. Disabling login monitoring alone does not affect
+            # the drop counters.
             if (
                 previous["drop_enabled"] != new_config["drop_enabled"]
                 or previous["drop_count_enabled"]
@@ -1491,9 +1487,9 @@ class Fail2ban:
             ):
                 self._proxy_hits.clear()
             if released:
-                # A naplóban a forrás szerinti bontás is szerepel, hogy a
-                # belépés és a drop együttes kikapcsolása ne veszítse el
-                # a drop-rész információját.
+                # The audit includes the breakdown by source so that disabling
+                # login and drop together does not lose the information about
+                # the drop part.
                 login_count = sum(
                     1 for record in released
                     if release_login
@@ -1520,14 +1516,15 @@ class Fail2ban:
                 )
             return self.snapshot()
 
-    # -- indulás és nézet ------------------------------------------------------
+    # -- startup and view ------------------------------------------------------
 
     def sync(self) -> bool:
-        """A mentett tiltások visszatöltése a (frissen ürített) nft halmazba.
+        """Restore saved bans into the (freshly flushed) nft set.
 
-        A hátralévő időt pontosan, egész másodpercre vágva adjuk át; a
-        ``MIN_BAN`` csak alsó korlát, nem kerekítés. A lejárt rekordokat
-        kihagyjuk, a nulla vagy negatív hátralévő idő nem kerül a kernelbe.
+        The remaining time is passed exactly, truncated to whole seconds;
+        ``MIN_BAN`` is only a lower bound, not rounding. Expired records are
+        skipped, and a zero or negative remaining time is not put into the
+        kernel.
         """
         with self._lock:
             self._retry_orphan_unbans_locked()
@@ -1562,8 +1559,8 @@ class Fail2ban:
             except Exception as exc:
                 self._error = str(exc)
                 self.log(
-                    "[fail2ban] FIGYELEM: a mentett tiltások visszatöltése "
-                    f"nem sikerült: {exc}"
+                    "[fail2ban] WARNING: failed to restore saved bans: "
+                    f"{exc}"
                 )
                 self._write_audit(
                     "fail2ban_sync_failed",
@@ -1571,8 +1568,8 @@ class Fail2ban:
                     count=len(elements),
                 )
                 return False
-            # A sync_bans() a halmazt teljesen üríti, és csak az ismert
-            # tiltásokat teszi vissza; az árva elemek ezzel eltűntek.
+            # sync_bans() empties the set completely and puts back only the
+            # known bans; orphan elements are gone with this.
             self._orphan_unbans.clear()
             if expired:
                 self._save_locked(raise_errors=False)
@@ -1598,8 +1595,8 @@ class Fail2ban:
             self._prune_attempts_locked(now)
             self._prune_drop_events_locked(now)
             self._prune_proxy_hits_locked(now)
-            # A proxy-tiltások (source="proxy") ugyanabban a listában jelennek
-            # meg; ugyanaz az IP teljes tiltással együtt kétszer is szerepelhet.
+            # Proxy bans (source="proxy") appear in the same list; the same IP
+            # can appear twice alongside a full ban.
             bans = [
                 _ban_view(record, now)
                 for record in sorted(
@@ -1709,7 +1706,7 @@ class Fail2ban:
         }
 
     def status(self) -> dict:
-        """Rövid állapot a naplózáshoz."""
+        """Brief status for logging."""
         snapshot = self.snapshot()
         return {
             "enabled": snapshot["enabled"],

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Porttartományok: egység-, nft- és csomagszintű tesztek."""
+"""Port ranges: unit, nft and packet-level tests."""
 
 from __future__ import annotations
 
@@ -271,8 +271,8 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("deploy/hatarvedelem-boot.nft ./deploy", dockerfile)
 
     def test_migration_runs_before_validation(self) -> None:
-        # A régi set-flagek mellett az `nft -c` elbukna, ezért a migrációnak
-        # (boot-védelem, majd tábla-törlés) a validálás ELŐTT kell futnia.
+        # With the old set flags `nft -c` would fail, so the migration
+        # (boot guard, then table deletion) must run BEFORE validation.
         entrypoint = (ROOT / "docker" / "entrypoint.sh").read_text(
             encoding="utf-8"
         )
@@ -290,8 +290,8 @@ class PackagingTests(unittest.TestCase):
         self.assertLess(
             install.index("hatarvedelem-boot.nft"), delete_at
         )
-        # A migráció eldöntése az első validálás előtt, a törlés utáni
-        # (második) validálás pedig a törlés után van.
+        # The migration decision is before the first validation, and the
+        # (second) validation after the deletion comes after the deletion.
         self.assertLess(
             install.index("recreate_table=1"),
             install.index('-c -f "$TMP_NFT"'),
@@ -301,13 +301,13 @@ class PackagingTests(unittest.TestCase):
 
 @unittest.skipUnless(
     all(shutil.which(tool) for tool in ("unshare", "nsenter", "nft", "ip")),
-    "nincs unshare/nsenter/nft/ip",
+    "unshare/nsenter/nft/ip not available",
 )
 class PortRangeNamespaceTests(unittest.TestCase):
     def _unshare_ok(self) -> None:
         probe = subprocess.run(["unshare", "-rn", "true"], capture_output=True)
         if probe.returncode != 0:
-            self.skipTest("a user namespace nem elérhető")
+            self.skipTest("the user namespace is not available")
 
     def test_interval_set_syntax_and_timeout(self) -> None:
         self._unshare_ok()
@@ -332,14 +332,14 @@ nft -j list set inet t s
         )
         if result.returncode != 0:
             if "Operation not permitted" in result.stderr:
-                self.skipTest("a névtérben nem engedélyezett")
+                self.skipTest("not permitted in the namespace")
             self.fail(result.stderr[-2000:])
         self.assertIn('"range": [8000, 8100]', result.stdout.replace("\n", " "))
         self.assertIn('"timeout"', result.stdout)
 
     def test_old_sets_are_migrated_before_validation(self) -> None:
-        # A 3.15.0-ig a validálás a migráció előtt futott, ezért egy régi
-        # (interval flag nélküli) tábla mellett az indulás elbukott.
+        # Until 3.15.0 validation ran before the migration, so startup failed
+        # with an old table (without the interval flag).
         self._unshare_ok()
         entrypoint = (ROOT / "docker" / "entrypoint.sh").read_text(
             encoding="utf-8"
@@ -373,11 +373,11 @@ HOST_PORTS_JSON=''
 BOOT_NFT=@@BOOT@@
 RENDERED=@@RENDERED@@
 log() { printf '[hatarvedelem] %s\\n' "$*"; }
-die() { printf '[hatarvedelem] HIBA: %s\\n' "$*" >&2; exit 1; }
+die() { printf '[hatarvedelem] ERROR: %s\\n' "$*" >&2; exit 1; }
 @@ENSURE@@
 @@MIGRATE@@
 
-# Régi stílusú tábla: hat halmaz interval flag nélkül.
+# Old-style table: six sets without the interval flag.
 nft add table inet hatarvedelem
 for s in allowed_tcp allowed_udp allowed_input_tcp allowed_input_udp; do
   nft add set inet hatarvedelem "$s" '{ type ipv4_addr . inet_service; flags timeout; size 16384; }'
@@ -386,22 +386,22 @@ for s in host_service_tcp host_service_udp; do
   nft add set inet hatarvedelem "$s" '{ type inet_service; size 65536; }'
 done
 
-# A régi sorrend bizonyítéka: így bukott el a 3.15.0-s indulás.
+# Proof of the old order: this is how the 3.15.0 startup failed.
 if nft -c -f "$RENDERED" 2>/dev/null; then
-  echo 'REGRESSION: a régi set-ek mellett a validálás nem bukott el' >&2
+  echo 'REGRESSION: validation did not fail with the old sets' >&2
   exit 1
 fi
 
 migrate_interval_sets
 [ "$migrated" = "1" ]
-# A törlés előtt betöltött boot-védelemnek aktívnak kell maradnia.
+# The boot guard loaded before deletion must remain active.
 nft list table inet hatarvedelem_boot >/dev/null
 nft -c -f "$RENDERED"
 nft -f "$RENDERED"
 for s in allowed_tcp allowed_udp allowed_input_tcp allowed_input_udp \
         host_service_tcp host_service_udp; do
   nft list set inet hatarvedelem "$s" | grep -q 'flags interval' \
-    || { echo "hiányzó interval flag: $s" >&2; exit 1; }
+    || { echo "missing interval flag: $s" >&2; exit 1; }
 done
 echo MIGRATED_OK
 """.replace("@@PYTHON@@", sys.executable) \
@@ -414,7 +414,7 @@ echo MIGRATED_OK
                 capture_output=True, text=True, timeout=120,
             )
         if result.returncode != 0 and "Operation not permitted" in result.stderr:
-            self.skipTest("a névtérben nem engedélyezett")
+            self.skipTest("not permitted in the namespace")
         self.assertIn("MIGRATED_OK", result.stdout, result.stderr[-3000:])
 
     def test_packet_level_range_and_revoke(self) -> None:
@@ -426,7 +426,7 @@ echo MIGRATED_OK
         )
         if result.returncode != 0 and not result.stdout.strip():
             if "Operation not permitted" in result.stderr:
-                self.skipTest("a névtérben nem engedélyezett")
+                self.skipTest("not permitted in the namespace")
             self.fail(result.stderr[-3000:])
         report = json.loads(result.stdout)
         failed = {

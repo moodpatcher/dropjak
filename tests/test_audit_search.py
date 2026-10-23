@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Az auditnapló keresésének tesztjei (esemény- és szabadszöveges szűrő).
+"""Tests for searching the audit log (event and free-text filters).
 
-Futtatás a projekt gyökeréből:
+Run from the project root:
 
     python3 -m unittest tests.test_audit_search -v
 
-A tesztek izolált ideiglenes könyvtárban dolgoznak; a HTTP-s teszt saját,
-127.0.0.1-re kötött kiszolgálót indít, és közvetlenül admin munkamenetet
-hoz létre, így nincs szükség jelszó/2FA folyamatra.
+The tests work in an isolated temporary directory; the HTTP test starts its
+own server bound to 127.0.0.1 and creates an admin session directly, so no
+password/2FA flow is needed.
 """
 
 from __future__ import annotations
@@ -36,15 +36,15 @@ def quiet(*_args, **_kwargs) -> None:
     return None
 
 
-# A sorok szándékosan vegyes eseménykódokat és értékeket tartalmaznak.
-# A ts értékek a legújabb-tól a legrégebbi felé rendezést és a before=
-# lapozást teszik ellenőrizhetővé.
+# The rows deliberately contain mixed event codes and values.
+# The ts values make the newest-to-oldest ordering and the before=
+# paging checkable.
 ROWS = (
     {
         "ts": 100.0, "time": "2026-01-01T00:01:40Z",
         "event": "access_granted", "severity": "info",
         "user": "alice", "ip": "10.0.0.5", "rule": "web-only",
-        "reason": "sikeres belepes",
+        "reason": "successful login",
     },
     {
         "ts": 200.0, "time": "2026-01-01T00:03:20Z",
@@ -63,7 +63,7 @@ ROWS = (
         "user": "root", "ip": "10.0.0.1", "rule": "web-only",
         "reason": "removed",
     },
-    # Régi bejegyzés severity nélkül: alapértelmezésben "info".
+    # Old entry without severity: "info" by default.
     {
         "ts": 500.0, "time": "2026-01-01T00:08:20Z",
         "event": "login_success", "user": "carol", "ip": "10.0.0.7",
@@ -86,7 +86,7 @@ def timestamps(rows) -> list[float]:
 
 
 class AuditSearchUnitTests(unittest.TestCase):
-    """Az AuditLog.read esemény- és q-szűrője."""
+    """The event and q filters of AuditLog.read."""
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -120,9 +120,9 @@ class AuditSearchUnitTests(unittest.TestCase):
     def test_events_filter_is_exact_set(self) -> None:
         rows = self.audit.read(events=["login_success", "admin_rule_deleted"])
         self.assertEqual(timestamps(rows), [500.0, 400.0, 300.0])
-        # Pontos egyezés: az előtag nem család-szűrő.
+        # Exact match: the prefix is not a family filter.
         self.assertEqual(self.audit.read(events=["login"]), [])
-        # A régi egyes szűrővel együtt mindkettőnek teljesülnie kell.
+        # Together with the old single filter, both must hold.
         rows = self.audit.read(events=["login_success"], user="carol")
         self.assertEqual(timestamps(rows), [500.0])
 
@@ -135,8 +135,8 @@ class AuditSearchUnitTests(unittest.TestCase):
                 )
 
     def test_q_ignores_json_key_names(self) -> None:
-        # Az értékek között nincs "event"/"user" szó, ezért a kulcsnevek
-        # korábbi beszámítása nélkül egyik sor sem illeszkedhet.
+        # There is no "event"/"user" word among the values, so without
+        # counting the key names none of the rows can match.
         self.assertEqual(self.audit.read(q="event"), [])
         self.assertEqual(self.audit.read(q="user"), [])
 
@@ -159,7 +159,7 @@ class AuditSearchUnitTests(unittest.TestCase):
         self.assertEqual(rows[0]["ts"], 100.0)
         self.assertEqual(rows[0]["user"], "alice")
 
-        # Ugyanaz más súlyossággal: nincs metszet.
+        # The same with another severity: no intersection.
         self.assertEqual(
             self.audit.read(
                 event="Access Granted", user="alice", q="web-only",
@@ -185,8 +185,8 @@ class AuditSearchUnitTests(unittest.TestCase):
         self.assertNotIn(500.0, warn)
 
     def test_unknown_filters_return_empty_list(self) -> None:
-        self.assertEqual(self.audit.read(event="nincs_ilyen_esemeny"), [])
-        self.assertEqual(self.audit.read(q="nincs-ilyen-ertek"), [])
+        self.assertEqual(self.audit.read(event="no_such_event"), [])
+        self.assertEqual(self.audit.read(q="no-such-value"), [])
 
     def test_limit_is_clamped_and_order_is_newest_first(self) -> None:
         self.assertEqual(timestamps(self.audit.read(limit=0)), [500.0])
@@ -231,7 +231,7 @@ class AuditSearchUnitTests(unittest.TestCase):
 
 
 class AuditSearchApiTests(unittest.TestCase):
-    """GET /api/admin/logs esemény- és q-paramétere."""
+    """The event and q parameters of GET /api/admin/logs."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -241,7 +241,7 @@ class AuditSearchApiTests(unittest.TestCase):
         cls.users = gateway.UserStore(
             os.path.join(root, "users.json"), iterations=10_000
         )
-        cls.users.add("root", "root-jelszo-1", role=gateway.ROLE_ADMIN)
+        cls.users.add("root", "root-password-1", role=gateway.ROLE_ADMIN)
         rules = gateway.RuleStore(
             os.path.join(root, "rules.json"), catalog=catalog, logger=quiet
         )
@@ -365,7 +365,7 @@ class AuditSearchApiTests(unittest.TestCase):
             ("event=login_success&event=admin_rule_deleted",
              [500.0, 400.0, 300.0]),
             ("events=" + urllib.parse.quote(" LOGIN_SUCCESS , ,"), [500.0, 300.0]),
-            # Egyetlen event= a régi részleges egyezés marad.
+            # A single event= keeps the old partial matching.
             ("event=login", [500.0, 300.0]),
             ("events=login", []),
             ("events=", [500.0, 400.0, 300.0, 200.0, 100.0]),
@@ -385,7 +385,7 @@ class AuditSearchApiTests(unittest.TestCase):
         self.assertEqual(status, 400, data)
 
     def test_api_unknown_event_is_empty_and_ok(self) -> None:
-        status, data = self.get_logs("event=nincs_ilyen")
+        status, data = self.get_logs("event=no_such")
         self.assertEqual(status, 200, data)
         self.assertIs(data["ok"], True)
         self.assertEqual(data["logs"], [])

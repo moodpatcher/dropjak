@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
-"""Csomagszintű teszt az otthoni tunnel-ügynök nft szabályaihoz.
+"""Packet-level test for the home tunnel agent's nft rules.
 
-Futtatás:  unshare -rn python3 tests/tunnel_agent_netns.py
+Run:  unshare -rn python3 tests/tunnel_agent_netns.py
 
-A gyökér-névtér az ügynök konténerét modellezi: ``wg0`` veth a "felhő"
-kliens felé (10.77.0.2/24 <-> 10.77.0.3/24), ``int0`` veth a belső Docker
-hálózat felé (172.30.0.1/24 <-> 172.30.0.2/24). A belső névtérben futó
-szolgáltatás a 25565-ös TCP/UDP porton figyel; a felhő kliens a
-10.77.0.2:41001-re csatlakozik. A valódi, renderelt szabálykészlet töltődik
-be, majd ellenőrizzük:
+The root namespace models the agent's container: ``wg0`` veth towards the
+"cloud" client (10.77.0.2/24 <-> 10.77.0.3/24), ``int0`` veth towards the
+internal Docker network (172.30.0.1/24 <-> 172.30.0.2/24). The service running
+in the internal namespace listens on TCP/UDP port 25565; the cloud client
+connects to 10.77.0.2:41001. The real, rendered ruleset is loaded, then we
+check:
 
-* a leképezett TCP/UDP port elérhető (és a szolgáltatás az ügynök belső
-  IP-jét látja a SNAT miatt),
-* a nem leképezett port nem érhető el,
-* a konténerből a tunnel felé (10.77.0.3:9999) és a felhő endpoint felé
-  (198.51.100.7:51820) induló NEW kapcsolat eldobódik.
+* the mapped TCP/UDP port is reachable (and the service sees the agent's
+  internal IP because of SNAT),
+* an unmapped port is unreachable,
+* a NEW connection initiated from the container towards the tunnel
+  (10.77.0.3:9999) and towards the cloud endpoint (198.51.100.7:51820) is
+  dropped.
 
-Kimenet: JSON a vizsgálatokkal; a kilépési kód 0, ha minden rendben.
+Output: JSON with the checks; exit code 0 if everything is fine.
 """
 
 from __future__ import annotations
@@ -80,7 +81,7 @@ while True:
     conn.close()
 '''
 
-NETS = {  # névtér: (gyökér-if, gyermek-if, gyökér-cím, gyermek-cím, átjáró)
+NETS = {  # namespace: (root if, child if, root address, child address, gateway)
     "peer": ("wg0", "cwg", "10.77.0.2/24", "10.77.0.3/24", "10.77.0.2"),
     "svc": ("int0", "csvc", "172.30.0.1/24", "172.30.0.2/24", "172.30.0.1"),
 }
@@ -140,7 +141,7 @@ def _main(spawned: list) -> int:
         ns(child.pid, "ip", "link", "set", child_if, "up")
         ns(child.pid, "ip", "route", "add", "default", "via", gateway)
 
-    # A "felhő" felé vezető út, hogy a forward-lánc foghassa a csomagot.
+    # The route towards the "cloud", so the forward chain can catch the packet.
     run("ip", "route", "add", "198.51.100.0/24", "dev", "wg0")
 
     for name, script in (("svc", SERVICE), ("peer", PEER_LISTENER)):
@@ -174,7 +175,7 @@ def _main(spawned: list) -> int:
     rules = ta.render_ruleset(config, entries, ["198.51.100.7"], ["int0"],
                               ["10.77.0.1"], [])
     run("nft", "-f", "-", input=rules)
-    time.sleep(1.0)  # ARP és a szolgáltatás indulása
+    time.sleep(1.0)  # ARP and service startup
 
     checks: dict[str, object] = {}
     ok = True

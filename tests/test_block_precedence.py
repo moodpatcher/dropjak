@@ -220,9 +220,9 @@ class BlockPrecedenceTemplateTests(unittest.TestCase):
             self.assertLess(block, grant, rule)
 
     def test_input_jumps_preauth_input_after_block_before_portal(self) -> None:
-        # A pre-auth_input lánc a blokk UTÁN fut (a blokk felülbírálja), de a
-        # portál- és SSH-szabályok ELŐTT, hogy a host-port belépés előtt
-        # elérhető legyen.
+        # The pre-auth_input chain runs AFTER the block (the block overrides), but
+        # BEFORE the portal and SSH rules, so host-port access is reachable
+        # before login.
         self.assertIn(
             "add chain inet hatarvedelem preauth_input", self.template
         )
@@ -240,8 +240,8 @@ class BlockPrecedenceTemplateTests(unittest.TestCase):
         ):
             hits = self.indices(self.input, rule)
             self.assertTrue(hits, rule)
-            # A korai portál-kivételek szándékosan a blokk előtt vannak; a
-            # pre-auth után a lánc későbbi, érdemi szabályai következnek.
+            # The early portal exceptions are deliberately before the block; after
+            # pre-auth come the chain's later, substantive rules.
             self.assertLess(preauth_input, hits[-1], rule)
 
     # -- prerouting / block_nat -------------------------------------------

@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""A futó démon vezérlőcsatornájának és a CLI visszaesésének tesztjei.
+"""Tests for the running daemon's control channel and the CLI fallback.
 
-Futtatás a projekt gyökeréből:
+Run from the project root:
 
     python3 -m unittest discover -s tests -p 'test_live_cli.py' -v
 
-A tesztek valódi Unix-domain socketet használnak egy ideiglenes
-könyvtárban, és hamis nft/conntrack szkripteket, így a valódi rendszert
-nem módosítják.
+The tests use a real Unix-domain socket in a temporary directory, and fake
+nft/conntrack scripts, so they do not modify the real system.
 """
 
 from __future__ import annotations
@@ -39,11 +38,11 @@ CATALOG = gateway.ServiceCatalog.load(str(ROOT / "services.json"))
 IP = "203.0.113.7"
 
 
-# ------------------------------------------------------------------ segédek
+# ------------------------------------------------------------------ helpers
 
 
 def write_fake_tools(directory: str) -> tuple[str, str]:
-    """Hamis nft és conntrack szkriptek az ideiglenes könyvtárban."""
+    """Fake nft and conntrack scripts in the temporary directory."""
     log = os.path.join(directory, "tools.log")
     nft = os.path.join(directory, "nft")
     with open(nft, "w", encoding="utf-8") as fh:
@@ -91,7 +90,7 @@ class _Drops:
 
 
 def build_gateway(directory: str):
-    """Teljes, futó démonhoz hasonló Gateway a megadott könyvtárban."""
+    """A full, running-daemon-like Gateway in the given directory."""
     nft, conntrack = write_fake_tools(directory)
     firewall = gateway.Firewall(binary=nft, logger=lambda *_: None)
     users = gateway.UserStore(
@@ -129,8 +128,8 @@ def build_gateway(directory: str):
         drops=_Drops(),
         fail2ban=manager,
     )
-    # A Gateway a hiányzó on_ban visszahívást maga köti be; ellenőrizzük,
-    # hogy a tiltás utókezelése tényleg a démonhoz fut be.
+    # The Gateway wires in the missing on_ban callback itself; we check that
+    # the ban's post-processing really runs against the daemon.
     return types.SimpleNamespace(
         gw=gw,
         users=users,
@@ -150,7 +149,7 @@ def control_call(
     raw: bytes | None = None,
     timeout: float = 10.0,
 ) -> dict:
-    """Egy kérés a vezérlőcsatornán; a válasz dekódolt JSON objektuma."""
+    """One request on the control channel; the decoded JSON object of the response."""
     body = raw
     if body is None:
         body = (
@@ -164,7 +163,7 @@ def control_call(
         try:
             sock.sendall(body)
         except (BrokenPipeError, ConnectionResetError):
-            # A szerver a túl nagy kérést már elutasíthatta és lezárhatta.
+            # The server may already have rejected and closed the oversized request.
             pass
         chunks: list[bytes] = []
         while True:
@@ -176,7 +175,7 @@ def control_call(
                 break
     response_raw = b"".join(chunks)
     if not response_raw:
-        raise AssertionError("a vezérlőcsatorna üres választ adott")
+        raise AssertionError("the control channel gave an empty response")
     return json.loads(response_raw.split(b"\n", 1)[0])
 
 
@@ -191,10 +190,10 @@ def control_path(state_dir: str) -> str:
 
 
 def start_raw_control_server(state_dir: str, *, hold: float = 0.0):
-    """Nyers Unix-socket szerver: elfogad, kiolvassa a kérést, majd vagy
-    azonnal lezár (EOF), vagy ``hold`` másodpercig nem válaszol (timeout).
+    """Raw Unix-socket server: accepts, reads the request, then either
+    closes immediately (EOF), or does not answer for ``hold`` seconds (timeout).
 
-    Visszatérés: idempotens lezáró függvény.
+    Returns: an idempotent close function.
     """
     path = control_path(state_dir)
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
@@ -235,7 +234,7 @@ def start_raw_control_server(state_dir: str, *, hold: float = 0.0):
 
 
 class _FakePeerRequest:
-    """SO_PEERCRED-et imitáló kérés a peer-uid ellenőrzéshez."""
+    """A request imitating SO_PEERCRED for the peer-uid check."""
 
     def __init__(self, uid: int) -> None:
         self.uid = uid
@@ -250,7 +249,7 @@ class _FakePeerRequest:
 
 
 class _HandlerDouble:
-    """A HTTP Handler azon metódusai, amelyeket az F7 teszt hív."""
+    """The HTTP Handler methods that the F7 test calls."""
 
     _ban_reply = server.Handler._ban_reply
     _session = server.Handler._session
@@ -304,7 +303,7 @@ class _HandlerDouble:
         self.gw.audit.write(event, **fields)
 
 
-# ------------------------------------------------------- vezérlőcsatorna
+# ------------------------------------------------------- control channel
 
 
 class ControlServerTests(unittest.TestCase):
@@ -342,20 +341,20 @@ class ControlServerTests(unittest.TestCase):
         self.assertNotIn("alice-password-1", json.dumps(response))
 
     def test_unknown_action_is_rejected(self) -> None:
-        response = control_call(self.path, {"action": "ismeretlen.művelet"})
+        response = control_call(self.path, {"action": "unknown.action"})
         self.assertFalse(response["ok"])
         self.assertEqual(response["status"], 1)
-        self.assertIn("ismeretlen", response["error"])
+        self.assertIn("unknown", response["error"])
         events = audit_events(self.ctx.audit)
         rejected = [e for e in events if e["event"] == "control_rejected"]
         self.assertEqual(len(rejected), 1)
         self.assertEqual(rejected[0]["reason"], "unknown_action")
 
     def test_malformed_json_is_rejected(self) -> None:
-        response = control_call(self.path, raw=b"{ez nem json}\n")
+        response = control_call(self.path, raw=b"{this is not json}\n")
         self.assertFalse(response["ok"])
         self.assertEqual(response["status"], 1)
-        self.assertEqual(response["error"], "hibás kérés")
+        self.assertEqual(response["error"], "bad request")
         rejected = [
             e for e in audit_events(self.ctx.audit)
             if e["event"] == "control_rejected"
@@ -364,7 +363,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(rejected[0]["reason"], "bad_request")
 
     def test_request_without_newline_is_rejected(self) -> None:
-        # A kliens lezárja az írást, hogy a szerver ne várjon időtúllépésig.
+        # The client closes the write side so the server does not wait until timeout.
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
             sock.settimeout(10)
             sock.connect(self.path)
@@ -380,14 +379,14 @@ class ControlServerTests(unittest.TestCase):
                     break
         response = json.loads(response_raw.split(b"\n", 1)[0])
         self.assertFalse(response["ok"])
-        self.assertEqual(response["error"], "hibás kérés")
+        self.assertEqual(response["error"], "bad request")
 
     def test_oversized_request_is_rejected(self) -> None:
         raw = b"x" * (server.CONTROL_MAX_REQUEST + 1)
         response = control_call(self.path, raw=raw)
         self.assertFalse(response["ok"])
         self.assertEqual(response["status"], 1)
-        self.assertIn(response["error"], ("túl nagy kérés", "hibás kérés"))
+        self.assertIn(response["error"], ("request too large", "bad request"))
 
     def test_user_add_via_socket_creates_user_and_audits(self) -> None:
         password = "dave-password-1"
@@ -441,7 +440,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertIsNone(self.ctx.sessions.validate(session.token, IP))
         events = [e["event"] for e in audit_events(self.ctx.audit)]
         self.assertEqual(events.count("cli_password_changed"), 1)
-        # A jelszó soha nem kerülhet a naplóba.
+        # The password must never get into the log.
         with open(self.ctx.audit.path, "r", encoding="utf-8") as fh:
             dump = fh.read()
         self.assertNotIn(new_password, dump)
@@ -477,7 +476,7 @@ class ControlServerTests(unittest.TestCase):
         self.assertIn(IP, flushed)
         self.assertIsNone(self.ctx.sessions.validate(session.token, IP))
         events = [e["event"] for e in audit_events(self.ctx.audit)]
-        # Az on_ban írja a fail2ban_ban eseményt, a csatorna a cli_* párt.
+        # on_ban writes the fail2ban_ban event, the channel writes the cli_* pair.
         self.assertEqual(events.count("fail2ban_ban"), 1)
         self.assertEqual(events.count("cli_fail2ban_ban"), 1)
 
@@ -486,19 +485,19 @@ class ControlServerTests(unittest.TestCase):
         )
         self.assertTrue(response["ok"], response)
         self.assertIsNone(self.ctx.fail2ban.banned(IP))
-        # A feloldás nem állítja vissza a korábbi hozzáférést.
+        # The release does not restore the earlier access.
         self.assertIsNone(self.ctx.sessions.validate(session.token, IP))
 
     def test_server_close_removes_socket_and_is_idempotent(self) -> None:
         self.control.stop()
         self.assertFalse(os.path.exists(self.path))
-        # Második lezárás nem dobhat és nem hozhat létre új fájlt.
+        # A second close must not raise and must not create a new file.
         self.control.server_close()
         self.assertFalse(os.path.exists(self.path))
 
     def test_stop_waits_for_inflight_handler(self) -> None:
-        # A kezelőszálak nem daemon szálak: a stop() a lezárás előtt
-        # megvárja a már elfogadott kérés feldolgozását.
+        # The handler threads are not daemon threads: stop() waits for the
+        # already accepted request to be processed before closing.
         self.add_user()
         started = threading.Event()
         release = threading.Event()
@@ -528,7 +527,7 @@ class ControlServerTests(unittest.TestCase):
             stopper.join(0.3)
             self.assertTrue(
                 stopper.is_alive(),
-                "a stop() nem várta meg a futó kezelőt",
+                "stop() did not wait for the running handler",
             )
             release.set()
             stopper.join(5)
@@ -555,7 +554,7 @@ class ControlServerTests(unittest.TestCase):
         with mock.patch("server.os.chmod", side_effect=swapping_chmod):
             with self.assertRaises(server.ControlUnavailable):
                 server.ControlServer(path, self.ctx.gw)
-        # Az idegen, kicserélt socketet nem töröljük.
+        # We do not delete the foreign, swapped socket.
         self.assertTrue(stat.S_ISSOCK(os.lstat(path).st_mode))
 
     def test_stale_socket_is_replaced(self) -> None:
@@ -576,11 +575,11 @@ class ControlServerTests(unittest.TestCase):
     def test_non_socket_path_is_not_deleted(self) -> None:
         path = os.path.join(self.tmp.name, "not-a-socket")
         with open(path, "w", encoding="utf-8") as fh:
-            fh.write("értékes fájl")
+            fh.write("valuable file")
         with self.assertRaises(server.ControlUnavailable):
             server.ControlServer(path, self.ctx.gw)
         with open(path, "r", encoding="utf-8") as fh:
-            self.assertEqual(fh.read(), "értékes fájl")
+            self.assertEqual(fh.read(), "valuable file")
 
 
 class ControlPeerCredentialTests(unittest.TestCase):
@@ -602,13 +601,13 @@ class ControlPeerCredentialTests(unittest.TestCase):
         handler.handle()
         response = json.loads(handler.wfile.getvalue())
         self.assertEqual(
-            response, {"ok": False, "status": 1, "error": "elutasítva"}
+            response, {"ok": False, "status": 1, "error": "rejected"}
         )
         events = audit_events(self.ctx.audit)
         denied = [e for e in events if e["event"] == "control_denied"]
         self.assertEqual(len(denied), 1)
         self.assertEqual(denied[0]["reason"], "peer_uid")
-        # A peer uid/pid nem kerülhet a naplóba.
+        # The peer uid/pid must not get into the log.
         self.assertNotIn(str(os.geteuid() + 1), json.dumps(denied))
 
     def test_same_uid_is_accepted(self) -> None:
@@ -636,10 +635,10 @@ class ControlStartupTests(unittest.TestCase):
         with mock.patch("sys.stdout", out), mock.patch("sys.stderr", err):
             control = server._start_control_server(self.ctx.gw)
         self.assertIsNone(control)
-        self.assertIn("nem biztonságos", err.getvalue())
-        self.assertIn("PID-fájl", err.getvalue())
-        # A STATE_DIR jogosultságát nem változtatjuk meg, és a
-        # vezérlőkönyvtárat/socketet sem hozzuk létre.
+        self.assertIn("not secure", err.getvalue())
+        self.assertIn("PID file", err.getvalue())
+        # We do not change STATE_DIR's permissions, and we do not create the
+        # control directory/socket either.
         self.assertEqual(
             stat.S_IMODE(os.stat(self.tmp.name).st_mode), 0o777
         )
@@ -690,7 +689,7 @@ class ControlStartupTests(unittest.TestCase):
         self.assertEqual(server._live_daemon_pid(), os.getpid())
         server._remove_server_pid(inode)
         self.assertFalse(os.path.exists(path))
-        # Második eltávolítás nem dobhat.
+        # A second removal must not raise.
         server._remove_server_pid(inode)
 
     def test_live_daemon_pid_ignores_stale_and_unsafe_pidfiles(self) -> None:
@@ -702,7 +701,7 @@ class ControlStartupTests(unittest.TestCase):
         os.chmod(path, 0o600)
         self.assertIsNone(server._live_daemon_pid())
 
-        # Csoport/más által írható PID-fájlból nem fogadunk el PID-et.
+        # We do not accept a PID from a group/world-writable PID file.
         with open(path, "w", encoding="ascii") as fh:
             fh.write(f"{os.getpid()}\n")
         os.chmod(path, 0o644)
@@ -713,7 +712,7 @@ class ControlStartupTests(unittest.TestCase):
         self.assertEqual(server._live_daemon_pid(), os.getpid())
 
 
-# ------------------------------------------------------------ CLI visszaesés
+# ------------------------------------------------------------ CLI fallback
 
 
 class CliFallbackTests(unittest.TestCase):
@@ -754,10 +753,10 @@ class CliFallbackTests(unittest.TestCase):
             input_text=password + "\n",
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Felhasználó létrehozva: bob", result.stdout)
-        self.assertIn("FIGYELEM", result.stderr)
-        self.assertIn("nincs vezérlőcsatorna", result.stderr)
-        self.assertIn("NEM vonta vissza", result.stderr)
+        self.assertIn("User created: bob", result.stdout)
+        self.assertIn("WARNING", result.stderr)
+        self.assertIn("no control channel", result.stderr)
+        self.assertIn("did NOT revoke", result.stderr)
         self.assertNotIn(password, result.stdout)
         self.assertNotIn(password, result.stderr)
         store = gateway.UserStore(self.users_path)
@@ -774,9 +773,9 @@ class CliFallbackTests(unittest.TestCase):
             "fail2ban", "ban", IP, "--seconds", "120"
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(f"Letiltva: {IP}", result.stdout)
-        self.assertIn("FIGYELEM", result.stderr)
-        self.assertIn("NEM vonta vissza", result.stderr)
+        self.assertIn(f"Banned: {IP}", result.stdout)
+        self.assertIn("WARNING", result.stderr)
+        self.assertIn("did NOT revoke", result.stderr)
         manager = fail2ban_mod.Fail2ban(
             gateway.Firewall(binary=self.nft, logger=lambda *_: None),
             path=os.path.join(self.state_dir, "fail2ban.json"),
@@ -789,7 +788,7 @@ class CliFallbackTests(unittest.TestCase):
         self.assertIn("cli_fail2ban_ban", dump)
 
     def test_daemon_error_does_not_fall_back(self) -> None:
-        # A helyi fájlban van carol, a démon saját (üres) tárában nincs.
+        # carol is in the local file, but not in the daemon's own (empty) store.
         gateway.UserStore(
             self.users_path, iterations=10_000
         ).add("carol", "carol-password-1")
@@ -801,14 +800,14 @@ class CliFallbackTests(unittest.TestCase):
         control = server.ControlServer(path, ctx.gw)
         control.start()
         self.addCleanup(control.stop)
-        # A CLI ugyanazt a state könyvtárat lássa, ahol a socket van.
+        # The CLI should see the same state directory where the socket is.
         self.state_dir = daemon_dir
 
         result = self.run_cli("user", "del", "carol")
         self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn("Nincs ilyen felhasználó: carol", result.stdout)
-        # Érvényes hibaüzenet érkezett: NEM szabad helyben is módosítani.
-        self.assertNotIn("FIGYELEM", result.stderr)
+        self.assertIn("No such user: carol", result.stdout)
+        # A valid error message arrived: we must NOT modify locally either.
+        self.assertNotIn("WARNING", result.stderr)
         self.assertIsNotNone(
             gateway.UserStore(self.users_path).record("carol")
         )
@@ -827,17 +826,17 @@ class CliFallbackTests(unittest.TestCase):
 
         result = self.run_cli("user", "del", "carol")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Felhasználó törölve: carol", result.stdout)
-        self.assertNotIn("FIGYELEM", result.stderr)
-        # A démon élő tárából tűnt el a felhasználó; a CLI helyi fájlja
-        # üres maradt (nem esett vissza helyi módra).
+        self.assertIn("User deleted: carol", result.stdout)
+        self.assertNotIn("WARNING", result.stderr)
+        # The user disappeared from the daemon's live store; the CLI's local file
+        # remained empty (it did not fall back to local mode).
         self.assertIsNone(ctx.users.record("carol"))
         self.assertIsNone(
             gateway.UserStore(self.users_path).record("carol")
         )
 
     def test_presend_connection_refused_falls_back_with_warning(self) -> None:
-        # Elavult socket: létezik, 0600, de senki nem figyel rajta.
+        # Stale socket: it exists, 0600, but nobody is listening on it.
         path = control_path(self.state_dir)
         os.makedirs(os.path.dirname(path), mode=0o700)
         stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -850,9 +849,9 @@ class CliFallbackTests(unittest.TestCase):
             input_text="bob-password-1\n",
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Felhasználó létrehozva: bob", result.stdout)
-        self.assertIn("FIGYELEM", result.stderr)
-        self.assertIn("elavult socket", result.stderr)
+        self.assertIn("User created: bob", result.stdout)
+        self.assertIn("WARNING", result.stderr)
+        self.assertIn("stale socket", result.stderr)
         self.assertIsNotNone(
             gateway.UserStore(self.users_path).record("bob")
         )
@@ -865,9 +864,9 @@ class CliFallbackTests(unittest.TestCase):
             input_text="bob-password-1\n",
         )
         self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn("NEM futtattam helyi módosítást", result.stderr)
-        self.assertIn("megszakadt vagy üres", result.stderr)
-        self.assertNotIn("Felhasználó létrehozva", result.stdout)
+        self.assertIn("I did NOT run a local modification", result.stderr)
+        self.assertIn("cut off or empty", result.stderr)
+        self.assertNotIn("User created", result.stdout)
         self.assertIsNone(
             gateway.UserStore(self.users_path).record("bob")
         )
@@ -900,8 +899,8 @@ class CliFallbackTests(unittest.TestCase):
             )
         self.assertTrue(handled)
         self.assertEqual(code, 1)
-        self.assertIn("NEM futtattam helyi módosítást", err.getvalue())
-        self.assertIn("időtúllépés", err.getvalue())
+        self.assertIn("I did NOT run a local modification", err.getvalue())
+        self.assertIn("timeout", err.getvalue())
         self.assertIsNone(
             gateway.UserStore(self.users_path).record("timeout-bob")
         )
@@ -922,8 +921,8 @@ class CliFallbackTests(unittest.TestCase):
             input_text="bob-password-1\n",
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("Felhasználó létrehozva: bob", result.stdout)
-        self.assertIn("FIGYELEM", result.stderr)
+        self.assertIn("User created: bob", result.stdout)
+        self.assertIn("WARNING", result.stderr)
         self.assertIsNotNone(
             gateway.UserStore(self.users_path).record("bob")
         )
@@ -935,9 +934,9 @@ class CliFallbackTests(unittest.TestCase):
             input_text="bob-password-1\n",
         )
         self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn("démon fut", result.stderr)
-        self.assertIn("NEM futtattam", result.stderr)
-        self.assertNotIn("Felhasználó létrehozva", result.stdout)
+        self.assertIn("the daemon is running", result.stderr)
+        self.assertIn("I did NOT run", result.stderr)
+        self.assertNotIn("User created", result.stdout)
         self.assertIsNone(
             gateway.UserStore(self.users_path).record("bob")
         )
@@ -948,9 +947,9 @@ class CliFallbackTests(unittest.TestCase):
             "fail2ban", "ban", IP, "--seconds", "120"
         )
         self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn("démon fut", result.stderr)
-        self.assertIn("NEM futtattam", result.stderr)
-        self.assertNotIn(f"Letiltva: {IP}", result.stdout)
+        self.assertIn("the daemon is running", result.stderr)
+        self.assertIn("I did NOT run", result.stderr)
+        self.assertNotIn(f"Banned: {IP}", result.stdout)
         manager = fail2ban_mod.Fail2ban(
             gateway.Firewall(binary=self.nft, logger=lambda *_: None),
             path=os.path.join(self.state_dir, "fail2ban.json"),
@@ -959,7 +958,7 @@ class CliFallbackTests(unittest.TestCase):
         self.assertIsNone(manager.banned(IP))
 
 
-# ------------------------------------------------------ F7: versenyhelyzetek
+# ------------------------------------------------------ F7: race conditions
 
 
 class Fail2banRaceTests(unittest.TestCase):
@@ -975,8 +974,8 @@ class Fail2banRaceTests(unittest.TestCase):
         self.ctx.users.add("alice", "alice-password-1")
 
     def ban_without_side_effects(self) -> None:
-        # Szimulálja, hogy a tiltás már bekerült az állapotba, de a
-        # visszahívás (még) nem bontotta a munkameneteket.
+        # Simulates that the ban has already got into the state, but the
+        # callback has (yet) not torn down the sessions.
         with mock.patch.object(
             self.ctx.fail2ban, "_notify", lambda _record: None
         ):
@@ -1004,14 +1003,14 @@ class Fail2banRaceTests(unittest.TestCase):
         self.assertEqual(fields["user"], "alice")
         self.assertEqual(fields["method"], "totp")
         self.assertEqual(fields["source"], "manual")
-        # A válasz nem tartalmazhat jelszót, tokent vagy sütit.
+        # The response must not contain a password, token or cookie.
         dumped = json.dumps(payload)
         self.assertNotIn("alice-password-1", dumped)
         self.assertNotIn("Set-Cookie", headers)
 
     def test_ban_between_precheck_and_login_revokes_new_session(self) -> None:
-        # A szimulált verseny: a login() sikeresen létrehozza a
-        # munkamenetet, majd — még a válasz előtt — az IP tiltásra kerül.
+        # The simulated race: login() successfully creates the session, then —
+        # still before the response — the IP gets banned.
         double = _HandlerDouble(self.ctx.gw)
         real_login = self.ctx.sessions.login
 
@@ -1031,7 +1030,7 @@ class Fail2banRaceTests(unittest.TestCase):
         self.assertEqual(code, 403)
         self.assertTrue(payload["banned"])
         self.assertNotIn("Set-Cookie", headers)
-        # A létrehozott munkamenet nem maradhat életben.
+        # The created session must not stay alive.
         self.assertEqual(self.ctx.sessions.count(), 0)
         self.assertEqual(
             self.ctx.sessions.active_sessions(), []
@@ -1051,8 +1050,8 @@ class Fail2banRaceTests(unittest.TestCase):
         self.ban_without_side_effects()
         double = _HandlerDouble(self.ctx.gw, token=session.token)
         self.assertIsNone(server.Handler._session(double))
-        # A védelem mélységben nem vonja vissza a munkamenetet; azt a
-        # belépési/hozzáférési út teszi meg.
+        # Defense in depth does not revoke the session; the login/access path
+        # does that.
         self.assertIsNotNone(
             self.ctx.sessions.validate(session.token, IP)
         )
@@ -1089,7 +1088,7 @@ class Fail2banRaceTests(unittest.TestCase):
         self.assertEqual(code, 403)
         self.assertTrue(payload["banned"])
         self.assertIn("Retry-After", headers)
-        # A jelszó nem változott meg.
+        # The password did not change.
         self.assertTrue(
             self.ctx.users.verify("alice", "alice-password-1")
         )
@@ -1099,7 +1098,7 @@ class Fail2banRaceTests(unittest.TestCase):
         failed = [
             fields for event, fields in double.audits
             if event == "password_change_failed"
-            and fields.get("reason") == "fail2ban tiltás"
+            and fields.get("reason") == "fail2ban ban"
         ]
         self.assertEqual(len(failed), 1)
         self.assertNotIn(
@@ -1169,7 +1168,7 @@ class Fail2banRaceTests(unittest.TestCase):
             id="web", label="web", description="", tcp=(80,)
         )
         self.ctx.sessions.authorize(session.token, IP, rule, 600)
-        # Időközben egy másik folyamat kötelező jelszócserét állít be.
+        # Meanwhile another process sets up a mandatory password change.
         self.ctx.users.set_password(
             "alice", "temp-password-1", must_change_password=True
         )
@@ -1189,7 +1188,7 @@ class Fail2banRaceTests(unittest.TestCase):
         denied = [
             fields for event, fields in double.audits
             if event == "access_denied"
-            and fields.get("reason") == "kötelező jelszócsere"
+            and fields.get("reason") == "mandatory password change"
         ]
         self.assertEqual(len(denied), 1)
         self.assertTrue(denied[0]["access_revoked"])

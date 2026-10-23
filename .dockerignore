@@ -1,4 +1,4 @@
-# Verziókezelés és helyi fájlok
+# Version control and local files
 .git
 .gitignore
 .env

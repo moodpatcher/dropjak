@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""A Caddy-alapú aldomain-proxy tesztjei.
+"""Tests for the Caddy-based subdomain proxy.
 
-* a proxy-beállítások érvényesítése (settings_store), input/forward célok;
-* a domain szabály (RuleStore) és a munkamenet-választás (SessionManager);
-* a loopback-only /api/proxy/ask és /api/proxy/auth végpontok egy valódi
-  AppServeren, minimális gateway-dublőrrel;
-* a docker/entrypoint.sh sablonkitöltése HV_PROXY=0/1 mellett.
+* validation of the proxy settings (settings_store), input/forward targets;
+* the domain rule (RuleStore) and the session selection (SessionManager);
+* the loopback-only /api/proxy/ask and /api/proxy/auth endpoints on a real
+  AppServer, with a minimal gateway double;
+* rendering the docker/entrypoint.sh template with HV_PROXY=0/1.
 """
 
 from __future__ import annotations
@@ -95,7 +95,7 @@ class ProxySettingsTests(unittest.TestCase):
 
     def test_multiple_roots(self) -> None:
         roots = [ROOT_DOMAIN, SECOND_DOMAIN]
-        # Ugyanaz az aldomain két gyökér alatt külön bejegyzés.
+        # The same subdomain under two roots is a separate entry.
         stored = self.store.set_proxy(roots, [
             {"name": "owui", "port": 3000, **R},
             {"name": "owui", "root": SECOND_DOMAIN, "port": 3001},
@@ -107,19 +107,19 @@ class ProxySettingsTests(unittest.TestCase):
         )
         for domains, routes, message in (
             (roots, [{"name": "owui", "port": 3000, **R},
-                     {"name": "OWUI", "port": 3001, **R}], "duplikált"),
+                     {"name": "OWUI", "port": 3001, **R}], "duplicate"),
             (roots, [{"name": "x", "root": "z3.example.net", "port": 3000}],
-             "ismeretlen gyökérdomain"),
-            (roots, [{"name": "x", "port": 3000}], "ismeretlen gyökérdomain"),
-            # A bejegyzés hostneve egy másik gyökér.
+             "unknown root domain"),
+            (roots, [{"name": "x", "port": 3000}], "unknown root domain"),
+            # The entry's hostname is another root.
             (["example.com", ROOT_DOMAIN],
              [{"name": "z1", "root": "example.com", "port": 3000}],
-             "nem lehet gyökérdomain"),
-            # Bejegyzéssel rendelkező gyökér nem törölhető.
+             "cannot be a root domain"),
+            # A root that has entries cannot be deleted.
             ([ROOT_DOMAIN],
              [{"name": "owui", "port": 3000, **R},
               {"name": "owui", "root": SECOND_DOMAIN, "port": 3001}],
-             "ismeretlen gyökérdomain: z2.example.org"),
+             "unknown root domain: z2.example.org"),
         ):
             with self.subTest(domains=domains, routes=routes):
                 with self.assertRaisesRegex(
@@ -127,7 +127,7 @@ class ProxySettingsTests(unittest.TestCase):
                 ):
                     self.store.set_proxy(domains, routes)
         self.assertEqual(self.store.snapshot()["proxy_domains"], roots)
-        # A bejegyzései nélkül a gyökér törölhető.
+        # Without its entries the root can be deleted.
         stored = self.store.set_proxy(
             [ROOT_DOMAIN], [{"name": "owui", "port": 3000, **R}]
         )
@@ -151,7 +151,7 @@ class ProxySettingsTests(unittest.TestCase):
             [{"name": f"r{i}", "port": 3000 + i} for i in range(65)],
         ]
         cases = [[{**R, **item} for item in routes] for routes in cases]
-        cases += ["nem lista"] + [
+        cases += ["not a list"] + [
             [{"name": "ok", "port": port, **R}] for port in reserved
         ]
         for routes in cases:
@@ -173,7 +173,7 @@ class ProxySettingsTests(unittest.TestCase):
             {"name": "a", "root": ROOT_DOMAIN, "type": "input", "port": 3000,
              "enabled": True, "visibility": "private"}
         ])
-        # A következő írás már csak az új kulcsot tartalmazza.
+        # The next write contains only the new key.
         store.set_proxy(snap["proxy_domains"], snap["proxy_routes"])
         with open(self.path, encoding="utf-8") as fh:
             saved = json.load(fh)
@@ -203,7 +203,7 @@ class ProxySettingsTests(unittest.TestCase):
         stored = self.store.set_proxy([ROOT_DOMAIN], [
             {"name": "nas", "type": "forward", "ip": " 192.168.10.20 ",
              "port": 443, **R},
-            # A forward célra a host fenntartott portjai nem vonatkoznak.
+            # The host's reserved ports do not apply to the forward target.
             {"name": "ssh", "type": "forward", "ip": "10.0.0.5", "port": 22,
              **R},
         ])
@@ -239,7 +239,7 @@ class ProxySettingsTests(unittest.TestCase):
         for value in ("Public", "", None, True, "open"):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(
-                    settings_store.SettingsError, "láthatóság"
+                    settings_store.SettingsError, "visibility"
                 ):
                     self.store.set_proxy([ROOT_DOMAIN], [
                         {"name": "x", "port": 3000, "visibility": value, **R}
@@ -250,7 +250,7 @@ class ProxySettingsTests(unittest.TestCase):
         self.store.set_proxy(roots, [{"name": "owui", "port": 3000, **R}])
         for routes in (
             [], [{"name": "owui2", "port": 3000, **R}],
-            # Másik gyökér alá helyezés is eltünteti a hivatkozott hostnevet.
+            # Moving it under another root also makes the referenced hostname disappear.
             [{"name": "owui", "root": SECOND_DOMAIN, "port": 3000}],
         ):
             with self.subTest(routes=routes):
@@ -258,7 +258,7 @@ class ProxySettingsTests(unittest.TestCase):
                     settings_store.SettingsError, host("owui")
                 ):
                     self.store.set_proxy(roots, routes, {host("owui")})
-        # A cél módosítása (hostnév változatlan) megengedett.
+        # Changing the target (hostname unchanged) is allowed.
         stored = self.store.set_proxy(roots, [
             {"name": "owui", "type": "forward", "ip": "10.1.2.3", "port": 80,
              **R}
@@ -271,15 +271,15 @@ class ProxySettingsTests(unittest.TestCase):
         self.assertEqual(self.store.snapshot()["portal_domain"], "")
         stored = self.store.set_portal_domain(portal)
         self.assertEqual(stored["portal_domain"], portal)
-        # A böngészőből bemásolt URL és a nagybetű/záró pont is elfogadott.
+        # A URL pasted from the browser, and uppercase/a trailing dot, are accepted too.
         for pasted in (
             f"https://{portal}/", portal.upper() + ".",
-            f"https://{portal}:443/utvonal",
+            f"https://{portal}:443/path",
         ):
             with self.subTest(pasted=pasted):
                 stored = self.store.set_portal_domain(pasted)
                 self.assertEqual(stored["portal_domain"], portal)
-        # A portál challenge-e a címhez tartozik; kikapcsoláskor törlődik.
+        # The portal's challenge belongs to the address; it is deleted when disabled.
         stored = self.store.set_proxy(
             [ROOT_DOMAIN], [],
             portal_challenge={"triggers": ["always"], "interval_hours": 24},
@@ -292,16 +292,16 @@ class ProxySettingsTests(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaises(settings_store.SettingsError):
                     self.store.set_portal_domain(value)
-        # Ütközés egy meglévő proxy-bejegyzéssel.
+        # Collision with an existing proxy entry.
         with self.assertRaisesRegex(
-            settings_store.SettingsError, "proxy-bejegyzés"
+            settings_store.SettingsError, "proxy entry"
         ):
             self.store.set_proxy([ROOT_DOMAIN], [
                 {"name": "dropjak", "port": 3000, **R}
             ])
-        # A gyökér nem törölhető a portál címe alól.
+        # The root cannot be deleted from under the portal's address.
         with self.assertRaisesRegex(
-            settings_store.SettingsError, "gyökérdomain alatt"
+            settings_store.SettingsError, "under a root domain"
         ):
             self.store.set_proxy([SECOND_DOMAIN], [])
         stored = self.store.set_portal_domain("")
@@ -310,9 +310,9 @@ class ProxySettingsTests(unittest.TestCase):
 
     def test_root_entry_requires_a_dedicated_portal_address(self) -> None:
         entry = {"name": "", "port": 3000, **R}
-        # A portál saját címe nélkül a gyökér a portálé.
+        # Without the portal's own address the root belongs to the portal.
         with self.assertRaisesRegex(
-            settings_store.SettingsError, "saját portálcím"
+            settings_store.SettingsError, "dedicated portal address"
         ):
             self.store.set_proxy([ROOT_DOMAIN], [entry])
         self.store.set_proxy([ROOT_DOMAIN], [])
@@ -322,12 +322,12 @@ class ProxySettingsTests(unittest.TestCase):
             settings_store.route_host(stored["proxy_routes"][0]), ROOT_DOMAIN
         )
         with self.assertRaisesRegex(
-            settings_store.SettingsError, "duplikált"
+            settings_store.SettingsError, "duplicate"
         ):
             self.store.set_proxy([ROOT_DOMAIN], [entry, dict(entry)])
-        # Szabály hivatkozhat a gyökérre szóló bejegyzésre, ezért nem tűnhet el.
+        # A rule may reference the entry for the root, so it must not disappear.
         with self.assertRaisesRegex(
-            settings_store.SettingsError, "hivatkozik"
+            settings_store.SettingsError, "references it"
         ):
             self.store.set_proxy(
                 [ROOT_DOMAIN], [], referenced={ROOT_DOMAIN}
@@ -350,7 +350,7 @@ class ProxySettingsTests(unittest.TestCase):
 
 def add_session(manager, ip, domains=(), *, authorized=True, ttl=60,
                 role=gateway.ROLE_USER, full=False):
-    """Munkamenet közvetlen beillesztése egy választással."""
+    """Insert a session directly with one selection."""
     now = time.time()
     grants = (gateway.Ports(full=True),) if full else ()
     manager._sessions[ip] = gateway.Session(
@@ -391,7 +391,7 @@ class DomainRuleStoreTests(unittest.TestCase):
         self.assertEqual(
             self.store.domain_references(), {host("owui"), host("nas")}
         )
-        # Újratöltés után is ugyanaz, portok nélkül.
+        # After a reload it is the same, without ports.
         reloaded = gateway.RuleStore(
             self.store.path, catalog=self.store.catalog,
             logger=lambda *_: None,
@@ -414,7 +414,7 @@ class DomainRuleStoreTests(unittest.TestCase):
                 with self.assertRaises(gateway.RuleStoreError):
                     self.store.create("dom", {"label": "x", **data})
         self.assertIsNone(self.store.get("dom"))
-        # Bejegyzésnév-forrás nélkül domain szabály nem menthető.
+        # Without an entry-name source a domain rule cannot be saved.
         self.store.domain_names = None
         with self.assertRaises(gateway.RuleStoreError):
             self.store.create("dom", {"label": "x", "domains": [host("owui")]})
@@ -429,7 +429,7 @@ class DomainRuleStoreTests(unittest.TestCase):
         self.assertEqual(
             coll.grants, (gateway.Ports(tcp=(80,), direction="forward"),)
         )
-        # Kiosztás nélküli régi fiók nem örökli a domain szabályt.
+        # A legacy account without an assignment does not inherit the domain rule.
         legacy = types.SimpleNamespace(
             name="old", role=gateway.ROLE_USER, rules=(), rules_set=False
         )
@@ -440,7 +440,7 @@ class DomainRuleStoreTests(unittest.TestCase):
 
 
 class DomainRuleMigrationTests(unittest.TestCase):
-    """A 3.6 előtti, pont nélküli domain-hivatkozások átalakítása."""
+    """Conversion of the pre-3.6, dotless domain references."""
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -502,7 +502,7 @@ class DomainRuleMigrationTests(unittest.TestCase):
         self.assertEqual(
             len(glob.glob(self.rules_path + ".domains-backup-*")), 1
         )
-        # A migrált szabály ugyanúgy enged, és a hivatkozásvédelem is él.
+        # The migrated rule allows the same, and the reference protection is live too.
         self.assertEqual(
             gw.rules.domain_names(), {host("owui"), host("nas")}
         )
@@ -514,7 +514,7 @@ class DomainRuleMigrationTests(unittest.TestCase):
             gw.settings.set_proxy(
                 [ROOT_DOMAIN], [], gw.rules.domain_references()
             )
-        # Újraindítás után (a régi kulcs már nélkül) is teljes hostnév marad.
+        # After a restart (already without the old key) the full hostname remains.
         gw.settings.set_proxy(
             [ROOT_DOMAIN], gw.settings.snapshot()["proxy_routes"],
             gw.rules.domain_references(),
@@ -535,11 +535,11 @@ class DomainRuleMigrationTests(unittest.TestCase):
         self.write_settings("")
         gw = self.gateway()
         self.assertEqual(gw.rules.get("dom").domains, (host("nas"),))
-        # A csak feloldhatatlan nevű szabály kimarad, a többi megmarad.
+        # The rule with only unresolvable names is left out, the rest remains.
         self.assertIsNone(gw.rules.get("old"))
         self.assertEqual(gw.rules.get("web").tcp, (80,))
-        self.assertTrue(any("fel nem oldható" in line for line in self.logs))
-        # Nem sérült fájl: nincs félretéve és nincs átírva.
+        self.assertTrue(any("cannot be resolved" in line for line in self.logs))
+        # Not a corrupted file: it is not set aside and not rewritten.
         self.assertEqual(
             Path(self.rules_path).read_text(encoding="utf-8"), before
         )
@@ -580,13 +580,13 @@ class DomainSessionTests(unittest.TestCase):
         self.assertEqual(authorized.snapshot()["domains"], ["owui"])
         self.assertEqual(tools.script(), [])
         self.assertTrue(manager.allows_domain("192.168.50.23", "owui"))
-        # Port szabállyal együtt csak a port kerül a kernelbe.
+        # Together with a port rule only the port goes into the kernel.
         manager.authorize(session.token, "192.168.50.23", [rule, web], 600)
         script = tools.script()
         self.assertEqual(len(script), 1, script)
         self.assertIn("allowed_tcp { 192.168.50.23 . 80 ", script[0])
         self.assertTrue(manager.allows_domain("192.168.50.23", "owui"))
-        # A domain választás eltávolítása nem nyúl a tűzfalhoz.
+        # Removing the domain selection does not touch the firewall.
         tools.clear()
         self.assertEqual(manager.revoke_rule("dom"), 1)
         self.assertEqual(tools.lines(), [])
@@ -615,7 +615,7 @@ class ProxyEndpointTests(unittest.TestCase):
              "port": 5001, **R},
             {"name": "wiki", "port": 3002, **R},
             {"name": "pub", "port": 3003, "visibility": "public", **R},
-            # Ugyanaz az aldomain a második gyökér alatt, másik céllal.
+            # The same subdomain under the second root, with a different target.
             {"name": "owui", "root": SECOND_DOMAIN, "type": "forward",
              "ip": "192.168.10.30", "port": 8080},
         ])
@@ -627,7 +627,7 @@ class ProxyEndpointTests(unittest.TestCase):
         add_session(sessions, cls.ADMIN, full=True, role=gateway.ROLE_ADMIN)
         add_session(sessions, cls.EXPIRED, (host("owui"),), ttl=-1)
         add_session(sessions, cls.SECOND, (host("owui", SECOND_DOMAIN),))
-        # Az audit- és drop-sorok rögzítése a navigáció/401 tesztekhez.
+        # Recording of the audit and drop rows for the navigation/401 tests.
         cls.audits, cls.drops = [], []
         cls.certs = settings_store.CertStore(
             os.path.join(cls.tmp.name, "certs"), logger=lambda *_: None
@@ -723,14 +723,14 @@ class ProxyEndpointTests(unittest.TestCase):
         resp, _ = self.auth("wiki." + ROOT_DOMAIN, self.OTHER_DOMAIN)
         self.assertEqual(resp.status, 200)
         self.assertEqual(resp.getheader("X-Dropjak-Upstream"), "127.0.0.1:3002")
-        # Több elemű XFF-nél az utolsó (a Caddy által látott) IP számít.
+        # With a multi-element XFF the last IP (the one Caddy sees) counts.
         resp, _ = self.auth(
             "owui." + ROOT_DOMAIN, f"203.0.113.9, {self.AUTHORIZED}"
         )
         self.assertEqual(resp.status, 200)
 
     def test_unauthorized_variants_get_login_page(self) -> None:
-        for ip in ("198.51.100.99", self.BANNED, "", "nem-ip",
+        for ip in ("198.51.100.99", self.BANNED, "", "not-ip",
                    f"{self.AUTHORIZED}, 203.0.113.9", self.PORT_ONLY,
                    self.OTHER_DOMAIN, self.ADMIN, self.EXPIRED):
             with self.subTest(ip=ip):
@@ -744,16 +744,16 @@ class ProxyEndpointTests(unittest.TestCase):
                 page = body.decode("utf-8")
                 self.assertIn("/__dropjak/unauthorized.png", page)
                 self.assertIn(f'href="https://{ROOT_DOMAIN}/"', page)
-                # Ikonos belépés-gomb: kék téglalap, SVG-ikon, akadálymentes név.
+                # Icon-only login button: blue rectangle, SVG icon, accessible name.
                 self.assertIn('class="login"', page)
                 self.assertIn('aria-label="Log in"', page)
                 self.assertIn('title="Log in"', page)
                 self.assertNotIn('class="state-icon"', page)
                 self.assertIn("<svg", page)
-                # A gomb a kép alatt, középen: blokk-szintű, automatikus
-                # vízszintes margóval (különben a kép mellé csúszna).
+                # The button is below the image, centered: block-level, with an automatic
+                # horizontal margin (otherwise it would slide next to the image).
                 self.assertIn("margin:20px auto 0", page)
-                # A tiltó oldalon nincs látható szöveg a régi magyar feliratokból.
+                # The login page has no visible text from the old Hungarian captions.
                 visible = re.sub(r"<[^>]+>", " ", page)
                 for removed in (
                     "Nincs hozzáférés", "Bejelentkezés",
@@ -763,7 +763,7 @@ class ProxyEndpointTests(unittest.TestCase):
                         self.assertNotIn(removed, visible)
 
     def test_login_url_ignores_portal_url(self) -> None:
-        # A captive PORTAL_URL a LAN-címe; a tiltóoldal a HTTPS-gyökérre mutat.
+        # The captive PORTAL_URL is the LAN address; the login page points to the HTTPS root.
         old = gateway.PORTAL_URL
         gateway.PORTAL_URL = 'http://portal/"><script>'
         try:
@@ -785,10 +785,10 @@ class ProxyEndpointTests(unittest.TestCase):
                         resp.getheader("X-Dropjak-Upstream"),
                         f"127.0.0.1:{gateway.PORT}",
                     )
-            # Ismeretlen IP: mint bármely publikus bejegyzésnél, 401.
+            # Unknown IP: as with any public entry, 401.
             resp, _ = self.auth(portal, "")
             self.assertEqual(resp.status, 401)
-            # A gyökér bejegyzés nélkül már nem a portálé: nincs tanúsítványa.
+            # Without an entry the root no longer belongs to the portal: it has no certificate.
             resp, _ = self.auth(ROOT_DOMAIN, "198.51.100.99")
             self.assertEqual(resp.status, 404)
             self.assertIsNone(resp.getheader("X-Dropjak-Upstream"))
@@ -796,14 +796,14 @@ class ProxyEndpointTests(unittest.TestCase):
             self.assertEqual(resp.status, 404)
             resp, _ = self.get(f"/api/proxy/ask?domain={portal}")
             self.assertEqual(resp.status, 200)
-            # A portál címe is tiltja a loopback-végpontokat a Caddyn át.
+            # The portal's address also blocks the loopback endpoints through Caddy.
             resp, _ = self.get("/api/proxy/auth", {
                 "X-Forwarded-Host": portal,
                 "X-Forwarded-For": "198.51.100.99",
                 "X-Forwarded-Uri": "/api/proxy/auth",
             })
             self.assertEqual(resp.status, 404)
-            # A portál címére is kérhető challenge; a captcha-oldal jön.
+            # A challenge can be requested for the portal's address too; the captcha page comes.
             self.settings.set_proxy(
                 [ROOT_DOMAIN, SECOND_DOMAIN],
                 self.settings.snapshot()["proxy_routes"],
@@ -812,7 +812,7 @@ class ProxyEndpointTests(unittest.TestCase):
             resp, body = self.auth(portal, "198.51.100.99")
             self.assertEqual(resp.status, 403)
             self.assertIn(b"proxy_challenge", body)
-            # Üres nevű bejegyzés: a gyökér saját szolgáltatást ad.
+            # An entry with an empty name: the root provides its own service.
             snap = self.settings.snapshot()
             self.settings.set_proxy(
                 snap["proxy_domains"],
@@ -844,23 +844,23 @@ class ProxyEndpointTests(unittest.TestCase):
                 self.assertEqual(
                     resp.getheader("X-Dropjak-Upstream"), "127.0.0.1:3003"
                 )
-        for ip in (self.BANNED, "", "nem-ip"):
+        for ip in (self.BANNED, "", "not-ip"):
             with self.subTest(ip=ip):
                 resp, _ = self.auth(name, ip)
                 self.assertEqual(resp.status, 401)
                 self.assertIsNone(resp.getheader("X-Dropjak-Upstream"))
-        # A privát bejegyzés továbbra is domain szabályt kér.
+        # The private entry still requires a domain rule.
         resp, _ = self.auth(host("owui"), "198.51.100.99")
         self.assertEqual(resp.status, 401)
 
     def test_guard_uses_raw_peer(self) -> None:
-        # Loopback peer külső XFF-fel (a Caddy) átjut az őrön ...
+        # A loopback peer with an external XFF (Caddy) gets through the guard ...
         resp, _ = self.get(
             f"/api/proxy/ask?domain={ROOT_DOMAIN}",
             {"X-Forwarded-For": "203.0.113.9"},
         )
         self.assertEqual(resp.status, 200)
-        # ... az idegen peer hamis loopback XFF-fel nem.
+        # ... a foreign peer with a forged loopback XFF does not.
         for path in (f"/api/proxy/ask?domain={ROOT_DOMAIN}",
                      "/api/proxy/unauthorized.png"):
             with self.subTest(path=path):
@@ -882,7 +882,7 @@ class ProxyEndpointTests(unittest.TestCase):
                     resp.getheader("X-Dropjak-Upstream"),
                     f"127.0.0.1:{gateway.PORT}",
                 )
-        # A Caddyn át a proxy-végpontok nem érhetők el (ott a peer loopback).
+        # Through Caddy the proxy endpoints are unreachable (there the peer is loopback).
         for uri in ("/api/proxy/auth", "/api/proxy/ask?domain=x",
                     "/api/proxy/unauthorized.png"):
             with self.subTest(uri=uri):
@@ -908,8 +908,8 @@ class ProxyEndpointTests(unittest.TestCase):
         self.assertEqual(
             resp.getheader("X-Dropjak-Upstream"), "192.168.10.30:8080"
         )
-        # Az owui.<A> szabály nem nyitja az owui.<B>-t, és fordítva; a
-        # tiltóoldal a kért bejegyzés saját gyökerére mutat.
+        # The owui.<A> rule does not open owui.<B>, and vice versa; the
+        # login page points to the requested entry's own root.
         for name, ip, root in (
             (second, self.AUTHORIZED, SECOND_DOMAIN),
             (host("owui"), self.SECOND, ROOT_DOMAIN),
@@ -930,7 +930,7 @@ class ProxyEndpointTests(unittest.TestCase):
 
 
 class ProxiedPortalHttpTests(unittest.TestCase):
-    """A portál a gyökérdomainen, a Caddyn át (loopback peer + XFF)."""
+    """The portal on the root domain, through Caddy (loopback peer + XFF)."""
 
     CLIENT = "198.51.100.77"
     PORTAL = "http://192.168.10.1:8100/"
@@ -1026,8 +1026,8 @@ class ProxiedPortalHttpTests(unittest.TestCase):
             s.ip == self.CLIENT for s in self.gw.sessions._sessions.values()
         ))
         self.assertEqual(self.last_audit("login_success")["ip"], self.CLIENT)
-        # Sikertelen belépés: a fail2ban is a valódi kliens IP-t számolja.
-        resp, _ = self.login(self.proxied("198.51.100.78"), "rossz-jelszo")
+        # Failed login: fail2ban also counts the real client IP.
+        resp, _ = self.login(self.proxied("198.51.100.78"), "wrong-password")
         self.assertEqual(resp.status, 403)
         self.assertIn("198.51.100.78", self.gw.fail2ban._attempts)
         self.assertEqual(self.last_audit("login_failed")["ip"], "198.51.100.78")
@@ -1040,15 +1040,15 @@ class ProxiedPortalHttpTests(unittest.TestCase):
     def test_forged_xff_from_non_loopback_is_ignored(self) -> None:
         resp, _ = self.login(
             {"Host": "192.168.10.1:8100", "X-Forwarded-For": "203.0.113.5"},
-            "rossz-jelszo", source="127.0.0.2",
+            "wrong-password", source="127.0.0.2",
         )
         self.assertEqual(resp.status, 403)
         self.assertIn("127.0.0.2", self.gw.fail2ban._attempts)
         self.assertNotIn("203.0.113.5", self.gw.fail2ban._attempts)
         self.assertEqual(self.last_audit("login_failed")["ip"], "127.0.0.2")
-        # Érvénytelen XFF loopbackről: a peer marad, nincs összeomlás.
+        # Invalid XFF from loopback: the peer remains, no crash.
         resp, _ = self.request(
-            "GET", "/api/status", self.proxied("nem-ip, ::zz")
+            "GET", "/api/status", self.proxied("not-ip, ::zz")
         )
         self.assertEqual(resp.status, 200)
 
@@ -1141,13 +1141,13 @@ class ProxyFirewallTemplateTests(unittest.TestCase):
 
 
 class ProductNameTests(unittest.TestCase):
-    """A látható terméknév Dropjak; a technikai azonosítók változatlanok."""
+    """The visible product name is Dropjak; the technical identifiers are unchanged."""
 
     def test_server_header_and_cli_description(self) -> None:
         self.assertEqual(server.Handler.server_version, "Dropjak/2")
         source = (ROOT / "server.py").read_text(encoding="utf-8")
         self.assertIn(
-            'description="Felhasználók kezelése a Dropjak users.json fájljában."',
+            'description="Manage users in the Dropjak users.json file."',
             source,
         )
         for line in source.splitlines():
@@ -1155,7 +1155,7 @@ class ProductNameTests(unittest.TestCase):
                 "hatarvedelem" in line
                 and ("server_version" in line or "description=" in line)
             ):
-                self.fail(f"látható terméknév maradt: {line.strip()}")
+                self.fail(f"visible product name remained: {line.strip()}")
 
 
 if __name__ == "__main__":

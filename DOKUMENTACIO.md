@@ -1,6 +1,6 @@
 # Dropjak — documentation
 
-This file unifies all Markdown documentation of the project, with the exception of `README.md`, which remains separate and unchanged. The merge took place on 2026-10-22; at the beginning of each section an italic line indicates which original file the content comes from (the original files can be found in the git history). The heading levels were shifted (the original H1 became the section title) and the links between documents point to the anchors of this file. The whole document was translated into English on 2026-10-23; quoted UI labels, API validation messages and log strings keep their original Hungarian wording. Code blocks, tables and `file:line` references are otherwise unchanged, and the original Hungarian text remains available in the git history.
+This file unifies all Markdown documentation of the project, with the exception of `README.md`, which remains separate and unchanged. The merge took place on 2026-10-22; at the beginning of each section an italic line indicates which original file the content comes from (the original files can be found in the git history). The heading levels were shifted (the original H1 became the section title) and the links between documents point to the anchors of this file. The whole document was translated into English on 2026-10-23; quoted UI labels keep their original Hungarian wording, while API validation messages and log strings are shown in the English form the server emits. Code blocks, tables and `file:line` references are otherwise unchanged, and the original Hungarian text remains available in the git history.
 
 ## Contents
 
@@ -235,7 +235,7 @@ The approximate order of the forward chain:
 9. `preauth` chain; pre-auth means bypassing the portal, and it also covers the response direction.
 10. Everything else drop.
 
-The input chain is similarly fail-closed, but with the portal, DHCP and LAN DNS as exceptions. Host SSH is opened by the `(IP, 22) ∈ allowed_input_tcp` pair; the generic established rule does not keep revoked SSH alive. After the `block` jump, but before the MAC guards, the portal and SSH rules, `jump preauth_input` follows: this implements the `input` direction of `preauth` entries, with direct `accept` (no forward mark and no `preauth_nat`). The chain starts with the `banned_v4` drop, matches traffic by `ct original ip daddr`/`ct original proto-dst`, and restricts it to the configured LAN and WAN interfaces. If neither interface is known, rendering stops with an error in Hungarian.
+The input chain is similarly fail-closed, but with the portal, DHCP and LAN DNS as exceptions. Host SSH is opened by the `(IP, 22) ∈ allowed_input_tcp` pair; the generic established rule does not keep revoked SSH alive. After the `block` jump, but before the MAC guards, the portal and SSH rules, `jump preauth_input` follows: this implements the `input` direction of `preauth` entries, with direct `accept` (no forward mark and no `preauth_nat`). The chain starts with the `banned_v4` drop, matches traffic by `ct original ip daddr`/`ct original proto-dst`, and restricts it to the configured LAN and WAN interfaces. If neither interface is known, rendering stops with an error.
 
 #### 4.4. Portal and captive portal
 The HTTP traffic of an unauthorized client is redirected by the prerouting chain to the portal. The portal is always reachable from the LAN; access from the WAN depends on the value of `HV_PORTAL_NET`. The `block` and `preauth` rules look at the pre-DNAT (original) destination, so for a Docker-published service the VM's public address and the published host port must be used, not the container's internal address. Pre-auth in the `input` direction intentionally does not get a `preauth_nat` exception: TCP 80 from the LAN is still redirected to the portal, while the host port from the WAN is directly reachable.
@@ -1277,7 +1277,7 @@ Success is a generic confirmation that does not reveal whether a username or
 email was already present. The message text below is illustrative.
 
 ```json
-{"ok": true, "message": "Kérelmedet rögzítettük. Az admin jóváhagyása után beléphetsz."}
+{"ok": true, "message": "Your request has been recorded. After admin approval you can log in."}
 ```
 
 | Situation | HTTP | Response |
@@ -1877,7 +1877,7 @@ discard the rule but yields empty resolved ports (fail-closed).
 
 The admin endpoint remains `POST /api/admin/rules`. The response is the full
 admin state (`_admin_state()`), and on a successful duplication additionally
-`"message": "Szabály duplikálva."`.
+`"message": "Rule duplicated."`.
 
 ##### Creating or modifying a standalone rule
 
@@ -1970,7 +1970,7 @@ the error indicates this.
 {
   "action": "duplicate",
   "id": "web-only",
-  "label": "Csak web — másolat",
+  "label": "Web only — copy",
   "new_id": "web-only-copy"
 }
 ```
@@ -1980,8 +1980,8 @@ the error indicates this.
   identifier: `web-only-copy`, then on collision `web-only-2`, `web-only-3`,
   … The generated identifier is at most 32 characters and matches the
   rule-identifier format.
-- Default name: `<source name> (copy)`; the interface sends the localized
-  "másolat" suffix.
+- Default name: `<source name> (copy)`; the interface sends a localized copy
+  suffix (HU "másolat", DE "Kopie").
 - The copy takes over the description, the TTLs, and for a standalone rule
   the ports/ICMP/full access, and for a collection the member list. For a
   collection, the resolved ports are **not** written into the copy's stored
@@ -1991,21 +1991,21 @@ the error indicates this.
 
 ##### Errors
 
-Errors arrive with HTTP 400 and a Hungarian `error` text, for example:
+Errors arrive with HTTP 400 and an English `error` text, for example:
 
-- `members: 1–64 szabály-azonosítóból álló lista kell`
-- `members: legalább 1 és legfeljebb 64 egyedi szabály kell`
-- `members: ismétlődő szabály-azonosító`
-- `ismeretlen szabály a gyűjtőszabályban: …`
-- `a gyűjtőszabály nem tartalmazhat másik gyűjtőszabályt: …`
-- `a gyűjtőszabály nem tartalmazhat teljes hozzáférésű szabályt: …`
-- `service_refs: 1–64 szolgáltatás-hivatkozásból álló lista kell`
-- `service_refs: ismétlődő szolgáltatás-hivatkozás`
-- `ismeretlen vagy letiltott szolgáltatás: …`
-- `szolgáltatás-szabályhoz nem adható meg tcp, udp, icmp, full, members, domains`
-- `a kiválasztott szolgáltatásokhoz nincs elérhető port`
-- `tunnel: a szolgáltatás nem törölhető, mert szabály hivatkozik rá; …`
-- `a(z) … szabály nem törölhető, mert tagja a következő gyűjtőszabályoknak: …; előbb vedd ki a tagok közül`
+- `members: a list of 1–64 rule identifiers is required`
+- `members: at least 1 and at most 64 unique rules are required`
+- `members: duplicate rule identifier`
+- `unknown rule in the collection rule: …`
+- `a collection rule cannot contain another collection rule: …`
+- `a collection rule cannot contain a full-access rule: …`
+- `service_refs: a list of 1–64 service references is required`
+- `service_refs: duplicate service reference`
+- `unknown or disabled service: …`
+- `a service rule cannot have tcp, udp, icmp, full, members, domains`
+- `the selected services have no available port or domain`
+- `tunnel: the service cannot be deleted because a rule references it; …`
+- `rule … is a member of the following collection rules: …; first remove it from the members`
 
 #### Revoking sessions
 
@@ -2808,7 +2808,7 @@ otherwise the reply is a 400; a well-formed but unknown code simply matches
 nothing. The Logs tab sends its searchable multi-select as `events=`.
 
 The `ip` filter takes a single IPv4/IPv6 address or a CIDR range
-(`192.168.10.0/24`); anything else is a 400 with a Hungarian error. It
+(`192.168.10.0/24`); anything else is a 400 with an error. It
 matches when any of `ip`, `target`, `target_ip`, `session_ip` or
 `request_ip` holds an address inside the range, so admin actions on an
 address (e.g. a ban or unban, which carry it in `target`) are found too.
@@ -2850,7 +2850,7 @@ accidentally persist a secret in a normal key:
 - Exact keys `pass`, `password`, `password_hash`, `hash`, `secret`,
   `totp_secret`, `code`, `recovery`, `recovery_code`, `cookie`, `token`,
   `ticket` and `otpauth_uri` are **omitted** from the entry. The process log
-  records only the field name (`[napló] érzékeny mező elhagyva: <key>`),
+  records only the field name (`[audit] sensitive field omitted: <key>`),
   never the value.
 - Passwords, password hashes, TOTP codes and secrets, recovery codes and
   their hashes, cookies, `otpauth://` URIs and full session/ticket tokens are
@@ -3190,19 +3190,19 @@ In the service row of the agent card the **Teszt** (Test) button
 agent's DNAT, without touching the public WAN address and the loopback: the
 server opens a TCP connection to the port of the agent's `10.77.0.x` address to
 which both Caddy and the DNAT forward. The connection being established is
-success; the cause of the failure is shown in Hungarian
-(`időtúllépés`, `elutasítva`, `hálózati hiba: …`). For `udp` and `both`
+success; the cause of the failure is shown in English
+(`timeout`, `refused`, `network error: …`). For `udp` and `both`
 protocols a zero-byte UDP probe is also sent: no response is expected, so
 silence is success; `ConnectionRefusedError` (ICMP unreachable) is failure. For
 `both` TCP is authoritative, but the UDP probe also runs. A single call
 examines at most four mappings in parallel, for at most six seconds in total;
-the response is per mapping `{proto, listen, target, ok, detail}` and a
-Hungarian summary line. The test is read-only: it writes no setting, does not
+the response is per mapping `{proto, listen, target, ok, detail}` and an
+English summary line. The test is read-only: it writes no setting, does not
 touch nftables, and starts nothing. Every call gets a `tunnel_service_test`
 audit entry with the agent/service identifier, the protocols, the listener and
 target ports and the results; token, key or PSK never go into the log. For a
 disabled agent or service, or an unknown identifier, the operation is rejected
-with a Hungarian error.
+with an English error.
 
 #### Home agent
 

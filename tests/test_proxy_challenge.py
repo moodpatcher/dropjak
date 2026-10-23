@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""A proxy-bejegyzések challenge-e (captcha-kapu).
+"""Challenges for proxy entries (captcha gate).
 
-* a ``challenge`` mező érvényesítése (settings_store);
-* a /api/proxy/auth döntése: a challenge csak engedélyezett (200) kérésnél,
-  403-mal, a fail2ban- és drop-számlálás nélkül; feltételenként;
-* a belépő süti (aláírás, host, IP, lejárat) és a /api/gate/challenge
-  végpont (PoW-feladvány, megoldás, Set-Cookie, hibák számolása);
-* a feltöltött wildcarddal fedett ismeretlen aldomain: mindig challenge,
-  utána a gyökérre irányít (belépő nélkül), ACME nélkül.
+* validation of the ``challenge`` field (settings_store);
+* the /api/proxy/auth decision: the challenge only for an authorized (200)
+  request, with 403, without fail2ban and drop counting; per condition;
+* the entry cookie (signature, host, IP, expiry) and the /api/gate/challenge
+  endpoint (PoW puzzle, solution, Set-Cookie, failure counting);
+* an unknown subdomain covered by the uploaded wildcard: always a challenge,
+  then redirects to the root (without an entry), without ACME.
 """
 
 from __future__ import annotations
@@ -78,7 +78,7 @@ class ChallengeSettingsTests(unittest.TestCase):
             route["challenge"],
             {"triggers": ["interval", "new_ip"], "interval_hours": 6},
         )
-        # Időköz nélkül a megadott óraszám nem számít (24 marad).
+        # Without an interval the given hour count does not count (24 remains).
         self.assertEqual(
             self.save({"triggers": ["always"], "interval_hours": 0})["challenge"],
             {"triggers": ["always"], "interval_hours": 24},
@@ -138,7 +138,7 @@ class ChallengeHttpTests(unittest.TestCase):
         sessions = gateway.SessionManager(firewall=None)
         private = [tp.host(r["name"]) for r in self.ROUTES
                    if r.get("visibility") != "public" and r.get("enabled", True)]
-        # A gyökér és a *.gyökér feltöltött tanúsítványa (ismeretlen aldomain).
+        # The uploaded certificate for the root and *.root (unknown subdomain).
         certs = settings_store.CertStore(
             os.path.join(self.tmp.name, "certs"), logger=lambda *_: None
         )
@@ -206,7 +206,7 @@ class ChallengeHttpTests(unittest.TestCase):
     def events(self, event):
         return [f for e, f in self.audits if e == event]
 
-    # -- döntési mátrix ----------------------------------------------------
+    # -- decision matrix ---------------------------------------------------
 
     def test_no_trigger_and_root_pass(self) -> None:
         self.assertEqual(self.status(tp.host("plain")), 200)
@@ -225,7 +225,7 @@ class ChallengeHttpTests(unittest.TestCase):
         self.assertIn("Verified", page)
         self.assertIn("const sha256 = (() => {", page)
         self.assertIn(".captcha-inner", page)
-        # Szöveg nélküli állapotoldal: csak a kép és az angol captcha.
+        # Text-free status page: only the image and the English captcha.
         self.assertNotIn('class="state-icon"', page)
         self.assertIn("<svg", page)
         self.assertIn("<title>Dropjak</title>", page)
@@ -239,8 +239,8 @@ class ChallengeHttpTests(unittest.TestCase):
                 self.assertNotIn(removed, page)
         self.assertNotIn("<a ", page)
         self.assertNotIn("<button", page)
-        # A captcha-szkript érvényes JS kell legyen: a Python escape miatt
-        # egyszer szintaxishiba lett, és a captcha el sem indult.
+        # The captcha script must be valid JS: because of a Python escape it once
+        # became a syntax error, and the captcha never started.
         node = shutil.which("node")
         if node:
             script = page[page.index("<script>") + len("<script>"):
@@ -269,7 +269,7 @@ class ChallengeHttpTests(unittest.TestCase):
         tampered = good[:-1] + ("0" if good[-1] != "0" else "1")
         for cookie in (
             tampered, "garbage", "a.b", self.cookie("plain"),
-            self.cookie(name, issued=time.time() - 7200, ttl=3600),  # lejárt
+            self.cookie(name, issued=time.time() - 7200, ttl=3600),  # expired
             self.cookie(name, issued=time.time() - 90000, ttl=200000),  # >24 h
         ):
             with self.subTest(cookie=cookie):
@@ -295,7 +295,7 @@ class ChallengeHttpTests(unittest.TestCase):
         self.assertEqual(self.status(tp.host(name), cookie=self.cookie(name)), 200)
 
     def test_new_ip_binds_pass_to_ip(self) -> None:
-        # IP-kötés nélkül a "*" belépő bármely IP-ről jó.
+        # Without IP binding the "*" entry is good from any IP.
         loose = self.cookie("pub")
         self.assertEqual(self.status(tp.host("pub"), OTHER, loose), 200)
         name = "ipbound"
@@ -315,7 +315,7 @@ class ChallengeHttpTests(unittest.TestCase):
         self.assertEqual(self.status(tp.host(name)), 403)
         self.assertEqual(self.status(tp.host(name), cookie=early), 403)
         self.assertEqual(self.status(tp.host(name), cookie=self.cookie(name)), 200)
-        # A belépési számláló nem proxy-401: az after_401-et nem élesíti.
+        # The login counter is not proxy-401: it does not arm after_401.
         self.f2b.record_failure(OTHER, "x")
         self.assertEqual(self.status(tp.host("pub"), OTHER, self.cookie("pub")), 200)
 
@@ -339,7 +339,7 @@ class ChallengeHttpTests(unittest.TestCase):
             {**NAV, "User-Agent": ""},
             {k: v for k, v in NAV.items() if k != "Accept-Language"},
             {"Accept": "text/html", "Accept-Language": "hu",
-             "User-Agent": "Mozilla/5.0"},  # navigáció Sec-Fetch nélkül
+             "User-Agent": "Mozilla/5.0"},  # navigation without Sec-Fetch
         ):
             with self.subTest(headers=headers):
                 self.assertEqual(self.status(name, headers=headers), 403)
@@ -352,17 +352,17 @@ class ChallengeHttpTests(unittest.TestCase):
         name = tp.host("burst")
         server._PROXY_BURST.clear()
         old = self.cookie("burst", issued=time.time() - 60)
-        for _ in range(20):  # XHR/asset kérés nem számít
+        for _ in range(20):  # an XHR/asset request does not count
             self.assertEqual(self.status(name, cookie=old, headers=XHR), 200)
         for _ in range(server.PROXY_BURST_LIMIT - 1):
             self.assertEqual(self.status(name, cookie=old), 200)
         self.assertEqual(self.status(name, cookie=old), 403)
-        # A régi belépő az észlelés után sem jó (XHR-re sem), az új igen.
+        # The old entry is no good after detection either (not even for XHR), the new one is.
         self.assertEqual(self.status(name, cookie=old), 403)
         self.assertEqual(self.status(name, cookie=old, headers=XHR), 403)
         self.assertEqual(self.status(name), 403)
         self.assertEqual(self.status(name, cookie=self.cookie("burst")), 200)
-        self.assertEqual(self.status(name, OTHER), 200)  # IP-nként számol
+        self.assertEqual(self.status(name, OTHER), 200)  # counts per IP
         self.assertEqual(self.events("proxy_challenge_shown")[0]["triggers"],
                          "burst")
 
@@ -421,10 +421,10 @@ class ChallengeHttpTests(unittest.TestCase):
         passed = self.events("proxy_challenge_passed")
         self.assertEqual(passed[0]["host"], name)
         self.assertEqual(passed[0]["triggers"], "new_ip")
-        # Visszajátszás: sikertelen, és proxy-találatnak számít.
+        # Replay: fails, and counts as a proxy hit.
         resp, body = self.gate(name, "POST", {"captcha": solution})
         self.assertEqual(resp.status, 403)
-        self.assertIn("fel volt használva", json.loads(body)["error"])
+        self.assertIn("the captcha was already used", json.loads(body)["error"])
         self.assertGreater(self.f2b.last_hit(USER, proxy_only=True), 0)
         self.assertEqual(len(self.events("proxy_challenge_failed")), 1)
 
@@ -457,7 +457,7 @@ class ChallengeHttpTests(unittest.TestCase):
         self.f2b.ban(USER, 600)
         self.assertEqual(self.gate(name)[0].status, 403)
 
-    # -- ismeretlen (vagy kikapcsolt), wildcarddal fedett aldomain ----------
+    # -- unknown (or disabled) subdomain covered by the wildcard --------------
 
     def test_unknown_covered_host_always_gets_challenge(self) -> None:
         for name in (tp.host("x"), tp.host("off")):
@@ -470,7 +470,7 @@ class ChallengeHttpTests(unittest.TestCase):
                 self.assertIn('id="powbox"', page)
                 self.assertIn("location.href = data.redirect", page)
                 self.assertNotIn("<a ", page)
-                # Belépő, munkamenet és feltétel nem számít.
+                # Entry, session and condition do not count.
                 self.assertEqual(
                     self.status(name, STRANGER, self.cookie("off")), 403
                 )
@@ -481,14 +481,14 @@ class ChallengeHttpTests(unittest.TestCase):
                 self.assertNotIn("triggers", shown[0])
                 resp, body = self.auth(name, headers=XHR)
                 self.assertEqual(json.loads(body)["code"], "proxy_challenge")
-                # ACME-t ismeretlen névre soha nem kér.
+                # It never asks for ACME for an unknown name.
                 resp, _ = self.request(
                     "GET", f"/api/proxy/ask?domain={name}", {}
                 )
                 self.assertEqual(resp.status, 404)
         self.assertEqual(self.drops, [])
         self.assertEqual(self.f2b.snapshot()["proxy_pending"], 0)
-        # Nem fedett ismeretlen név: változatlanul 404.
+        # Uncovered unknown name: still 404.
         for name in (f"a.b.{tp.ROOT_DOMAIN}", "x.example.org"):
             with self.subTest(host=name):
                 self.assertEqual(self.status(name), 404)

@@ -1,31 +1,34 @@
-# Dropjak — portállal védett aldomain-proxy (Caddy)
+# Dropjak — portal-gated subdomain proxy (Caddy)
 #
-# Statikus konfiguráció, újratöltés nélkül. Az útvonalakat a portál tárolja
-# (Admin → Domainek), és a Caddy kérésenként a portál loopback-végpontjait
-# kérdezi:
-#   - /api/proxy/cert: feltöltött tanúsítvány (lánc + kulcs) a névre, ha
-#     lefedi (ismeretlen aldomainre is), vagy 204, ha nincs; ekkor jön az on-demand ACME (get_certificate http, minden
-#     olyan kézfogásnál, amelyhez nincs tanúsítvány a Caddy memóriájában);
-#   - /api/proxy/ask: kérhető-e ACME-tanúsítvány az adott névre (on-demand
-#     TLS; az Admin → Beállítások kapcsolójával kikapcsolva mindig nem);
-#   - /api/proxy/auth: a kliens IP-jének munkamenete választott-e a
-#     bejegyzést tartalmazó domain szabályt, és hova kell továbbítani
-#     (X-Dropjak-Upstream: 127.0.0.1:<port> vagy <ip>:<port>); ha a
-#     bejegyzés challenge-et kér, 403-as captcha-oldalt ad helyette;
-#   - /api/gate/challenge: a challenge-oldal captchája (/__dropjak/challenge).
-# A {$PORT} a portál portja; a compose adja át.
+# Static configuration, without reload. The portal stores the routes
+# (Admin -> Domains), and Caddy asks the portal's loopback endpoints on every
+# request:
+#   - /api/proxy/cert: the uploaded certificate (chain + key) for the name if
+#     it covers it (even for an unknown subdomain), or 204 if there is none;
+#     then on-demand ACME follows (get_certificate http, at every handshake
+#     for which there is no certificate in Caddy's memory);
+#   - /api/proxy/ask: whether an ACME certificate can be requested for the
+#     given name (on-demand TLS; always no when disabled with the
+#     Admin -> Settings switch);
+#   - /api/proxy/auth: whether the session of the client IP has selected the
+#     domain rule containing the entry, and where to forward
+#     (X-Dropjak-Upstream: 127.0.0.1:<port> or <ip>:<port>); if the entry
+#     requests a challenge, it returns a 403 captcha page instead;
+#   - /api/gate/challenge: the challenge page's captcha (/__dropjak/challenge).
+# {$PORT} is the portal port; compose passes it in.
 #
-# Admin API csak Unix socketen, TCP-port nélkül, a csak a portál és a Caddy
-# konténerébe csatolt caddy-admin köteten (a könyvtár root:hatarvedelem 0750,
-# a portál belépési pontja állítja be). A portál egyetlen hívása a POST /stop:
-# az ACME kikapcsolásakor és tanúsítványfeltöltéskor leállítja a Caddyt, a
-# compose (restart: unless-stopped) üres tanúsítvány-gyorsítótárral indítja
-# újra. A certmagic ugyanis a memóriában tartott tanúsítványt az ask és a
-# get_certificate előtt adja ki; a /data alól betölteni viszont csak az ask
-# engedélyével tölt be, így kikapcsolt ACME mellett újraindulás után sem.
+# The admin API is only on a Unix socket, without a TCP port, on the
+# caddy-admin volume mounted only into the portal's and Caddy's container
+# (the directory is root:hatarvedelem 0750, set by the portal's entrypoint).
+# The portal's only call is POST /stop: when ACME is disabled and when a
+# certificate is uploaded, it stops Caddy, and compose (restart:
+# unless-stopped) starts it again with an empty certificate cache. certmagic
+# issues a certificate kept in memory before ask and get_certificate; however,
+# it loads from /data only with ask's permission, so even after a restart it
+# does not load with ACME disabled.
 {
 	admin unix//run/caddy-admin/admin.sock|0666
-	# A /stop (és a docker stop) legfeljebb ennyit vár a nyitott kapcsolatokra.
+	# /stop (and docker stop) waits at most this long for open connections.
 	grace_period 5s
 	on_demand_tls {
 		ask http://127.0.0.1:{$PORT:8100}/api/proxy/ask
@@ -40,7 +43,8 @@ https:// {
 		on_demand
 		get_certificate http http://127.0.0.1:{$PORT:8100}/api/proxy/cert
 	}
-	# A tiltó- és a challenge-oldal képe a portálról jön, hitelesítés nélkül.
+	# The image of the login and challenge pages comes from the portal,
+	# without authentication.
 	handle /__dropjak/unauthorized.png {
 		rewrite * /api/proxy/unauthorized.png
 		reverse_proxy 127.0.0.1:{$PORT:8100}
@@ -49,33 +53,34 @@ https:// {
 		rewrite * /api/proxy/sus.png
 		reverse_proxy 127.0.0.1:{$PORT:8100}
 	}
-	# A challenge-oldal captchája (GET: feladvány, POST: megoldás + belépő
-	# süti); a portál csak challenge-es bejegyzés vagy a feltöltött
-	# tanúsítvánnyal fedett ismeretlen aldomain hostján válaszol.
+	# The challenge page's captcha (GET: puzzle, POST: solution + session
+	# cookie); the portal answers only on the host of a challenge entry or of
+	# an unknown subdomain covered by the uploaded certificate.
 	handle /__dropjak/challenge {
 		rewrite * /api/gate/challenge
 		reverse_proxy 127.0.0.1:{$PORT:8100}
 	}
 	handle {
-		# A nem 2xx választ (401 tiltóoldal, 302, 404) a Caddy változatlanul
-		# a kliensnek adja; 2xx esetén a célt mindig a portál állítja be.
+		# Caddy passes a non-2xx response (401 login page, 302, 404) to the
+		# client unchanged; on 2xx the portal always sets the target.
 		forward_auth 127.0.0.1:{$PORT:8100} {
 			uri /api/proxy/auth
 			copy_headers X-Dropjak-Upstream
 		}
 		reverse_proxy {http.request.header.X-Dropjak-Upstream} {
 			header_up -X-Dropjak-Upstream
-			# A challenge-belépő sütije nem jut el a célalkalmazáshoz.
+			# The challenge login cookie does not reach the target application.
 			header_up Cookie "__Host-dropjak_pass=[^;]*;?\s*" ""
 			header_up Cookie ";\s*$" ""
 		}
 	}
 }
 
-# A 80-as port célját a portál adja (/api/proxy/redirect, mindig 3xx): saját
-# névre https://<host><uri>, minden másra (nincs rá tanúsítvány) a gyökér
-# portálja. Az aktív ACME HTTP-01 kihívást a Caddy minden útvonal előtt
-# kezeli; a többi kihívás-útvonal nem jut a portálhoz.
+# The target of port 80 is set by the portal (/api/proxy/redirect, always
+# 3xx): for its own name https://<host><uri>, for everything else (no
+# certificate for it) the root portal. The active ACME HTTP-01 challenge is
+# handled by Caddy before every route; the other challenge routes do not
+# reach the portal.
 http:// {
 	handle /.well-known/acme-challenge/* {
 		redir https://{host}{uri} 308
@@ -85,7 +90,7 @@ http:// {
 			uri /api/proxy/redirect
 		}
 	}
-	# Elérhetetlen portál: a régi átirányítás.
+	# Portal unreachable: the old redirect.
 	handle_errors {
 		redir https://{host}{uri} 308
 	}

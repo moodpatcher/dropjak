@@ -1,20 +1,20 @@
 #!/usr/sbin/nft -f
 #
-# Dropjak — korai boot-védelem Dockeres telepítéshez
+# Dropjak — early boot protection for Docker-based installations
 #
-# A Docker daemon csak a rendszer indítása után áll fel. A konténer addig
-# nem tudja betölteni a végleges szabályokat, ezért ebben az időablakban
-# szabályozatlan forgalom mehetne át, és az SSH is nyitva lehetne. Ezt a
-# szűk táblát a hoston egy korai systemd unit tölti be
-# (hatarvedelem-boot.service), a konténer belépési pontja pedig a végleges
-# szabályok betöltése után törli.
+# The Docker daemon only comes up after the system has started. Until then,
+# the container cannot load the final rules, so during this time window
+# unfiltered traffic could pass through, and SSH could also be open. This
+# narrow table is loaded on the host by an early systemd unit
+# (hatarvedelem-boot.service), and the container entrypoint deletes it
+# after loading the final rules.
 #
-# A forward-lánc mellett az input 22-es portját is eldobja: a host SSH a
-# portál indulása előtt nem lehet elérhető. A portál a végleges szabályok
-# betöltése után veszi át a helyét. A tábla IDEMPOTENS módon tölthető újra.
+# Besides the forward chain, it also drops input port 22: host SSH must
+# not be reachable before the portal starts. The portal takes over after
+# the final rules are loaded. The table can be reloaded IDEMPOTENTLY.
 #
-# Kézi betöltés:  nft -f /etc/nftables/hatarvedelem-boot.nft
-# Eltávolítás:    nft delete table inet hatarvedelem_boot
+# Manual load:  nft -f /etc/nftables/hatarvedelem-boot.nft
+# Removal:      nft delete table inet hatarvedelem_boot
 
 add table inet hatarvedelem_boot
 
@@ -34,19 +34,18 @@ flush chain inet hatarvedelem_boot forward
 flush chain inet hatarvedelem_boot input
 flush chain inet hatarvedelem_boot loopback_guard
 
-# A portál még nem fut, ezért a host SSH-t a végleges szabályok
-# betöltéséig mindenhonnan eldobjuk. A loopback kivétel, hogy a helyi
-# adminisztráció ne akadjon el.
+# The portal is not running yet, so host SSH is dropped from everywhere
+# until the final rules are loaded. Loopback is the exception so that
+# local administration is not blocked.
 table inet hatarvedelem_boot {
     chain input {
         iifname "lo" accept
         tcp dport 22 drop
     }
 
-    # A hoston net.ipv4.conf.all.route_localnet=1 (az input port proxy
-    # loopback-céljához): a kívülről érkező 127/8 célú vagy forrású csomag
-    # a végleges szabályok betöltése előtt sem érheti el a loopback
-    # szolgáltatásokat.
+    # On the host net.ipv4.conf.all.route_localnet=1 (for the input port proxy
+    # loopback target): packets with a destination or source in 127/8 from
+    # outside must not reach the loopback services before the final rules are loaded.
     chain loopback_guard {
         iifname != "lo" ip daddr 127.0.0.0/8 drop
         iifname != "lo" ip saddr 127.0.0.0/8 drop

@@ -1,53 +1,55 @@
 #!/usr/bin/env python3
 """
-Dropjak — a tűzfal adminisztrátori testreszabása.
+Dropjak — administrative customization of the firewall.
 
-Két, a portálon kezelhető szabálytípust tárol:
+Stores two rule types manageable in the portal:
 
-* ``preauth``: bejelentkezés előtt is nyitva lévő célok és portok. A
-  ``direction`` mezőjük ``forward`` (alapértelmezett: továbbított forgalom,
-  a forward láncban) vagy ``input`` (a portálgép saját szolgáltatása, a
-  ``preauth_input`` láncban) lehet; a hiányzó mező betöltéskor ``forward``.
-  A forward irány a portál-munkamenet nélkül is átengedi a forgalmat (és
-  megjelöli a Docker-védelemhez). Üres cél esetén minden célra érvényes.
-  Csak akkor használható, ha a cél és a port tudatosan nyilvános; az
-  ``input`` irány a portál kapuját megkerülve nyit host-portot.
-* ``block``: mindig eldobott célok és portok. A blokk a pre-auth szabályt
-  is felülbírálja.
+* ``preauth``: destinations and ports open even before login. Their
+  ``direction`` field may be ``forward`` (default: forwarded traffic, in the
+  forward chain) or ``input`` (a service of the portal host itself, in the
+  ``preauth_input`` chain); a missing field becomes ``forward`` on load.
+  The forward direction lets traffic through even without a portal session
+  (and marks it for Docker protection). An empty destination applies to every
+  destination. Use it only when the destination and port are intentionally
+  public; the ``input`` direction opens a host port bypassing the portal
+  gateway.
+* ``block``: destinations and ports that are always dropped. The block
+  overrides the pre-auth rule too.
 
-A ``site_name`` a tűzfal/portál megjelenített neve (üresen a beépített
-``Dropjak`` név érvényes); a portál fejlécében, a böngésző címében és az új
-2FA-beiratkozások issuer/címkéjeként jelenik meg.
+The ``site_name`` is the displayed name of the firewall/portal (when empty
+the built-in name ``Dropjak`` applies); it appears in the portal header, the
+browser title and as the issuer/labels of new 2FA enrollments.
 
-A ``motd_text`` és ``motd_expires_at`` a bejelentkezés utáni közlemény
-(MOTD): a szöveg üresen kikapcsolja, az ISO-8601 UTC lejárat üresen
-állandó. A lejárt közleményt a portál már nem kapja meg.
+``motd_text`` and ``motd_expires_at`` are the post-login notice (MOTD): an
+empty text disables it, an empty ISO-8601 UTC expiry means permanent. The
+portal no longer receives an expired notice.
 
-A ``proxy_domains`` és a ``proxy_routes`` a Caddy-alapú aldomain-proxy
-beállításai (üres gyökérlista = kikapcsolva): ``<név>.<root>`` (a ``root``
-a gyökérdomainek egyike) a host (``input``) vagy egy mögötte álló
-magánhálózati gép (``forward``, ``ip``) ``<port>`` portjára mutat. A
-``visibility`` ``private`` (domain szabály kell) vagy ``public`` (bárki). A
-``challenge`` (``{"triggers": [...], "interval_hours": n}``, elhagyható) a
-proxy challenge (captcha) feltételeit adja; nélküle nincs challenge. A régi,
-egyetlen ``proxy_domain`` betöltéskor egyelemű listává alakul. A Caddy a portál loopback-végpontjait kérdezi
-kérésenként, ezért a módosításhoz nincs újratöltés és nftables-művelet.
-A ``proxy_acme`` (alapértelmezés: igaz) kikapcsolva megtiltja az on-demand
-ACME-tanúsítványkérést; ekkor csak a feltöltött tanúsítványok (CertStore,
-gyökérdomainenként a ``certs/`` könyvtárban) szolgálnak ki.
+``proxy_domains`` and ``proxy_routes`` configure the Caddy-based subdomain
+proxy (empty root list = disabled): ``<name>.<root>`` (``root`` being one of
+the root domains) points to the ``<port>`` of the host (``input``) or a
+private-network machine behind it (``forward``, ``ip``). ``visibility`` is
+``private`` (a domain rule is required) or ``public`` (anyone). ``challenge``
+(``{"triggers": [...], "interval_hours": n}``, optional) defines the
+conditions of the proxy challenge (captcha); without it there is no
+challenge. The old single ``proxy_domain`` becomes a one-element list on
+load. Caddy queries the portal's loopback endpoints per request, so no
+reload or nftables operation is needed for a change.
+``proxy_acme`` (default: true), when disabled, forbids on-demand ACME
+certificate requests; then only uploaded certificates (CertStore, per root
+domain in the ``certs/`` directory) are served.
 
-A ``port_proxies`` a kernelszintű (nftables DNAT) port proxy bejegyzései: a
-host ``listen_port`` portjára érkező TCP/UDP forgalom a hostra (``input``,
-``redirect``) vagy egy magánhálózati gépre (``forward``, ``target_ip``)
-kerül. Ezeket a Gateway nftables-láncokba rendereli, ezért ez az egyetlen
-proxy-beállítás, amely tűzfalműveletet igényel.
+``port_proxies`` holds the kernel-level (nftables DNAT) port proxy entries:
+TCP/UDP traffic arriving on the host's ``listen_port`` is sent to the host
+(``input``, ``redirect``) or a private-network machine (``forward``,
+``target_ip``). The Gateway renders these into nftables chains, so this is
+the only proxy setting that requires a firewall operation.
 
-A beállítások a state-kötetben, 0600 jogosultságú JSON-fájlban maradnak
-meg. A fájl sérülése esetén a pre-auth lista üres marad (fail-closed);
-az admin a felületen felülírhatja.
+The settings are kept in the state volume, in a JSON file with 0600
+permissions. If the file is damaged, the pre-auth list stays empty
+(fail-closed); the admin can overwrite it in the UI.
 
-A modul szándékosan nem nyúl az nftables-hez: a Gateway alkalmazza a
-szabályokat, és csak siker esetén commitálja a fájlt.
+The module deliberately does not touch nftables: the Gateway applies the
+rules and commits the file only on success.
 """
 
 from __future__ import annotations
@@ -82,10 +84,10 @@ MAX_MOTD = 2000
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 MAX_PROXY_ROUTES = 64
 MAX_PROXY_DOMAINS = 16
-# A set_proxy() jelölése arra, hogy a hívó nem adott challenge-et.
+# set_proxy()'s sentinel that the caller did not supply a challenge.
 UNSET = object()
 _DNS_LABEL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
-# Legalább kétcímkés, kisbetűs FQDN (gyökérdomain és teljes proxy-hostnév).
+# At least two-label, lowercase FQDN (root domain and full proxy hostname).
 _FQDN_RE = re.compile(
     r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
     r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"
@@ -94,47 +96,48 @@ try:
     PORTAL_PORT = int(os.environ.get("PORT", "").strip() or 8100)
 except ValueError:
     PORTAL_PORT = 8100
-# Proxy-célként tiltott portok. A portál a loopbackről érkező kérést a
-# Caddynak hiszi, ezért a portálra mutató útvonal megkerülné az ellenőrzést;
-# a 80/443 maga a Caddy (önmagára mutató hurok), a többi host-szolgáltatás.
+# Ports forbidden as proxy targets. The portal treats a request coming from
+# loopback as Caddy's, so a route pointing at the portal would bypass the
+# check; 80/443 are Caddy itself (a self-pointing loop), the rest are host
+# services.
 PROXY_RESERVED_PORTS = (22, 53, 67, 80, 443, 2019)
 PROXY_PRIVATE_NETS = tuple(
     ipaddress.IPv4Network(net)
     for net in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
 )
-# Port proxy (nftables DNAT). A hallgató port nem lehet a host saját
-# szolgáltatása (SSH, DNS, DHCP, a portál-átirányítás/Caddy 80/443, a Caddy
-# admin 2019) és a portál portja sem: ezeket a prerouting elvenné tőlük.
+# Port proxy (nftables DNAT). The listening port cannot be a service of the
+# host itself (SSH, DNS, DHCP, the portal redirect/Caddy 80/443, Caddy admin
+# 2019) or the portal port: prerouting would take these away from them.
 MAX_PORT_PROXIES = 64
 PORT_PROXY_RESERVED_LISTEN = (22, 53, 67, 80, 443, 2019)
-# Input proxy célja nem lehet az SSH (az csak explicit TCP 22 host
-# szabállyal nyílhat), a Caddy admin és a portál.
+# The input proxy's target cannot be SSH (it can only be opened by an
+# explicit TCP 22 host rule), Caddy admin or the portal.
 PORT_PROXY_RESERVED_INPUT_TARGET = (22, 2019)
-# WireGuard-alagút (felhő oldal): az ügynökök a 10.77.0.0/24 hálózaton
-# kapnak címet, a szerver a 10.77.0.1. A belső (alagút) portok ügynökönként
-# egyediek; a hallgató portok a port proxykkal közös névtérben vannak.
+# WireGuard tunnel (cloud side): agents get an address on the 10.77.0.0/24
+# network, the server is 10.77.0.1. Internal (tunnel) ports are unique per
+# agent; listening ports share a namespace with port proxies.
 MAX_TUNNEL_AGENTS = 16
 MAX_TUNNEL_SERVICES = 64
 TUNNEL_SUBNET = ipaddress.IPv4Network("10.77.0.0/24")
 TUNNEL_SERVER_ADDRESS = "10.77.0.1"
 TUNNEL_DEFAULT_PORT = 51820
-# Egy portleképezés, egy szolgáltatás és egy ügynök hatékony (portonkénti)
-# bejegyzései is legfeljebb ennyi portra bomolhatnak ki.
+# The effective (per-port) entries of a port mapping, a service and an agent
+# may also expand to at most this many ports.
 MAX_TUNNEL_PORTS = 256
 TUNNEL_RESERVED_TARGET_PORTS = (22, 2019)
-# A domaines (Caddy → ügynök → cél) alagút-szolgáltatás belső portja ebből a
-# tartományból kap automatikus, determinisztikus értéket. Ez a port a WAN-on
-# nem jelenik meg, csak a wg0 felől a Caddy felé.
+# The internal port of a domain-mode (Caddy → agent → target) tunnel service
+# gets an automatic, deterministic value from this range. This port does not
+# appear on the WAN, only towards Caddy from wg0.
 TUNNEL_DOMAIN_PORT_LOW = 41000
 TUNNEL_DOMAIN_PORT_HIGH = 60999
 _WG_KEY_BYTES = 32
-# A token URL-safe, legalább 32 karakter (a secrets.token_urlsafe(32) 43).
+# The token is URL-safe, at least 32 characters (secrets.token_urlsafe(32) is 43).
 _TUNNEL_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
-# Cél-hostnév: a Docker-szolgáltatásnevek aláhúzást is tartalmazhatnak.
+# Target hostname: Docker service names may also contain underscores.
 _TUNNEL_HOST_RE = re.compile(
     r"^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9._-]{0,251}[A-Za-z0-9])?$"
 )
-# A bejegyzés challenge-feltételei (lásd README: Challenge).
+# The entry's challenge conditions (see README: Challenge).
 PROXY_CHALLENGE_TRIGGERS = (
     "always", "interval", "daily", "after_401", "fail2ban", "suspicious",
     "new_ip", "burst",
@@ -146,52 +149,52 @@ def _default_log(message: str) -> None:
 
 
 class SettingsError(ValueError):
-    """Érvénytelen beállítás vagy bejegyzés."""
+    """Invalid setting or entry."""
 
 
 def _text(value, field: str, maximum: int = MAX_LABEL) -> str:
     if not isinstance(value, str):
-        raise SettingsError(f"{field}: szöveg kell")
+        raise SettingsError(f"{field}: must be a string")
     value = value.strip()
     if not value:
-        raise SettingsError(f"{field}: nem lehet üres")
+        raise SettingsError(f"{field}: must not be empty")
     if len(value) > maximum:
-        raise SettingsError(f"{field}: legfeljebb {maximum} karakter")
+        raise SettingsError(f"{field}: at most {maximum} characters")
     if any(ord(char) < 32 or ord(char) == 127 for char in value):
-        raise SettingsError(f"{field}: vezérlőkaraktert nem tartalmazhat")
+        raise SettingsError(f"{field}: must not contain control characters")
     return value
 
 
 def _site_name(value) -> str:
-    """A tűzfal neve: szöveg, körbevágva; üres is lehet."""
+    """The firewall's name: text, trimmed; may be empty."""
     if not isinstance(value, str):
-        raise SettingsError("site_name: szöveg kell")
+        raise SettingsError("site_name: must be a string")
     value = value.strip()
     if len(value) > MAX_SITE_NAME:
         raise SettingsError(
-            f"site_name: legfeljebb {MAX_SITE_NAME} karakter"
+            f"site_name: at most {MAX_SITE_NAME} characters"
         )
     if any(ord(char) < 32 or ord(char) == 127 for char in value):
-        raise SettingsError("site_name: vezérlőkaraktert nem tartalmazhat")
+        raise SettingsError("site_name: must not contain control characters")
     return value
 
 
 def _motd_text(value) -> str:
-    """A bejelentkezés utáni közlemény szövege; üres = kikapcsolva."""
+    """The text of the post-login notice; empty = disabled."""
     if not isinstance(value, str):
-        raise SettingsError("motd: szöveg kell")
+        raise SettingsError("motd: must be a string")
     value = value.strip()
     if len(value) > MAX_MOTD:
-        raise SettingsError(f"motd: legfeljebb {MAX_MOTD} karakter")
+        raise SettingsError(f"motd: at most {MAX_MOTD} characters")
     return value
 
 
 def _motd_expires(value) -> str:
-    """A közlemény lejárata ISO-8601 UTC-ben; üres = állandó."""
+    """The notice's expiry in ISO-8601 UTC; empty = permanent."""
     if value is None:
         return ""
     if not isinstance(value, str):
-        raise SettingsError("motd: a lejárat szöveg kell")
+        raise SettingsError("motd: the expiry must be a string")
     text = value.strip()
     if not text:
         return ""
@@ -201,11 +204,11 @@ def _motd_expires(value) -> str:
         )
     except ValueError:
         raise SettingsError(
-            "motd: érvénytelen lejárat (ISO-8601 időpont kell)"
+            "motd: invalid expiry (an ISO-8601 timestamp is required)"
         ) from None
     if parsed.tzinfo is None:
         raise SettingsError(
-            "motd: a lejáratnak időzónát is tartalmaznia kell"
+            "motd: the expiry must include a timezone"
         )
     return parsed.astimezone(datetime.timezone.utc).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
@@ -213,7 +216,7 @@ def _motd_expires(value) -> str:
 
 
 def active_motd(settings: dict, now: float | None = None) -> str:
-    """A még érvényes közlemény szövege; lejárt vagy üres esetén ""."""
+    """The text of the still-valid notice; "" when expired or empty."""
     text = settings.get("motd_text", "")
     if not text:
         return ""
@@ -228,102 +231,102 @@ def active_motd(settings: dict, now: float | None = None) -> str:
 
 
 def _proxy_domain(value) -> str:
-    """Egy gyökérdomain: kisbetűs FQDN, vagy üres."""
+    """A root domain: a lowercase FQDN, or empty."""
     if not isinstance(value, str):
-        raise SettingsError("proxy_domains: szöveg kell")
+        raise SettingsError("proxy_domains: must be a string")
     value = value.strip().lower()
     if value and not _FQDN_RE.match(value):
         raise SettingsError(
-            "proxy_domains: érvényes, kisbetűs domainnév kell "
-            "(pl. z1.example.com)"
+            "proxy_domains: a valid lowercase domain name is required "
+            "(e.g. z1.example.com)"
         )
     return value
 
 
 def _proxy_domains(raw) -> list[str]:
-    """A proxy gyökérdomainjei: egyedi FQDN-ek; üres lista = kikapcsolva."""
+    """The proxy root domains: unique FQDNs; an empty list = disabled."""
     if not isinstance(raw, list):
-        raise SettingsError("proxy_domains: lista kell")
+        raise SettingsError("proxy_domains: must be a list")
     if len(raw) > MAX_PROXY_DOMAINS:
         raise SettingsError(
-            f"proxy_domains: legfeljebb {MAX_PROXY_DOMAINS} gyökérdomain lehet"
+            f"proxy_domains: at most {MAX_PROXY_DOMAINS} root domains are allowed"
         )
     domains = [_proxy_domain(value) for value in raw]
     if "" in domains:
         raise SettingsError(
-            "proxy_domains: érvényes, kisbetűs domainnév kell "
-            "(pl. z1.example.com)"
+            "proxy_domains: a valid lowercase domain name is required "
+            "(e.g. z1.example.com)"
         )
     if len(set(domains)) != len(domains):
-        raise SettingsError("proxy: duplikált gyökérdomain")
+        raise SettingsError("proxy: duplicate root domain")
     return domains
 
 
 def route_host(route: dict) -> str:
-    """A bejegyzés teljes hostneve; az üres aldomainnév a gyökérdomain maga."""
+    """The entry's full hostname; an empty subdomain name means the root domain itself."""
     return f"{route['name']}.{route['root']}" if route["name"] else route["root"]
 
 
 def _proxy_routes(raw, domains=(), default_root: str = "") -> list[dict]:
-    """A bejegyzések; a ``default_root`` a gyökér nélküli régi bejegyzésé."""
+    """The entries; ``default_root`` is the root for legacy entries without one."""
     if not isinstance(raw, list):
-        raise SettingsError("proxy_routes: lista kell")
+        raise SettingsError("proxy_routes: must be a list")
     if len(raw) > MAX_PROXY_ROUTES:
         raise SettingsError(
-            f"proxy_routes: legfeljebb {MAX_PROXY_ROUTES} útvonal lehet"
+            f"proxy_routes: at most {MAX_PROXY_ROUTES} routes are allowed"
         )
     routes: list[dict] = []
     seen: set[str] = set()
     for item in raw:
         if not isinstance(item, dict):
-            raise SettingsError("proxy: az útvonal JSON-objektum kell")
+            raise SettingsError("proxy: the route must be a JSON object")
         name = item.get("name")
         if isinstance(name, str):
             name = name.strip().lower()
-        # Üres név: maga a gyökérdomain (csak saját portálcím mellett).
+        # Empty name: the root domain itself (only alongside its own portal address).
         if not isinstance(name, str) or (name and not _DNS_LABEL_RE.match(name)):
             raise SettingsError(
-                "proxy: az aldomain egyetlen DNS-címke kell "
-                "(a–z, 0–9, kötőjel)"
+                "proxy: the subdomain must be a single DNS label "
+                "(a–z, 0–9, hyphen)"
             )
         root = item.get("root", default_root)
         if isinstance(root, str):
             root = root.strip().lower()
         if root not in domains:
             raise SettingsError(
-                f"proxy: ismeretlen gyökérdomain: {root or '—'}; gyökérdomain "
-                "csak a bejegyzései törlése vagy áthelyezése után törölhető"
+                f"proxy: unknown root domain: {root or '—'}; a root domain "
+                "can be deleted only after its entries are deleted or moved"
             )
         host = f"{name}.{root}" if name else root
         if len(host) > 253:
-            raise SettingsError("proxy: a teljes hostnév legfeljebb 253 karakter")
+            raise SettingsError("proxy: the full hostname may be at most 253 characters")
         if host in seen:
-            raise SettingsError("proxy: duplikált teljes hostnév")
+            raise SettingsError("proxy: duplicate full hostname")
         if name and host in domains:
             raise SettingsError(
-                f"proxy: a teljes hostnév nem lehet gyökérdomain: {host}"
+                f"proxy: the full hostname cannot be a root domain: {host}"
             )
         port = item.get("port")
         if isinstance(port, bool) or not isinstance(port, int) \
                 or not 1 <= port <= 65535:
-            raise SettingsError("proxy: a port 1 és 65535 között lehet")
-        # A típus nélküli (régi) bejegyzés a host saját szolgáltatása.
+            raise SettingsError("proxy: the port must be between 1 and 65535")
+        # An entry without a type (legacy) is a service of the host itself.
         kind = item.get("type", "input")
         if kind not in ("input", "forward"):
-            raise SettingsError("proxy: a típus input vagy forward lehet")
+            raise SettingsError("proxy: the type must be input or forward")
         if kind == "input" and (
             port in PROXY_RESERVED_PORTS or port == PORTAL_PORT
         ):
             raise SettingsError(
-                "proxy: fenntartott port (portál, 22, 53, 67, 80, 443, 2019)"
+                "proxy: reserved port (portal, 22, 53, 67, 80, 443, 2019)"
             )
         enabled = item.get("enabled", True)
         if not isinstance(enabled, bool):
-            raise SettingsError("az enabled mező igaz/hamis érték kell")
-        # A láthatóság nélküli (régi) bejegyzés privát marad.
+            raise SettingsError("the enabled field must be true/false")
+        # An entry without visibility (legacy) remains private.
         visibility = item.get("visibility", "private")
         if visibility not in ("private", "public"):
-            raise SettingsError("proxy: a láthatóság private vagy public lehet")
+            raise SettingsError("proxy: the visibility must be private or public")
         seen.add(host)
         route = {
             "name": name, "root": root, "type": kind, "port": port,
@@ -339,25 +342,25 @@ def _proxy_routes(raw, domains=(), default_root: str = "") -> list[dict]:
 
 
 def _proxy_challenge(raw) -> dict | None:
-    """A challenge-feltételek; hiányzó vagy üres lista: nincs challenge."""
+    """The challenge conditions; a missing or empty list: no challenge."""
     if raw is None:
         return None
     if not isinstance(raw, dict):
-        raise SettingsError("proxy: a challenge JSON-objektum kell")
+        raise SettingsError("proxy: challenge must be a JSON object")
     triggers = raw.get("triggers", [])
     if not isinstance(triggers, list) or any(
         not isinstance(value, str) or value not in PROXY_CHALLENGE_TRIGGERS
         for value in triggers
     ):
-        raise SettingsError("proxy: ismeretlen challenge-feltétel")
+        raise SettingsError("proxy: unknown challenge trigger")
     if len(set(triggers)) != len(triggers):
-        raise SettingsError("proxy: duplikált challenge-feltétel")
+        raise SettingsError("proxy: duplicate challenge trigger")
     hours = raw.get("interval_hours", 24)
     if "interval" in triggers and (
         isinstance(hours, bool) or not isinstance(hours, int)
         or not 1 <= hours <= 720
     ):
-        raise SettingsError("proxy: a challenge-időköz 1 és 720 óra között lehet")
+        raise SettingsError("proxy: the challenge interval must be between 1 and 720 hours")
     if not triggers:
         return None
     return {
@@ -367,89 +370,88 @@ def _proxy_challenge(raw) -> dict | None:
 
 
 def _portal_domain(raw, domains, routes) -> str:
-    """A Dropjak felület saját Caddy-domainje, vagy "" (gyökérdomainek)."""
+    """The Dropjak UI's own Caddy domain, or "" (root domains)."""
     if not isinstance(raw, str):
-        raise SettingsError("portal_domain: szöveg kell")
+        raise SettingsError("portal_domain: must be a string")
     value = raw.strip().lower()
-    # A böngészőből bemásolt teljes URL-t is elfogadjuk.
+    # We also accept a full URL pasted from the browser.
     value = value.split("://", 1)[-1].split("/", 1)[0]
     value = value.rsplit("@", 1)[-1].split(":", 1)[0].rstrip(".")
     if not value:
         return ""
     if not _FQDN_RE.match(value):
         raise SettingsError(
-            "portal_domain: érvényes, kisbetűs domainnév kell "
-            "(pl. dropjak.z1.example.com)"
+            "portal_domain: a valid lowercase domain name is required "
+            "(e.g. dropjak.z1.example.com)"
         )
     if value in domains:
         raise SettingsError(
-            "portal_domain: a Dropjak címe nem lehet gyökérdomain"
+            "portal_domain: the Dropjak address cannot be a root domain"
         )
     if not any(value.endswith("." + root) for root in domains):
         raise SettingsError(
-            "portal_domain: a Dropjak címe csak gyökérdomain alatt lehet "
-            "(pl. dropjak.z1.example.com)"
+            "portal_domain: the Dropjak address must be under a root domain "
+            "(e.g. dropjak.z1.example.com)"
         )
     if any(route_host(route) == value for route in routes):
         raise SettingsError(
-            "portal_domain: már van ilyen proxy-bejegyzés"
+            "portal_domain: a proxy entry with this hostname already exists"
         )
     return value
 
 
 def _tunnel_service_domain(value, domains, routes, portal_domain) -> str:
-    """A domaines alagút-szolgáltatás teljes hostneve, vagy "".
+    """The full hostname of a domain-mode tunnel service, or "".
 
-    A domain csak egy beállított gyökérdomain szigorú aldomainje lehet, és
-    nem ütközhet a gyökérrel, a portál saját címével, egy proxy-bejegyzéssel
-    vagy egy másik szolgáltatás domainjével (az utóbbit a hívó ellenőrzi).
+    The domain can only be a strict subdomain of a configured root domain,
+    and must not collide with the root, the portal's own address, a proxy
+    entry, or another service's domain (the latter is checked by the caller).
     """
     if value is None:
         return ""
     if not isinstance(value, str):
-        raise SettingsError("tunnel: a domain szöveg kell")
+        raise SettingsError("tunnel: the domain must be a string")
     value = value.strip().lower()
     if not value:
         return ""
     if not _FQDN_RE.match(value):
         raise SettingsError(
-            "tunnel: érvényes, kisbetűs domainnév kell (pl. mc.example.com)"
+            "tunnel: a valid lowercase domain name is required (e.g. mc.example.com)"
         )
-    # A gyökérrel való egyezést külön is elutasítjuk: több gyökér esetén a
-    # gyökér egy hosszabb gyökér aldomainjének is látszhatna.
+    # We reject equality with the root separately too: with several roots,
+    # the root could also look like a subdomain of a longer root.
     if value in domains:
         raise SettingsError(
-            "tunnel: a szolgáltatás domainje nem lehet gyökérdomain"
+            "tunnel: the service domain cannot be a root domain"
         )
     if not any(value.endswith("." + root) for root in domains):
         raise SettingsError(
-            "tunnel: a szolgáltatás domainje csak proxy gyökérdomain alatt "
-            "lehet"
+            "tunnel: the service domain must be under a proxy root domain"
         )
     if portal_domain and value == portal_domain:
         raise SettingsError(
-            "tunnel: a szolgáltatás domainje nem lehet a Dropjak címe"
+            "tunnel: the service domain cannot be the Dropjak address"
         )
     if any(route_host(route) == value for route in routes):
-        raise SettingsError("tunnel: már van ilyen proxy-bejegyzés")
+        raise SettingsError("tunnel: a proxy entry with this hostname already exists")
     return value
 
 
 def _proxy_ip(value) -> str:
-    """Forward proxy-cél: egyetlen magánhálózati (RFC 1918) IPv4-cím."""
+    """Forward proxy target: a single private-network (RFC 1918) IPv4 address."""
     try:
         address = ipaddress.IPv4Address(
             value.strip() if isinstance(value, str) else ""
         )
     except ValueError:
         address = None
-    # A három RFC 1918 tartomány kizárja a loopbacket, a link-local,
-    # multicast és 0.0.0.0 címet is.
+    # The three RFC 1918 ranges exclude loopback, link-local, multicast and
+    # 0.0.0.0 as well.
     if address is None or not any(
         address in network for network in PROXY_PRIVATE_NETS
     ):
         raise SettingsError(
-            "proxy: a forward célhoz magánhálózati IPv4-cím kell "
+            "proxy: a forward target requires a private-network IPv4 address "
             "(10/8, 172.16/12, 192.168/16)"
         )
     return str(address)
@@ -458,60 +460,60 @@ def _proxy_ip(value) -> str:
 def _port_value(value, field: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) \
             or not 1 <= value <= 65535:
-        raise SettingsError(f"port proxy: a {field} 1 és 65535 között lehet")
+        raise SettingsError(f"port proxy: the {field} must be between 1 and 65535")
     return value
 
 
 def _port_proxy(item) -> dict:
-    """Egy port proxy bejegyzés ellenőrzése és normalizálása."""
+    """Validate and normalize a port proxy entry."""
     if not isinstance(item, dict):
-        raise SettingsError("port proxy: a bejegyzés JSON-objektum kell")
+        raise SettingsError("port proxy: the entry must be a JSON object")
     entry_id = item.get("id")
     if entry_id in (None, ""):
         entry_id = secrets.token_hex(4)
     if not isinstance(entry_id, str) or not _ID_RE.match(entry_id):
-        raise SettingsError("érvénytelen bejegyzés-azonosító")
-    label = _text(item.get("label"), "címke")
+        raise SettingsError("invalid entry ID")
+    label = _text(item.get("label"), "label")
     proto = item.get("proto")
     if proto not in ("tcp", "udp", "both"):
-        raise SettingsError("port proxy: a protokoll tcp, udp vagy both lehet")
+        raise SettingsError("port proxy: the protocol must be tcp, udp or both")
     kind = item.get("type")
     if kind not in ("input", "forward"):
-        raise SettingsError("port proxy: a típus input vagy forward lehet")
-    listen = _port_value(item.get("listen_port"), "hallgató port")
+        raise SettingsError("port proxy: the type must be input or forward")
+    listen = _port_value(item.get("listen_port"), "listen port")
     if listen in PORT_PROXY_RESERVED_LISTEN or listen == PORTAL_PORT:
         raise SettingsError(
-            "port proxy: fenntartott hallgató port "
-            "(portál, 22, 53, 67, 80, 443, 2019)"
+            "port proxy: reserved listen port "
+            "(portal, 22, 53, 67, 80, 443, 2019)"
         )
-    target = _port_value(item.get("target_port"), "célport")
+    target = _port_value(item.get("target_port"), "target port")
     ifaces = item.get("ifaces", "both")
     if ifaces not in ("wan", "lan", "both"):
-        raise SettingsError("port proxy: az interfész wan, lan vagy both lehet")
+        raise SettingsError("port proxy: the interface must be wan, lan or both")
     enabled = item.get("enabled", True)
     snat = item.get("snat", False)
     if not isinstance(enabled, bool) or not isinstance(snat, bool):
-        raise SettingsError("az enabled/snat mező igaz/hamis érték kell")
+        raise SettingsError("the enabled/snat fields must be true/false")
     target_ip = ""
     if kind == "forward":
         try:
             target_ip = _proxy_ip(item.get("target_ip"))
         except SettingsError:
             raise SettingsError(
-                "port proxy: a forward célhoz magánhálózati IPv4-cím kell "
+                "port proxy: a forward target requires a private-network IPv4 address "
                 "(10/8, 172.16/12, 192.168/16)"
             ) from None
     else:
         if target in PORT_PROXY_RESERVED_INPUT_TARGET or target == PORTAL_PORT:
             raise SettingsError(
-                "port proxy: az input célport nem lehet 22, 2019 vagy a portál"
+                "port proxy: the input target port cannot be 22, 2019 or the portal"
             )
         if target == listen:
-            # Azonos porton a redirect semmit nem tesz: ezt a host (input)
-            # szabály önmagában megnyitja, proxy nem kell hozzá.
+            # A redirect on the same port does nothing: the host (input)
+            # rule opens it by itself; no proxy is needed for this.
             raise SettingsError(
-                "port proxy: input proxy célportja nem lehet a hallgató port "
-                "(ehhez elég egy host szabály)"
+                "port proxy: the input proxy target port cannot be the listen "
+                "port (a host rule is enough for this)"
             )
         snat = False
     return {
@@ -522,12 +524,12 @@ def _port_proxy(item) -> dict:
 
 
 def _port_proxies(raw) -> list[dict]:
-    """A port proxy lista; a (protokoll, hallgató port) pár egyedi."""
+    """The port proxy list; the (protocol, listen port) pair is unique."""
     if not isinstance(raw, list):
-        raise SettingsError("port_proxies: lista kell")
+        raise SettingsError("port_proxies: must be a list")
     if len(raw) > MAX_PORT_PROXIES:
         raise SettingsError(
-            f"port_proxies: legfeljebb {MAX_PORT_PROXIES} bejegyzés lehet"
+            f"port_proxies: at most {MAX_PORT_PROXIES} entries are allowed"
         )
     entries: list[dict] = []
     ids: set[str] = set()
@@ -535,16 +537,16 @@ def _port_proxies(raw) -> list[dict]:
     for item in raw:
         entry = _port_proxy(item)
         if entry["id"] in ids:
-            raise SettingsError(f"duplikált bejegyzés-azonosító: {entry['id']}")
+            raise SettingsError(f"duplicate entry ID: {entry['id']}")
         ids.add(entry["id"])
-        # A kikapcsolt bejegyzés is foglalja a portot, hogy a bekapcsolása
-        # ne ütközhessen.
+        # A disabled entry also reserves the port, so enabling it cannot
+        # collide.
         protos = ("tcp", "udp") if entry["proto"] == "both" else (entry["proto"],)
         for proto in protos:
             key = (proto, entry["listen_port"])
             if key in keys:
                 raise SettingsError(
-                    "port proxy: a hallgató port már foglalt: "
+                    "port proxy: the listen port is already in use: "
                     f"{proto.upper()} {entry['listen_port']}"
                 )
             keys.add(key)
@@ -553,7 +555,7 @@ def _port_proxies(raw) -> list[dict]:
 
 
 def default_tunnels() -> dict:
-    """A WireGuard-alagút szakasz alapértelmezése (ügynök nélkül)."""
+    """The WireGuard tunnel section's default (without agents)."""
     return {
         "port": TUNNEL_DEFAULT_PORT,
         "endpoint": "",
@@ -564,26 +566,26 @@ def default_tunnels() -> dict:
 
 
 def _wg_key(value, field: str, required: bool = False) -> str:
-    """WireGuard-kulcs: base64, pontosan 32 bájt (kanonikus alakban)."""
+    """WireGuard key: base64, exactly 32 bytes (in canonical form)."""
     if value is None or value == "":
         if required:
-            raise SettingsError(f"{field}: hiányzó WireGuard-kulcs")
+            raise SettingsError(f"{field}: missing WireGuard key")
         return ""
     if not isinstance(value, str):
-        raise SettingsError(f"{field}: érvénytelen WireGuard-kulcs")
+        raise SettingsError(f"{field}: invalid WireGuard key")
     try:
         raw = base64.b64decode(value.strip().encode("ascii"), validate=True)
     except (ValueError, UnicodeEncodeError):
         raw = b""
     if len(raw) != _WG_KEY_BYTES:
         raise SettingsError(
-            f"{field}: érvénytelen WireGuard-kulcs (base64, 32 bájt kell)"
+            f"{field}: invalid WireGuard key (base64, 32 bytes required)"
         )
     return base64.b64encode(raw).decode("ascii")
 
 
 def _tunnel_address(value) -> str:
-    """Az ügynök címe a 10.77.0.0/24 hálózatban, 10.77.0.2–254."""
+    """The agent's address on the 10.77.0.0/24 network, 10.77.0.2–254."""
     try:
         address = ipaddress.IPv4Address(value if isinstance(value, str) else "")
     except ValueError:
@@ -591,68 +593,68 @@ def _tunnel_address(value) -> str:
     if address is None or address not in TUNNEL_SUBNET \
             or not 2 <= address.packed[-1] <= 254:
         raise SettingsError(
-            "tunnel: az ügynök címe 10.77.0.2 és 10.77.0.254 közötti IPv4 kell"
+            "tunnel: the agent address must be an IPv4 address between 10.77.0.2 and 10.77.0.254"
         )
     return str(address)
 
 
 def _tunnel_host(value, field: str) -> str:
     if not isinstance(value, str):
-        raise SettingsError(f"{field}: szöveg kell")
+        raise SettingsError(f"{field}: must be a string")
     value = value.strip()
     try:
         return str(ipaddress.IPv4Address(value))
     except ValueError:
         pass
     if not _TUNNEL_HOST_RE.match(value):
-        raise SettingsError(f"{field}: érvényes hostnév vagy IPv4-cím kell")
+        raise SettingsError(f"{field}: a valid hostname or IPv4 address is required")
     return value
 
 
 def _tunnel_endpoint(value) -> str:
-    """A nyilvános végpont hostneve; üresen a kérés Hostja érvényes."""
+    """The public endpoint hostname; when empty, the request's Host is used."""
     if value is None:
         return ""
     if not isinstance(value, str):
-        raise SettingsError("tunnel: a végpont szöveg kell")
+        raise SettingsError("tunnel: the endpoint must be a string")
     value = value.strip()
     if not value:
         return ""
     if any(ord(char) < 33 or ord(char) == 127 for char in value):
-        raise SettingsError("tunnel: a végpont nem tartalmazhat szóközt")
-    return _tunnel_host(value, "tunnel: a végpont")
+        raise SettingsError("tunnel: the endpoint must not contain whitespace")
+    return _tunnel_host(value, "tunnel: the endpoint")
 
 
 def _tunnel_target(value) -> str:
-    """A cél ``host:port`` alakban (hostnév vagy IPv4)."""
+    """The target in ``host:port`` form (hostname or IPv4)."""
     if not isinstance(value, str) or ":" not in value:
-        raise SettingsError("tunnel: a cél host:port alakú kell")
+        raise SettingsError("tunnel: the target must be in host:port form")
     host, _, port = value.strip().rpartition(":")
     if not host:
-        raise SettingsError("tunnel: a cél host:port alakú kell")
-    host = _tunnel_host(host, "tunnel: a cél")
+        raise SettingsError("tunnel: the target must be in host:port form")
+    host = _tunnel_host(host, "tunnel: the target")
     try:
         number = int(port, 10)
     except ValueError:
         number = 0
     if not 1 <= number <= 65535:
-        raise SettingsError("tunnel: a célport 1 és 65535 között lehet")
+        raise SettingsError("tunnel: the target port must be between 1 and 65535")
     return f"{host}:{number}"
 
 
 def _parse_tunnel_port_token(value: str, field: str) -> tuple[int, int]:
-    """Egy port vagy ``lo-hi`` tartomány (zárt intervallum)."""
+    """A port or ``lo-hi`` range (inclusive interval)."""
     text = value.strip().replace("–", "-").replace("—", "-")
     match = re.fullmatch(r"(\d+)(?:\s*-\s*(\d+))?", text)
     if match is None:
-        raise SettingsError(f"{field}: érvénytelen port: {value!r}")
+        raise SettingsError(f"{field}: invalid port: {value!r}")
     low = int(match.group(1))
     high = int(match.group(2)) if match.group(2) else low
     if not 1 <= low <= 65535 or not 1 <= high <= 65535:
-        raise SettingsError(f"{field}: a port 1 és 65535 között lehet: {value}")
+        raise SettingsError(f"{field}: the port must be between 1 and 65535: {value}")
     if low > high:
         raise SettingsError(
-            f"{field}: a tartomány kezdete nem lehet nagyobb a végénél: "
+            f"{field}: the range start cannot be greater than the end: "
             f"{value}"
         )
     return low, high
@@ -660,17 +662,17 @@ def _parse_tunnel_port_token(value: str, field: str) -> tuple[int, int]:
 
 def _tunnel_port_list(value, field: str,
                       maximum: int = MAX_TUNNEL_PORTS) -> tuple[int, ...]:
-    """Portlista a beírt sorrend megtartásával.
+    """Port list preserving the entered order.
 
-    Elfogad egész számot, vessző/szóköz/pontosvessző elválasztású szöveget
-    vagy listát; az elem lehet port vagy ``lo-hi`` tartomány. A tartomány
-    növekvő sorrendben bővül, a lista elemrendje viszont változatlan marad:
-    a hallgató és a célport párosítása indexenként, ugyanabban a sorrendben
-    történik. Ismétlődő port csak a párosítás utáni ellenőrzésnél hiba.
-    A korlát a felbontott portok számára vonatkozik.
+    Accepts an integer, a comma/space/semicolon separated string or a list;
+    an item may be a port or a ``lo-hi`` range. A range expands in ascending
+    order, but the list's item order stays unchanged: listen and target
+    ports are paired by index in the same order. A duplicate port is an error
+    only in the check after pairing. The limit applies to the number of
+    resolved ports.
     """
     if value is None:
-        raise SettingsError(f"{field}: portlista kell")
+        raise SettingsError(f"{field}: a port list is required")
     if isinstance(value, str):
         value = [
             part for part in re.split(r"[\s,;]+", value.strip()) if part
@@ -678,7 +680,7 @@ def _tunnel_port_list(value, field: str,
     elif isinstance(value, int) and not isinstance(value, bool):
         value = [value]
     if not isinstance(value, (list, tuple)):
-        raise SettingsError(f"{field}: portlista kell")
+        raise SettingsError(f"{field}: a port list is required")
     intervals: list[tuple[int, int]] = []
     for part in value:
         if isinstance(part, str):
@@ -689,23 +691,23 @@ def _tunnel_port_list(value, field: str,
         elif isinstance(part, int) and not isinstance(part, bool):
             intervals.append(_parse_tunnel_port_token(str(part), field))
         else:
-            raise SettingsError(f"{field}: érvénytelen port: {part!r}")
+            raise SettingsError(f"{field}: invalid port: {part!r}")
     if not intervals:
-        raise SettingsError(f"{field}: legalább egy port kell")
+        raise SettingsError(f"{field}: at least one port is required")
     total = sum(high - low + 1 for low, high in intervals)
     if total > maximum:
-        raise SettingsError(f"{field}: legfeljebb {maximum} port adható meg")
+        raise SettingsError(f"{field}: at most {maximum} ports may be given")
     return tuple(
         port for low, high in intervals for port in range(low, high + 1)
     )
 
 
 def _format_tunnel_port_sequence(ports) -> str:
-    """A portok tömör szövege a megadott (párosítási) sorrendben.
+    """The compact text of the ports in the given (pairing) order.
 
-    Csak az egymás után következő, növekvő portokat vonja össze
-    tartománnyá; a sorrendet nem rendezi át és nem is deduplikálja, így a
-    hallgató és a célportok párosítása a visszaolvasáskor is megmarad.
+    It merges only consecutive, ascending ports into a range; it neither
+    reorders nor deduplicates, so the listen and target port pairing is
+    preserved on read-back.
     """
     parts: list[str] = []
     if not ports:
@@ -724,12 +726,12 @@ def _format_tunnel_port_sequence(ports) -> str:
 
 
 def _pair_tunnel_ports(listen, target, proto: str) -> list[tuple[int, int]]:
-    """A hallgató és célportok indexenkénti párosítása és ellenőrzése.
+    """Index-wise pairing and validation of the listen and target ports.
 
-    Ismétlődő hallgató port csak azonos céllal és azonos protokollal
-    fordulhatna elő, de az is hiba; a célport ismétlődése viszont
-    megengedett (több hallgató port mutathat ugyanoda). A párok
-    hallgató, majd célport szerint rendezve térnek vissza.
+    A duplicate listen port could only occur with the same target and the same
+    protocol, but that is an error too; a duplicate target port is allowed
+    (several listen ports may point to the same place). The pairs are
+    returned sorted by listen port, then target port.
     """
     pairs = list(zip(listen, target))
     seen: dict[int, int] = {}
@@ -738,11 +740,11 @@ def _pair_tunnel_ports(listen, target, proto: str) -> list[tuple[int, int]]:
         if previous is not None:
             if previous != target_port:
                 raise SettingsError(
-                    "tunnel: ugyanaz a hallgató port eltérő célportra "
-                    f"mutat: {listen_port} ({previous} != {target_port})"
+                    "tunnel: the same listen port points to different target "
+                    f"ports: {listen_port} ({previous} != {target_port})"
                 )
             raise SettingsError(
-                "tunnel: a hallgató port többször szerepel: "
+                "tunnel: the listen port appears more than once: "
                 f"{proto.upper()} {listen_port}"
             )
         seen[listen_port] = target_port
@@ -750,55 +752,55 @@ def _pair_tunnel_ports(listen, target, proto: str) -> list[tuple[int, int]]:
 
 
 def _normalize_tunnel_mappings(raw_mappings) -> list[dict]:
-    """A ``mappings`` lista ellenőrzése és kanonikus alakba írása."""
+    """Validate the ``mappings`` list and write it into canonical form."""
     if not isinstance(raw_mappings, list):
-        raise SettingsError("tunnel: a mappings lista kell")
+        raise SettingsError("tunnel: mappings must be a list")
     if not raw_mappings:
-        raise SettingsError("tunnel: legalább egy portleképezés kell")
+        raise SettingsError("tunnel: at least one port mapping is required")
     mappings: list[dict] = []
     total = 0
     for index, raw in enumerate(raw_mappings, 1):
         if not isinstance(raw, dict):
             raise SettingsError(
-                f"tunnel: a(z) {index}. portleképezés JSON-objektum kell"
+                f"tunnel: port mapping #{index} must be a JSON object"
             )
         proto = raw.get("proto")
         if proto not in ("tcp", "udp", "both"):
-            raise SettingsError("tunnel: a protokoll tcp, udp vagy both lehet")
+            raise SettingsError("tunnel: the protocol must be tcp, udp or both")
         listen = _tunnel_port_list(
-            raw.get("listen"), "tunnel: a hallgató port"
+            raw.get("listen"), "tunnel: the listen port"
         )
-        target = _tunnel_port_list(raw.get("target"), "tunnel: a célport")
+        target = _tunnel_port_list(raw.get("target"), "tunnel: the target port")
         if len(target) != len(listen):
             if len(target) == 1 and len(listen) > 1:
                 raise SettingsError(
-                    "tunnel: egy célport nem felel meg több hallgató portnak"
+                    "tunnel: one target port cannot correspond to several listen ports"
                 )
             raise SettingsError(
-                "tunnel: a célportok száma nem egyezik a hallgató portokéval: "
+                "tunnel: the number of target ports does not match the number of listen ports: "
                 f"{len(listen)} != {len(target)}"
             )
         pairs = _pair_tunnel_ports(listen, target, proto)
         for port in listen:
             if port in PORT_PROXY_RESERVED_LISTEN or port == PORTAL_PORT:
                 raise SettingsError(
-                    "tunnel: fenntartott hallgató port "
-                    "(portál, 22, 53, 67, 80, 443, 2019)"
+                    "tunnel: reserved listen port "
+                    "(portal, 22, 53, 67, 80, 443, 2019)"
                 )
         for port in target:
             if port in TUNNEL_RESERVED_TARGET_PORTS:
                 raise SettingsError(
-                    "tunnel: a célport nem lehet 22 vagy 2019"
+                    "tunnel: the target port cannot be 22 or 2019"
                 )
         total += len(pairs)
         if total > MAX_TUNNEL_PORTS:
             raise SettingsError(
-                f"tunnel: szolgáltatásonként legfeljebb {MAX_TUNNEL_PORTS} "
-                "port képezhető le"
+                f"tunnel: at most {MAX_TUNNEL_PORTS} ports "
+                "can be mapped per service"
             )
-        # A kanonikus alak a párokat rendezi (hallgató, majd célport), és
-        # mindkét oldalt ugyanabban a pár-sorrendben írja ki, hogy a
-        # visszaolvasás ugyanígy párosítson.
+        # The canonical form sorts the pairs (listen, then target port) and
+        # writes both sides in the same pair order so that read-back pairs
+        # them the same way.
         mappings.append({
             "proto": proto,
             "listen": _format_tunnel_port_sequence(
@@ -812,68 +814,68 @@ def _normalize_tunnel_mappings(raw_mappings) -> list[dict]:
 
 
 def _normalize_tunnel_domain_mappings(raw_mappings) -> list[dict]:
-    """A domaines szolgáltatás egyetlen TCP-leképezésének ellenőrzése.
+    """Validate the single TCP mapping of a domain-mode service.
 
-    A domaines szolgáltatást a Caddy szolgálja ki HTTPS-en, ezért csak egy
-    TCP-leképezés értelmezett. A hallgató (belső alagút) port elhagyható:
-    ilyenkor a ``_tunnels`` osztja ki. A célport a megszokott módon egyetlen
-    port kell legyen.
+    A domain-mode service is served by Caddy over HTTPS, so only one TCP
+    mapping is meaningful. The listen (internal tunnel) port may be omitted:
+    in that case ``_tunnels`` assigns it. The target port must be a single
+    port as usual.
     """
     if not isinstance(raw_mappings, list):
-        raise SettingsError("tunnel: a mappings lista kell")
+        raise SettingsError("tunnel: mappings must be a list")
     if len(raw_mappings) != 1:
         raise SettingsError(
-            "tunnel: domaines szolgáltatáshoz pontosan egy portleképezés kell"
+            "tunnel: a domain-mode service requires exactly one port mapping"
         )
     raw = raw_mappings[0]
     if not isinstance(raw, dict):
         raise SettingsError(
-            "tunnel: a portleképezés JSON-objektum kell"
+            "tunnel: the port mapping must be a JSON object"
         )
     if raw.get("proto") != "tcp":
-        raise SettingsError("tunnel: domaines szolgáltatás csak TCP lehet")
+        raise SettingsError("tunnel: a domain-mode service can only be TCP")
     listen_text = ""
     listen_raw = raw.get("listen")
     if listen_raw not in (None, ""):
-        listen = _tunnel_port_list(listen_raw, "tunnel: a hallgató port")
+        listen = _tunnel_port_list(listen_raw, "tunnel: the listen port")
         if len(listen) != 1:
             raise SettingsError(
-                "tunnel: domaines szolgáltatáshoz egyetlen belső port kell"
+                "tunnel: a domain-mode service requires a single internal port"
             )
         if listen[0] in PORT_PROXY_RESERVED_LISTEN or listen[0] == PORTAL_PORT:
             raise SettingsError(
-                "tunnel: fenntartott belső port "
-                "(portál, 22, 53, 67, 80, 443, 2019)"
+                "tunnel: reserved internal port "
+                "(portal, 22, 53, 67, 80, 443, 2019)"
             )
         listen_text = str(listen[0])
-    target = _tunnel_port_list(raw.get("target"), "tunnel: a célport")
+    target = _tunnel_port_list(raw.get("target"), "tunnel: the target port")
     if len(target) != 1:
         raise SettingsError(
-            "tunnel: domaines szolgáltatáshoz egyetlen célport kell"
+            "tunnel: a domain-mode service requires a single target port"
         )
     if target[0] in TUNNEL_RESERVED_TARGET_PORTS:
-        raise SettingsError("tunnel: a célport nem lehet 22 vagy 2019")
+        raise SettingsError("tunnel: the target port cannot be 22 or 2019")
     return [{
         "proto": "tcp", "listen": listen_text, "target": str(target[0]),
     }]
 
 
 def _mapping_ports(mappings) -> list[dict]:
-    """A szolgáltatás leképezéseinek hatékony, portonkénti listája.
+    """The effective, per-port list of a service's mappings.
 
-    A tcp és udp ugyanarra a hallgató/cél portpárra ``both``-ra olvad össze;
-    eltérő célportnál és ismétlődő protokollnál hibát ad.
+    tcp and udp for the same listen/target port pair merge into ``both``; a
+    different target port or a duplicate protocol raises an error.
     """
     effective: dict[int, dict] = {}
     for mapping in mappings or []:
         proto = mapping.get("proto")
         listen = _tunnel_port_list(
-            mapping.get("listen"), "tunnel: a hallgató port"
+            mapping.get("listen"), "tunnel: the listen port"
         )
-        target = _tunnel_port_list(mapping.get("target"), "tunnel: a célport")
+        target = _tunnel_port_list(mapping.get("target"), "tunnel: the target port")
         if len(target) != len(listen):
             raise SettingsError(
-                "tunnel: a célportok száma nem egyezik a hallgató portokéval"
+                "tunnel: the number of target ports does not match the number of listen ports"
             )
         for listen_port, target_port in zip(listen, target):
             current = effective.get(listen_port)
@@ -885,14 +887,14 @@ def _mapping_ports(mappings) -> list[dict]:
                 continue
             if current["target_port"] != target_port:
                 raise SettingsError(
-                    "tunnel: ugyanaz a hallgató port eltérő célportra mutat: "
+                    "tunnel: the same listen port points to different target ports: "
                     f"{listen_port} ({current['target_port']} != {target_port})"
                 )
             if {current["proto"], proto} == {"tcp", "udp"}:
                 current["proto"] = "both"
                 continue
             raise SettingsError(
-                "tunnel: a hallgató port többször szerepel: "
+                "tunnel: the listen port appears more than once: "
                 f"{proto.upper()} {listen_port}"
             )
     return sorted(
@@ -902,19 +904,19 @@ def _mapping_ports(mappings) -> list[dict]:
 
 
 def tunnel_service_ports(service) -> list[dict]:
-    """Egy szolgáltatás hatékony portjai.
+    """The effective ports of a service.
 
-    Visszaadott elem: ``{proto, listen_port, target_port, tunnel_port}``,
-    ahol az alagút portja mindig a hallgató porttal egyezik. A lista a
-    hallgató port szerint rendezett.
+    Each returned item is ``{proto, listen_port, target_port, tunnel_port}``,
+    where the tunnel port always equals the listen port. The list is sorted
+    by listen port.
     """
     if not isinstance(service, dict):
-        raise SettingsError("tunnel: a szolgáltatás JSON-objektum kell")
+        raise SettingsError("tunnel: the service must be a JSON object")
     return _mapping_ports(service.get("mappings", []))
 
 
 def _agent_effective_ports(agent, enabled_only: bool) -> list[dict]:
-    """Az ügynök szolgáltatásainak összevont, portonkénti listája."""
+    """The combined, per-port list of the agent's services."""
     if not isinstance(agent, dict):
         return []
     effective: dict[int, dict] = {}
@@ -938,25 +940,25 @@ def _agent_effective_ports(agent, enabled_only: bool) -> list[dict]:
                 continue
             if item["target_port"] != current["target_port"]:
                 raise SettingsError(
-                    "tunnel: ugyanaz a hallgató port eltérő célportra mutat: "
+                    "tunnel: the same listen port points to different target ports: "
                     f"{listen_port}"
                 )
             if item["proto"] == current["proto"] \
                     or "both" in (item["proto"], current["proto"]):
                 raise SettingsError(
-                    "tunnel: a hallgató port többször szerepel az "
-                    f"ügynökön: {listen_port}"
+                    "tunnel: the listen port appears more than once on the "
+                    f"agent: {listen_port}"
                 )
             if service.get("target_host", "") != current["target_host"]:
                 raise SettingsError(
-                    "tunnel: ugyanaz a hallgató port eltérő célhostra mutat: "
+                    "tunnel: the same listen port points to different target hosts: "
                     f"{listen_port}"
                 )
             current["proto"] = "both"
     if len(effective) > MAX_TUNNEL_PORTS:
         raise SettingsError(
-            f"tunnel: ügynökönként legfeljebb {MAX_TUNNEL_PORTS} port "
-            "képezhető le"
+            f"tunnel: at most {MAX_TUNNEL_PORTS} ports "
+            "can be mapped per agent"
         )
     return sorted(
         effective.values(),
@@ -965,26 +967,26 @@ def _agent_effective_ports(agent, enabled_only: bool) -> list[dict]:
 
 
 def agent_services_expanded(agent) -> list[dict]:
-    """A bekapcsolt szolgáltatások hatékony portjai, determinisztikusan.
+    """The effective ports of enabled services, deterministically.
 
-    Elem: ``{service_id, label, target_host, proto, listen_port,
-    target_port, tunnel_port}``. Az azonos hallgató/cél portpárra mutató
-    tcp+udp leképezések ``both``-ra olvadnak össze; az ügynökön belül
-    hallgató portonként egyetlen hatékony bejegyzés marad.
+    Item: ``{service_id, label, target_host, proto, listen_port,
+    target_port, tunnel_port}``. tcp+udp mappings pointing to the same
+    listen/target port pair merge into ``both``; within the agent a single
+    effective entry remains per listen port.
     """
     return _agent_effective_ports(agent, enabled_only=True)
 
 
 def tunnel_service_index(tunnels) -> dict[str, dict]:
-    """Engedélyezett alagút-szolgáltatások indexe hivatkozás szerint.
+    """Index of enabled tunnel services by reference.
 
-    Kulcs: ``"<ügynök-azonosító>/<szolgáltatás-azonosító>"``. Érték:
-    ``{agent_id, service_id, label, target_host, domain, public, tcp, udp}``,
-    ahol a portok rendezett tuple-ök. Letiltott ügynök vagy szolgáltatás nem
-    kerül bele, így a hiányzó hivatkozás a szabály feloldásakor üres
-    portokat ad (fail-closed). A ``tcp``/``udp`` a ``both`` protokollnál is
-    kitöltődik. Domaines szolgáltatásnál mindkettő üres (nincs WAN-port),
-    de a ``signature`` tartalmazza a leképezést.
+    Key: ``"<agent ID>/<service ID>"``. Value: ``{agent_id, service_id,
+    label, target_host, domain, public, tcp, udp}``, where ports are ordered
+    tuples. A disabled agent or service is not included, so a missing
+    reference yields empty ports when the rule is resolved (fail-closed).
+    ``tcp``/``udp`` are filled in for the ``both`` protocol too. For a
+    domain-mode service both are empty (no WAN port), but ``signature``
+    contains the mapping.
     """
     index: dict[str, dict] = {}
     if not isinstance(tunnels, dict):
@@ -995,8 +997,8 @@ def tunnel_service_index(tunnels) -> dict[str, dict]:
         try:
             expanded = agent_services_expanded(agent)
         except SettingsError:
-            # Egy hibás ügynök ne akassza meg a teljes feloldást; a hibás
-            # szolgáltatásai egyszerűen nem oldhatók fel.
+            # A faulty agent must not break the whole resolution; its faulty
+            # services simply cannot be resolved.
             continue
         for item in expanded:
             ref = f"{agent.get('id', '')}/{item['service_id']}"
@@ -1009,19 +1011,18 @@ def tunnel_service_index(tunnels) -> dict[str, dict]:
                 "public": bool(item.get("public", False)),
                 "tcp": set(),
                 "udp": set(),
-                # A teljes, protokollonkénti leképezés (hallgató port,
-                # célhost, célport). A szabály döntéskori ellenőrzése ezt
-                # hasonlítja össze, hogy egy célhost/célport átirányítás
-                # akkor is érvénytelenítse a régi engedélyt, ha a hallgató
-                # portok nem változtak.
+                # The full per-protocol mapping (listen port, target host,
+                # target port). The rule's decision-time check compares this
+                # so that a target host/port redirect invalidates the old
+                # authorization even if the listen ports did not change.
                 "signature": set(),
             })
             if item.get("domain"):
-                # Domaines szolgáltatás: nincs WAN-hallgató port, ezért a
-                # szolgáltatás-szabály sem nyithat portot, de a proxy-gapun
-                # a domainjét megnyitja. Az aláírás a leképezés mellett a
-                # domain-nevet is tartalmazza, hogy az átnevezés
-                # érvénytelenítse a korábbi döntést.
+                # Domain-mode service: there is no WAN listen port, so the
+                # service rule cannot open a port either, but it opens its
+                # domain through the proxy gateway. Besides the mapping, the
+                # signature also contains the domain name so that a rename
+                # invalidates the earlier decision.
                 entry["signature"].add((
                     "domain", 0, item.get("domain", ""), 0,
                 ))
@@ -1055,46 +1056,46 @@ def tunnel_service_index(tunnels) -> dict[str, dict]:
 
 def _tunnel_service(item, domains=(), routes=(), portal_domain="",
                     seen_domains=None) -> dict:
-    """Egy alagút-szolgáltatás ellenőrzése és normalizálása.
+    """Validate and normalize a tunnel service.
 
-    Régi (egyetlen portos) alak: ``listen_port`` + ``tunnel_port`` +
-    ``target: host:port``. Ezt automatikusan az új ``mappings`` alakra
-    alakítjuk; a régi ``tunnel_port`` elveszik (a hallgató port lesz az
-    alagút portja is).
+    Legacy (single-port) form: ``listen_port`` + ``tunnel_port`` +
+    ``target: host:port``. This is automatically converted to the new
+    ``mappings`` form; the old ``tunnel_port`` is lost (the listen port
+    becomes the tunnel port too).
 
-    Domaines módban (``domain != ""``) a szolgáltatás csak egy TCP-
-    leképezést tartalmazhat; a hallgató port a belső alagút port, amelyet
-    hiányzó értéknél a ``_tunnels`` oszt ki.
+    In domain mode (``domain != ""``) the service may contain only one TCP
+    mapping; the listen port is the internal tunnel port, which ``_tunnels``
+    assigns when the value is missing.
     """
     if not isinstance(item, dict):
-        raise SettingsError("tunnel: a szolgáltatás JSON-objektum kell")
+        raise SettingsError("tunnel: the service must be a JSON object")
     service_id = item.get("id")
     if service_id in (None, ""):
         service_id = secrets.token_hex(4)
     if not isinstance(service_id, str) or not _ID_RE.match(service_id):
-        raise SettingsError("tunnel: érvénytelen szolgáltatás-azonosító")
-    label = _text(item.get("label"), "tunnel: címke")
+        raise SettingsError("tunnel: invalid service ID")
+    label = _text(item.get("label"), "tunnel: label")
     enabled = item.get("enabled", True)
     if not isinstance(enabled, bool):
-        raise SettingsError("az enabled mező igaz/hamis érték kell")
+        raise SettingsError("the enabled field must be true/false")
     public = item.get("public", False)
     if not isinstance(public, bool):
-        raise SettingsError("a public mező igaz/hamis érték kell")
+        raise SettingsError("the public field must be true/false")
     domain = _tunnel_service_domain(
         item.get("domain"), domains, routes, portal_domain
     )
     if domain and seen_domains is not None:
         if domain in seen_domains:
             raise SettingsError(
-                f"tunnel: duplikált szolgáltatás-domain: {domain}"
+                f"tunnel: duplicate service domain: {domain}"
             )
         seen_domains.add(domain)
-    # A challenge csak domaines szolgáltatásnál értelmes: a Caddy ezen a
-    # hoston kérdez, és a szintetikus cél viszi tovább a feltételeket.
+    # A challenge is meaningful only for a domain-mode service: Caddy queries
+    # on this host, and the synthetic target forwards the conditions.
     challenge = _proxy_challenge(item.get("challenge"))
     if challenge is not None and not domain:
         raise SettingsError(
-            "tunnel: challenge csak domaines szolgáltatáshoz adható"
+            "tunnel: a challenge can only be given for a domain-mode service"
         )
     if "mappings" in item:
         if domain and not (
@@ -1102,10 +1103,10 @@ def _tunnel_service(item, domains=(), routes=(), portal_domain="",
             and item["target_host"].strip()
         ):
             raise SettingsError(
-                "tunnel: domaines szolgáltatáshoz célhost kell"
+                "tunnel: a domain-mode service requires a target host"
             )
         target_host = _tunnel_host(
-            item.get("target_host"), "tunnel: a célhost"
+            item.get("target_host"), "tunnel: the target host"
         )
         if domain:
             mappings = _normalize_tunnel_domain_mappings(item.get("mappings"))
@@ -1114,17 +1115,17 @@ def _tunnel_service(item, domains=(), routes=(), portal_domain="",
     else:
         if domain:
             raise SettingsError(
-                "tunnel: domaines szolgáltatáshoz mappings lista kell"
+                "tunnel: a domain-mode service requires a mappings list"
             )
-        # Régi alak migrációja.
+        # Legacy form migration.
         proto = item.get("proto")
         if proto not in ("tcp", "udp", "both"):
-            raise SettingsError("tunnel: a protokoll tcp, udp vagy both lehet")
+            raise SettingsError("tunnel: the protocol can only be tcp, udp or both")
         listen = item.get("listen_port")
         if isinstance(listen, bool) or not isinstance(listen, int) \
                 or not 1 <= listen <= 65535:
             raise SettingsError(
-                "tunnel: a hallgató port 1 és 65535 között lehet"
+                "tunnel: the listen port must be between 1 and 65535"
             )
         old_target = _tunnel_target(item.get("target"))
         target_host, _, target_port = old_target.rpartition(":")
@@ -1145,40 +1146,40 @@ def _tunnel_service(item, domains=(), routes=(), portal_domain="",
 
 def _tunnel_agent(item, domains=(), routes=(), portal_domain="",
                   seen_domains=None) -> dict:
-    """Egy ügynök ellenőrzése (kulcsok, token, cím, szolgáltatások)."""
+    """Validate an agent (keys, token, address, services)."""
     if not isinstance(item, dict):
-        raise SettingsError("tunnel: az ügynök JSON-objektum kell")
+        raise SettingsError("tunnel: the agent must be a JSON object")
     agent_id = item.get("id")
     if agent_id in (None, ""):
         agent_id = secrets.token_hex(4)
     if not isinstance(agent_id, str) or not _ID_RE.match(agent_id):
-        raise SettingsError("tunnel: érvénytelen ügynök-azonosító")
-    label = _text(item.get("label"), "tunnel: címke")
+        raise SettingsError("tunnel: invalid agent ID")
+    label = _text(item.get("label"), "tunnel: label")
     address = _tunnel_address(item.get("address"))
     private_key = _wg_key(
-        item.get("private_key"), "tunnel: az ügynök privát kulcsa", True
+        item.get("private_key"), "tunnel: the agent's private key", True
     )
     public_key = _wg_key(
-        item.get("public_key"), "tunnel: az ügynök nyilvános kulcsa", True
+        item.get("public_key"), "tunnel: the agent's public key", True
     )
     preshared_key = _wg_key(
-        item.get("preshared_key"), "tunnel: a megosztott kulcs", True
+        item.get("preshared_key"), "tunnel: the preshared key", True
     )
     token = item.get("token")
     if not isinstance(token, str) or not _TUNNEL_TOKEN_RE.match(token):
         raise SettingsError(
-            "tunnel: érvénytelen ügynök-token (32+ URL-safe karakter kell)"
+            "tunnel: invalid agent token (32+ URL-safe characters are required)"
         )
     enabled = item.get("enabled", True)
     if not isinstance(enabled, bool):
-        raise SettingsError("az enabled mező igaz/hamis érték kell")
+        raise SettingsError("the enabled field must be true/false")
     raw_services = item.get("services", [])
     if not isinstance(raw_services, list):
-        raise SettingsError("tunnel: a services lista kell")
+        raise SettingsError("tunnel: services must be a list")
     if len(raw_services) > MAX_TUNNEL_SERVICES:
         raise SettingsError(
-            f"tunnel: ügynökönként legfeljebb {MAX_TUNNEL_SERVICES} "
-            "szolgáltatás lehet"
+            f"tunnel: at most {MAX_TUNNEL_SERVICES} "
+            "services per agent"
         )
     services: list[dict] = []
     service_ids: set[str] = set()
@@ -1188,7 +1189,7 @@ def _tunnel_agent(item, domains=(), routes=(), portal_domain="",
         )
         if service["id"] in service_ids:
             raise SettingsError(
-                "tunnel: duplikált szolgáltatás-azonosító: "
+                "tunnel: duplicate service ID: "
                 f"{service['id']}"
             )
         service_ids.add(service["id"])
@@ -1202,14 +1203,13 @@ def _tunnel_agent(item, domains=(), routes=(), portal_domain="",
 
 
 def _assign_tunnel_domain_ports(agents, wg_port: int) -> None:
-    """A domaines szolgáltatások belső alagút-portjainak kiosztása.
+    """Assign the internal tunnel ports of domain-mode services.
 
-    A kiosztás determinisztikus: ügynök-, majd szolgáltatássorrendben a
-    legkisebb szabad port a 41000–60999 tartományból. A foglaltak közé
-    tartozik minden explicit (portos) hallgató port, a WireGuard port, a
-    fenntartott hallgató portok és a portál portja, valamint a korábban
-    kiosztott belső port. A mentett, már explicit belső port revalidáláskor
-    változatlan marad.
+    The assignment is deterministic: in agent, then service order, the
+    lowest free port in the 41000-60999 range. The reserved set contains
+    every explicit (numeric) listen port, the WireGuard port, the reserved
+    listen ports and the portal port, plus the previously assigned internal
+    ports. A saved explicit internal port stays unchanged on revalidation.
     """
     explicit: set[int] = set()
     for agent in agents:
@@ -1223,7 +1223,7 @@ def _assign_tunnel_domain_ports(agents, wg_port: int) -> None:
     reserved.add(wg_port)
     used = set(explicit) | reserved
     assigned: set[int] = set()
-    # A már mentett belső portok ütközésvizsgálata.
+    # Collision check of the already saved internal ports.
     for agent in agents:
         for service in agent.get("services", []):
             if not service.get("domain"):
@@ -1234,12 +1234,12 @@ def _assign_tunnel_domain_ports(agents, wg_port: int) -> None:
             port = int(listen)
             if port in assigned or port in explicit or port in reserved:
                 raise SettingsError(
-                    "tunnel: a belső (alagút) port már foglalt: "
+                    "tunnel: the internal (tunnel) port is already taken: "
                     f"{port}"
                 )
             assigned.add(port)
             used.add(port)
-    # A hiányzó belső portok kiosztása.
+    # Assign the missing internal ports.
     for agent in agents:
         for service in agent.get("services", []):
             if not service.get("domain"):
@@ -1258,34 +1258,34 @@ def _assign_tunnel_domain_ports(agents, wg_port: int) -> None:
                 break
             else:
                 raise SettingsError(
-                    "tunnel: nincs szabad belső alagút-port "
+                    "tunnel: no free internal tunnel port "
                     f"({TUNNEL_DOMAIN_PORT_LOW}–{TUNNEL_DOMAIN_PORT_HIGH})"
                 )
 
 
 def _tunnels(raw, domains=(), routes=(), portal_domain="") -> dict:
-    """A WireGuard-alagút szakasz; hiányzó kulcs = alapértelmezés."""
+    """The WireGuard tunnel section; a missing key means defaults."""
     if raw is None:
         raw = {}
     if not isinstance(raw, dict):
-        raise SettingsError("tunnels: JSON-objektum kell")
+        raise SettingsError("tunnels: a JSON object is required")
     port = raw.get("port", TUNNEL_DEFAULT_PORT)
     if isinstance(port, bool) or not isinstance(port, int) \
             or not 1024 <= port <= 65535:
         raise SettingsError(
-            "tunnel: a WireGuard port 1024 és 65535 között lehet"
+            "tunnel: the WireGuard port must be between 1024 and 65535"
         )
     if port in PORT_PROXY_RESERVED_LISTEN or port == PORTAL_PORT:
         raise SettingsError(
-            "tunnel: fenntartott WireGuard port "
-            "(portál, 22, 53, 67, 80, 443, 2019)"
+            "tunnel: reserved WireGuard port "
+            "(portal, 22, 53, 67, 80, 443, 2019)"
         )
     raw_agents = raw.get("agents", [])
     if not isinstance(raw_agents, list):
-        raise SettingsError("tunnel: az agents lista kell")
+        raise SettingsError("tunnel: agents must be a list")
     if len(raw_agents) > MAX_TUNNEL_AGENTS:
         raise SettingsError(
-            f"tunnel: legfeljebb {MAX_TUNNEL_AGENTS} ügynök lehet"
+            f"tunnel: at most {MAX_TUNNEL_AGENTS} agents"
         )
     agents: list[dict] = []
     agent_ids: set[str] = set()
@@ -1297,28 +1297,28 @@ def _tunnels(raw, domains=(), routes=(), portal_domain="") -> dict:
         )
         if agent["id"] in agent_ids:
             raise SettingsError(
-                f"tunnel: duplikált ügynök-azonosító: {agent['id']}"
+                f"tunnel: duplicate agent ID: {agent['id']}"
             )
         agent_ids.add(agent["id"])
         if agent["address"] in addresses:
             raise SettingsError(
-                f"tunnel: duplikált ügynökcím: {agent['address']}"
+                f"tunnel: duplicate agent address: {agent['address']}"
             )
         addresses.add(agent["address"])
         agents.append(agent)
     server_private_key = _wg_key(
-        raw.get("server_private_key"), "tunnel: a szerver privát kulcsa"
+        raw.get("server_private_key"), "tunnel: the server private key"
     )
     server_public_key = _wg_key(
-        raw.get("server_public_key"), "tunnel: a szerver nyilvános kulcsa"
+        raw.get("server_public_key"), "tunnel: the server public key"
     )
     if agents and not (server_private_key and server_public_key):
         raise SettingsError(
-            "tunnel: ügynökök mentéséhez szerver WireGuard-kulcspár kell"
+            "tunnel: a server WireGuard key pair is required to save agents"
         )
     _assign_tunnel_domain_ports(agents, port)
-    # Az ügynökön belüli ütközések és a hatékony portok korlátja. A domaines
-    # szolgáltatások belső portja is része az ügynök névterének.
+    # Collisions within the agent and the limit on effective ports. The
+    # internal port of domain-mode services is part of the agent's namespace.
     for agent in agents:
         _agent_effective_ports(agent, enabled_only=False)
     return {
@@ -1331,10 +1331,10 @@ def _tunnels(raw, domains=(), routes=(), portal_domain="") -> dict:
 
 
 def _check_tunnel_listen_ports(port_proxies, tunnels) -> None:
-    """A hallgató portok közös névtere a port proxykkal (a ``both`` kettőt foglal)."""
+    """The shared namespace of listen ports with port proxies (``both`` claims two)."""
     keys: set[tuple[str, int]] = set()
-    # Bekapcsolt ügynöknél a WireGuard UDP-port a bejövő forgalomé; egy
-    # ugyanilyen hallgató port a handshake-et a proxyhoz irányítaná.
+    # With an enabled agent the WireGuard UDP port carries inbound traffic;
+    # a listen port on the same number would send the handshake to the proxy.
     wg_port = tunnels["port"] if any(
         agent["enabled"] for agent in tunnels["agents"]
     ) else None
@@ -1343,20 +1343,20 @@ def _check_tunnel_listen_ports(port_proxies, tunnels) -> None:
             if entry["listen_port"] == wg_port \
                     and entry["proto"] in ("udp", "both"):
                 raise SettingsError(
-                    "port proxy: a hallgató port a WireGuard porttal "
-                    f"ütközik: UDP {wg_port}"
+                    "port proxy: the listen port collides with the WireGuard port: "
+                    f"UDP {wg_port}"
                 )
         for agent in tunnels["agents"]:
             for item in _agent_effective_ports(agent, enabled_only=False):
                 if item.get("domain"):
-                    # A domaines szolgáltatás belső portja nem WAN-hallgató
-                    # port, ezért nem ütközhet a WireGuard porttal.
+                    # The internal port of a domain-mode service is not a WAN
+                    # listen port, so it cannot collide with the WireGuard port.
                     continue
                 if item["listen_port"] == wg_port \
                         and item["proto"] in ("udp", "both"):
                     raise SettingsError(
-                        "tunnel: a hallgató port a WireGuard porttal "
-                        f"ütközik: UDP {wg_port}"
+                        "tunnel: the listen port collides with the WireGuard port: "
+                        f"UDP {wg_port}"
                     )
     for entry in port_proxies:
         for proto in (
@@ -1366,7 +1366,7 @@ def _check_tunnel_listen_ports(port_proxies, tunnels) -> None:
     for agent in tunnels["agents"]:
         for item in _agent_effective_ports(agent, enabled_only=False):
             if item.get("domain"):
-                # A belső alagút-port nem a WAN hallgató-port névtere.
+                # The internal tunnel port is not part of the WAN listen port namespace.
                 continue
             for proto in (
                 ("tcp", "udp") if item["proto"] == "both"
@@ -1375,7 +1375,7 @@ def _check_tunnel_listen_ports(port_proxies, tunnels) -> None:
                 key = (proto, item["listen_port"])
                 if key in keys:
                     raise SettingsError(
-                        "tunnel: a hallgató port már foglalt: "
+                        "tunnel: the listen port is already taken: "
                         f"{proto.upper()} {item['listen_port']}"
                     )
                 keys.add(key)
@@ -1385,50 +1385,50 @@ def _normalize_dst(raw) -> str:
     if raw is None:
         raw = ""
     if not isinstance(raw, str):
-        raise SettingsError("cél: szöveg kell (IP vagy CIDR)")
+        raise SettingsError("destination: a string is required (IP or CIDR)")
     raw = raw.strip()
     if not raw:
         return ""
     try:
         network = ipaddress.ip_network(raw, strict=False)
     except ValueError as exc:
-        raise SettingsError(f"érvénytelen cél: {raw}") from exc
+        raise SettingsError(f"invalid destination: {raw}") from exc
     if network.version != 4:
-        raise SettingsError(f"csak IPv4 cél adható meg: {raw}")
+        raise SettingsError(f"only an IPv4 destination can be given: {raw}")
     if network.is_multicast:
-        raise SettingsError(f"multicast cél nem használható: {raw}")
+        raise SettingsError(f"a multicast destination cannot be used: {raw}")
     if network.prefixlen == 32 and network.network_address.is_unspecified:
-        raise SettingsError("a 0.0.0.0/32 cél nem használható")
+        raise SettingsError("the 0.0.0.0/32 destination cannot be used")
     if network.prefixlen == 32 and str(network.network_address) == "255.255.255.255":
-        raise SettingsError("a broadcast cél nem használható")
+        raise SettingsError("a broadcast destination cannot be used")
     if network.prefixlen == 32:
         return str(network.network_address)
     return str(network)
 
 
 def _normalize_direction(raw) -> str:
-    """A pre-auth bejegyzés iránya: ``forward`` (alap) vagy ``input``."""
+    """The direction of a pre-auth entry: ``forward`` (default) or ``input``."""
     if raw is None:
         return "forward"
     if not isinstance(raw, str):
-        raise SettingsError("az irány csak forward vagy input lehet")
+        raise SettingsError("the direction can only be forward or input")
     value = raw.strip()
     if not value:
         return "forward"
     if value not in ("forward", "input"):
-        raise SettingsError(f"érvénytelen irány: {raw!r}")
+        raise SettingsError(f"invalid direction: {raw!r}")
     return value
 
 
 def _normalize_ports(raw) -> list[int]:
     if not isinstance(raw, list):
-        raise SettingsError("portok: lista kell")
+        raise SettingsError("ports: a list is required")
     if len(raw) > MAX_PORTS:
-        raise SettingsError(f"portok: legfeljebb {MAX_PORTS} port adható meg")
+        raise SettingsError(f"ports: at most {MAX_PORTS} ports can be given")
     ports: list[int] = []
     for value in raw:
         if isinstance(value, bool):
-            raise SettingsError(f"érvénytelen port: {value!r}")
+            raise SettingsError(f"invalid port: {value!r}")
         if isinstance(value, str):
             value = value.strip()
             if not value:
@@ -1436,50 +1436,50 @@ def _normalize_ports(raw) -> list[int]:
             try:
                 value = int(value, 10)
             except ValueError as exc:
-                raise SettingsError(f"érvénytelen port: {value}") from exc
+                raise SettingsError(f"invalid port: {value}") from exc
         if not isinstance(value, int):
-            raise SettingsError(f"érvénytelen port: {value!r}")
+            raise SettingsError(f"invalid port: {value!r}")
         if value < 1 or value > 65535:
-            raise SettingsError(f"a port 1 és 65535 között lehet: {value}")
+            raise SettingsError(f"the port must be between 1 and 65535: {value}")
         if value not in ports:
             ports.append(value)
     if not ports:
-        raise SettingsError("legalább egy port szükséges")
+        raise SettingsError("at least one port is required")
     return sorted(ports)
 
 
 def normalize_entry(kind: str, entry, entry_id: str = "") -> dict:
     if kind not in ("preauth", "block"):
-        raise SettingsError(f"ismeretlen beállítás-típus: {kind!r}")
+        raise SettingsError(f"unknown settings type: {kind!r}")
     if not isinstance(entry, dict):
-        raise SettingsError("a bejegyzés JSON-objektum kell")
+        raise SettingsError("the entry must be a JSON object")
     if entry_id:
         if not _ID_RE.match(entry_id):
-            raise SettingsError("érvénytelen bejegyzés-azonosító")
+            raise SettingsError("invalid entry ID")
     else:
         entry_id = secrets.token_hex(4)
         while not _ID_RE.match(entry_id):
             entry_id = secrets.token_hex(4)
-    # A típus nem szerepel a bejegyzésben; a lista hordozza.
-    label = _text(entry.get("label"), "címke")
+    # The type is not stored in the entry; the list carries it.
+    label = _text(entry.get("label"), "label")
     dst = _normalize_dst(entry.get("dst", ""))
     proto = str(entry.get("proto", "")).strip().lower()
     if proto not in ("tcp", "udp"):
-        raise SettingsError(f"érvénytelen protokoll: {entry.get('proto')!r}")
+        raise SettingsError(f"invalid protocol: {entry.get('proto')!r}")
     ports = _normalize_ports(entry.get("ports"))
     enabled = entry.get("enabled", True)
     if not isinstance(enabled, bool):
-        raise SettingsError("az enabled mező igaz/hamis érték kell")
+        raise SettingsError("the enabled field must be true/false")
     if kind == "block" and proto == "tcp" and 80 in ports and not dst:
-        # A 80-as portot a prerouting a portálra irányítja; cél nélkül a
-        # blokk nem érvényesülne, ezért ezt nem engedjük csendben.
+        # Prerouting sends port 80 to the portal; without a destination the
+        # block would not take effect, so we do not allow this silently.
         raise SettingsError(
-            "a 80-as TCP-port blokkolásához cél szükséges "
-            "(különben a portál-átirányítás megelőzi)"
+            "blocking TCP port 80 requires a destination "
+            "(otherwise the portal redirect takes precedence)"
         )
     direction = ""
     if kind == "preauth":
-        # A régi bejegyzésekben nincs direction: azok forward irányúak.
+        # Older entries have no direction: those are forward.
         direction = _normalize_direction(entry.get("direction"))
     normalized = {
         "id": entry_id,
@@ -1495,7 +1495,7 @@ def normalize_entry(kind: str, entry, entry_id: str = "") -> dict:
 
 
 def legacy_proxy_domain(data) -> str:
-    """A 3.6 előtti, egyetlen ``proxy_domain`` (új formátumnál üres)."""
+    """The single pre-3.6 ``proxy_domain`` (empty for the new format)."""
     if not isinstance(data, dict) or "proxy_domains" in data:
         return ""
     return _proxy_domain(data.get("proxy_domain", ""))
@@ -1503,41 +1503,41 @@ def legacy_proxy_domain(data) -> str:
 
 def validate_state(data) -> dict:
     if not isinstance(data, dict):
-        raise SettingsError("a beállítások JSON-objektum kell")
+        raise SettingsError("settings must be a JSON object")
     registration_enabled = data.get("registration_enabled", False)
     if not isinstance(registration_enabled, bool):
         raise SettingsError(
-            "a registration_enabled mező igaz/hamis érték kell"
+            "the registration_enabled field must be true/false"
         )
-    # A kulcs nélküli (régi) fájl a korábbi viselkedést kapja: ACME be.
+    # A file without the key (legacy) gets the previous behaviour: ACME on.
     proxy_acme = data.get("proxy_acme", True)
     if not isinstance(proxy_acme, bool):
-        raise SettingsError("a proxy_acme mező igaz/hamis érték kell")
+        raise SettingsError("the proxy_acme field must be true/false")
     legacy = legacy_proxy_domain(data)
     if "proxy_domains" in data:
         domains = _proxy_domains(data["proxy_domains"])
     else:
-        # Régi formátum: az egyetlen gyökér listává alakul, a gyökér nélküli
-        # bejegyzések azt kapják. Gyökér nélkül a bejegyzések hatástalanok
-        # voltak, ezért elmaradnak (a régi kulcs a következő írással eltűnik).
+        # Legacy format: the single root becomes a list, and rootless entries
+        # receive it. Without a root those entries had no effect, so they are
+        # dropped (the old key disappears on the next write).
         domains = [legacy] if legacy else []
     raw_routes = data.get("proxy_routes", [])
     if "proxy_domains" not in data and not legacy:
         raw_routes = []
     routes = _proxy_routes(raw_routes, domains, legacy)
     portal_domain = _portal_domain(data.get("portal_domain", ""), domains, routes)
-    # Gyökérre szóló bejegyzés csak akkor lehet, ha a portál már saját címen
-    # fut; különben a gyökér a portált szolgálja ki.
+    # A root entry is only possible when the portal already runs on its own
+    # address; otherwise the root serves the portal.
     if not portal_domain and any(not route["name"] for route in routes):
         raise SettingsError(
-            "proxy: gyökérre szóló bejegyzés csak saját portálcím mellett lehet"
+            "proxy: a root entry requires a dedicated portal address"
         )
     port_proxies = _port_proxies(data.get("port_proxies", []))
     tunnels = _tunnels(
         data.get("tunnels"), domains, routes, portal_domain
     )
-    # A hallgató portok a port proxykkal közös névtérben vannak; ezt csak
-    # itt lehet ellenőrizni, ahol mindkét lista látszik.
+    # The listen ports share a namespace with port proxies; this can only be
+    # checked here, where both lists are visible.
     _check_tunnel_listen_ports(port_proxies, tunnels)
     result = {
         "site_name": _site_name(data.get("site_name", "")),
@@ -1547,14 +1547,14 @@ def validate_state(data) -> dict:
         "proxy_domains": domains,
         "proxy_routes": routes,
         "proxy_acme": proxy_acme,
-        # A Dropjak felület saját címe és a hozzá tartozó challenge; üres
-        # címnél a gyökérdomainek szolgálják ki a portált.
+        # The Dropjak UI's own address and its challenge; with an empty
+        # address the root domains serve the portal.
         "portal_domain": portal_domain,
         "portal_challenge": (
             _proxy_challenge(data.get("portal_challenge"))
             if portal_domain else None
         ),
-        # A kulcs nélküli (régi) fájlban nincs port proxy és alagút.
+        # A file without the key (legacy) has no port proxy and no tunnel.
         "port_proxies": port_proxies,
         "tunnels": tunnels,
         "preauth": [],
@@ -1563,22 +1563,22 @@ def validate_state(data) -> dict:
     for kind in ("preauth", "block"):
         raw_list = data.get(kind, [])
         if not isinstance(raw_list, list):
-            raise SettingsError(f"{kind}: lista kell")
+            raise SettingsError(f"{kind}: a list is required")
         if len(raw_list) > MAX_ENTRIES:
             raise SettingsError(
-                f"{kind}: legfeljebb {MAX_ENTRIES} bejegyzés lehet"
+                f"{kind}: at most {MAX_ENTRIES} entries are allowed"
             )
         seen: set[str] = set()
         for raw_entry in raw_list:
             if not isinstance(raw_entry, dict):
-                raise SettingsError(f"{kind}: a bejegyzés JSON-objektum kell")
+                raise SettingsError(f"{kind}: the entry must be a JSON object")
             entry_id = raw_entry.get("id")
             if entry_id is not None and not isinstance(entry_id, str):
-                raise SettingsError("érvénytelen bejegyzés-azonosító")
+                raise SettingsError("invalid entry ID")
             entry = normalize_entry(kind, raw_entry, entry_id or "")
             if entry["id"] in seen:
                 raise SettingsError(
-                    f"duplikált bejegyzés-azonosító: {entry['id']}"
+                    f"duplicate entry ID: {entry['id']}"
                 )
             seen.add(entry["id"])
             result[kind].append(entry)
@@ -1586,7 +1586,7 @@ def validate_state(data) -> dict:
 
 
 class SettingsStore:
-    """A firewall-settings.json betöltése, módosítása és atomi írása."""
+    """Loading, modifying and atomically writing firewall-settings.json."""
 
     def __init__(
         self,
@@ -1598,8 +1598,8 @@ class SettingsStore:
         self._lock = threading.Lock()
         self._data = self._defaults()
         self._error = ""
-        # A betöltött fájl régi, egyetlen gyökérdomainje (különben üres): a
-        # szabálytár ezzel oldja fel a régi, pont nélküli domain-hivatkozást.
+        # The legacy, single root domain of the loaded file (empty otherwise):
+        # the rule store uses this to resolve old, dotless domain references.
         self.legacy_proxy_domain = ""
         self.load()
 
@@ -1633,19 +1633,19 @@ class SettingsStore:
             return
         except (OSError, ValueError, SettingsError) as exc:
             with self._lock:
-                # Sérült fájlnál a pre-auth mindenképp legyen üres.
+                # With a corrupt file pre-auth must be empty in any case.
                 self._data = self._defaults()
                 self._error = str(exc)
             self.log(
-                f"[beállítások] FIGYELEM: a(z) {self.path} nem olvasható, "
-                f"a testreszabás alapértelmezésre áll: {exc}"
+                f"[settings] WARNING: {self.path} cannot be read, "
+                f"customization falls back to defaults: {exc}"
             )
             return
         if isinstance(raw, dict) and "proxy_domains" not in raw \
                 and raw.get("proxy_routes") and not legacy:
             self.log(
-                "[beállítások] gyökérdomain nélküli régi proxy-bejegyzések "
-                "elhagyva (hatástalanok voltak)"
+                "[settings] dropping legacy proxy entries without a root "
+                "domain (they had no effect)"
             )
         with self._lock:
             self._data = data
@@ -1668,29 +1668,29 @@ class SettingsStore:
         entry_id: str = "",
         entry=None,
     ) -> dict:
-        """A módosítás érvényesítése és az új állapot előállítása.
+        """Validate the change and produce the new state.
 
-        Nem ír fájlt és nem módosítja a memóriabeli állapotot; a hívó
-        előbb az nftables-re alkalmazza, majd commit()-tal menti.
+        Does not write a file and does not modify the in-memory state; the
+        caller first applies it to nftables, then saves with commit().
         """
         with self._lock:
             data = self._copy_locked()
         action = str(action or "").strip().lower()
         if kind not in ("preauth", "block"):
-            raise SettingsError(f"ismeretlen beállítás-típus: {kind!r}")
+            raise SettingsError(f"unknown settings type: {kind!r}")
         entries = data[kind]
         if action == "create":
             if len(entries) >= MAX_ENTRIES:
                 raise SettingsError(
-                    f"{kind}: legfeljebb {MAX_ENTRIES} bejegyzés lehet"
+                    f"{kind}: at most {MAX_ENTRIES} entries are allowed"
                 )
             normalized = normalize_entry(kind, entry)
             if any(item["id"] == normalized["id"] for item in entries):
-                raise SettingsError("duplikált bejegyzés-azonosító")
+                raise SettingsError("duplicate entry ID")
             entries.append(normalized)
         elif action in ("update", "delete", "toggle"):
             if not isinstance(entry_id, str) or not entry_id:
-                raise SettingsError("hiányzó bejegyzés-azonosító")
+                raise SettingsError("missing entry ID")
             index = next(
                 (
                     pos for pos, item in enumerate(entries)
@@ -1699,26 +1699,26 @@ class SettingsStore:
                 None,
             )
             if index is None:
-                raise SettingsError(f"nincs ilyen bejegyzés: {entry_id}")
+                raise SettingsError(f"no such entry: {entry_id}")
             if action == "delete":
                 del entries[index]
             elif action == "toggle":
                 enabled = entry.get("enabled") if isinstance(entry, dict) else None
                 if not isinstance(enabled, bool):
-                    raise SettingsError("az enabled mező igaz/hamis érték kell")
+                    raise SettingsError("the enabled field must be true/false")
                 entries[index]["enabled"] = enabled
             else:
                 normalized = normalize_entry(kind, entry, entry_id)
                 entries[index] = normalized
         else:
-            raise SettingsError(f"ismeretlen művelet: {action!r}")
+            raise SettingsError(f"unknown operation: {action!r}")
         return validate_state(data)
 
     def prepare_port_proxies(self, entries) -> dict:
-        """Az új port proxy lista érvényesítése (fájlírás nélkül).
+        """Validate the new port proxy list (without writing a file).
 
-        A port proxy nftables-láncokat igényel, ezért a hívó előbb
-        alkalmazza (Gateway.apply_settings), és csak utána commitál.
+        A port proxy requires nftables chains, so the caller applies it
+        first (Gateway.apply_settings) and only then commits.
         """
         with self._lock:
             data = self._copy_locked()
@@ -1726,7 +1726,7 @@ class SettingsStore:
         return validate_state(data)
 
     def prepare_tunnels(self, tunnels) -> dict:
-        """Az alagút szakasz érvényesítése (fájlírás nélkül)."""
+        """Validate the tunnel section (without writing a file)."""
         with self._lock:
             data = self._copy_locked()
         data["tunnels"] = _tunnels(
@@ -1775,7 +1775,7 @@ class SettingsStore:
         return copy.deepcopy(checked)
 
     def reset(self) -> None:
-        """A beállításfájl törlése és az állapot alaphelyzetbe állítása."""
+        """Delete the settings file and reset the state."""
         with self._lock:
             try:
                 os.unlink(self.path)
@@ -1786,13 +1786,13 @@ class SettingsStore:
             self.legacy_proxy_domain = ""
 
     def set_registration_enabled(self, enabled: bool) -> dict:
-        """A regisztráció (fiók-kérés) engedélyezése vagy tiltása.
+        """Enable or disable registration (account requests).
 
-        Csak a beállításfájlt írja atomikusan; az nftables-hez nem nyúl.
+        Only writes the settings file atomically; does not touch nftables.
         """
         if not isinstance(enabled, bool):
             raise SettingsError(
-                "a registration_enabled mező igaz/hamis érték kell"
+                "the registration_enabled field must be true/false"
             )
         with self._lock:
             data = self._copy_locked()
@@ -1800,10 +1800,10 @@ class SettingsStore:
         return self.commit(data)
 
     def set_site_name(self, name: str) -> dict:
-        """A tűzfal nevének mentése.
+        """Save the firewall's name.
 
-        Üres érték a beépített ``Dropjak`` névre állítja vissza. Csak a
-        beállításfájlt írja atomikusan; az nftables-hez nem nyúl.
+        An empty value restores the built-in ``Dropjak`` name. Only writes
+        the settings file atomically; does not touch nftables.
         """
         value = _site_name(name)
         with self._lock:
@@ -1812,10 +1812,10 @@ class SettingsStore:
         return self.commit(data)
 
     def set_motd(self, text: str, expires_at: str = "") -> dict:
-        """A bejelentkezés utáni közlemény mentése.
+        """Save the post-login announcement.
 
-        Üres szöveg kikapcsolja; üres lejárat állandó érvényességet jelent.
-        Csak a beállításfájlt írja atomikusan; az nftables-hez nem nyúl.
+        Empty text disables it; an empty expiry means it never expires.
+        Only writes the settings file atomically; does not touch nftables.
         """
         with self._lock:
             data = self._copy_locked()
@@ -1824,22 +1824,22 @@ class SettingsStore:
         return self.commit(data)
 
     def set_proxy_acme(self, enabled: bool) -> dict:
-        """Az automatikus (on-demand ACME) tanúsítványkérés be/ki."""
+        """Enable or disable automatic (on-demand ACME) certificate requests."""
         if not isinstance(enabled, bool):
-            raise SettingsError("a proxy_acme mező igaz/hamis érték kell")
+            raise SettingsError("the proxy_acme field must be true/false")
         with self._lock:
             data = self._copy_locked()
         data["proxy_acme"] = enabled
         return self.commit(data)
 
     def set_portal_domain(self, domain: str) -> dict:
-        """A Dropjak felület saját Caddy-domainje (üres: a gyökérdomainek).
+        """The Dropjak UI's own Caddy domain (empty: the root domains).
 
-        Kikapcsoláskor a hozzá tartozó challenge is törlődik. Csak a
-        beállításfájlt írja atomikusan; az nftables-hez nem nyúl.
+        Disabling it also clears its challenge. Only writes the settings
+        file atomically; does not touch nftables.
         """
         if not isinstance(domain, str):
-            raise SettingsError("portal_domain: szöveg kell")
+            raise SettingsError("portal_domain: a string is required")
         with self._lock:
             data = self._copy_locked()
         data["portal_domain"] = domain
@@ -1848,12 +1848,12 @@ class SettingsStore:
         return self.commit(data)
 
     def set_proxy(self, domains, routes, referenced=(), portal_challenge=UNSET) -> dict:
-        """A proxy gyökérdomainjeinek és útvonalainak mentése.
+        """Save the proxy root domains and routes.
 
-        A ``referenced`` a domain szabályok által hivatkozott teljes
-        hostnevek: ezek nem tűnhetnek el (törlés, átnevezés vagy másik
-        gyökér alá helyezés). Csak a beállításfájlt írja atomikusan; az
-        nftables-hez nem nyúl.
+        ``referenced`` holds the full host names referenced by domain
+        rules: those must not disappear (deletion, rename or moving under
+        another root). Only writes the settings file atomically; does not
+        touch nftables.
         """
         domains = _proxy_domains(domains)
         routes = _proxy_routes(routes, domains)
@@ -1863,9 +1863,9 @@ class SettingsStore:
         )
         if missing:
             raise SettingsError(
-                "proxy: domain szabály hivatkozik rá, ezért nem törölhető "
-                f"és nem nevezhető át: {', '.join(missing)}; előbb vedd ki "
-                "a szabályból"
+                "proxy: a domain rule references it, so it cannot be deleted "
+                f"or renamed: {', '.join(missing)}; remove it from the "
+                "rule first"
             )
         with self._lock:
             data = self._copy_locked()
@@ -1876,7 +1876,7 @@ class SettingsStore:
         return self.commit(data)
 
 
-# ----------------------------------------------------------- tanúsítványok
+# ------------------------------------------------------------ certificates
 
 CERT_DIR = os.path.join(STATE_DIR, "certs")
 MAX_CERT_PEM = 64 * 1024
@@ -1887,19 +1887,19 @@ _PEM_CERT_RE = re.compile(
 
 
 def _pem(value, field: str) -> str:
-    """Egy feltöltött PEM-szöveg alapellenőrzése (méret, ASCII)."""
+    """Basic validation of an uploaded PEM text (size, ASCII)."""
     if not isinstance(value, str):
-        raise SettingsError(f"{field}: PEM szöveg kell")
+        raise SettingsError(f"{field}: a PEM string is required")
     if len(value.encode("utf-8")) > MAX_CERT_PEM:
-        raise SettingsError(f"{field}: legfeljebb {MAX_CERT_PEM // 1024} KiB")
+        raise SettingsError(f"{field}: at most {MAX_CERT_PEM // 1024} KiB")
     value = value.strip()
     if not value or not value.isascii():
-        raise SettingsError(f"{field}: érvénytelen PEM")
+        raise SettingsError(f"{field}: invalid PEM")
     return value + "\n"
 
 
 def _decode_cert(path: str) -> dict:
-    """Az első tanúsítvány adatai (stdlib, de privát API: hibánál üres)."""
+    """The data of the first certificate (stdlib, but a private API: empty on error)."""
     decode = getattr(getattr(ssl, "_ssl", None), "_test_decode_cert", None)
     if decode is None:
         return {}
@@ -1918,7 +1918,7 @@ def _name_of(rdns, key: str = "commonName") -> str:
 
 
 def cert_covers(name: str, sans) -> bool:
-    """Lefedi-e a SAN-lista a nevet (pontos vagy egycímkés wildcard)."""
+    """Does the SAN list cover the name (exact or single-label wildcard)."""
     if name in sans:
         return True
     label, _, parent = name.partition(".")
@@ -1926,7 +1926,7 @@ def cert_covers(name: str, sans) -> bool:
 
 
 def _write_private(path: str, data: bytes) -> None:
-    """Atomi, 0600 jogosultságú írás (a beállításfájl mintájára)."""
+    """Atomic write with 0600 permissions (like the settings file)."""
     directory = os.path.dirname(path)
     fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".cert-", suffix=".tmp")
     try:
@@ -1945,12 +1945,12 @@ def _write_private(path: str, data: bytes) -> None:
 
 
 class CertStore:
-    """Gyökérdomainenként feltöltött tanúsítványlánc és titkos kulcs.
+    """Uploaded certificate chain and private key per root domain.
 
-    ``<dir>/<root>.pem`` (lánc) és ``<root>.key`` (kulcs), könyvtár 0700,
-    fájlok 0600. A kulcs és a PEM soha nem kerül API-válaszba vagy naplóba;
-    kifelé csak a metaadat megy (public()). A Caddy a loopback-only
-    /api/proxy/cert végponton kapja meg a láncot és a kulcsot (bundle()).
+    ``<dir>/<root>.pem`` (chain) and ``<root>.key`` (key), directory 0700,
+    files 0600. The key and the PEM never end up in an API response or in
+    the log; only metadata goes out (public()). Caddy receives the chain
+    and the key at the loopback-only /api/proxy/cert endpoint (bundle()).
     """
 
     def __init__(self, directory: str = CERT_DIR, logger=_default_log) -> None:
@@ -1973,7 +1973,7 @@ class CertStore:
         now: float,
         directory: str | None = None,
     ) -> dict:
-        """A pár ellenőrzése ideiglenes 0600 fájlokon; a metaadatot adja."""
+        """Check the pair on temporary 0600 files; returns the metadata."""
         directory = self.directory if directory is None else directory
         os.makedirs(directory, mode=0o700, exist_ok=True)
         os.chmod(directory, 0o700)
@@ -1987,15 +1987,15 @@ class CertStore:
                 with os.fdopen(fd, "w", encoding="ascii") as fh:
                     fh.write(data)
             try:
-                # A jelszóvisszahívás a titkosított kulcsnál a tty-prompt
-                # helyett hibát ad.
+                # For an encrypted key the password callback returns an
+                # error instead of prompting on the tty.
                 ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER).load_cert_chain(
                     paths[0], paths[1], password=lambda: b""
                 )
             except ssl.SSLError as exc:
                 raise SettingsError(
-                    "a tanúsítvány és a kulcs nem olvasható, vagy nem "
-                    "tartozik össze"
+                    "the certificate and the key cannot be read, or do not "
+                    "belong together"
                 ) from exc
             info = _decode_cert(paths[0])
         finally:
@@ -2008,9 +2008,9 @@ class CertStore:
             not_before = ssl.cert_time_to_seconds(info["notBefore"])
             not_after = ssl.cert_time_to_seconds(info["notAfter"])
         except (KeyError, ValueError) as exc:
-            raise SettingsError("a tanúsítvány adatai nem olvashatók") from exc
+            raise SettingsError("the certificate data cannot be read") from exc
         if not_after <= now:
-            raise SettingsError("a tanúsítvány lejárt")
+            raise SettingsError("the certificate has expired")
         sans = [
             str(value).lower()
             for kind, value in info.get("subjectAltName", ())
@@ -2018,7 +2018,7 @@ class CertStore:
         ]
         if root not in sans and f"*.{root}" not in sans:
             raise SettingsError(
-                f"a tanúsítvány SAN-listája nem fedi le: {root} / *.{root}"
+                f"the certificate's SAN list does not cover: {root} / *.{root}"
             )
         issuer = info.get("issuer")
         return {
@@ -2033,14 +2033,14 @@ class CertStore:
         }
 
     def load(self) -> None:
-        """A tárolt párok betöltése; a hibás pár kimarad (naplózva)."""
+        """Load the stored pairs; a faulty pair is skipped (and logged)."""
         certs: dict[str, dict] = {}
         try:
             names = sorted(os.listdir(self.directory))
         except FileNotFoundError:
             names = []
         except OSError as exc:
-            self.log(f"[tanúsítványok] a könyvtár nem olvasható: {exc}")
+            self.log(f"[certificates] the directory cannot be read: {exc}")
             names = []
         for name in names:
             root = name[:-4]
@@ -2052,11 +2052,11 @@ class CertStore:
                     chain = fh.read()
                 with open(key_path, encoding="ascii") as fh:
                     key = fh.read()
-                # A lejárt tárolt tanúsítvány is betöltődik (a felület
-                # jelzi), de a bundle() nem adja ki.
+                # An expired stored certificate is also loaded (the UI
+                # reports it), but bundle() does not hand it out.
                 meta = self._check(root, chain, key, 0)
             except (OSError, ValueError) as exc:
-                self.log(f"[tanúsítványok] {root} kihagyva: {exc}")
+                self.log(f"[certificates] {root} skipped: {exc}")
                 continue
             certs[root] = {"bundle": (chain + key).encode("ascii"), "meta": meta}
         with self._lock:
@@ -2070,20 +2070,20 @@ class CertStore:
         now: float | None = None,
         directory: str | None = None,
     ) -> tuple[str, str, str, dict]:
-        """A PEM-pár teljes ellenőrzése írás nélkül (import és mentés)."""
+        """Full validation of a PEM pair without writing (import and save)."""
         root = _proxy_domain(root)
         if not root:
-            raise SettingsError("hiányzó gyökérdomain")
-        chain = _pem(chain, "tanúsítványlánc")
-        key = _pem(key, "titkos kulcs")
+            raise SettingsError("missing root domain")
+        chain = _pem(chain, "certificate chain")
+        key = _pem(key, "private key")
         if "PRIVATE KEY" in chain or not _PEM_CERT_RE.search(chain):
             raise SettingsError(
-                "tanúsítványlánc: csak CERTIFICATE PEM-blokk(ok) lehet(nek)"
+                "certificate chain: only CERTIFICATE PEM block(s) are allowed"
             )
         if "PRIVATE KEY-----" not in key or "CERTIFICATE" in key \
                 or "ENCRYPTED" in key:
             raise SettingsError(
-                "titkos kulcs: egyetlen, jelszó nélküli PRIVATE KEY PEM-blokk"
+                "private key: a single, unencrypted PRIVATE KEY PEM block"
             )
         meta = self._check(
             root, chain, key,
@@ -2093,10 +2093,10 @@ class CertStore:
         return root, chain, key, meta
 
     def validate_import(self, root: str, chain, key) -> dict:
-        """Egy importálandó pár ellenőrzése a tároló érintése nélkül.
+        """Validate a pair to be imported without touching the store.
 
-        A lejárt pár is átkerül (a felület jelzi, a Caddy nem szolgálja ki);
-        így egy korábbi állapot biztonsági mentésből visszaállítható.
+        An expired pair is also accepted (the UI reports it and Caddy does
+        not serve it), so a previous state can be restored from a backup.
         """
         with tempfile.TemporaryDirectory(prefix="hv-cert-import-") as tmp:
             return self._validate_pair(
@@ -2104,7 +2104,7 @@ class CertStore:
             )[3]
 
     def export_all(self) -> dict[str, dict]:
-        """Az összes tárolt pár (PEM + kulcs) a konfigurációs csomaghoz."""
+        """Every stored pair (PEM + key) for the configuration bundle."""
         with self._lock:
             roots = sorted(self._certs)
         out: dict[str, dict] = {}
@@ -2117,24 +2117,24 @@ class CertStore:
                     key = fh.read()
             except OSError as exc:
                 raise SettingsError(
-                    f"a(z) {root} tanúsítványpárja nem olvasható: {exc}"
+                    f"the certificate pair for {root} cannot be read: {exc}"
                 ) from exc
             out[root] = {"cert": chain, "key": key}
         return out
 
     def replace_all(self, certs) -> None:
-        """Az összes pár cseréje; minden pár előbb ellenőrizve van."""
+        """Replace all pairs; every pair is validated first."""
         if not isinstance(certs, dict):
-            raise SettingsError("a certs szakasz JSON-objektum kell")
+            raise SettingsError("the certs section must be a JSON object")
         checked: dict[str, tuple[str, str]] = {}
         for raw_root, item in certs.items():
             if not isinstance(item, dict):
-                raise SettingsError(f"{raw_root}: hibás tanúsítványbejegyzés")
+                raise SettingsError(f"{raw_root}: invalid certificate entry")
             root, chain, key, _meta = self._validate_pair(
                 raw_root, item.get("cert"), item.get("key"), now=0
             )
             if root in checked:
-                raise SettingsError(f"duplikált gyökérdomain: {root}")
+                raise SettingsError(f"duplicate root domain: {root}")
             checked[root] = (chain, key)
         with self._lock:
             old = set(self._certs)
@@ -2144,14 +2144,14 @@ class CertStore:
             self.install(root, chain, key, now=0)
 
     def reset(self) -> None:
-        """Minden tárolt pár törlése (factory reset)."""
+        """Delete every stored pair (factory reset)."""
         try:
             names = os.listdir(self.directory)
         except FileNotFoundError:
             names = []
         except OSError as exc:
             raise SettingsError(
-                f"a tanúsítványkönyvtár nem olvasható: {exc}"
+                f"the certificate directory cannot be read: {exc}"
             ) from exc
         for name in names:
             ext = os.path.splitext(name)[1]
@@ -2169,11 +2169,11 @@ class CertStore:
             pass
 
     def install(self, root: str, chain, key, now: float | None = None) -> dict:
-        """Érvényes pár mentése (csere is); a metaadatot adja vissza."""
+        """Save a valid pair (also replacing one); returns the metadata."""
         root, chain, key, meta = self._validate_pair(root, chain, key, now)
         pem_path, key_path = self._paths(root)
-        # A kulcs előbb: a félbeszakadt cserét a load() a párellenőrzéssel
-        # kiszűri.
+        # Key first: an interrupted replacement is filtered out by load()
+        # through the pair check.
         _write_private(key_path, key.encode("ascii"))
         _write_private(pem_path, chain.encode("ascii"))
         with self._lock:
@@ -2183,7 +2183,7 @@ class CertStore:
         return dict(meta)
 
     def delete(self, root: str) -> dict | None:
-        """A pár törlése; a törölt metaadat (vagy None, ha nem volt)."""
+        """Delete the pair; returns the removed metadata (or None if absent)."""
         with self._lock:
             entry = self._certs.pop(root, None)
         for path in self._paths(root) if _FQDN_RE.match(root or "") else ():
@@ -2194,13 +2194,13 @@ class CertStore:
         return dict(entry["meta"]) if entry else None
 
     def prune(self, roots) -> dict[str, dict]:
-        """A már nem létező gyökérdomainek párjainak törlése."""
+        """Delete the pairs of root domains that no longer exist."""
         with self._lock:
             orphans = [root for root in self._certs if root not in roots]
         return {root: self.delete(root) for root in orphans}
 
     def bundle(self, name: str, root: str, now: float | None = None):
-        """A Caddynak: lánc + kulcs, ha a root párja érvényesen fedi a nevet."""
+        """For Caddy: chain + key when the root's pair validly covers the name."""
         with self._lock:
             entry = self._certs.get(root)
         if entry is None:
@@ -2211,7 +2211,7 @@ class CertStore:
         return entry["bundle"] if cert_covers(name, meta["sans"]) else None
 
     def public(self, settings: dict, now: float | None = None) -> list[dict]:
-        """Gyökérdomainenként a metaadat és a lefedett/nem fedett nevek."""
+        """Metadata and the covered/uncovered names per root domain."""
         now = time.time() if now is None else now
         with self._lock:
             metas = {root: dict(e["meta"]) for root, e in self._certs.items()}

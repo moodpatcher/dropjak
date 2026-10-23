@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
-"""Regressziós tesztek a több szabályválasztásos visszavonás terjedésére.
+"""Regression tests for the propagation of a revocation across multiple rule selections.
 
-A központi eset: a munkamenet egyszerre választ egy másik szabályt és egy
-gyűjtőszabályt (a gyűjtő a második). Amikor az admin a gyűjtő egyik tagját
-módosítja, a gyűjtő választása eltűnik a munkamenetből, a másik választás
-és annak lejárata megmarad, a tűzfalból csak a távozó gyűjtő pontos elemei
-tűnnek el, a conntrack csak a távozó portokra irányul, és az auditösszesítő
-``sessions_revoked=1`` értéket, valamint a függő gyűjtőt tartalmazza.
+The central case: the session selects another rule and a collection rule at
+the same time (the collection is the second). When the admin modifies one
+member of the collection, the collection's selection disappears from the
+session, the other selection and its expiry remain, only the leaving
+collection's exact elements disappear from the firewall, conntrack is
+directed only at the leaving ports, and the audit summary contains
+``sessions_revoked=1`` as well as the dependent collection.
 
-Fontos értelmezés a tűzfal-naplóhoz: részleges eltávolításnál a maradó
-választás elemeit a rendszer szándékosan törli és újra kiadja, hogy a
-kerneloldali timeout az új munkamenet-TTL-re álljon (ugyanígy jár el a
-meglévő ``_remove_selections_locked`` és a hozzá tartozó tesztek is).
-Ezért a "csak a távozó elemek törlődtek" állítást a végleges (nem újra
-kiadott) elemek halmazán ellenőrizzük: az engedélyezéskor hozzáadott
-elemek mínusz a művelet után hozzáadott elemek. A megosztott elemek
-conntrack-törlése viszont valóban elmarad, ezt közvetlenül is vizsgáljuk.
+An important interpretation for the firewall log: on partial removal the
+system deliberately deletes and re-issues the remaining selection's elements
+so that the kernel-side timeout is set to the new session TTL (the existing
+``_remove_selections_locked`` and its tests do the same). Therefore the
+"only the leaving elements were deleted" assertion is checked on the set of
+final (not re-issued) elements: the elements added at authorization minus the
+elements added after the operation. The conntrack deletion of shared
+elements, however, really is skipped; we check that directly too.
 
-A tesztek hamis nft/conntrack szkripteket használnak; valódi tűzfalhoz és
-hálózathoz nem nyúlnak. A HTTP-kiszolgáló csak 127.0.0.1-re figyel.
+The tests use fake nft/conntrack scripts; they do not touch a real firewall or
+network. The HTTP server listens only on 127.0.0.1.
 """
 
 from __future__ import annotations
@@ -42,15 +43,15 @@ import server    # noqa: E402
 import fail2ban as fail2ban_mod  # noqa: E402
 
 
-# --------------------------------------------------------------- segédeszközök
+# --------------------------------------------------------------- helpers
 
 
 class FakeTools:
-    """Ideiglenes nft/conntrack szkriptek naplózással.
+    """Temporary nft/conntrack scripts with logging.
 
-    Csak a tesztekhez szükséges műveleteket ismeri: ``nft -f -`` (szkript),
-    ``nft -j list set`` (üres kimenet), a törlések naplózása és a
-    ``conntrack`` hívások rögzítése.
+    It knows only the operations the tests need: ``nft -f -`` (script),
+    ``nft -j list set`` (empty output), logging of deletions and recording of
+    ``conntrack`` calls.
     """
 
     def __init__(self, directory: str) -> None:
@@ -114,9 +115,9 @@ DELETE_PREFIX = "nft delete element inet hatarvedelem "
 
 
 def added_elements(lines) -> set[str]:
-    """A ``nft -f -`` szkriptben hozzáadott (halmaz, elem) kulcsok.
+    """The (set, element) keys added in the ``nft -f -`` script.
 
-    A timeout utótagot levágjuk, hogy összevethető legyen a törlésnaplóval.
+    We cut off the timeout suffix so it can be compared with the deletion log.
     """
     result: set[str] = set()
     for line in lines:
@@ -129,7 +130,7 @@ def added_elements(lines) -> set[str]:
 
 
 def deleted_elements(lines) -> set[str]:
-    """A naplózott ``nft delete element`` hívások (halmaz, elem) kulcsai."""
+    """The (set, element) keys of the logged ``nft delete element`` calls."""
     return {
         line[len(DELETE_PREFIX):]
         for line in lines
@@ -161,11 +162,11 @@ def rule(
     )
 
 
-# ---------------------------------------------------------------- HTTP-réteg
+# ---------------------------------------------------------------- HTTP layer
 
 
 class PropagationHttpTests(unittest.TestCase):
-    """A jelentett élő eset a valódi HTTP-végpontokon keresztül."""
+    """The reported live case through the real HTTP endpoints."""
 
     ADMIN_IP = "127.0.0.5"
     ADMIN_USER = "prop-admin"
@@ -252,7 +253,7 @@ class PropagationHttpTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tools.clear()
 
-    # -- HTTP-segédek ---------------------------------------------------------
+    # -- HTTP helpers ---------------------------------------------------------
 
     def conn(self, source: str = "127.0.0.1") -> http.client.HTTPConnection:
         return http.client.HTTPConnection(
@@ -350,7 +351,7 @@ class PropagationHttpTests(unittest.TestCase):
             if line.startswith("conntrack ")
         ]
 
-    # -- 1. gyűjtő másodikként: részleges visszavonás ------------------------
+    # -- 1. collection second: partial revocation ----------------------------
 
     def test_edit_collection_member_keeps_other_selection(self) -> None:
         ip = "127.0.0.21"
@@ -395,9 +396,9 @@ class PropagationHttpTests(unittest.TestCase):
         )
         self.assertEqual(status, 200, body)
 
-        # A gyűjtő választása eltűnt, a másik választás és a lejárat maradt.
+        # The collection's selection disappeared, the other selection and the expiry remained.
         current = self.current_session(cookie, ip)
-        self.assertIsNotNone(current, "a munkamenet nem tűnhet el")
+        self.assertIsNotNone(current, "the session must not disappear")
         self.assertTrue(current.authorized)
         self.assertEqual(current.rules, (other,))
         self.assertEqual(
@@ -418,8 +419,8 @@ class PropagationHttpTests(unittest.TestCase):
             self.gw.sessions.validate(self.cookie_token(cookie), ip)
         )
 
-        # Csak a gyűjtő pontos eleme tűnt el véglegesen; a maradó elem
-        # timeoutjának újraindításához törölt+újra kiadott elem megmarad.
+        # Only the collection's exact element disappeared permanently; the element
+        # deleted and re-issued to restart the remaining element's timeout stays.
         after = added_elements(self.tools.script())
         self.assertEqual(
             after, {f"allowed_tcp {{ {ip} . 18000 }}"}
@@ -432,7 +433,7 @@ class PropagationHttpTests(unittest.TestCase):
         self.assertNotIn(f"allowed_input_tcp {{ {ip} . 18080 }}", deletes)
         self.assertNotIn("allowed_v4", {item.split(" ", 1)[0] for item in deletes})
 
-        # A conntrack csak a távozó portra irányul, nem az egész IP-re.
+        # conntrack targets only the leaving port, not the whole IP.
         conntrack = self.conntrack_lines()
         self.assertIn(
             f"conntrack -D -s {ip} -p tcp --dport 18080", conntrack
@@ -448,14 +449,14 @@ class PropagationHttpTests(unittest.TestCase):
             )
             if row.get("target") == member
         ]
-        self.assertTrue(rows, "hiányzik az admin_rule_updated audit")
+        self.assertTrue(rows, "missing the admin_rule_updated audit")
         self.assertEqual(rows[-1].get("sessions_revoked"), 1)
         self.assertIn(
             collection,
             str(rows[-1].get("collections_affected", "")).split(","),
         )
 
-    # -- 3. tag két gyűjtőben, a munkamenet csak az egyiket választotta -----
+    # -- 3. member in two collections, the session selected only one ---------
 
     def test_member_of_two_collections_only_selected_collection_removed(
         self,
@@ -492,7 +493,7 @@ class PropagationHttpTests(unittest.TestCase):
 
         admin = self.admin_cookie()
         status, _, body = self.admin_update(
-            admin, member, label="Közös tag", tcp=[17010],
+            admin, member, label="Shared member", tcp=[17010],
             direction="forward", default_ttl=300, max_ttl=3600,
         )
         self.assertEqual(status, 200, body)
@@ -510,8 +511,8 @@ class PropagationHttpTests(unittest.TestCase):
 
         after = added_elements(self.tools.script())
         self.assertEqual(after, {f"allowed_tcp {{ {ip} . 16000 }}"})
-        # Csak a kiválasztott gyűjtő (és a tag) elemei távoztak; a nem
-        # kiválasztott gyűjtő saját portja (17200) érintetlen.
+        # Only the selected collection's (and the member's) elements left; the
+        # unselected collection's own port (17200) is untouched.
         self.assertEqual(
             before - after,
             {
@@ -524,7 +525,7 @@ class PropagationHttpTests(unittest.TestCase):
         self.assertFalse(
             any("17200" in line for line in self.conntrack_lines())
         )
-        # A nem kiválasztott gyűjtő a szabálytárban változatlanul megvan.
+        # The unselected collection is still present unchanged in the rule store.
         other_collection = self.rules.get(unselected)
         self.assertIsNotNone(other_collection)
         self.assertEqual(
@@ -545,7 +546,7 @@ class PropagationHttpTests(unittest.TestCase):
         self.assertIn(selected, dependents)
         self.assertIn(unselected, dependents)
 
-    # -- 4. gyűjtő és a tagja is kiválasztva: egy menetben törlés -----------
+    # -- 4. both the collection and its member selected: one-shot deletion ---
 
     def test_edit_member_removes_collection_and_member_selections(self) -> None:
         ip = "127.0.0.23"
@@ -578,15 +579,15 @@ class PropagationHttpTests(unittest.TestCase):
         )
         self.assertEqual(status, 200, body)
 
-        # Mindkét választás egy menetben tűnt el: nincs köztes, részleges
-        # újrakiadás (az egyenkénti revoke_rule két lépésben újraadta volna
-        # a maradó választás elemeit).
+        # Both selections disappeared in one pass: there is no intermediate, partial
+        # re-issue (revoking one by one would have re-issued the remaining
+        # selection's elements in two steps).
         self.assertIsNone(self.current_session(cookie, ip))
         self.assertIsNone(
             self.gw.sessions.validate(self.cookie_token(cookie), ip)
         )
         after = added_elements(self.tools.script())
-        self.assertEqual(after, set(), "nem maradhat újra kiadott elem")
+        self.assertEqual(after, set(), "no re-issued element may remain")
         self.assertEqual(
             before - after,
             {
@@ -599,7 +600,7 @@ class PropagationHttpTests(unittest.TestCase):
         self.assertIn(f"allowed_tcp {{ {ip} . 15100 }}", deletes)
         self.assertIn(f"allowed_v4 {{ {ip} }}", deletes)
         self.assertIn(f"allowed_icmp {{ {ip} }}", deletes)
-        # Teljes eltávolításnál az egész IP kapcsolatai szakadnak meg.
+        # On full removal all of the IP's connections are broken.
         self.assertIn(
             f"conntrack -D -s {ip}", self.conntrack_lines()
         )
@@ -613,7 +614,7 @@ class PropagationHttpTests(unittest.TestCase):
         self.assertTrue(rows)
         self.assertEqual(rows[-1].get("sessions_revoked"), 1)
 
-    # -- 7. újbóli engedélyezés bejelentkezés nélkül, az új definícióval ----
+    # -- 7. re-authorization without login, with the new definition ---------
 
     def test_reauth_after_edit_grants_new_definition_without_old_element(
         self,
@@ -655,8 +656,8 @@ class PropagationHttpTests(unittest.TestCase):
             {f"allowed_tcp {{ {ip} . 14080 }}"},
         )
 
-        # Új bejelentkezés nélkül, ugyanazzal a munkamenettel engedélyezzük
-        # újra ugyanazt a gyűjtőt: az új tagdefiníció érvényesül.
+        # Without a new login, with the same session, we re-authorize the same
+        # collection: the new member definition applies.
         self.tools.clear()
         status, _, body = self.access(cookie, [other, collection], 600, ip)
         self.assertEqual(status, 200, body)
@@ -682,20 +683,20 @@ class PropagationHttpTests(unittest.TestCase):
                 f"allowed_tcp {{ {ip} . 14000 }}",
                 f"allowed_tcp {{ {ip} . 14090 }}",
             },
-            "az új definíció portjai kerüljenek kiadásra",
+            "the new definition's ports should be issued",
         )
         deletes = deleted_elements(self.tools.deletes())
-        # A távozó régi elem (14080) sem hozzáadásban, sem törlésben nem
-        # jelenhet meg újra: az már a módosításkor eltűnt.
+        # The leaving old element (14080) must not appear again in either an add or
+        # a delete: it had already disappeared at modification time.
         self.assertNotIn(f"allowed_tcp {{ {ip} . 14080 }}", adds)
         self.assertNotIn(f"allowed_tcp {{ {ip} . 14080 }}", deletes)
 
 
-# ---------------------------------------------------------------- magszint
+# ---------------------------------------------------------------- core level
 
 
 class _DirectSessionTests(unittest.TestCase):
-    """Közvetlen SessionManager-tesztek hamis tűzfallal."""
+    """Direct SessionManager tests with a fake firewall."""
 
     IP = "192.168.50.23"
 
@@ -726,11 +727,11 @@ class _DirectSessionTests(unittest.TestCase):
 
 
 class PartialRevokeUnitTests(_DirectSessionTests):
-    """2. eset: a második választás visszavonása, az első megmarad."""
+    """Case 2: revoking the second selection, the first remains."""
 
     def test_revoke_second_keeps_first_and_updates_derived_fields(self) -> None:
-        first = rule("first", label="Első", tcp=(80,))
-        second = rule("second", label="Második", tcp=(443, 8080))
+        first = rule("first", label="First", tcp=(80,))
+        second = rule("second", label="Second", tcp=(443, 8080))
         session = self.login()
         authorized = self.sessions.authorize(
             session.token, self.IP, [first, second], 120
@@ -742,15 +743,15 @@ class PartialRevokeUnitTests(_DirectSessionTests):
         self.assertEqual(self.sessions.revoke_rule("second"), 1)
 
         current = self.sessions.validate(session.token, self.IP)
-        self.assertIsNotNone(current, "a munkamenet nem tűnhet el")
+        self.assertIsNotNone(current, "the session must not disappear")
         self.assertTrue(current.authorized)
-        # A megmaradt választás minden származtatott nézetben konzisztens.
+        # The remaining selection is consistent in every derived view.
         self.assertEqual(current.rules, ("first",))
         self.assertEqual(current.rule, "first")
-        self.assertEqual(current.rule_label, "Első")
+        self.assertEqual(current.rule_label, "First")
         self.assertEqual(
             current.rule_parts,
-            (gateway.RuleSelection("first", "Első", first.grants),),
+            (gateway.RuleSelection("first", "First", first.grants),),
         )
         self.assertEqual(
             current.grant_parts,
@@ -771,9 +772,9 @@ class PartialRevokeUnitTests(_DirectSessionTests):
 
         row = self.sessions.active_sessions()[0]
         self.assertEqual(row["rule"], "first")
-        self.assertEqual(row["rule_label"], "Első")
+        self.assertEqual(row["rule_label"], "First")
         self.assertEqual(row["selected_rules"], ["first"])
-        self.assertEqual(row["selected_rule_labels"], ["Első"])
+        self.assertEqual(row["selected_rule_labels"], ["First"])
 
         after = added_elements(self.tools.script())
         self.assertEqual(after, {f"allowed_tcp {{ {self.IP} . 80 }}"})
@@ -795,12 +796,12 @@ class PartialRevokeUnitTests(_DirectSessionTests):
             f"conntrack -D -s {self.IP} -p tcp --dport 80", conntrack
         )
         self.assertNotIn(f"conntrack -D -s {self.IP}", conntrack)
-        # A második azonosítóra újabb hívás már nem érinti a munkamenetet.
+        # A further call for the second identifier no longer affects the session.
         self.assertEqual(self.sessions.revoke_rule("second"), 0)
 
 
 class OverlappingPortUnitTests(_DirectSessionTests):
-    """5. eset: két input választás közös 22-es portja nem tűnik el."""
+    """Case 5: the shared port 22 of two input selections does not disappear."""
 
     def test_shared_input_port_not_deleted_or_flushed(self) -> None:
         first = rule("ssh-a", label="SSH A", tcp=(22, 180), direction="input")
@@ -844,10 +845,10 @@ class OverlappingPortUnitTests(_DirectSessionTests):
                 f"allowed_input_tcp {{ {self.IP} . 180 }}",
             },
         )
-        # Véglegesen csak a 443 tűnt el. A 22-es portot a maradó választás
-        # timeoutjának újraindítása miatt a grant_all törli és azonnal
-        # vissza is adja; a revoke_exact nem érinti, és a conntrack sem
-        # törli a megosztott port élő kapcsolatait.
+        # Only 443 disappeared permanently. Because of restarting the remaining
+        # selection's timeout, grant_all deletes port 22 and immediately
+        # re-adds it; revoke_exact does not touch it, and conntrack does not
+        # delete the shared port's live connections either.
         self.assertEqual(
             before - after, {f"allowed_input_tcp {{ {self.IP} . 443 }}"}
         )
@@ -867,16 +868,16 @@ class OverlappingPortUnitTests(_DirectSessionTests):
 
 
 class MixedDirectionCollectionUnitTests(_DirectSessionTests):
-    """6. eset: vegyes irányú gyűjtő másodikként, input 22 megmarad."""
+    """Case 6: mixed-direction collection second, input 22 remains."""
 
     def test_mixed_collection_second_cleans_both_exact_sets(self) -> None:
         ssh = rule("ssh", label="SSH", tcp=(22,), direction="input")
         mixed = gateway.Rule(
             id="mixed",
-            label="Vegyes",
+            label="Mixed",
             description="",
-            # A feloldott gyűjtő nézete: forward 25565 TCP/UDP, input
-            # 25566 TCP/UDP. A members mező teszi gyűjtővé.
+            # The resolved collection's view: forward 25565 TCP/UDP, input
+            # 25566 TCP/UDP. The members field makes it a collection.
             tcp=(25565,),
             udp=(25565,),
             input_tcp=(25566,),
@@ -930,7 +931,7 @@ class MixedDirectionCollectionUnitTests(_DirectSessionTests):
         self.assertEqual(
             after, {f"allowed_input_tcp {{ {self.IP} . 22 }}"}
         )
-        # Mindkét irány pontos halmaza távozott; a 22-es input elem megmarad.
+        # Both directions' exact sets left; the input element 22 remains.
         self.assertEqual(
             before - after,
             {

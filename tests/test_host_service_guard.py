@@ -1,23 +1,21 @@
 #!/usr/bin/env python3
-"""Az audit F5 javításának tesztjei.
+"""Tests for the audit's F5 fix.
 
-F5: a ``host_service_tcp``/``host_service_udp`` add-only őrhalmazok eddig
-4096 elemig bővülhettek, és a szinkron hibája csak naplózódott. A javítás:
+F5: the ``host_service_tcp``/``host_service_udp`` add-only guard sets could
+previously grow to 4096 elements, and a sync failure was only logged. The fix:
 
-* a halmazméret 65536, így a legfeljebb 65535 érvényes host port mind
-  elfér, és nem veszhet el csendben egy őrelem;
-* a szinkron hibája után a host (input) engedélyek 503-mal (``FirewallError``)
-  elutasításra kerülnek, míg a csak forward engedélyezés működik;
-* a következő host engedélyezés egyszer újrapróbálja a szinkront, így egy
-  átmeneti nft-hiba magától gyógyul;
-* a sikeres szinkron után biztonságos takarítás fut: portot csak akkor
-  töröl, ha egyetlen perzisztált szabály sem hivatkozik rá, és nincs hozzá
-  élő conntrack-bejegyzés. Ha a conntrack vagy az nft listázás nem megy,
-  egyetlen port sem törlődik.
+* the set size is 65536, so all up to 65535 valid host ports fit, and a guard
+element cannot be lost silently;
+* after a sync failure, host (input) authorizations are rejected with 503
+  (``FirewallError``), while forward-only authorization keeps working;
+* the next host authorization retries the sync once, so a transient nft
+error heals by itself;
+* after a successful sync a safe cleanup runs: it deletes a port only if no
+persisted rule references it and there is no live conntrack entry for it. If
+conntrack or the nft listing does not work, no port is deleted.
 
-A tesztek nem nyúlnak valódi nftables-hez: a health-tesztek apró hamis
-tűzfalat, a takarítás-tesztek a ``test_gateway`` FakeTools segédjét
-használják.
+The tests do not touch real nftables: the health tests use a small fake
+firewall, the cleanup tests use the ``test_gateway`` FakeTools helper.
 """
 
 from __future__ import annotations
@@ -42,11 +40,11 @@ from test_gateway import FakeTools  # noqa: E402
 IP = "192.168.50.23"
 
 
-# ------------------------------------------------------------------ segédek
+# ------------------------------------------------------------------ helpers
 
 
 class RecordingAudit:
-    """Az audit-eseményeket memóriában gyűjtő helyettesítő."""
+    """Replacement that collects audit events in memory."""
 
     def __init__(self) -> None:
         self.events: list[tuple[str, dict]] = []
@@ -69,7 +67,7 @@ class FakeGroups:
 
 
 class FakeRules:
-    """Csak a sync_host_ports() által használt szabálytár-műveletek."""
+    """Only the rule store operations used by sync_host_ports()."""
 
     def __init__(self, rules=()) -> None:
         self._rules = list(rules)
@@ -85,7 +83,7 @@ class FakeRules:
 
 
 class GuardFirewall:
-    """Hamis tűzfal a health/fail-closed tesztekhez."""
+    """Fake firewall for the health/fail-closed tests."""
 
     def __init__(self) -> None:
         self.fail_sync = False
@@ -99,7 +97,7 @@ class GuardFirewall:
         self.sync_calls += 1
         self.sync_args.append((tuple(tcp_ports), tuple(udp_ports)))
         if self.fail_sync:
-            raise gateway.FirewallError("nft sync hiba")
+            raise gateway.FirewallError("nft sync error")
 
     def prune_host_service_ports(
         self, referenced_tcp, referenced_udp, audit=None
@@ -147,7 +145,7 @@ def make_rule(
 
 
 def build_gateway(rules=(), firewall=None):
-    """Gateway a valódi SessionManager-rel, hamis háttér-tárakkal."""
+    """Gateway with the real SessionManager and fake backend stores."""
     fw = firewall if firewall is not None else GuardFirewall()
     audit = RecordingAudit()
     gw = gateway.Gateway(
@@ -198,8 +196,8 @@ class TemplateCapacityTests(unittest.TestCase):
 
 class HostPortHealthTests(unittest.TestCase):
     def setUp(self) -> None:
-        # A hamis tűzfal nem végez conntrack-törlést; a globális eszközt
-        # kapcsoljuk ki, hogy a tesztek ne hívjanak valódi conntrackot.
+        # The fake firewall does no conntrack deletion; we disable the global
+        # tool so the tests do not call real conntrack.
         patcher = mock.patch.object(gateway, "CONNTRACK_BIN", "")
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -224,13 +222,13 @@ class HostPortHealthTests(unittest.TestCase):
         gw, fw, audit = build_gateway([rule])
         fw.fail_sync = True
 
-        # A flag konzervatívan hamis, még mielőtt bármilyen sync lefutna.
+        # The flag is conservatively false even before any sync runs.
         self.assertFalse(gw._host_ports_ok)
         session = login(gw)
         with self.assertRaises(gateway.FirewallError):
             gw.sessions.authorize(session.token, IP, rule, 60)
 
-        # Az authorize egyszer megpróbálta a szinkront, de nem adott grantet.
+        # authorize tried the sync once but did not grant.
         self.assertEqual(fw.sync_calls, 1)
         self.assertEqual(fw.grant_calls, [])
         self.assertFalse(gw._host_ports_ok)
@@ -247,7 +245,7 @@ class HostPortHealthTests(unittest.TestCase):
 
         self.assertTrue(authorized.authorized)
         self.assertEqual(len(fw.grant_calls), 1)
-        # A forward engedély nem hívja a portőr-visszahívást.
+        # Forward authorization does not call the port guard callback.
         self.assertEqual(fw.sync_calls, 1)
 
     def test_next_host_authorization_retries_once_and_heals(self) -> None:
@@ -258,8 +256,8 @@ class HostPortHealthTests(unittest.TestCase):
         self.assertFalse(gw._host_ports_ok)
         self.assertEqual(fw.sync_calls, 1)
 
-        # A hiba elmúlt: a következő host engedélyezés pontosan egy
-        # retry-t indít, és utána sikeresen ad grantet.
+        # The error is gone: the next host authorization starts exactly one
+        # retry, and after that grants successfully.
         fw.fail_sync = False
         session = login(gw)
         authorized = gw.sessions.authorize(session.token, IP, rule, 60)
@@ -272,7 +270,7 @@ class HostPortHealthTests(unittest.TestCase):
         self.assertIn(22, fw.prune_calls[0][0])
         self.assertIn(22, fw.sync_args[-1][0])
 
-        # Egészséges állapotban nincs további retry.
+        # In a healthy state there is no further retry.
         gw.sessions.authorize(session.token, IP, rule, 60)
         self.assertEqual(fw.sync_calls, 2)
 
@@ -314,17 +312,17 @@ class HostPortHealthTests(unittest.TestCase):
         gw.sync_host_ports()
 
         self.assertTrue(gw._host_ports_ok)
-        # A szinkronba csak az input tag portjai kerülnek...
+        # Only the input member's ports go into the sync...
         self.assertEqual(fw.sync_args[-1], ((25566,), (25566,)))
-        # ...de a takarítás hivatkozáslistája minden szabályrész portját
-        # védi: a gyűjtő forward tagjának 80-as portja sem törölhető.
+        # ...but the cleanup's reference list protects every rule part's port:
+        # even port 80 of the collection's forward member cannot be deleted.
         self.assertEqual(len(fw.prune_calls), 1)
         referenced_tcp, referenced_udp, _audit = fw.prune_calls[0]
         self.assertEqual(referenced_tcp, (80, 25566))
         self.assertEqual(referenced_udp, (25566,))
 
 
-# ------------------------------------------------------------------ takarítás
+# ------------------------------------------------------------------ cleanup
 
 
 class HostServicePruneTests(unittest.TestCase):
@@ -336,14 +334,14 @@ class HostServicePruneTests(unittest.TestCase):
         self.addCleanup(
             setattr, gateway, "CONNTRACK_BIN", self._old_conntrack
         )
-        # Alapból nincs conntrack: ilyenkor a takarítás nem törölhet.
+        # No conntrack by default: in that case cleanup may not delete.
         gateway.CONNTRACK_BIN = ""
         self.fw = gateway.Firewall(
             binary=str(self.tools.nft), logger=lambda *_: None
         )
 
     def set_conntrack(self, lines=()) -> None:
-        """A conntrack -L kimenetét utánzó szkript beállítása."""
+        """Set up a script imitating the output of conntrack -L."""
         body = "".join(
             f"printf '%s\\n' {self._shell_quote(line)}\n" for line in lines
         )
@@ -384,7 +382,7 @@ class HostServicePruneTests(unittest.TestCase):
             any("host_service_udp { 5353 }" in line for line in deletes),
             deletes,
         )
-        # A hivatkozott portot egyik törlés sem érinti.
+        # No deletion touches the referenced port.
         self.assertFalse(any(" 443" in line for line in deletes), deletes)
         self.assertFalse(any(" 53 " in line for line in deletes), deletes)
 
@@ -409,8 +407,8 @@ class HostServicePruneTests(unittest.TestCase):
 
         summary = self.fw.prune_host_service_ports({22}, set())
 
-        # A 80 élő kapcsolatban szerepel (dport), ezért megmarad; a 8080
-        # sem hivatkozott, sem élő, ezért törlődik.
+        # 80 appears in a live connection (dport), so it remains; 8080 is
+        # neither referenced nor live, so it is deleted.
         self.assertEqual(summary["removed_tcp"], [8080])
         self.assertEqual(summary["live_kept"], [80])
         self.assertFalse(any(" 80," in line for line in self.delete_scripts()))
@@ -438,7 +436,7 @@ class HostServicePruneTests(unittest.TestCase):
 
         warnings = [
             message for message in messages
-            if "takarítás kihagyva" in message
+            if "host port pruning skipped" in message
         ]
         self.assertEqual(len(warnings), 1, messages)
 
@@ -463,7 +461,7 @@ class HostServicePruneTests(unittest.TestCase):
         with mock.patch.object(
             self.fw,
             "_run",
-            side_effect=gateway.FirewallError("az nft nem található"),
+            side_effect=gateway.FirewallError("nft not found"),
         ):
             summary = self.fw.prune_host_service_ports({80}, {53})
 
@@ -471,7 +469,7 @@ class HostServicePruneTests(unittest.TestCase):
         self.assertEqual(self.delete_scripts(), [])
 
     def test_missing_set_is_treated_as_empty(self) -> None:
-        # A FakeTools alapból üres nftables JSON-t ad: nincs törölnivaló.
+        # FakeTools returns empty nftables JSON by default: nothing to delete.
         self.set_conntrack()
         self.tools.clear()
 
@@ -485,7 +483,7 @@ class HostServicePruneTests(unittest.TestCase):
         payload = (
             '{"nftables": [{"set": {"name": "host_service_tcp", '
             '"elem": [22, {"elem": 80}, {"elem": {"val": 443}}, '
-            '"nem-szam", 70000, true]}}]}'
+            '"not-a-number", 70000, true]}}]}'
         )
         self.assertEqual(
             gateway.Firewall.parse_service_set_json(

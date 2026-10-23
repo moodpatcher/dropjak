@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Dropjak végponttól végpontig teszt a teszt-VM-en.
+"""Dropjak end-to-end test on the test VM.
 
-A hoston futó mód létrehozza az ideiglenes felhasználót, majd a hvclient
-hálózati névtérből hajtja végre a kliens-lépéseket. A tűzfalhalmazokat a
-host névterében ellenőrzi. A szkript a végén törli a felhasználót.
+Host mode creates the temporary user, then performs the client steps from the
+hvclient network namespace. It checks the firewall sets in the host namespace.
+The script deletes the user at the end.
 
-Feltételek: root jogosultság, a projekt /root/hatarvedelem alatt, valamint
-a hv-lan veth pár és a hvclient névtér (192.168.10.2) létezése.
+Requirements: root privileges, the project under /root/hatarvedelem, and the
+existence of the hv-lan veth pair and the hvclient namespace (192.168.10.2).
 
-Futtatás a VM-en:
+Run on the VM:
     python3 tests/e2e_vm.py
 """
 
@@ -39,9 +39,10 @@ import gateway  # noqa: E402
 
 BASE = "http://192.168.10.1:8100"
 COOKIE = "/root/e2e_cookies.txt"
-# A portál egy IP-n egyszerre csak egy munkamenetet tart. Az admin API-t ezért
-# a host loopback címéről (127.0.0.1) érjük el, külön sütitárral: így a kliens
-# névtér 192.168.10.2-es munkamenete és az admin munkamenet egyszerre élhet.
+# The portal keeps only one session per IP. We therefore reach the admin API
+# from the host loopback address (127.0.0.1), with a separate cookie jar: this
+# way the client namespace's session at 192.168.10.2 and the admin session can
+# live at the same time.
 ADMIN_BASE = os.environ.get("E2E_ADMIN_BASE", "http://127.0.0.1:8100")
 ADMIN_COOKIE = os.environ.get("E2E_ADMIN_COOKIE", "/root/e2e_admin_cookies.txt")
 SCEN_COOKIE = os.environ.get("E2E_SCEN_COOKIE", "/root/e2e_scenario_cookies.txt")
@@ -54,21 +55,21 @@ PASS_ENV = "E2E_PASS"
 NEW_PASS_ENV = "E2E_NEW_PASS"
 NFT_SETS = ("allowed_v4", "allowed_tcp", "allowed_udp", "allowed_icmp",
             "allowed_input_tcp", "allowed_input_udp", "client_mac")
-# A klienshez tartozó engedélyhalmazok; a client_mac külön kezelendő, mert
-# abban IP . MAC kulcs van, nem IP vagy IP . port.
+# The grant sets belonging to the client; client_mac is handled separately,
+# because it has IP . MAC keys, not IP or IP . port.
 GRANT_SETS = ("allowed_v4", "allowed_tcp", "allowed_udp", "allowed_icmp",
               "allowed_input_tcp", "allowed_input_udp")
 CLIENT_IP = "192.168.10.2"
 
-# A kiterjesztett forgatókönyvek kapcsolói. Alapból minden kapcsoló KI van,
-# ezért egy szokásos futás nem indít újraindítást és nem vár lejáratra.
+# Switches for the extended scenarios. By default every switch is OFF,
+# so a normal run does not trigger a restart and does not wait for expiry.
 LONG_GATE = "HV_E2E_LONG"
 PENDING_GATE = "HV_E2E_PENDING"
 RESTART_GATE = "HV_E2E_RESTART"
 MULTI_GATE = "HV_E2E_MULTI"
-# A K6 saját tesztfelhasználója és alapértelmezett szabálypárja. A pár a
-# HV_E2E_RULES változóval felülírható; a felhasználót a forgatókönyv-erőforrások
-# hozzák létre, a szabályokat a K6 a belépés előtt rendeli hozzá.
+# K6's own test user and default rule pair. The pair can be overridden with
+# the HV_E2E_RULES variable; the user is created by the scenario resources,
+# and K6 assigns the rules before login.
 MULTI_USER = "e2e-multi-user"
 MULTI_DEFAULT_RULES = ("e2e-rev-fwd", "e2e-rev-host")
 try:
@@ -76,17 +77,17 @@ try:
 except ValueError:
     LONG_MAX_WAIT = 900
 
-# A forgatókönyvek által létrehozott erőforrások. A takarítás a gyűjtőket a
-# tagjaik előtt törli, mert a szabálytár nem engedi a gyűjtőben hivatkozott
-# tag törlését. A gyűjtő egyszerre ad forward TCP/UDP, ICMP, teljes (allowed_v4)
-# és host (input) engedélyt, ezért egyetlen engedélyezéssel mind a hét
-# érintett halmaz ellenőrizhető.
+# The resources created by the scenarios. Cleanup deletes collections before
+# their members, because the rule store does not allow deleting a member
+# referenced in a collection. The collection grants forward TCP/UDP, ICMP,
+# full (allowed_v4) and host (input) permission at once, so a single
+# authorization can verify all seven affected sets.
 SCENARIO_RULES = (
     "e2e-full-coll",
     "e2e-rev-fwd", "e2e-rev-full", "e2e-rev-host",
 )
-# A takarításnak a fő folyamat saját szabályait is törölnie kell. A gyűjtőket
-# a tagjaik előtt kell törölni.
+# Cleanup must also delete the main process's own rules. Collections must be
+# deleted before their members.
 CLEANUP_RULES = (
     "e2e-combo",
     "e2e-full-coll",
@@ -103,13 +104,13 @@ PREAUTH_LABEL_PREFIX = "e2e-preauth-"
 CONNTRACK_BIN = (
     os.environ.get("HV_CONNTRACK_BIN") or shutil.which("conntrack") or ""
 )
-# A restart-helper állapotfájljai; a main finally a markerrel engedi tovább.
+# The restart helper's state files; main finally releases it with the marker.
 RESTART_MARKER = ""
 RESTART_STATE = ""
 RESTART_LOG = ""
 RESTART_TIMEOUT = 180
 
-# A kiterjesztett forgatókönyvek admin munkamenete a host loopbackjáról.
+# Admin session of the extended scenarios from the host loopback.
 _admin_portal: Portal | None = None
 _admin_password = ""
 
@@ -119,7 +120,7 @@ skipped: list[str] = []
 pending: list[str] = []
 
 
-# ------------------------------------------------------------------ kliens mód
+# ------------------------------------------------------------------ client mode
 
 class Portal:
     def __init__(
@@ -147,8 +148,8 @@ class Portal:
         if payload is not None:
             body = json.dumps(payload).encode()
             headers["Content-Type"] = "application/json"
-            # Az Origin a tényleges Hosttal egyezik (a szerver ezt nézi),
-            # ezért a loopback admin kérésnél is a loopback cím kerül ide.
+            # The Origin matches the actual Host (the server checks this),
+            # so the loopback address goes here even for a loopback admin request.
             headers["Origin"] = self.base
         req = urllib.request.Request(
             self.base + path, data=body, headers=headers,
@@ -217,11 +218,11 @@ def cmd_password() -> int:
 
 
 def _access_rule_ids(rule) -> list[str]:
-    """A szabály-választás rendezett, ismétlődés nélküli azonosítói.
+    """The ordered, duplicate-free identifiers of the rule selection.
 
-    A ``rule`` lehet vesszővel elválasztott szöveg (a kliens-parancs és a
-    régi hívók ezt használják) vagy szabály-azonosítók sorozata. Az eredeti
-    sorrend marad meg; az üres elemek kimaradnak.
+    ``rule`` may be a comma-separated string (the client command and the old
+    callers use this) or a sequence of rule identifiers. The original order
+    is kept; empty elements are left out.
     """
     raw: list[str] = []
     if isinstance(rule, str):
@@ -230,7 +231,7 @@ def _access_rule_ids(rule) -> list[str]:
         for item in rule:
             if not isinstance(item, str):
                 raise TypeError(
-                    "a szabály-azonosítóknak szövegeknek kell lenniük"
+                    "rule identifiers must be strings"
                 )
             raw.extend(item.split(","))
     ids: list[str] = []
@@ -243,9 +244,9 @@ def _access_rule_ids(rule) -> list[str]:
 
 def cmd_access(rule: str | Sequence[str], ttl: str) -> int:
     ids = _access_rule_ids(rule)
-    # A ``rules`` lista a mérvadó; a ``rule`` a régi szerverek és kliensek
-    # kedvéért az első azonosítót tartalmazza. Egy azonosítónál a szerver
-    # továbbra is fogadja ezt a régi alakot.
+    # The ``rules`` list is authoritative; ``rule`` contains the first
+    # identifier for the sake of old servers and clients. With one identifier
+    # the server still accepts this old form.
     portal = Portal()
     code, text = portal.request(
         "/api/access",
@@ -309,7 +310,7 @@ def ping_works() -> bool:
 
 
 def host_ssh_works() -> bool:
-    """A host SSH portja elérhető-e a kliens névtérből."""
+    """Whether the host SSH port is reachable from the client namespace."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(2)
     try:
@@ -322,11 +323,11 @@ def host_ssh_works() -> bool:
 
 
 def cmd_tcp_probe(host: str, port: str, timeout: str) -> int:
-    """TCP-kapcsolat eredménye: open / refused / timeout / error.
+    """TCP connection result: open / refused / timeout / error.
 
-    A host_ssh_works() csak igaz/hamis értéket ad, ezért a blokk-teszt nem
-    tudná megkülönböztetni az eldobást (időtúllépés) az elutasítástól. Ez a
-    parancs a kliens névtérben fut, és méri az eltelt időt is.
+    host_ssh_works() only gives a boolean, so the block test could not
+    distinguish a drop (timeout) from a rejection. This command runs in the
+    client namespace and also measures the elapsed time.
     """
     started = time.monotonic()
     status = "error"
@@ -357,13 +358,14 @@ def cmd_tcp_hold(
     host: str, port: str, hold_seconds: str, established_path: str,
     after_path: str, release_path: str, wait_seconds: str,
 ) -> int:
-    """Tartós TLS-kapcsolat a blokk meglévő folyamra gyakorolt hatásához.
+    """Persistent TLS connection to test the block's effect on an existing flow.
 
-    Az első kérés után jelzőfájlt ír (a hívó ekkor telepíti a blokkot),
-    majd ugyanazon a kapcsolaton kér a blokk alatt, kiírja az eredményt,
-    megvárja a blokk eltávolítását jelző fájlt, és újra kér. Az utolsó
-    kérés sikere bizonyítja, hogy a blokk eltávolítása után újraengedélyezés
-    nélkül működik a még érvényes engedély.
+    After the first request it writes a flag file (the caller installs the
+    block then), then requests on the same connection during the block,
+    writes the result, waits for the file signalling the block's removal,
+    and requests again. The success of the last request proves that the
+    still-valid grant works without re-authorization after the block is
+    removed.
     """
     result = {
         "established": False,
@@ -389,13 +391,13 @@ def cmd_tcp_hold(
         sock.settimeout(8)
         sock.sendall(request)
         if not sock.recv(4096):
-            raise OSError("a szerver az első kérésre üres választ adott")
+            raise OSError("the server gave an empty response to the first request")
         result["established"] = True
         with open(established_path, "w", encoding="utf-8") as fh:
             fh.write("established\n")
         time.sleep(hold)
-        # A blokk alatti kérés: a helyi TCP-pufferbe kerül, a hálózaton
-        # viszont a blokk eldobja, ezért a válasz elmarad.
+        # The request during the block goes into the local TCP buffer, but on
+        # the network the block drops it, so the response does not arrive.
         try:
             sock.sendall(request)
             sock.settimeout(wait)
@@ -414,9 +416,9 @@ def cmd_tcp_hold(
                 "after": result["after"],
                 "after_reply": result["after_reply"],
             }, fh)
-        # A blokk eltávolítását a hívó markerrel jelzi; a TCP a blokkolt
-        # szegmenst addig újraküldi, majd a marker után ugyanazon a
-        # kapcsolaton újra kérünk.
+        # The caller signals the block's removal with the marker; TCP keeps
+        # retransmitting the blocked segment, and after the marker we request
+        # again on the same connection.
         release_deadline = time.monotonic() + max(15.0, wait * 4)
         while time.monotonic() < release_deadline:
             if os.path.exists(release_path):
@@ -448,11 +450,12 @@ def cmd_tcp_hold(
 
 
 def cmd_traffic() -> int:
-    """Rövid forgalomgenerálás a conntrack-ellenőrzésekhez.
+    """Short traffic generation for the conntrack checks.
 
-    A DNS-válasz és a host SSH kapcsolat a kliens forrás-IP-jéhez tartozó
-    conntrack-bejegyzést hoz létre. A visszavonás után ezeknek el kell
-    tűnniük; a portál saját, 8100-as folyamait a host oldali segéd szűri.
+    The DNS response and the host SSH connection create a conntrack entry
+    belonging to the client's source IP. After revocation these must
+    disappear; the host-side helper filters out the portal's own flows on
+    port 8100.
     """
     print(json.dumps({
         "dns": dns_works(),
@@ -480,7 +483,7 @@ def cmd_check() -> int:
 
 
 def cmd_admin_seed() -> int:
-    """Host SSH és vegyes gyűjtő létrehozása, majd hozzárendelés a tesztuserhez."""
+    """Create the host SSH and mixed collection rules, then assign them to the test user."""
     portal = Portal()
     results = []
     for payload in (
@@ -491,7 +494,7 @@ def cmd_admin_seed() -> int:
         },
         {
             "action": "create", "id": "e2e-combo",
-            "label": "E2E vegyes", "collection": True,
+            "label": "E2E mixed", "collection": True,
             "members": ["browse", "host-e2e"],
             "default_ttl": 120, "max_ttl": 600,
         },
@@ -499,7 +502,7 @@ def cmd_admin_seed() -> int:
         code, text = portal.request("/api/admin/rules", payload)
         data = safe_json(text)
         ok = code == 200 or (
-            isinstance(data, dict) and "már létezik" in str(data.get("error", ""))
+            isinstance(data, dict) and "already exists" in str(data.get("error", ""))
         )
         results.append({"rule": payload["id"], "code": code, "ok": ok})
     code, text = portal.request("/api/admin/users", {
@@ -517,34 +520,34 @@ def cmd_admin_seed() -> int:
 
 
 def _admin_tolerant(portal: Portal, path: str, payload: dict) -> tuple[bool, str]:
-    """Admin művelet, a „már nincs ilyen” hibát sikernek tekintve."""
+    """Admin operation, treating the "no longer exists" error as success."""
     try:
         code, text = portal.request(path, payload)
-    except Exception as exc:  # a takarítás ne szakadjon meg egy hálózati hibától
+    except Exception as exc:  # cleanup must not break on a network error
         return False, f"{type(exc).__name__}: {exc}"[:200]
     data = safe_json(text)
     message = str(data.get("error", "")) if isinstance(data, dict) else str(data)
     if code == 200:
         return True, ""
-    # Csak a már hiányzó erőforrást tekintjük késznek. A „nem törölhető”
-    # valódi maradékot jelez (pl. gyűjtőre mutató hivatkozás), azt nem
-    # szabad elrejteni.
-    if "nincs ilyen" in message:
+    # Only the already missing resource counts as done. A "cannot be
+    # deleted" error indicates a real leftover (e.g. a reference to a
+    # collection), which must not be hidden.
+    if "no such" in message:
         return True, ""
     return False, f"code={code} {message[:160]}"
 
 
 def cmd_admin_cleanup() -> int:
-    """A kiterjesztett forgatókönyvek maradékainak eltakarítása.
+    """Clean up the leftovers of the extended scenarios.
 
-    Az outer main finally blokkja akkor is meghívja, ha egy forgatókönyv
-    félbeszakadt. Minden hiányzó erőforrásra toleráns; csak a valódi hibákat
-    jelzi, és a kliens munkamenetét nem érinti.
+    The outer main finally block calls it even if a scenario was
+    interrupted. It is tolerant of every missing resource; it reports only
+    real errors, and does not touch the client's session.
     """
     portal = Portal()
     problems: list[str] = []
 
-    # 1. Blokk- és pre-auth bejegyzések a jól ismert címke-prefixszel.
+    # 1. Block and pre-auth entries with the well-known label prefix.
     code, text = portal.request("/api/admin/settings")
     data = safe_json(text)
     settings = (
@@ -572,7 +575,7 @@ def cmd_admin_cleanup() -> int:
             if not ok:
                 problems.append(f"{kind} {entry_id}: {detail}")
 
-    # 2. Csoportok (a szabály- és felhasználóhivatkozások előtt).
+    # 2. Groups (before the rule and user references).
     for group_id in SCENARIO_GROUPS:
         ok, detail = _admin_tolerant(portal, "/api/admin/groups", {
             "action": "delete", "id": group_id,
@@ -580,7 +583,7 @@ def cmd_admin_cleanup() -> int:
         if not ok:
             problems.append(f"group {group_id}: {detail}")
 
-    # 3. Szabályok; a gyűjtők a CLEANUP_RULES elején vannak.
+    # 3. Rules; the collections are at the beginning of CLEANUP_RULES.
     for rule_id in CLEANUP_RULES:
         ok, detail = _admin_tolerant(portal, "/api/admin/rules", {
             "action": "delete", "id": rule_id,
@@ -588,7 +591,7 @@ def cmd_admin_cleanup() -> int:
         if not ok:
             problems.append(f"rule {rule_id}: {detail}")
 
-    # 4. Ideiglenes felhasználók.
+    # 4. Temporary users.
     for name in SCENARIO_USERS:
         ok, detail = _admin_tolerant(portal, "/api/admin/users", {
             "action": "delete", "name": name,
@@ -596,8 +599,8 @@ def cmd_admin_cleanup() -> int:
         if not ok:
             problems.append(f"user {name}: {detail}")
 
-    # 5. A teszt kliens IP esetleges maradék tiltása ne akadályozza a
-    # következő futást. A hiányzó tiltás 404, ami itt rendben van.
+    # 5. A possible leftover ban of the test client IP must not block the
+    # next run. A missing ban is a 404, which is fine here.
     try:
         code, _text = portal.request("/api/admin/fail2ban", {
             "action": "unban", "ip": CLIENT_IP,
@@ -651,10 +654,10 @@ def client_main(argv: list[str]) -> int:
             "firewall_tab": 'data-admin="firewall"' in body,
         }))
         return 0
-    raise SystemExit(f"ismeretlen kliens-parancs: {argv[0]}")
+    raise SystemExit(f"unknown client command: {argv[0]}")
 
 
-# ------------------------------------------------------------------- host mód
+# ------------------------------------------------------------------- host mode
 
 def run_client(
     *args: str,
@@ -671,7 +674,7 @@ def run_client(
     if cookie is not None:
         env["E2E_COOKIE"] = cookie
     if user is not None:
-        # A kliens login parancsa ezt olvassa; a munkamenet-süti külön van.
+        # The client login command reads this; the session cookie is separate.
         env["E2E_USER"] = user
     return subprocess.run(
         ["ip", "netns", "exec", "hvclient", "python3", __file__, "client", *args],
@@ -692,13 +695,13 @@ def client_json(
     )
     if proc.returncode not in (0, 1):
         raise RuntimeError(
-            f"kliens hiba ({' '.join(args)}): rc={proc.returncode}\n{proc.stderr[-2000:]}"
+            f"client error ({' '.join(args)}): rc={proc.returncode}\n{proc.stderr[-2000:]}"
         )
     try:
         return json.loads(proc.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError) as exc:
         raise RuntimeError(
-            f"nem értelmezhető kimenet ({' '.join(args)}): {proc.stdout[-2000:]}\n{proc.stderr[-1000:]}"
+            f"unparseable output ({' '.join(args)}): {proc.stdout[-2000:]}\n{proc.stderr[-1000:]}"
         ) from exc
 
 
@@ -713,14 +716,14 @@ def check(title: str, cond: bool, detail: str = "") -> None:
 
 
 def skip(title: str, detail: str = "") -> None:
-    """Kihagyott ellenőrzés; nem számít hibának és nem növeli a PASS-t."""
+    """Skipped check; it does not count as an error and does not increase PASS."""
     print(f"[SKIP] {title}" + (f" — {detail}" if detail else ""), flush=True)
     skipped.append(title)
 
 
 def pending_skip(title: str, gate: str, detail: str = "") -> None:
-    """Kapcsolóval védett, még nem stabil forgatókönyv kihagyása."""
-    reason = f"{gate} nincs bekapcsolva"
+    """Skip a scenario that is protected by a switch and not yet stable."""
+    reason = f"{gate} is not enabled"
     if detail:
         reason += f"; {detail}"
     print(f"[SKIP] {title} — {reason}", flush=True)
@@ -752,7 +755,7 @@ def set_is_empty(table_dump: str, set_name: str) -> bool:
 
 
 def client_mac() -> str:
-    """A hvclient MAC-címe a host ARP-táblájából (a portál is innen olvas)."""
+    """The hvclient MAC address from the host ARP table (the portal reads it from here too)."""
     proc = subprocess.run(
         ["ip", "neigh", "show", CLIENT_IP], capture_output=True, text=True,
     )
@@ -763,7 +766,7 @@ def client_mac() -> str:
 
 
 def nft_json_entries(set_name: str) -> list[dict]:
-    """A valódi nft -j kimenet feldolgozása a gyártási parserrel."""
+    """Process the real nft -j output with the production parser."""
     proc = subprocess.run(
         ["nft", "-j", "list", "set", "inet", "hatarvedelem", set_name],
         capture_output=True, text=True,
@@ -794,7 +797,7 @@ def nft_state(label: str) -> dict:
 
 
 def grant_state() -> dict:
-    """A kliens engedélyeinek jelenléte halmazonként, kiírás nélkül."""
+    """Presence of the client's grants per set, without printing."""
     snap = snapshot()["text"]
     return {
         name: set_has(snap, name, CLIENT_IP)
@@ -803,7 +806,7 @@ def grant_state() -> dict:
 
 
 def nft_raw_elements(set_name: str) -> list:
-    """Az nft -j nyers elemei, hogy az ``expires`` mező ellenőrizhető legyen."""
+    """The raw elements of nft -j so the ``expires`` field can be checked."""
     proc = subprocess.run(
         ["nft", "-j", "list", "set", "inet", "hatarvedelem", set_name],
         capture_output=True, text=True,
@@ -836,7 +839,7 @@ def raw_element_body(raw_element) -> dict:
 
 
 def client_entries(set_name: str) -> list[dict]:
-    """A klienshez tartozó, feldolgozott halmazelemek (expires_in-nel)."""
+    """The client's processed set elements (with expires_in)."""
     return [
         entry for entry in nft_json_entries(set_name)
         if entry.get("address") == CLIENT_IP
@@ -853,7 +856,7 @@ def expected_grant_entries(
     input_udp: tuple[int, ...] = (53,),
     mac: bool = True,
 ) -> dict[str, set[int | None]]:
-    """A várt elemek halmazonként; az address-only halmazok kulcsa None."""
+    """The expected elements per set; the key of address-only sets is None."""
     expected: dict[str, set[int | None]] = {}
     if full:
         expected["allowed_v4"] = {None}
@@ -875,7 +878,7 @@ def expected_grant_entries(
 def grant_element_problems(
     expected: dict[str, set[int | None]]
 ) -> tuple[dict[str, list[int | None]], list[str]]:
-    """A hiányzó és az ``expires`` mezőt nélkülöző engedélyelemek."""
+    """The missing grant elements and those lacking the ``expires`` field."""
     missing: dict[str, list[int | None]] = {}
     no_expiry: list[str] = []
     for set_name, wanted in expected.items():
@@ -897,23 +900,23 @@ def grant_element_problems(
                 absent, key=lambda value: -1 if value is None else value
             )
         if not entries:
-            no_expiry.append(f"{set_name}: nincs elem")
+            no_expiry.append(f"{set_name}: no elements")
             continue
         for entry in entries:
             if not isinstance(entry.get("expires_in"), int):
                 no_expiry.append(
                     f"{set_name}: {entry.get('address')}."
-                    f"{entry.get('port') or ''} expires_in hiányzik"
+                    f"{entry.get('port') or ''} expires_in is missing"
                 )
         raw = nft_raw_elements(set_name)
         if not raw:
-            no_expiry.append(f"{set_name}: nyers nft elem nincs")
+            no_expiry.append(f"{set_name}: no raw nft element")
             continue
         for raw_element in raw:
             body = raw_element_body(raw_element)
             expires = body.get("expires")
             if isinstance(expires, bool) or not isinstance(expires, (int, float)):
-                no_expiry.append(f"{set_name}: nyers elem expires nélkül")
+                no_expiry.append(f"{set_name}: raw element without expires")
                 break
     return missing, no_expiry
 
@@ -921,21 +924,21 @@ def grant_element_problems(
 def verify_grant_elements(
     label: str, expected: dict[str, set[int | None]]
 ) -> None:
-    """Várt elemek és a kerneloldali ``expires`` mező ellenőrzése.
+    """Check the expected elements and the kernel-side ``expires`` field.
 
-    A grant_all() minden elemhez kernel TTL-t ad, ezért a nyers nft JSON-ben
-    minden engedélyelemnek hordoznia kell ``expires`` mezőt. A vizsgálat a
-    teljes halmazra fut: a teszt VM-en a dinamikus halmazokban csak a teszt
-    kliens elemei vannak.
+    grant_all() gives every element a kernel TTL, so in the raw nft JSON
+    every grant element must carry an ``expires`` field. The check runs on
+    the whole set: on the test VM the dynamic sets contain only the test
+    client's elements.
     """
     missing, no_expiry = grant_element_problems(expected)
     check(
-        f"{label}: a várt engedélyelemek minden halmazban megvannak",
+        f"{label}: the expected grant elements are present in every set",
         not missing,
         json.dumps(missing, sort_keys=True),
     )
     check(
-        f"{label}: minden engedélyelem expires mezőt hordoz",
+        f"{label}: every grant element carries an expires field",
         not no_expiry,
         "; ".join(no_expiry[:8]),
     )
@@ -946,7 +949,7 @@ def user_cli(*args: str, stdin: str | None = None) -> subprocess.CompletedProces
 
 
 def server_cli(*args: str, stdin: str | None = None) -> subprocess.CompletedProcess:
-    """A futó konténer CLI-je (user/fail2ban); a démon control socketjét használja."""
+    """CLI of the running container (user/fail2ban); it uses the daemon's control socket."""
     return subprocess.run(
         ["docker", "compose", "exec", "-T", "--user", "hatarvedelem", "hatarvedelem",
          "python3", "/opt/hatarvedelem/server.py", *args],
@@ -961,11 +964,11 @@ def fail2ban_cli(*args: str) -> subprocess.CompletedProcess:
 # ------------------------------------------------------- admin API (loopback)
 
 def _admin_login(password: str, attempts: int = 3) -> bool:
-    """Admin munkamenet a host loopbackjáról, külön sütitárral.
+    """Admin session from the host loopback, with a separate cookie jar.
 
-    A portál egy IP-n egy munkamenetet tart, ezért a kliens névtér
-    192.168.10.2-es munkamenete mellett csak a 127.0.0.1-es admin
-    munkamenet élhet. A belépési korlátot 429-nél kivárjuk.
+    The portal keeps one session per IP, so alongside the client namespace's
+    session at 192.168.10.2 only the admin session at 127.0.0.1 can live.
+    At a 429 we wait out the login limit.
     """
     global _admin_portal, _admin_password
     portal = Portal(ADMIN_BASE, ADMIN_COOKIE)
@@ -993,8 +996,8 @@ def _admin_login(password: str, attempts: int = 3) -> bool:
         break
     if last_code != 200:
         return False
-    # Az admin jogot a tényleges admin végponton ellenőrizzük; a login
-    # önmagában még kötelező jelszócsere előtti munkamenetet is adhat.
+    # We check the admin right on the actual admin endpoint; login alone may
+    # still yield a session before the mandatory password change.
     code, _text = portal.request("/api/admin/state")
     if code != 200:
         return False
@@ -1021,7 +1024,7 @@ def _admin_request(path: str, payload: dict | None = None) -> tuple[int, str]:
         and data.get("code") == "admin_session"
         and _admin_password
     ):
-        # Lejárt admin munkamenet: egyszer újra belépünk, majd ismételjük.
+        # Expired admin session: log in again once, then repeat.
         if _admin_login(_admin_password):
             code, text = _admin_portal.request(path, payload)
     return code, text
@@ -1073,7 +1076,7 @@ def admin_log_rows(event: str, limit: int = 250) -> list[dict] | None:
 def audit_event(
     event: str, predicate, timeout: float = 8.0
 ) -> tuple[str, dict]:
-    """Esemény keresése az admin naplóban: found / missing / unavailable."""
+    """Search for an event in the admin log: found / missing / unavailable."""
     deadline = time.monotonic() + timeout
     while True:
         rows = admin_log_rows(event)
@@ -1097,12 +1100,12 @@ def check_audit(
 ) -> None:
     state, row = audit_event(event, predicate, timeout)
     if state == "unavailable":
-        skip(f"{label}: audit esemény ({event})", "az admin napló nem érhető el")
+        skip(f"{label}: audit event ({event})", "the admin log is unavailable")
         return
     check(
-        f"{label}: audit esemény ({event})",
+        f"{label}: audit event ({event})",
         state == "found",
-        "nem található" if state != "found" else json.dumps(row, ensure_ascii=False)[:400],
+        "not found" if state != "found" else json.dumps(row, ensure_ascii=False)[:400],
     )
 
 
@@ -1124,11 +1127,11 @@ def _conntrack_lines() -> list[str] | None:
 
 
 def client_conntrack_flows() -> list[str] | None:
-    """A kliens nem-portál conntrack folyamai.
+    """The client's non-portal conntrack flows.
 
-    A portál saját 8100-as folyamát kiszűrjük: a kilépés válasza még a
-    conntrack-ürítés után is létrehozhat egy bejegyzést, és az nem jelent
-    hálózati engedélyt.
+    We filter out the portal's own flow on port 8100: the exit response can
+    create an entry even after the conntrack flush, and that does not mean
+    network permission.
     """
     lines = _conntrack_lines()
     if lines is None:
@@ -1142,20 +1145,20 @@ def client_conntrack_flows() -> list[str] | None:
 def check_conntrack_empty(label: str) -> None:
     flows = client_conntrack_flows()
     if flows is None:
-        skip(f"{label}: conntrack üres", "a conntrack eszköz nem érhető el")
+        skip(f"{label}: conntrack is empty", "the conntrack tool is unavailable")
         return
-    check(f"{label}: conntrack üres", not flows, json.dumps(flows[:4]))
+    check(f"{label}: conntrack is empty", not flows, json.dumps(flows[:4]))
 
 
 def check_conntrack_traffic(label: str) -> None:
     flows = client_conntrack_flows()
     if flows is None:
-        skip(f"{label}: conntrack forgalom", "a conntrack eszköz nem érhető el")
+        skip(f"{label}: conntrack traffic", "the conntrack tool is unavailable")
         return
-    check(f"{label}: conntrack forgalom van", bool(flows), json.dumps(flows[:2]))
+    check(f"{label}: conntrack traffic is present", bool(flows), json.dumps(flows[:2]))
 
 
-# ------------------------------------------------------- kliens műveletek
+# ------------------------------------------------------- client operations
 
 def client_login(
     user: str, password: str, cookie: str, label: str, attempts: int = 3
@@ -1168,9 +1171,9 @@ def client_login(
         if result.get("code") != 429:
             break
         if attempt + 1 < attempts:
-            print(f"    {label}: login korlát (429), várakozás 61 s...", flush=True)
+            print(f"    {label}: login limit (429), waiting 61 s...", flush=True)
             time.sleep(61)
-    check(f"{label}: friss belépés", bool(result.get("ok")), json.dumps(result.get("body")))
+    check(f"{label}: fresh login", bool(result.get("ok")), json.dumps(result.get("body")))
     return result
 
 
@@ -1183,10 +1186,10 @@ def client_access(
         if result.get("code") != 429:
             break
         if attempt + 1 < attempts:
-            print(f"    {label}: access korlát (429), várakozás 61 s...", flush=True)
+            print(f"    {label}: access limit (429), waiting 61 s...", flush=True)
             time.sleep(61)
     check(
-        f"{label}: engedélyezés ({rule})",
+        f"{label}: authorization ({rule})",
         bool(result.get("ok")) and bool(result.get("body", {}).get("authorized")),
         json.dumps(result.get("body")),
     )
@@ -1196,7 +1199,7 @@ def client_access(
 def generate_traffic(label: str) -> None:
     traffic = client_json("traffic")
     check(
-        f"{label}: DNS és host SSH forgalom ment",
+        f"{label}: DNS and host SSH traffic succeeded",
         bool(traffic.get("dns")) and bool(traffic.get("host_ssh")),
         json.dumps(traffic),
     )
@@ -1204,30 +1207,30 @@ def generate_traffic(label: str) -> None:
 
 
 def assert_revoked(label: str) -> None:
-    """Munkamenet, halmazok és conntrack ellenőrzése egy visszavonás után."""
+    """Check the session, the sets and conntrack after a revocation."""
     sessions = admin_sessions_for_ip()
     if sessions is None:
-        skip(f"{label}: munkamenet megszűnt", "az admin munkamenet-lista nem érhető el")
+        skip(f"{label}: the session is gone", "the admin session list is unavailable")
     else:
         check(
-            f"{label}: munkamenet megszűnt",
+            f"{label}: the session is gone",
             not sessions,
             json.dumps([row.get("id") for row in sessions]),
         )
     state = grant_state()
     check(
-        f"{label}: minden engedélyhalmaz üres",
+        f"{label}: every grant set is empty",
         not any(state.values()),
         json.dumps(state),
     )
     check_conntrack_empty(label)
 
 
-# ------------------------------------------------------- forgatókönyv-erőforrások
+# ------------------------------------------------------- scenario resources
 
 FULL_COLL_PAYLOAD = {
-    "label": "E2E teljes gyűjtő",
-    "description": "forward TCP/UDP/ICMP, teljes és host engedély egyben",
+    "label": "E2E full collection",
+    "description": "forward TCP/UDP/ICMP, full and host permission together",
     "collection": True,
     "members": ["e2e-rev-fwd", "e2e-rev-full", "e2e-rev-host"],
     "default_ttl": 60,
@@ -1235,7 +1238,7 @@ FULL_COLL_PAYLOAD = {
 }
 REV_FWD_PAYLOAD = {
     "label": "E2E forward",
-    "description": "TCP 80, UDP 53 és ICMP",
+    "description": "TCP 80, UDP 53 and ICMP",
     "direction": "forward",
     "tcp": [80],
     "udp": [53],
@@ -1245,8 +1248,8 @@ REV_FWD_PAYLOAD = {
     "max_ttl": 300,
 }
 REV_FULL_PAYLOAD = {
-    "label": "E2E teljes",
-    "description": "teljes forward hozzáférés (allowed_v4)",
+    "label": "E2E full",
+    "description": "full forward access (allowed_v4)",
     "direction": "forward",
     "tcp": [],
     "udp": [],
@@ -1257,7 +1260,7 @@ REV_FULL_PAYLOAD = {
 }
 REV_HOST_PAYLOAD = {
     "label": "E2E host",
-    "description": "host SSH 22/TCP és UDP 53",
+    "description": "host SSH 22/TCP and UDP 53",
     "direction": "input",
     "tcp": [22],
     "udp": [53],
@@ -1274,7 +1277,7 @@ def ensure_rule(rule_id: str, payload: dict) -> tuple[bool, str]:
     })
     if data.get("ok"):
         return True, ""
-    # Maradék szabály frissítése ugyanazzal a teljes payloaddal.
+    # Update a leftover rule with the same full payload.
     data = admin_json("/api/admin/rules", {
         "action": "update", "id": rule_id, **payload,
     })
@@ -1284,8 +1287,8 @@ def ensure_rule(rule_id: str, payload: dict) -> tuple[bool, str]:
 def ensure_group(group_id: str, rules: list[str]) -> tuple[bool, str]:
     payload = {
         "action": "create", "id": group_id,
-        "label": "E2E visszavonás csoport",
-        "description": "a csoportfrissítés visszavonási út tesztje",
+        "label": "E2E revocation group",
+        "description": "the test of the group update's revocation path",
         "rules": rules, "members": [],
     }
     data = admin_json("/api/admin/groups", payload)
@@ -1300,7 +1303,7 @@ def ensure_temp_user(
     name: str, password: str, *, rules: list[str] | None = None,
     groups: list[str] | None = None,
 ) -> tuple[bool, str]:
-    # A korábbi futás maradéka ne örököljön csoporttagságot vagy szabályt.
+    # A leftover from an earlier run must not inherit group membership or a rule.
     admin_post("/api/admin/users", {"action": "delete", "name": name})
     created = user_cli(
         "add", name, "--no-must-change", "--password-stdin",
@@ -1318,11 +1321,11 @@ def ensure_temp_user(
 
 
 def ensure_scenario_resources() -> dict[str, str] | None:
-    """A közös szabályok, csoport és ideiglenes felhasználók előkészítése.
+    """Prepare the shared rules, the group and the temporary users.
 
-    Minden erőforrás-azonosító a SCENARIO_* listákban szerepel, ezért a main
-    finally takarítása akkor is eltávolítja őket, ha egy forgatókönyv
-    félbeszakad. A jelszavak csak memóriában élnek, és soha nem íródnak ki.
+    Every resource identifier appears in the SCENARIO_* lists, so main's
+    finally cleanup removes them even if a scenario is interrupted. The
+    passwords live only in memory and are never printed.
     """
     passwords = {name: secrets.token_urlsafe(18) for name in SCENARIO_USERS}
     problems: list[str] = []
@@ -1340,33 +1343,33 @@ def ensure_scenario_resources() -> dict[str, str] | None:
         problems.append(f"group e2e-rev-grp: {detail}")
     for name in SCENARIO_USERS:
         if name == MULTI_USER and not gate_on(MULTI_GATE):
-            # A K6 kapcsoló nélkül nem jön létre a saját felhasználója sem,
-            # így az alap futás erőforrásai változatlanok maradnak.
+            # Without the K6 switch its own user is not created either, so the
+            # resources of a basic run remain unchanged.
             continue
         if name == "e2e-rev-user":
             rules = None
         elif name == MULTI_USER:
-            # A K6 a saját (esetleg HV_E2E_RULES-szel felülírt) párját
-            # rendeli hozzá a belépés előtt. Az explicit üres lista fontos:
-            # így a fiók nem örökli a régi, kiosztás nélküli forward
-            # szabályokat.
+            # K6 assigns its own pair (possibly overridden by HV_E2E_RULES)
+            # before login. The explicit empty list matters: this way the
+            # account does not inherit the old forward rules from before the
+            # assignment.
             rules = []
         else:
             rules = ["e2e-full-coll"]
         ok, detail = ensure_temp_user(name, passwords[name], rules=rules)
         if not ok:
             problems.append(f"user {name}: {detail}")
-    # A csoporttag csak a felhasználó létrehozása után állítható be.
+    # A group member can only be set after the user is created.
     group = admin_json("/api/admin/groups", {
         "action": "update", "id": "e2e-rev-grp",
-        "label": "E2E visszavonás csoport",
-        "description": "a csoportfrissítés visszavonási út tesztje",
+        "label": "E2E revocation group",
+        "description": "the test of the group update's revocation path",
         "rules": ["e2e-full-coll"], "members": ["e2e-rev-user"],
     })
     if not group.get("ok"):
         problems.append(f"group members: {group.get('error', '')}")
-    # A csoporttagság a felhasználói rekordba is bekerül; a frissítés
-    # egyúttal visszavonja az esetleges maradék munkameneteket.
+    # Group membership also goes into the user record; the update also
+    # revokes any remaining sessions.
     user = admin_json("/api/admin/users", {
         "action": "update", "name": "e2e-rev-user",
         "groups": ["e2e-rev-grp"],
@@ -1374,7 +1377,7 @@ def ensure_scenario_resources() -> dict[str, str] | None:
     if not user.get("ok"):
         problems.append(f"user group: {user.get('error', '')}")
     check(
-        "kiterjesztett erőforrások előkészítve",
+        "extended resources prepared",
         not problems,
         "; ".join(problems),
     )
@@ -1385,20 +1388,20 @@ def _revocation_login(
     user: str, password: str, rule: str, label: str,
     cookie: str = SCEN_COOKIE,
 ) -> None:
-    """Friss belépés + engedélyezés a közös gyűjtővel, majd elemellenőrzés."""
+    """Fresh login + authorization with the shared collection, then element check."""
     client_login(user, password, cookie, label)
     client_access(rule, 120, cookie, label)
     verify_grant_elements(label, expected_grant_entries())
-    # A forgalom a visszavonás előtti conntrack állapotot biztosítja.
+    # The traffic provides the conntrack state before revocation.
     generate_traffic(label)
 
 
 def scenario_revocation_matrix(passwords: dict[str, str]) -> None:
-    print("== K1. Visszavonási utak ==", flush=True)
+    print("== K1. Revocation paths ==", flush=True)
     user = "e2e-rev-user"
     password = passwords[user]
 
-    # 1. Kliens kilépés.
+    # 1. Client logout.
     label = "K1/logout"
     _revocation_login(user, password, "e2e-full-coll", label)
     out = client_json("logout", cookie=SCEN_COOKIE)
@@ -1408,7 +1411,7 @@ def scenario_revocation_matrix(passwords: dict[str, str]) -> None:
         row.get("user") == user and row.get("authorized") is True
     ))
 
-    # 2. Admin által megszakított munkamenet.
+    # 2. Session terminated by the admin.
     label = "K1/admin-terminate"
     _revocation_login(user, password, "e2e-full-coll", label)
     sessions = admin_sessions_for_ip()
@@ -1418,7 +1421,7 @@ def scenario_revocation_matrix(passwords: dict[str, str]) -> None:
         if authorized:
             session_id = str(authorized[0].get("id") or "")
     if not session_id:
-        check(f"{label}: a kliens munkamenet az admin listában", False,
+        check(f"{label}: the client session is in the admin list", False,
               json.dumps(sessions))
     else:
         data = admin_json("/api/admin/sessions", {
@@ -1431,11 +1434,11 @@ def scenario_revocation_matrix(passwords: dict[str, str]) -> None:
         row.get("target") == user and row.get("ip") == CLIENT_IP
     ))
 
-    # 3. A gyűjtőszabály saját módosítása.
+    # 3. Modification of the collection rule itself.
     label = "K1/rule-update"
     _revocation_login(user, password, "e2e-full-coll", label)
     updated = dict(FULL_COLL_PAYLOAD)
-    updated["description"] = f"frissítve {int(time.time())}"
+    updated["description"] = f"updated {int(time.time())}"
     data = admin_json("/api/admin/rules", {
         "action": "update", "id": "e2e-full-coll", **updated,
     })
@@ -1447,11 +1450,12 @@ def scenario_revocation_matrix(passwords: dict[str, str]) -> None:
         and int(row.get("sessions_revoked") or 0) >= 1
     ))
 
-    # 4. Gyűjtőtag módosítása: a függő gyűjtő munkamenete is bontandó.
+    # 4. Modification of a collection member: the dependent collection's
+    # sessions must also be dropped.
     label = "K1/collection-member-update"
     _revocation_login(user, password, "e2e-full-coll", label)
     member = dict(REV_FWD_PAYLOAD)
-    member["description"] = f"tag frissítve {int(time.time())}"
+    member["description"] = f"member updated {int(time.time())}"
     data = admin_json("/api/admin/rules", {
         "action": "update", "id": "e2e-rev-fwd", **member,
     })
@@ -1464,13 +1468,13 @@ def scenario_revocation_matrix(passwords: dict[str, str]) -> None:
         and int(row.get("sessions_revoked") or 0) >= 1
     ))
 
-    # 5. Csoportfrissítés: a csoporttag munkamenete bontandó.
+    # 5. Group update: the group member's sessions must be dropped.
     label = "K1/group-update"
     _revocation_login(user, password, "e2e-full-coll", label)
     data = admin_json("/api/admin/groups", {
         "action": "update", "id": "e2e-rev-grp",
-        "label": "E2E visszavonás csoport",
-        "description": f"csoport frissítve {int(time.time())}",
+        "label": "E2E revocation group",
+        "description": f"group updated {int(time.time())}",
         "rules": ["e2e-full-coll"], "members": [user],
     })
     check(f"{label}: admin group update 200", bool(data.get("ok")),
@@ -1481,7 +1485,7 @@ def scenario_revocation_matrix(passwords: dict[str, str]) -> None:
         and int(row.get("sessions_revoked") or 0) >= 1
     ))
 
-    # 6. Felhasználó letiltása.
+    # 6. Disabling a user.
     label = "K1/user-disable"
     disabled_user = "e2e-rev-del"
     _revocation_login(disabled_user, passwords[disabled_user], "e2e-full-coll", label)
@@ -1496,13 +1500,13 @@ def scenario_revocation_matrix(passwords: dict[str, str]) -> None:
         and row.get("enabled") is False
         and int(row.get("sessions_revoked") or 0) >= 1
     ))
-    # A törlés útjához újra engedélyezzük; ez maga is visszavonja a
-    # munkameneteket, de itt már nincs élő munkamenet.
+    # Re-enable for the delete path; this itself revokes the sessions, but
+    # there is no live session here any more.
     admin_json("/api/admin/users", {
         "action": "update", "name": disabled_user, "enabled": True,
     })
 
-    # 7. Felhasználó törlése.
+    # 7. Deleting a user.
     label = "K1/user-delete"
     _revocation_login(disabled_user, passwords[disabled_user], "e2e-full-coll", label)
     data = admin_json("/api/admin/users", {
@@ -1516,8 +1520,8 @@ def scenario_revocation_matrix(passwords: dict[str, str]) -> None:
         and int(row.get("sessions_revoked") or 0) >= 1
     ))
 
-    # 8. Fail2ban tiltás. A tiltás a kliens portál-elérését is lezárja,
-    # ezért az ellenőrzések után azonnal feloldjuk.
+    # 8. Fail2ban ban. The ban also closes the client's portal access, so we
+    # lift it immediately after the checks.
     label = "K1/fail2ban"
     _revocation_login(user, password, "e2e-full-coll", label)
     try:
@@ -1550,42 +1554,42 @@ def wait_condition(predicate, timeout: float, interval: float = 2.0) -> bool:
 def scenario_natural_expiry(
     passwords: dict[str, str], min_ttl: int
 ) -> None:
-    """Természetes lejárat a szerver min_ttl értékével.
+    """Natural expiry with the server's min_ttl value.
 
-    A kernel TTL-jét szándékosan nem rövidítjük: a munkamenet valódi
-    lejáratát és a reaper naplóeseményét vizsgáljuk. A szerver min_ttl-je
-    60 másodperc, ezért a várakozás legalább ennyi; a felső korlát a
-    HV_E2E_LONG kapcsolóhoz tartozó E2E_LONG_MAX_WAIT.
+    We deliberately do not shorten the kernel TTL: we examine the session's
+    real expiry and the reaper's log event. The server's min_ttl is 60
+    seconds, so the wait is at least that; the upper bound is
+    E2E_LONG_MAX_WAIT, belonging to the HV_E2E_LONG switch.
     """
-    title = "K2. Természetes lejárat (HV_E2E_LONG)"
+    title = "K2. Natural expiry (HV_E2E_LONG)"
     if not gate_on(LONG_GATE):
-        skip(title, f"{LONG_GATE} nincs bekapcsolva")
+        skip(title, f"{LONG_GATE} is not enabled")
         return
     print(f"== {title} ==", flush=True)
     ttl = max(60, int(min_ttl))
-    # A várakozás felső korlátja a kapcsolóhoz tartozó E2E_LONG_MAX_WAIT.
-    # Ha a szerver min_ttl-je ennél hosszabb, a teszt nem tudná kivárni a
-    # valódi lejáratot; ilyenkor inkább egyértelműen kihagyjuk, mintsem
-    # hamis FAILt vagy órás várakozást produkáljunk.
+    # The upper bound of the wait is the switch's E2E_LONG_MAX_WAIT. If the
+    # server's min_ttl is longer than that, the test could not wait out the
+    # real expiry; in that case we skip it explicitly rather than produce a
+    # false FAIL or an hour-long wait.
     if ttl + 30 > LONG_MAX_WAIT:
         skip(
             title,
-            f"a szerver min_ttl={ttl} s, az E2E_LONG_MAX_WAIT="
-            f"{LONG_MAX_WAIT} s kevés a kiváráshoz (legalább TTL+30 kell)",
+            f"the server min_ttl={ttl} s, and E2E_LONG_MAX_WAIT="
+            f"{LONG_MAX_WAIT} s is too little to wait it out (at least TTL+30 is needed)",
         )
         return
     user = "e2e-exp-user"
     label = "K2/expiry"
     client_login(user, passwords[user], EXPIRY_COOKIE, label)
-    # A TTL az /api/access feldolgozásakor indul, ezért az óra indítása
-    # előbb történik, mint a kérés; a későbbi nft/forgalmi ellenőrzések
-    # ideje nem rövidítheti le a várt lejáratot.
+    # The TTL starts when /api/access is processed, so the clock starts
+    # before the request; the time of the later nft/traffic checks cannot
+    # shorten the expected expiry.
     started = time.time()
     client_access("e2e-full-coll", ttl, EXPIRY_COOKIE, label)
     verify_grant_elements(label, expected_grant_entries())
     generate_traffic(label)
     deadline = started + min(LONG_MAX_WAIT, ttl + 120)
-    print(f"    várakozás a természetes lejáratig (TTL {ttl} s)...", flush=True)
+    print(f"    waiting for natural expiry (TTL {ttl} s)...", flush=True)
     wait_condition(
         lambda: not any(grant_state().values())
         and not (client_conntrack_flows() or []),
@@ -1594,22 +1598,22 @@ def scenario_natural_expiry(
     )
     elapsed = time.time() - started
     check(
-        f"{label}: a lejárat legalább a TTL után következett be",
+        f"{label}: the expiry happened at least after the TTL",
         elapsed >= ttl,
-        f"eltelt={elapsed:.0f} s, TTL={ttl} s",
+        f"elapsed={elapsed:.0f} s, TTL={ttl} s",
     )
     state = grant_state()
     check(
-        f"{label}: minden engedélyhalmaz lejárt",
+        f"{label}: every grant set has expired",
         not any(state.values()), json.dumps(state),
     )
     check_conntrack_empty(label)
     sessions = admin_sessions_for_ip()
     if sessions is None:
-        skip(f"{label}: munkamenet megszűnt", "az admin munkamenet-lista nem érhető el")
+        skip(f"{label}: the session is gone", "the admin session list is unavailable")
     else:
         check(
-            f"{label}: munkamenet megszűnt",
+            f"{label}: the session is gone",
             not sessions,
             json.dumps([row.get("id") for row in sessions]),
         )
@@ -1618,7 +1622,7 @@ def scenario_natural_expiry(
     ), timeout=30.0)
 
 
-# ------------------------------------------------------------ blokk-teszt
+# ------------------------------------------------------------ block test
 
 def admin_setting_entries(kind: str) -> list[dict]:
     data = admin_json("/api/admin/settings")
@@ -1655,7 +1659,7 @@ def delete_admin_blocks(prefix: str = BLOCK_LABEL_PREFIX) -> None:
 def create_admin_setting(
     kind: str, label: str, dst: str, proto: str, ports: list[int]
 ) -> str:
-    kind_name = "blokk" if kind == "block" else "pre-auth"
+    kind_name = "block" if kind == "block" else "pre-auth"
     data = admin_json("/api/admin/settings", {
         "action": "create", "kind": kind,
         "entry": {
@@ -1664,7 +1668,7 @@ def create_admin_setting(
         },
     })
     if data.get("_code") != 200:
-        check(f"{kind_name} létrehozása ({label})", False,
+        check(f"{kind_name} creation ({label})", False,
               str(data.get("error", ""))[:160])
         return ""
     matching = [
@@ -1672,21 +1676,21 @@ def create_admin_setting(
         if row.get("label") == label
     ]
     if not matching:
-        check(f"{kind_name} létrehozása ({label})", False,
-              "nincs azonosító a válaszban")
+        check(f"{kind_name} creation ({label})", False,
+              "no identifier in the response")
         return ""
-    check(f"{kind_name} létrehozása ({label})", True)
+    check(f"{kind_name} creation ({label})", True)
     return str(matching[-1].get("id") or "")
 
 
 def delete_admin_setting(kind: str, entry_id: str, label: str) -> None:
     if not entry_id:
         return
-    kind_name = "blokk" if kind == "block" else "pre-auth"
+    kind_name = "block" if kind == "block" else "pre-auth"
     data = admin_json("/api/admin/settings", {
         "action": "delete", "kind": kind, "id": entry_id,
     })
-    check(f"{kind_name} törlése ({label})", bool(data.get("ok")),
+    check(f"{kind_name} deletion ({label})", bool(data.get("ok")),
           str(data.get("error", ""))[:160])
 
 
@@ -1709,7 +1713,7 @@ def nft_chain_text(chain: str) -> str:
 def start_tcp_hold(
     host: str, port: int, hold_seconds: float, wait_seconds: float
 ) -> tuple[subprocess.Popen, tuple[str, str, str]]:
-    """A kliens névtérben futó tartós TLS-folyam indítása."""
+    """Start the persistent TLS flow running in the client namespace."""
     stamp = f"{os.getpid()}-{int(time.time() * 1000)}"
     established = f"/tmp/hv-e2e-hold-{stamp}.established"
     after = f"/tmp/hv-e2e-hold-{stamp}.after"
@@ -1739,7 +1743,7 @@ def finish_tcp_hold(
     except subprocess.TimeoutExpired:
         proc.kill()
         output, _ = proc.communicate()
-        return {"error": "a folyamat nem fejeződött be időben"}, output
+        return {"error": "the process did not finish in time"}, output
     lines = [line for line in output.splitlines() if line.strip()]
     data = safe_json(lines[-1]) if lines else {}
     if not isinstance(data, dict):
@@ -1748,7 +1752,7 @@ def finish_tcp_hold(
 
 
 def scenario_block_precedence(passwords: dict[str, str]) -> None:
-    title = "K3. Blokk elsőbbsége (HV_E2E_PENDING)"
+    title = "K3. Block precedence (HV_E2E_PENDING)"
     if not gate_on(PENDING_GATE):
         pending_skip(title, PENDING_GATE)
         return
@@ -1771,9 +1775,9 @@ def scenario_block_precedence(passwords: dict[str, str]) -> None:
         verify_grant_elements(label, expected_grant_entries())
         generate_traffic(label)
 
-        # A láncok sorrendje: a blokk minden engedély (és a konténer
-        # accept) előtt, a portál accept viszont a blokk előtt fut, a NAT
-        # blokk pedig a redirect/DNAT előtt.
+        # Chain order: the block runs before every grant (and before the
+        # container accept), while the portal accept runs before the block,
+        # and the NAT block before the redirect/DNAT.
         forward_chain = nft_chain_text("forward")
         input_chain = nft_chain_text("input")
         prerouting = nft_chain_text("prerouting")
@@ -1781,36 +1785,36 @@ def scenario_block_precedence(passwords: dict[str, str]) -> None:
         forward_grant_pos = forward_chain.find("@allowed_v4")
         container_pos = forward_chain.find("172.30.0.2 tcp dport")
         check(
-            f"{label}: a blokk a forward engedélyek előtt fut",
+            f"{label}: the block runs before the forward grants",
             0 <= forward_block_pos < forward_grant_pos,
             f"block={forward_block_pos}, grant={forward_grant_pos}",
         )
         check(
-            f"{label}: a blokk a konténer accept előtt fut",
+            f"{label}: the block runs before the container accept",
             0 <= forward_block_pos < container_pos,
             f"block={forward_block_pos}, container={container_pos}",
         )
         portal_accept_pos = input_chain.find("dport 8100 accept")
         input_block_pos = input_chain.find("jump block")
         check(
-            f"{label}: a portál accept a blokk előtt fut",
+            f"{label}: the portal accept runs before the block",
             0 <= portal_accept_pos < input_block_pos,
             f"portal={portal_accept_pos}, block={input_block_pos}",
         )
         check(
-            f"{label}: a NAT-blokk a redirect/DNAT előtt fut",
+            f"{label}: the NAT block runs before the redirect/DNAT",
             0 <= prerouting.find("jump block_nat") < prerouting.find("redirect"),
             f"block_nat={prerouting.find('jump block_nat')}, "
             f"redirect={prerouting.find('redirect')}",
         )
-        # 1. Meglévő, már established TLS-folyam a blokk alatt, majd a
-        # blokk törlése után ugyanazon a kapcsolaton, újraengedélyezés
-        # nélkül. A conntrackot szándékosan nem ürítjük.
+        # 1. An existing, already established TLS flow during the block,
+        # then after deleting the block on the same connection, without
+        # re-authorization. We deliberately do not flush conntrack.
         before_fwd = client_json("tcp-probe", "1.1.1.1", "80", "3")
         before_host = client_json("tcp-probe", "192.168.10.1", "22", "3")
-        check(f"{label}: engedélyezett forward TCP 80 nyitva",
+        check(f"{label}: allowed forward TCP 80 is open",
               before_fwd.get("status") == "open", json.dumps(before_fwd))
-        check(f"{label}: engedélyezett host SSH nyitva",
+        check(f"{label}: allowed host SSH is open",
               before_host.get("status") == "open", json.dumps(before_host))
 
         hold_proc, hold_paths = start_tcp_hold("1.1.1.1", 443, 4, 3)
@@ -1821,17 +1825,17 @@ def scenario_block_precedence(passwords: dict[str, str]) -> None:
         if not established:
             hold_data, _hold_out = finish_tcp_hold(hold_proc, 5)
             hold_proc = None
-            check(f"{label}: meglévő TLS-folyam létrejött", False,
+            check(f"{label}: the existing TLS flow was established", False,
                   json.dumps(hold_data)[:300])
         else:
-            check(f"{label}: meglévő TLS-folyam létrejött", True)
+            check(f"{label}: the existing TLS flow was established", True)
             before_conntrack = _conntrack_lines()
             if before_conntrack is None:
-                skip(f"{label}: a meglévő folyam a conntrackban van",
-                     "a conntrack eszköz nem érhető el")
+                skip(f"{label}: the existing flow is in conntrack",
+                     "the conntrack tool is unavailable")
             else:
                 check(
-                    f"{label}: a meglévő folyam a blokk előtt a conntrackban van",
+                    f"{label}: the existing flow is in conntrack before the block",
                     any("dport=443" in line for line in before_conntrack),
                     json.dumps([line for line in before_conntrack
                                 if "dport=443" in line][:3]),
@@ -1841,11 +1845,11 @@ def scenario_block_precedence(passwords: dict[str, str]) -> None:
             )
             during_conntrack = _conntrack_lines()
             if during_conntrack is None:
-                skip(f"{label}: a blokk nem ürítette a conntrackot",
-                     "a conntrack eszköz nem érhető el")
+                skip(f"{label}: the block did not flush conntrack",
+                     "the conntrack tool is unavailable")
             else:
                 check(
-                    f"{label}: a blokk nem ürítette a conntrackot",
+                    f"{label}: the block did not flush conntrack",
                     any("dport=443" in line for line in during_conntrack),
                     json.dumps([line for line in during_conntrack
                                 if "dport=443" in line][:3]),
@@ -1855,26 +1859,26 @@ def scenario_block_precedence(passwords: dict[str, str]) -> None:
             )
             after_data = _read_json_file(after_path) if after_seen else {}
             check(
-                f"{label}: a blokk alatt a meglévő folyam válasza elmarad "
-                "(időtúllépés, nem megszakítás)",
+                f"{label}: during the block the existing flow gets no response "
+                "(timeout, not a reset)",
                 after_seen and after_data.get("after") == "timeout"
                 and not after_data.get("after_reply"),
                 json.dumps(after_data)[:300],
             )
             during_flow = client_json("tcp-probe", "1.1.1.1", "443", "3")
-            check(f"{label}: a blokk alatt az új 443 kapcsolat eldobva",
+            check(f"{label}: during the block the new 443 connection is dropped",
                   during_flow.get("status") == "timeout",
                   json.dumps(during_flow))
             missing, no_expiry = grant_element_problems(
                 expected_grant_entries()
             )
             check(
-                f"{label}: a blokk nem távolított el engedélyelemet",
+                f"{label}: the block did not remove any grant element",
                 not missing,
                 json.dumps(missing, sort_keys=True),
             )
             check(
-                f"{label}: a blokk nem rövidítette az engedélyek TTL-jét",
+                f"{label}: the block did not shorten the grants' TTL",
                 not no_expiry,
                 "; ".join(no_expiry[:8]),
             )
@@ -1888,19 +1892,19 @@ def scenario_block_precedence(passwords: dict[str, str]) -> None:
             hold_data, _hold_out = finish_tcp_hold(hold_proc, 25)
             hold_proc = None
             check(
-                f"{label}: a blokk törlése után ugyanaz a folyam újra működik",
+                f"{label}: after deleting the block the same flow works again",
                 bool(hold_data.get("recovered")),
                 json.dumps(hold_data)[:400],
             )
             status = client_json("status", cookie=BLOCK_COOKIE)
             check(
-                f"{label}: a meglévő folyamhoz nem kellett újraengedélyezés",
+                f"{label}: the existing flow needed no re-authorization",
                 bool(status.get("body", {}).get("authorized")),
                 json.dumps(status.get("body")),
             )
 
-        # 2. Új kapcsolatok: forward 80 és host SSH 22 eldobása, valamint a
-        # portál 8100-as tiltása ellenére a portál elérése.
+        # 2. New connections: dropping forward 80 and host SSH 22, and
+        # reaching the portal despite blocking its port 8100.
         fwd_block_id = create_admin_block(
             BLOCK_LABEL_PREFIX + "fwd", "1.1.1.1", "tcp", [80]
         )
@@ -1910,67 +1914,68 @@ def scenario_block_precedence(passwords: dict[str, str]) -> None:
         portal_block_id = create_admin_block(
             BLOCK_LABEL_PREFIX + "portal", "192.168.10.1", "tcp", [8100]
         )
-        # A blokk-láncok tartalma csak a bejegyzések létrehozása után
-        # olvasható; a sorrendet a fenti, bejegyzés nélküli láncokon
-        # ellenőriztük.
+        # The content of the block chains can only be read after creating
+        # the entries; the order was checked above on the chains without
+        # entries.
         block_chain = nft_chain_text("block")
         block_nat = nft_chain_text("block_nat")
-        check(f"{label}: a blokk-szabály a kernelben van",
+        check(f"{label}: the block rule is in the kernel",
               "1.1.1.1" in block_chain and "192.168.10.1" in block_chain,
               block_chain[-500:])
         check(
-            f"{label}: a blokk a conntrack eredeti tuple-jára illeszkedik "
-            "(a válaszirányt is lefedi)",
+            f"{label}: the block matches the conntrack original tuple "
+            "(it covers the reply direction too)",
             "ct original ip daddr" in block_chain
             and "ct original proto-dst" in block_chain,
             block_chain[-400:],
         )
         check(
-            f"{label}: a NAT-blokk a DNAT előtti célt/portot használja",
+            f"{label}: the NAT block uses the pre-DNAT destination/port",
             "ct original ip daddr" in block_nat
             and "ct original proto-dst" in block_nat,
             block_nat[-400:],
         )
         page = client_json("page", cookie=BLOCK_COOKIE)
         check(
-            f"{label}: a 8100-at tiltó bejegyzés ellenére a portál elérhető",
+            f"{label}: despite the entry blocking 8100 the portal is reachable",
             page.get("code") == "200" and bool(page.get("rules")),
             json.dumps(page)[:300],
         )
         during_fwd = client_json("tcp-probe", "1.1.1.1", "80", "3")
         during_host = client_json("tcp-probe", "192.168.10.1", "22", "3")
-        check(f"{label}: a blokkolt forward TCP eldobva (időtúllépés)",
+        check(f"{label}: the blocked forward TCP is dropped (timeout)",
               during_fwd.get("status") == "timeout", json.dumps(during_fwd))
-        check(f"{label}: a blokkolt host SSH eldobva (időtúllépés)",
+        check(f"{label}: the blocked host SSH is dropped (timeout)",
               during_host.get("status") == "timeout", json.dumps(during_host))
-        # A WAN/DNAT oldali megkerüléshez külön WAN forrásnévtér és
-        # publikált DNAT-szolgáltatás kellene; a harness ilyet nem hoz
-        # létre. A pre-DNAT szemantikát a block_nat szabály szövege
-        # rögzíti, ezért a belső cím/port blokkja nem érinti a DNAT-utat.
+        # A bypass on the WAN/DNAT side would need a separate WAN source
+        # namespace and a published DNAT service; the harness does not
+        # create one. The pre-DNAT semantics are recorded by the text of the
+        # block_nat rule, so blocking the internal address/port does not
+        # affect the DNAT path.
         skip(
-            f"{label}: WAN/DNAT oldali megkerülés",
-            "nincs WAN forrásnévtér és publikált DNAT-szolgáltatás",
+            f"{label}: bypass on the WAN/DNAT side",
+            "there is no WAN source namespace and published DNAT service",
         )
         skip(
-            f"{label}: belső cím/port blokkja nem fogja a DNAT-utat",
-            "TODO: WAN névtér + publikált konténerport szükséges",
+            f"{label}: an internal address/port block does not catch the DNAT path",
+            "TODO: a WAN namespace + a published container port is needed",
         )
-        # A Docker-híd egress csak a 172.30.0.2 konténer-elfogadó szabály
-        # mellett tesztelhető; egy általános bridge-konténer más forrás-IP-t
-        # kap, ezért a futó Minecraft konténer hálózatát/nevét nem
-        # bitoroljuk a tesztben.
+        # The Docker bridge egress can only be tested alongside the
+        # 172.30.0.2 container-accept rule; a generic bridge container gets a
+        # different source IP, so we do not take over the running Minecraft
+        # container's network/name in the test.
         skip(
-            f"{label}: Docker-híd konténer kimenet (443)",
-            "TODO: a 172.30.0.2 konténer-elfogadó szabályhoz dedikált "
-            "tesztkonténer kell, a futó Minecraft konténer megzavarása nélkül",
+            f"{label}: Docker bridge container egress (443)",
+            "TODO: a dedicated test container is needed for the 172.30.0.2 "
+            "container-accept rule, without disturbing the running Minecraft container",
         )
-        # Beállításfájl-sérülés: csak a beállításfájl egy másolatának
-        # biztonságos cseréjével és HV_E2E_RESTARTtal lenne értelmes; a
-        # harness nem írja a futó konténer beállításfájlját.
+        # Settings-file corruption: this would only make sense with a safe
+        # swap of a copy of the settings file and HV_E2E_RESTART; the harness
+        # does not write the running container's settings file.
         skip(
-            f"{label}: sérült beállításfájl és last-known-good blokk",
-            "TODO: a beállításfájl másolatának cseréje invasiv, nincs "
-            "implementálva",
+            f"{label}: corrupt settings file and last-known-good block",
+            "TODO: swapping a copy of the settings file is invasive, not "
+            "implemented",
         )
 
         delete_admin_block(fwd_block_id, BLOCK_LABEL_PREFIX + "fwd")
@@ -1981,42 +1986,42 @@ def scenario_block_precedence(passwords: dict[str, str]) -> None:
         portal_block_id = ""
         after_fwd = client_json("tcp-probe", "1.1.1.1", "80", "3")
         after_host = client_json("tcp-probe", "192.168.10.1", "22", "3")
-        check(f"{label}: a blokk törlése után a forward engedély újra él",
+        check(f"{label}: after deleting the block the forward grant is live again",
               after_fwd.get("status") == "open", json.dumps(after_fwd))
-        check(f"{label}: a blokk törlése után a host SSH újra él",
+        check(f"{label}: after deleting the block host SSH is live again",
               after_host.get("status") == "open", json.dumps(after_host))
         missing, no_expiry = grant_element_problems(expected_grant_entries())
         check(
-            f"{label}: a blokkolás után is minden engedélyelem megvan",
+            f"{label}: after the blocking every grant element is still present",
             not missing,
             json.dumps(missing, sort_keys=True),
         )
         check(
-            f"{label}: a blokkolás után is van kernel TTL",
+            f"{label}: after the blocking there is still a kernel TTL",
             not no_expiry,
             "; ".join(no_expiry[:8]),
         )
         status = client_json("status", cookie=BLOCK_COOKIE)
-        check(f"{label}: újraengedélyezés nem kellett",
+        check(f"{label}: no re-authorization was needed",
               bool(status.get("body", {}).get("authorized")),
               json.dumps(status.get("body")))
 
-        # 3. Pre-auth engedély és a blokk elsőbbsége. Ez nem WAN/DNAT, de
-        # ugyanazt a block_nat → preauth_nat sorrendet gyakorolja: a blokk
-        # a pre-auth engedélyt is felülírja, majd a törlése után az
-        # engedély újra érvényes.
+        # 3. Pre-auth grant and block precedence. This is not WAN/DNAT, but
+        # it exercises the same block_nat -> preauth_nat order: the block
+        # overrides the pre-auth grant too, and after its deletion the grant
+        # is valid again.
         out = client_json("logout", cookie=BLOCK_COOKIE)
-        check(f"{label}: kilépés a pre-auth teszthez", bool(out.get("ok")),
+        check(f"{label}: logout for the pre-auth test", bool(out.get("ok")),
               json.dumps(out.get("body")))
         preauth_id = create_admin_setting(
             "preauth", PREAUTH_LABEL_PREFIX + "fwd",
             "1.1.1.1", "tcp", [80],
         )
-        # A TCP-probe önmagában nem különbözteti meg a pre-auth engedélyt a
-        # portál-átirányítástól (mindkettő nyitott port), ezért HTTP-t is
-        # nézünk: pre-auth mellett a válasz nem a portál oldala.
+        # A TCP probe alone does not distinguish the pre-auth grant from the
+        # portal redirect (both are an open port), so we also check HTTP:
+        # with pre-auth the response is not the portal page.
         pre = client_json("check")
-        check(f"{label}: a pre-auth engedély működik (nem portál-átirányítás)",
+        check(f"{label}: the pre-auth grant works (no portal redirect)",
               pre.get("http_external") is True
               and pre.get("http_portal") is False,
               json.dumps(pre))
@@ -2024,14 +2029,14 @@ def scenario_block_precedence(passwords: dict[str, str]) -> None:
             BLOCK_LABEL_PREFIX + "preauth", "1.1.1.1", "tcp", [80]
         )
         blocked_pre = client_json("check")
-        check(f"{label}: a blokk a pre-auth engedélyt is felülírja",
+        check(f"{label}: the block overrides the pre-auth grant too",
               blocked_pre.get("http_external") is False
               and blocked_pre.get("http_portal") is False,
               json.dumps(blocked_pre))
         delete_admin_block(preauth_block_id, BLOCK_LABEL_PREFIX + "preauth")
         preauth_block_id = ""
         restored_pre = client_json("check")
-        check(f"{label}: a blokk törlése után a pre-auth engedély újra él",
+        check(f"{label}: after deleting the block the pre-auth grant is live again",
               restored_pre.get("http_external") is True
               and restored_pre.get("http_portal") is False,
               json.dumps(restored_pre))
@@ -2073,10 +2078,10 @@ def scenario_block_precedence(passwords: dict[str, str]) -> None:
         delete_admin_settings("preauth", PREAUTH_LABEL_PREFIX)
 
 
-# --------------------------------------------------------- CLI-propagáció
+# --------------------------------------------------------- CLI propagation
 
 def scenario_cli_propagation(passwords: dict[str, str]) -> None:
-    title = "K5. CLI-propagáció (HV_E2E_PENDING)"
+    title = "K5. CLI propagation (HV_E2E_PENDING)"
     if not gate_on(PENDING_GATE):
         pending_skip(title, PENDING_GATE)
         return
@@ -2085,8 +2090,8 @@ def scenario_cli_propagation(passwords: dict[str, str]) -> None:
     label = "K5/cli"
     current = passwords[user]
     try:
-        # 1. fail2ban ban a futó démonon: azonnali munkamenet- és
-        # conntrack-bontás, a következő /api/access nélkül.
+        # 1. fail2ban ban on the running daemon: immediate session and
+        # conntrack teardown, without the next /api/access.
         _revocation_login(
             user, current, "e2e-full-coll", label + "/ban",
             cookie=CLI_COOKIE,
@@ -2100,11 +2105,11 @@ def scenario_cli_propagation(passwords: dict[str, str]) -> None:
             and int(row.get("sessions_revoked") or 0) >= 1
         ))
     finally:
-        # A tiltás a kliens portál-elérését is zárja; mindenképp oldjuk fel.
+        # The ban also closes the client's portal access; lift it in any case.
         fail2ban_cli("unban", CLIENT_IP)
         admin_post("/api/admin/fail2ban", {"action": "unban", "ip": CLIENT_IP})
 
-    # 2. CLI jelszócsere: a munkamenet és a conntrack azonnal bontandó.
+    # 2. CLI password change: the session and conntrack must be dropped immediately.
     new_password = current + "-cli"
     _revocation_login(
         user, current, "e2e-full-coll", label + "/passwd",
@@ -2122,7 +2127,7 @@ def scenario_cli_propagation(passwords: dict[str, str]) -> None:
         and int(row.get("sessions_revoked") or 0) >= 1
     ))
 
-    # 3. CLI felhasználótörlés: ugyanaz a követelmény.
+    # 3. CLI user deletion: the same requirement.
     _revocation_login(
         user, new_password, "e2e-full-coll", label + "/del",
         cookie=CLI_COOKIE,
@@ -2137,10 +2142,10 @@ def scenario_cli_propagation(passwords: dict[str, str]) -> None:
     ))
 
 
-# ------------------------------------------------- több szabály együtt
+# ------------------------------------------------- multiple rules together
 
 def multi_rule_pair() -> tuple[str, str] | None:
-    """A K6 két szabálya: HV_E2E_RULES vagy az ismert teszt-szabályok."""
+    """K6's two rules: HV_E2E_RULES or the known test rules."""
     raw = os.environ.get("HV_E2E_RULES", "").strip()
     values = [item.strip() for item in raw.split(",") if item.strip()]
     if not values:
@@ -2161,7 +2166,7 @@ def _grant_ports(value) -> list[int]:
 
 
 def _normalise_grant(raw) -> dict | None:
-    """Egy grant-dict normalizált alakja; ismeretlen irány esetén None."""
+    """The normalized form of a grant dict; None for an unknown direction."""
     if not isinstance(raw, dict):
         return None
     direction = raw.get("direction")
@@ -2180,11 +2185,11 @@ def _rule_grant_parts(
     rule: dict, catalogue: dict[str, dict],
     seen: frozenset[str] = frozenset(),
 ) -> list[dict] | None:
-    """Egy szabály irányonkénti grantjei; gyűjtő tagjai rekurzívan.
+    """A rule's per-direction grants; collection members recursively.
 
-    A ``catalogue`` a szabály-azonosítók public payloadjait tartalmazza.
-    Hiányzó tag vagy körkörös hivatkozás esetén None-t ad, hogy a hívó
-    egyértelműen jelezhesse a hibát a hamis PASS helyett.
+    ``catalogue`` contains the public payloads of the rule identifiers.
+    On a missing member or a circular reference it returns None, so the
+    caller can report the error unambiguously instead of a false PASS.
     """
     rule_id = str(rule.get("id") or "")
     if rule_id and rule_id in seen:
@@ -2213,7 +2218,7 @@ def _rule_grant_parts(
 
 
 def _grant_union(parts: list[dict]) -> dict[str, dict]:
-    """Irányonkénti unió; egy irány full engedélye elnyeli a portokat."""
+    """Per-direction union; a direction's full grant absorbs the ports."""
     union: dict[str, dict] = {}
     for part in parts:
         entry = union.setdefault(part["direction"], {
@@ -2249,13 +2254,13 @@ def _grant_union_detail(union: dict[str, dict]) -> dict:
 
 
 def _grant_gaps(expected: dict[str, dict], actual: dict[str, dict]) -> dict:
-    """Az actual grantből hiányzó várt elemek irányonként."""
+    """The expected elements missing from the actual grant, per direction."""
     gaps: dict[str, list[str]] = {}
     for direction, wanted in expected.items():
         got = actual.get(direction)
         missing: list[str] = []
         if got is None:
-            missing.append("teljes irány")
+            missing.append("entire direction")
         elif wanted["full"]:
             if not got["full"]:
                 missing.append("full")
@@ -2274,7 +2279,7 @@ def _grant_gaps(expected: dict[str, dict], actual: dict[str, dict]) -> dict:
 
 
 def _grant_removed(first: dict[str, dict], second: dict[str, dict]) -> list[dict]:
-    """Az első választás azon elemei, amelyeket a második már nem fed."""
+    """The elements of the first selection that the second no longer covers."""
     removed: list[dict] = []
     for direction, old in first.items():
         new = second.get(direction) or {
@@ -2300,7 +2305,7 @@ def _grant_removed(first: dict[str, dict], second: dict[str, dict]) -> list[dict
 
 
 def _grant_removed_present(removed: list[dict], actual: dict[str, dict]) -> list[dict]:
-    """A grants-ben (még) jelen lévő, eltávolítandó elemek."""
+    """The elements to be removed that are (still) present in the grants."""
     present: list[dict] = []
     for item in removed:
         got = actual.get(item["direction"]) or {
@@ -2319,7 +2324,7 @@ def _grant_removed_present(removed: list[dict], actual: dict[str, dict]) -> list
 
 
 def _nft_grant_element(item: dict) -> tuple[str, int | None] | None:
-    """Egy grant-elem (halmaz, port) párja; port nélküli halmaznál None."""
+    """The (set, port) pair of a grant element; None for a set without a port."""
     direction = item["direction"]
     kind = item["kind"]
     if kind == "full":
@@ -2358,7 +2363,7 @@ def _nft_union_elements(union: dict[str, dict]) -> list[dict]:
 
 
 def _nft_element_report(elements: list[dict]) -> tuple[list[str], list[str]]:
-    """(hiányzó, jelen lévő) nft halmazelemek a klienshez."""
+    """(missing, present) nft set elements for the client."""
     missing: list[str] = []
     present: list[str] = []
     cache: dict[str, list[dict]] = {}
@@ -2368,10 +2373,10 @@ def _nft_element_report(elements: list[dict]) -> tuple[list[str], list[str]]:
             name += f"/{item['port']}"
         mapping = _nft_grant_element(item)
         if mapping is None:
-            # Ilyen grantet a szerver a szabályvalidációban elutasít; ha
-            # mégis megjelenik, nem tudjuk ellenőrizni, ezért hibának
-            # számít, nem csendes kihagyásnak.
-            missing.append(f"{name} (nincs halmazleképezés)")
+            # The server rejects such a grant in rule validation; if one
+            # still appears we cannot check it, so it counts as an error,
+            # not a silent skip.
+            missing.append(f"{name} (no set mapping)")
             continue
         set_name, port = mapping
         if set_name not in cache:
@@ -2389,7 +2394,7 @@ def _nft_element_report(elements: list[dict]) -> tuple[list[str], list[str]]:
 
 
 def _selection_fields(payload: dict) -> tuple[list | None, list | None]:
-    """A válasz selected_rules/grants mezői (opcionálisan session alatt)."""
+    """The selected_rules/grants fields of the response (optionally under session)."""
     if not isinstance(payload, dict):
         return None, None
     sources = [payload]
@@ -2407,7 +2412,7 @@ def _selection_fields(payload: dict) -> tuple[list | None, list | None]:
 def _selection_state(
     access_body: dict, cookie: str
 ) -> tuple[list | None, list | None, str]:
-    """A választás az /api/access válaszából, szükség esetén /api/statusból."""
+    """The selection from the /api/access response, from /api/status if necessary."""
     selected, grants = _selection_fields(access_body)
     source = "access"
     if selected is None or grants is None:
@@ -2430,27 +2435,25 @@ def _response_grants(raw_grants) -> list[dict] | None:
 
 
 def scenario_multi_access(passwords: dict[str, str]) -> None:
-    """K6: két szabály együttes, majd részleges választása.
+    """K6: two rules together, then a partial selection.
 
-    A HV_E2E_MULTI kapcsoló nélkül kihagyott. A szabálypár a HV_E2E_RULES
-    vesszővel elválasztott két azonosítója, alapból a harness saját
-    e2e-rev-fwd/e2e-rev-host szabályai. A forgatókönyv a saját
-    tesztfelhasználóját használja, ezért a többi forgatókönyv
-    szabálykiosztását nem módosítja.
+    Skipped without the HV_E2E_MULTI switch. The rule pair is the two
+    comma-separated identifiers in HV_E2E_RULES, by default the harness's
+    own e2e-rev-fwd/e2e-rev-host rules. The scenario uses its own test user,
+    so it does not modify the rule assignment of the other scenarios.
     """
-    title = "K6. Több szabály együttes engedélyezése (HV_E2E_MULTI)"
+    title = "K6. Joint authorization of multiple rules (HV_E2E_MULTI)"
     if not gate_on(MULTI_GATE):
-        skip(title, f"{MULTI_GATE} nincs bekapcsolva")
+        skip(title, f"{MULTI_GATE} is not enabled")
         return
     print(f"== {title} ==", flush=True)
 
     pair = multi_rule_pair()
     if pair is None:
         check(
-            f"{title}: a HV_E2E_RULES két különböző szabály-azonosítót "
-            "tartalmaz",
+            f"{title}: HV_E2E_RULES contains two different rule identifiers",
             False,
-            f"kapott={os.environ.get('HV_E2E_RULES', '')!r}",
+            f"received={os.environ.get('HV_E2E_RULES', '')!r}",
         )
         return
     first, second = pair
@@ -2458,22 +2461,22 @@ def scenario_multi_access(passwords: dict[str, str]) -> None:
     password = passwords.get(MULTI_USER, "")
     if not password:
         check(
-            f"{label}: a tesztfelhasználó jelszava elérhető",
+            f"{label}: the test user's password is available",
             False,
-            f"a(z) {MULTI_USER} nem szerepel a forgatókönyv-erőforrásokban",
+            f"{MULTI_USER} is not among the scenario resources",
         )
         return
 
     logged_in = False
     try:
-        # A szabálykiosztás a belépés előtt történik; a HV_E2E_RULES párja
-        # így élő szabályokra is mutathat, ha azok léteznek és kioszthatók.
+        # The rule assignment happens before login; the HV_E2E_RULES pair can
+        # thus point to live rules too, if they exist and can be assigned.
         assigned = admin_json("/api/admin/users", {
             "action": "update", "name": MULTI_USER,
             "rules": [first, second],
         })
         check(
-            f"{label}: a két szabály hozzárendelve a tesztfelhasználóhoz",
+            f"{label}: the two rules are assigned to the test user",
             bool(assigned.get("ok")),
             str(assigned.get("error", ""))[:200],
         )
@@ -2486,9 +2489,9 @@ def scenario_multi_access(passwords: dict[str, str]) -> None:
             return
         login_body = login.get("body", {})
 
-        # A várt unióhoz a szabályok public payloadja kell. Az admin state
-        # a gyűjtők tagjait is tartalmazza; a belépési válasz a felhasználó
-        # számára feloldott nézetet adja, ezért az utóbbi felülírja.
+        # The expected union needs the rules' public payload. The admin state
+        # also contains the collection members; the login response gives the
+        # view resolved for the user, so the latter overrides it.
         rules_by_id: dict[str, dict] = {}
         state = admin_json("/api/admin/state")
         if isinstance(state.get("rules"), list):
@@ -2501,8 +2504,7 @@ def scenario_multi_access(passwords: dict[str, str]) -> None:
                     rules_by_id[row["id"]] = row
         missing_rules = [rule_id for rule_id in pair if rule_id not in rules_by_id]
         check(
-            f"{label}: mindkét szabály a felhasználó választható készletében "
-            "van",
+            f"{label}: both rules are in the user's selectable set",
             not missing_rules,
             json.dumps(missing_rules),
         )
@@ -2512,7 +2514,7 @@ def scenario_multi_access(passwords: dict[str, str]) -> None:
         parts_first = _rule_grant_parts(rules_by_id[first], rules_by_id)
         parts_second = _rule_grant_parts(rules_by_id[second], rules_by_id)
         check(
-            f"{label}: a két szabály grantjei feloldhatók",
+            f"{label}: the grants of the two rules can be resolved",
             parts_first is not None and parts_second is not None,
             json.dumps({first: bool(parts_first), second: bool(parts_second)}),
         )
@@ -2522,7 +2524,7 @@ def scenario_multi_access(passwords: dict[str, str]) -> None:
         union_second = _grant_union(parts_second)
         union_both = _grant_union(parts_first + parts_second)
         check(
-            f"{label}: mindkét szabály ad hozzáférést",
+            f"{label}: both rules grant access",
             bool(union_first) and bool(union_second),
             json.dumps({
                 first: _grant_union_detail(union_first),
@@ -2532,7 +2534,7 @@ def scenario_multi_access(passwords: dict[str, str]) -> None:
         if not union_first or not union_second:
             return
 
-        # A TTL a két szabály közül a szigorúbb max_ttl-hez igazodik.
+        # The TTL follows the stricter max_ttl of the two rules.
         limits = login_body.get("limits")
         limits = limits if isinstance(limits, dict) else {}
         try:
@@ -2551,15 +2553,15 @@ def scenario_multi_access(passwords: dict[str, str]) -> None:
         strictest = min(rule_ttls) if rule_ttls else max_ttl
         ttl = max(min_ttl, min(120, max_ttl, strictest))
         check(
-            f"{label}: a kért TTL a két szabály korlátján belül van",
+            f"{label}: the requested TTL is within the two rules' limits",
             min_ttl <= ttl <= strictest and ttl <= max_ttl,
-            f"ttl={ttl}, min={min_ttl}, szigorúbb max={strictest}, "
-            f"globális max={max_ttl}",
+            f"ttl={ttl}, min={min_ttl}, stricter max={strictest}, "
+            f"global max={max_ttl}",
         )
         if not (min_ttl <= ttl <= strictest and ttl <= max_ttl):
             return
 
-        # (a) Mindkét szabály együttes engedélyezése.
+        # (a) Joint authorization of both rules.
         access_label = label + "/both"
         access = client_access(
             ",".join(pair), ttl, MULTI_COOKIE, access_label
@@ -2568,14 +2570,14 @@ def scenario_multi_access(passwords: dict[str, str]) -> None:
             access.get("body", {}), MULTI_COOKIE
         )
         check(
-            f"{access_label}: a selected_rules a megadott sorrendben "
-            "tartalmazza mindkét szabályt",
+            f"{access_label}: the selected_rules contains both rules in the "
+            "given order",
             selected == list(pair),
-            f"forrás={source}, kapott={json.dumps(selected)}",
+            f"source={source}, received={json.dumps(selected)}",
         )
         parts = _response_grants(raw_grants)
         check(
-            f"{access_label}: a grants lista olvasható",
+            f"{access_label}: the grants list is readable",
             parts is not None,
             json.dumps(raw_grants)[:400],
         )
@@ -2584,35 +2586,34 @@ def scenario_multi_access(passwords: dict[str, str]) -> None:
         actual = _grant_union(parts)
         gaps = _grant_gaps(union_both, actual)
         check(
-            f"{access_label}: a grants lefedi a két szabály unióját",
+            f"{access_label}: the grants cover the union of the two rules",
             not gaps,
-            f"hiányzó={json.dumps(gaps, sort_keys=True)}; "
-            f"kapott={json.dumps(_grant_union_detail(actual), sort_keys=True)}",
+            f"missing={json.dumps(gaps, sort_keys=True)}; "
+            f"received={json.dumps(_grant_union_detail(actual), sort_keys=True)}",
         )
         expected_elements = _nft_union_elements(union_both)
         missing, _present = _nft_element_report(expected_elements)
         check(
-            f"{access_label}: az nft halmazok tartalmazzák az unió elemeit",
+            f"{access_label}: the nft sets contain the elements of the union",
             not missing,
-            f"hiányzó={json.dumps(missing)}",
+            f"missing={json.dumps(missing)}",
         )
 
-        # (b) Csak a második szabály. Az első azon elemei, amelyeket a
-        # második nem fed, a válaszból és a kernelből is el kell tűnjenek.
+        # (b) Only the second rule. The elements of the first that the second
+        # does not cover must disappear from both the response and the kernel.
         second_label = label + "/second"
         access = client_access(second, ttl, MULTI_COOKIE, second_label)
         selected, raw_grants, source = _selection_state(
             access.get("body", {}), MULTI_COOKIE
         )
         check(
-            f"{second_label}: a selected_rules csak a második szabályt "
-            "tartalmazza",
+            f"{second_label}: the selected_rules contains only the second rule",
             selected == [second],
-            f"forrás={source}, kapott={json.dumps(selected)}",
+            f"source={source}, received={json.dumps(selected)}",
         )
         parts = _response_grants(raw_grants)
         check(
-            f"{second_label}: a grants lista olvasható",
+            f"{second_label}: the grants list is readable",
             parts is not None,
             json.dumps(raw_grants)[:400],
         )
@@ -2621,43 +2622,43 @@ def scenario_multi_access(passwords: dict[str, str]) -> None:
         actual = _grant_union(parts)
         gaps = _grant_gaps(union_second, actual)
         check(
-            f"{second_label}: a grants lefedi a második szabály unióját",
+            f"{second_label}: the grants cover the union of the second rule",
             not gaps,
-            f"hiányzó={json.dumps(gaps, sort_keys=True)}; "
-            f"kapott={json.dumps(_grant_union_detail(actual), sort_keys=True)}",
+            f"missing={json.dumps(gaps, sort_keys=True)}; "
+            f"received={json.dumps(_grant_union_detail(actual), sort_keys=True)}",
         )
         missing_second, _present_second = _nft_element_report(
             _nft_union_elements(union_second)
         )
         check(
-            f"{second_label}: a megmaradt második szabály elemei a "
-            "kernelben maradtak",
+            f"{second_label}: the remaining elements of the second rule stayed "
+            "in the kernel",
             not missing_second,
-            f"hiányzó={json.dumps(missing_second)}",
+            f"missing={json.dumps(missing_second)}",
         )
         removed = _grant_removed(union_first, union_second)
         if removed:
             still_granted = _grant_removed_present(removed, actual)
             check(
-                f"{second_label}: az első szabály már le nem fedett elemei "
-                "nincsenek a grants-ben",
+                f"{second_label}: the elements of the first rule that are no "
+                "longer covered are not in the grants",
                 not still_granted,
                 json.dumps(still_granted, sort_keys=True),
             )
             _missing_nft, still_present = _nft_element_report(removed)
             check(
-                f"{second_label}: az első szabály egyedi elemei eltűntek az "
-                "nft halmazokból",
+                f"{second_label}: the unique elements of the first rule "
+                "disappeared from the nft sets",
                 not still_present,
-                f"még jelen: {json.dumps(still_present)}",
+                f"still present: {json.dumps(still_present)}",
             )
         else:
             skip(
-                f"{second_label}: eltávolított elemek ellenőrzése",
-                "a két szabály grantje azonos, nincs egyedi eltávolítható elem",
+                f"{second_label}: checking the removed elements",
+                "the two rules' grants are identical, there is no unique removable element",
             )
 
-        # (c) Mindkét szabály visszaállítása: az unió újra érvényes.
+        # (c) Restoring both rules: the union is valid again.
         restored_label = label + "/restored"
         access = client_access(
             ",".join(pair), ttl, MULTI_COOKIE, restored_label
@@ -2666,14 +2667,13 @@ def scenario_multi_access(passwords: dict[str, str]) -> None:
             access.get("body", {}), MULTI_COOKIE
         )
         check(
-            f"{restored_label}: a selected_rules ismét mindkét szabályt "
-            "tartalmazza",
+            f"{restored_label}: the selected_rules again contains both rules",
             selected == list(pair),
-            f"forrás={source}, kapott={json.dumps(selected)}",
+            f"source={source}, received={json.dumps(selected)}",
         )
         parts = _response_grants(raw_grants)
         check(
-            f"{restored_label}: a grants lista olvasható",
+            f"{restored_label}: the grants list is readable",
             parts is not None,
             json.dumps(raw_grants)[:400],
         )
@@ -2682,17 +2682,17 @@ def scenario_multi_access(passwords: dict[str, str]) -> None:
         actual = _grant_union(parts)
         gaps = _grant_gaps(union_both, actual)
         check(
-            f"{restored_label}: a grants ismét lefedi a két szabály unióját",
+            f"{restored_label}: the grants again cover the union of the two rules",
             not gaps,
-            f"hiányzó={json.dumps(gaps, sort_keys=True)}; "
-            f"kapott={json.dumps(_grant_union_detail(actual), sort_keys=True)}",
+            f"missing={json.dumps(gaps, sort_keys=True)}; "
+            f"received={json.dumps(_grant_union_detail(actual), sort_keys=True)}",
         )
         missing, _present = _nft_element_report(expected_elements)
         check(
-            f"{restored_label}: az nft halmazok ismét tartalmazzák az unió "
-            "elemeit",
+            f"{restored_label}: the nft sets again contain the elements of the "
+            "union",
             not missing,
-            f"hiányzó={json.dumps(missing)}",
+            f"missing={json.dumps(missing)}",
         )
     finally:
         if logged_in:
@@ -2702,7 +2702,7 @@ def scenario_multi_access(passwords: dict[str, str]) -> None:
                 pass
 
 
-# --------------------------------------------------------- újraindítás
+# --------------------------------------------------------- restart
 
 def portal_ready() -> bool:
     try:
@@ -2715,11 +2715,11 @@ def portal_ready() -> bool:
 
 
 def _compose_up(mode: str | None) -> subprocess.CompletedProcess:
-    """Konténer újraindítása a megadott HV_FLUSH_ON_START értékkel.
+    """Restart the container with the given HV_FLUSH_ON_START value.
 
-    ``mode=None`` az alapértelmezett (HV_FLUSH_ON_START=1) visszaállítás.
-    A HV_ALLOW_STALE_GRANTS_ON_START-ot mindig kivesszük, így a 0 mód is
-    a biztonságos, ürítő ágat használja.
+    ``mode=None`` restores the default (HV_FLUSH_ON_START=1). We always
+    remove HV_ALLOW_STALE_GRANTS_ON_START, so even mode 0 uses the safe,
+    flushing branch.
     """
     env = dict(os.environ)
     env.pop("HV_ALLOW_STALE_GRANTS_ON_START", None)
@@ -2752,11 +2752,11 @@ def _read_json_file(path: str) -> dict:
 
 
 def restart_helper_main(argv: list[str]) -> int:
-    """Leválasztott segédfolyamat: újraindít, állapotot ír, majd visszaállít.
+    """Detached helper process: restart, write the state, then restore.
 
-    A marker fájl hiánya esetén legkésőbb a megadott idő után akkor is
-    visszaállítja az alapértelmezett üzemmódot, hogy egy megszakadt SSH
-    ne hagyja a portált ideiglenes beállításokkal.
+    If the marker file is missing, it restores the default mode after the
+    given time at the latest, so an interrupted SSH does not leave the
+    portal with temporary settings.
     """
     if len(argv) < 4:
         return 2
@@ -2788,16 +2788,17 @@ def restart_helper_main(argv: list[str]) -> int:
             ]
             for name in NFT_SETS
         }
-        # A per-szet olvasás hiba esetén üres listát ad, ezért külön
-        # rögzítjük, hogy maga az nft tábla olvasható volt-e. Enélkül egy
-        # sikertelen nft-hívás hamis „nincs maradék engedély” eredményt adna.
+        # The per-set read returns an empty list on error, so we record
+        # separately whether the nft table itself could be read. Without
+        # this a failed nft call would give a false "no leftover grant"
+        # result.
         table = subprocess.run(
             ["nft", "list", "table", "inet", "hatarvedelem"],
             capture_output=True, text=True,
         )
         state["table_ok"] = table.returncode == 0
-        # A conntrack hiánya nem bizonyíték az ürességre: None-ként mentjük,
-        # és a hívó ilyenkor SKIPpel, nem PASS-szal jelent.
+        # The absence of conntrack is no proof of emptiness: we save it as
+        # None, and the caller then reports SKIP, not PASS.
         state["conntrack"] = _conntrack_lines()
         save(phase="up")
         deadline = time.monotonic() + timeout
@@ -2852,17 +2853,17 @@ def _start_restart_helper(mode: str) -> subprocess.Popen:
 
 
 def scenario_restart_matrix(passwords: dict[str, str]) -> None:
-    title = "K4. Újraindítási mátrix (HV_E2E_RESTART)"
+    title = "K4. Restart matrix (HV_E2E_RESTART)"
     if not gate_on(RESTART_GATE):
-        skip(title, f"{RESTART_GATE} nincs bekapcsolva")
+        skip(title, f"{RESTART_GATE} is not enabled")
         return
     print(f"== {title} ==", flush=True)
-    print("FIGYELEM: ez a forgatókönyv újraindítja a hatarvedelem konténert, "
-          "és a tűzfal újratöltése megszakíthatja az SSH-kapcsolatot.",
+    print("WARNING: this scenario restarts the hatarvedelem container, "
+          "and reloading the firewall may interrupt the SSH connection.",
           flush=True)
-    print("FIGYELEM: a leválasztott segédfolyamat legkésőbb "
-          f"{RESTART_TIMEOUT} s múlva akkor is visszaállítja az "
-          "alapértelmezett üzemmódot, ha a teszt megszakad.", flush=True)
+    print("WARNING: the detached helper process restores the default "
+          f"mode within {RESTART_TIMEOUT} s at the latest even if the "
+          "test is interrupted.", flush=True)
     user = "e2e-exp-user"
     label = "K4/restart"
     global RESTART_MARKER
@@ -2882,12 +2883,12 @@ def scenario_restart_matrix(passwords: dict[str, str]) -> None:
                 180, 1.0,
             )
             state = _read_json_file(state_path)
-            check(f"{mode_label}: a segédfolyamat elindult", up,
+            check(f"{mode_label}: the helper process started", up,
                   json.dumps({k: state.get(k) for k in ("phase", "up_rc", "error")}))
-            check(f"{mode_label}: a portál újraindult", bool(state.get("ready")),
+            check(f"{mode_label}: the portal restarted", bool(state.get("ready")),
                   json.dumps({k: state.get(k) for k in ("phase", "up_rc")}))
             check(
-                f"{mode_label}: az nft tábla olvasható az újraindítás után",
+                f"{mode_label}: the nft table is readable after the restart",
                 bool(state.get("table_ok")),
                 json.dumps({k: state.get(k) for k in ("phase", "up_rc")}),
             )
@@ -2897,36 +2898,36 @@ def scenario_restart_matrix(passwords: dict[str, str]) -> None:
                 name: rows for name, rows in sets.items() if rows
             }
             check(
-                f"{mode_label}: minden halmaz állapota kiolvasható",
+                f"{mode_label}: the state of every set can be read",
                 not missing_sets, json.dumps(missing_sets),
             )
             check(
-                f"{mode_label}: nincs maradék engedély egyik halmazban sem",
+                f"{mode_label}: there is no leftover grant in any set",
                 not stale, json.dumps(stale)[:400],
             )
             conntrack_state = state.get("conntrack")
             if not isinstance(conntrack_state, list):
                 skip(
-                    f"{mode_label}: nincs maradék conntrack bejegyzés",
-                    "a conntrack eszköz nem érhető el",
+                    f"{mode_label}: there is no leftover conntrack entry",
+                    "the conntrack tool is unavailable",
                 )
             else:
                 check(
-                    f"{mode_label}: nincs maradék conntrack bejegyzés",
+                    f"{mode_label}: there is no leftover conntrack entry",
                     not conntrack_state,
                     json.dumps(conntrack_state)[:400],
                 )
-            # Az admin munkamenet a konténer újraindításakor megszűnt; az
-            # admin_get automatikusan újra belép a tárolt jelszóval.
+            # The admin session ended when the container restarted;
+            # admin_get automatically logs in again with the stored password.
             sessions = admin_sessions_for_ip()
             if sessions is None:
-                skip(f"{mode_label}: nincs kliens munkamenet",
-                     "az admin munkamenet-lista nem érhető el")
+                skip(f"{mode_label}: there is no client session",
+                     "the admin session list is unavailable")
             else:
-                check(f"{mode_label}: nincs kliens munkamenet",
+                check(f"{mode_label}: there is no client session",
                       not sessions,
                       json.dumps([row.get("id") for row in sessions]))
-            # Engedjük tovább a segédfolyamatot, és várjuk meg a visszaállást.
+            # Release the helper process and wait for the restore.
             with open(RESTART_MARKER, "w", encoding="utf-8") as fh:
                 fh.write("continue\n")
             restored = wait_condition(
@@ -2934,7 +2935,7 @@ def scenario_restart_matrix(passwords: dict[str, str]) -> None:
                 240, 1.0,
             )
             final = _read_json_file(state_path)
-            check(f"{mode_label}: az alapértelmezett üzemmód visszaállt",
+            check(f"{mode_label}: the default mode was restored",
                   restored and bool(final.get("restore_ready")),
                   json.dumps({k: final.get(k)
                               for k in ("phase", "restore_rc", "restore_ready")}))
@@ -2942,7 +2943,7 @@ def scenario_restart_matrix(passwords: dict[str, str]) -> None:
                 helper_rc = helper.wait(timeout=15)
             except subprocess.TimeoutExpired:
                 helper_rc = None
-            check(f"{mode_label}: a segédfolyamat lefutott",
+            check(f"{mode_label}: the helper process finished",
                   helper_rc is not None, f"rc={helper_rc}")
             try:
                 os.unlink(RESTART_MARKER)
@@ -2962,7 +2963,7 @@ def scenario_restart_matrix(passwords: dict[str, str]) -> None:
             )
 
 
-# ------------------------------------------------------- host oldali takarítás
+# ------------------------------------------------------- host-side cleanup
 
 def _admin_tolerant_request(path: str, payload: dict) -> bool:
     try:
@@ -2973,11 +2974,11 @@ def _admin_tolerant_request(path: str, payload: dict) -> bool:
         return True
     data = safe_json(text)
     message = str(data.get("error", "")) if isinstance(data, dict) else str(data)
-    return "nincs ilyen" in message
+    return "no such" in message
 
 
 def terminate_client_sessions() -> None:
-    """A kliens IP esetlegesen maradt munkameneteinek lezárása adminból."""
+    """Terminate any sessions left from the client IP, from admin."""
     try:
         sessions = admin_sessions_for_ip()
     except Exception:
@@ -2993,19 +2994,19 @@ def terminate_client_sessions() -> None:
 
 
 def host_admin_cleanup() -> bool:
-    """A kiterjesztett erőforrások eltakarítása a loopback admin sütivel.
+    """Clean up the extended resources with the loopback admin cookie.
 
-    Akkor használjuk, ha a kliens oldali újrabejelentkezés (pl. 429 miatt)
-    nem sikerül. Nem törli a tesztfelhasználót; azt a main finally CLI-vel
-    távolítja el.
+    We use it when re-login on the client side (e.g. because of a 429)
+    fails. It does not delete the test user; main's finally removes that
+    with the CLI.
     """
     global _admin_portal
     if _admin_portal is None:
         if not _admin_password or not _admin_login(_admin_password):
             return False
-    # Az admin munkamenet a konténer-újraindítás után elavult lehet; ez a
-    # hívás 403 esetén automatikusan újra belép. Hálózati hiba esetén a
-    # hívó a kliens oldali takarításra vált.
+    # The admin session may be stale after a container restart; this call
+    # logs in again automatically on a 403. On a network error the caller
+    # switches to client-side cleanup.
     try:
         code, _text = admin_get("/api/admin/state")
     except Exception:
@@ -3050,25 +3051,25 @@ def host_admin_cleanup() -> bool:
 
 
 def usage_text() -> str:
-    return f"""Dropjak végponttól végpontig teszt (host mód)
+    return f"""Dropjak end-to-end test (host mode)
 
-Használat:
-  python3 tests/e2e_vm.py            # teljes futás a teszt-VM hostján
-  python3 tests/e2e_vm.py --help     # ez a súgó (nincs hálózati művelet)
+Usage:
+  python3 tests/e2e_vm.py            # full run on the test VM host
+  python3 tests/e2e_vm.py --help     # this help (no network operations)
 
-A host mód a kliens lépéseket a hvclient hálózati névtérből futtatja, a
-tűzfalhalmazokat a host névterében ellenőrzi, a végén pedig eltakarít.
+Host mode runs the client steps from the hvclient network namespace, checks
+the firewall sets in the host namespace, and cleans up at the end.
 
-Kiterjesztett forgatókönyvek (alapból minden kapcsoló KI):
-  K1. Visszavonási utak                   admin API szükséges
-  K2. Természetes lejárat                 HV_E2E_LONG=1
-  K3. Blokk elsőbbsége                    HV_E2E_PENDING=1
-  K4. Újraindítási mátrix                 HV_E2E_RESTART=1
-  K5. CLI-propagáció                      HV_E2E_PENDING=1
-  K6. Több szabály együttes engedélyezése HV_E2E_MULTI=1
-      HV_E2E_RULES=elso,masodik           (alap: e2e-rev-fwd,e2e-rev-host)
+Extended scenarios (by default every switch is OFF):
+  K1. Revocation paths                      admin API required
+  K2. Natural expiry                       HV_E2E_LONG=1
+  K3. Block precedence                     HV_E2E_PENDING=1
+  K4. Restart matrix                       HV_E2E_RESTART=1
+  K5. CLI propagation                      HV_E2E_PENDING=1
+  K6. Joint authorization of multiple rules HV_E2E_MULTI=1
+      HV_E2E_RULES=first,second            (default: e2e-rev-fwd,e2e-rev-host)
 
-További környezeti változók: E2E_LONG_MAX_WAIT, E2E_USER, E2E_PASS,
+Further environment variables: E2E_LONG_MAX_WAIT, E2E_USER, E2E_PASS,
 E2E_NEW_PASS, E2E_ADMIN_BASE, E2E_ADMIN_COOKIE, E2E_COOKIE,
 E2E_SCEN_COOKIE, E2E_EXPIRY_COOKIE, E2E_CLI_COOKIE, E2E_BLOCK_COOKIE,
 E2E_MULTI_COOKIE, HV_CONNTRACK_BIN.
@@ -3079,143 +3080,142 @@ def main() -> int:
     password = secrets.token_urlsafe(18)
     new_password = password + "-v2"
 
-    user_cli("del", USER)  # esetleges maradék eltakarítása
-    # A tesztfelhasználó admin, hogy a host SSH-hez szükséges, kifejezetten
-    # 22/TCP-t engedélyező host szabályt és a vegyes gyűjtőt az admin API-n
-    # keresztül létrehozhassa, majd hozzárendelhesse önmagához. A szabályok
-    # nem részei a seedelt készletnek, ezért a teszt hozza létre és törli.
+    user_cli("del", USER)  # clean up possible leftovers
+    # The test user is an admin so that it can create, through the admin
+    # API, the host rule allowing 22/TCP specifically (needed for host SSH)
+    # and the mixed collection, then assign them to itself. The rules are not
+    # part of the seeded set, so the test creates and deletes them.
     created = user_cli(
         "add", USER, "--role", "admin", "--rule", "browse",
         "--password-stdin", stdin=password + "\n",
     )
     if created.returncode != 0:
-        print(f"HIBA: a tesztfelhasználó létrehozása nem sikerült: {created.stderr.strip()}")
+        print(f"ERROR: creating the test user failed: {created.stderr.strip()}")
         return 2
 
     logout_done = False
     extended_started = False
     try:
-        print("== 0. Kiinduló állapot ==", flush=True)
+        print("== 0. Initial state ==", flush=True)
         page = client_json("page")
-        check("portál oldal betölt", page.get("code") == "200")
-        check("szabályválasztó a felületen", bool(page.get("rules")))
-        check("admin panel a felületen", bool(page.get("admin_panel")))
-        check("TTL mező a felületen", bool(page.get("ttl")))
-        check("nincs óra/perc TTL választó a felületen", bool(page.get("ttl_unit_absent")))
-        check("admin szabály API a felületen", bool(page.get("rules_api")))
-        check("/api/access hívás a felületen", bool(page.get("access_api")))
-        check("jelszócsere nézet a felületen", bool(page.get("password_view")))
-        check("munkamenetek fül a felületen", bool(page.get("sessions_tab")))
-        check("tűzfal fül a felületen", bool(page.get("firewall_tab")))
+        check("portal page loads", page.get("code") == "200")
+        check("rule selector on the page", bool(page.get("rules")))
+        check("admin panel on the page", bool(page.get("admin_panel")))
+        check("TTL field on the page", bool(page.get("ttl")))
+        check("no hour/minute TTL selector on the page", bool(page.get("ttl_unit_absent")))
+        check("admin rule API on the page", bool(page.get("rules_api")))
+        check("/api/access call on the page", bool(page.get("access_api")))
+        check("password change view on the page", bool(page.get("password_view")))
+        check("sessions tab on the page", bool(page.get("sessions_tab")))
+        check("firewall tab on the page", bool(page.get("firewall_tab")))
         login = client_json("login", password=password)
-        check("login: helyes jelszóval van munkamenet", bool(login.get("ok")))
-        check("login: még nincs hálózati engedély", not login.get("body", {}).get("authorized"))
-        check("login: várakozó állapot (pending)", bool(login.get("body", {}).get("pending")))
-        check("login: első belépésnél kötelező jelszócsere",
+        check("login: with the correct password there is a session", bool(login.get("ok")))
+        check("login: no network grant yet", not login.get("body", {}).get("authorized"))
+        check("login: pending state", bool(login.get("body", {}).get("pending")))
+        check("login: first login requires a password change",
               login.get("body", {}).get("must_change_password") is True)
         rule_ids = [rule.get("id") for rule in login.get("body", {}).get("rules", [])]
-        check("login: a felhasználó szabályai megvannak",
+        check("login: the user's rules are present",
               "browse" in rule_ids and "admin-full" not in rule_ids,
               json.dumps(rule_ids))
 
         before_change = client_json("access", "browse", "60")
-        check("jelszócsere előtt: hozzáférés elutasítva (403)",
+        check("before the password change: access denied (403)",
               before_change.get("code") == 403, json.dumps(before_change.get("body")))
         changed = client_json(
             "password", password=password, new_password=new_password
         )
-        check("jelszócsere: 200", bool(changed.get("ok")), json.dumps(changed.get("body")))
-        check("jelszócsere: a kötelező csere flag eltűnt",
+        check("password change: 200", bool(changed.get("ok")), json.dumps(changed.get("body")))
+        check("password change: the mandatory change flag disappeared",
               changed.get("body", {}).get("must_change_password") is False)
 
         status = client_json("status")
         check("status: pending=True", bool(status.get("body", {}).get("pending")))
         check("status: authorized=False", not status.get("body", {}).get("authorized"))
-        check("status: szabályok és limitek megvannak",
+        check("status: rules and limits are present",
               "rules" in status.get("body", {}) and "limits" in status.get("body", {}))
         limits = status.get("body", {}).get("limits", {})
-        check("limitek: 60–2592000 másodperc",
+        check("limits: 60-2592000 seconds",
               limits.get("min_ttl") == 60 and limits.get("max_ttl") == 2592000,
               json.dumps(limits))
 
-        # A host SSH-hoz kifejezetten 22/TCP-t engedélyező, a felhasználóhoz
-        # rendelt host szabály kell. A szabály és a vegyes gyűjtő létrehozása
-        # admin API-val történik; a saját szabályok frissítése után újra kell
-        # jelentkezni.
+        # Host SSH needs a host rule assigned to the user that specifically
+        # allows 22/TCP. The rule and the mixed collection are created via the
+        # admin API; after updating one's own rules, one must log in again.
         seeded = client_json("admin-seed")
-        check("admin: host SSH és vegyes gyűjtő létrehozva, hozzárendelve",
+        check("admin: host SSH and mixed collection created and assigned",
               bool(seeded.get("ok")), json.dumps(seeded))
         relogin = client_json("login", password=new_password)
-        check("új belépés a szabály-kiosztás után", bool(relogin.get("ok")),
+        check("new login after the rule assignment", bool(relogin.get("ok")),
               json.dumps(relogin.get("body")))
         rule_ids = [
             rule.get("id") for rule in relogin.get("body", {}).get("rules", [])
         ]
-        check("az új szabályok a felhasználónál vannak",
+        check("the new rules are on the user",
               "host-e2e" in rule_ids and "e2e-combo" in rule_ids
               and "admin-full" not in rule_ids, json.dumps(rule_ids))
 
         legacy = client_json("access", gateway.LEGACY_ADMIN_RULE_ID, "60")
-        check("a fenntartott admin-full szabály nem kérhető (400)",
+        check("the reserved admin-full rule cannot be requested (400)",
               legacy.get("code") == 400, json.dumps(legacy.get("body")))
 
         blocked = client_json("check")
-        check("bejelentkezés előtt: HTTP a portálra terelve",
+        check("before login: HTTP redirected to the portal",
               blocked.get("http_portal") is True, json.dumps(blocked))
-        check("bejelentkezés előtt: HTTPS tiltva", blocked.get("https") is False)
-        check("bejelentkezés előtt: DNS tiltva", blocked.get("dns") is False)
-        check("bejelentkezés előtt: ping tiltva", blocked.get("ping") is False)
-        check("bejelentkezés előtt: host SSH tiltva", blocked.get("host_ssh") is False)
-        state = nft_state("bejelentkezés előtt")
-        check("nft: host SSH halmaz üres", not state["host_ssh"])
-        check("nft: MAC-kötés nincs", not state["mac"])
+        check("before login: HTTPS blocked", blocked.get("https") is False)
+        check("before login: DNS blocked", blocked.get("dns") is False)
+        check("before login: ping blocked", blocked.get("ping") is False)
+        check("before login: host SSH blocked", blocked.get("host_ssh") is False)
+        state = nft_state("before login")
+        check("nft: host SSH set is empty", not state["host_ssh"])
+        check("nft: no MAC binding", not state["mac"])
 
-        print("== 1. Böngészés szabály 60 másodpercre ==", flush=True)
+        print("== 1. Browse rule for 60 seconds ==", flush=True)
         access = client_json("access", "browse", "60")
         check("access browse: 200", bool(access.get("ok")), json.dumps(access.get("body")))
-        check("access browse: engedélyezve", bool(access.get("body", {}).get("authorized")))
-        check("access browse: a szabály neve megvan",
+        check("access browse: authorized", bool(access.get("body", {}).get("authorized")))
+        check("access browse: the rule name is present",
               access.get("body", {}).get("rule") == "browse")
         grant = access.get("body", {}).get("grant", {})
-        check("access browse: a portengedély megvan",
+        check("access browse: the port grant is present",
               isinstance(grant.get("tcp"), list) and bool(grant.get("tcp")),
               json.dumps(grant))
-        check("access browse: nincs teljes hozzáférés",
+        check("access browse: no full access",
               grant.get("full") is False, json.dumps(grant))
         web = client_json("check")
-        check("browse: HTTP kimegy, nem a portál", web.get("http_external") is True, json.dumps(web))
-        check("browse: HTTPS kimegy", web.get("https") is True)
-        check("browse: DNS engedélyezett", web.get("dns") is True, json.dumps(web))
-        check("browse: ping nem engedélyezett", web.get("ping") is False)
-        check("browse: host SSH nem nyílt meg", web.get("host_ssh") is False, json.dumps(web))
-        state = nft_state("browse után")
-        check("nft: allowed_tcp tartalmazza a klienst", state["tcp"])
-        check("nft: allowed_udp tartalmazza a klienst", state["udp"])
-        check("nft: allowed_v4 nem tartalmazza a klienst", not state["v4"])
-        check("nft: allowed_icmp nem tartalmazza a klienst", not state["icmp"])
-        check("nft: host SSH halmaz üres", not state["host_ssh"])
-        check("nft: MAC-kötés rögzítve", state["mac"])
+        check("browse: HTTP goes out, not the portal", web.get("http_external") is True, json.dumps(web))
+        check("browse: HTTPS goes out", web.get("https") is True)
+        check("browse: DNS allowed", web.get("dns") is True, json.dumps(web))
+        check("browse: ping not allowed", web.get("ping") is False)
+        check("browse: host SSH did not open", web.get("host_ssh") is False, json.dumps(web))
+        state = nft_state("after browse")
+        check("nft: allowed_tcp contains the client", state["tcp"])
+        check("nft: allowed_udp contains the client", state["udp"])
+        check("nft: allowed_v4 does not contain the client", not state["v4"])
+        check("nft: allowed_icmp does not contain the client", not state["icmp"])
+        check("nft: host SSH set is empty", not state["host_ssh"])
+        check("nft: MAC binding recorded", state["mac"])
         expected_mac = client_mac()
         mac_entries = nft_json_entries("client_mac")
         bound = [
             entry.get("mac") for entry in mac_entries
             if entry.get("address") == CLIENT_IP
         ]
-        check("nft JSON: a MAC-kötés olvasható",
+        check("nft JSON: the MAC binding is readable",
               bool(bound) and all(mac and len(mac) == 17 for mac in bound),
               json.dumps(mac_entries))
         if expected_mac:
-            check("nft JSON: a MAC az ARP-ból származik",
+            check("nft JSON: the MAC comes from ARP",
                   bound and bound[0] == expected_mac,
-                  f"várt={expected_mac} kapott={bound}")
+                  f"expected={expected_mac} received={bound}")
         tcp_entries = nft_json_entries("allowed_tcp")
         client_ports = {
             entry["port"] for entry in tcp_entries
             if entry.get("address") == CLIENT_IP
         }
-        check("nft JSON: a kliens TCP-portjai olvashatók",
+        check("nft JSON: the client's TCP ports are readable",
               bool(client_ports), json.dumps(sorted(client_ports)))
-        check("nft JSON: a hátralévő idő is olvasható",
+        check("nft JSON: the remaining time is readable too",
               all(
                   isinstance(entry.get("expires_in"), int)
                   for entry in tcp_entries
@@ -3223,179 +3223,179 @@ def main() -> int:
               ),
               json.dumps(tcp_entries))
         input_entries = nft_json_entries("allowed_input_tcp")
-        check("nft JSON: browse nem nyit host SSH-t",
+        check("nft JSON: browse does not open host SSH",
               not any(entry.get("address") == CLIENT_IP for entry in input_entries),
               json.dumps(input_entries))
 
-        print("== 2. TTL-határok ==", flush=True)
+        print("== 2. TTL limits ==", flush=True)
         low = client_json("access", "browse", "59")
-        check("TTL 59 elutasítva (400)", low.get("code") == 400, json.dumps(low.get("body")))
+        check("TTL 59 rejected (400)", low.get("code") == 400, json.dumps(low.get("body")))
         high = client_json("access", "browse", "86401")
-        check("TTL 86401 elutasítva (400)", high.get("code") == 400, json.dumps(high.get("body")))
-        no_rule = client_json("access", "nincs-ilyen", "60")
-        check("ismeretlen szabály elutasítva (400)", no_rule.get("code") == 400)
+        check("TTL 86401 rejected (400)", high.get("code") == 400, json.dumps(high.get("body")))
+        no_rule = client_json("access", "no-such-rule", "60")
+        check("unknown rule rejected (400)", no_rule.get("code") == 400)
         still_web = client_json("check")
-        check("elutasított kérés nem vonta vissza a hozzáférést",
+        check("rejected request did not revoke the access",
               still_web.get("http_external") is True and still_web.get("https") is True)
         min_ok = client_json("access", "browse", "60")
-        check("TTL 60 elfogadva", bool(min_ok.get("ok")), json.dumps(min_ok.get("body")))
+        check("TTL 60 accepted", bool(min_ok.get("ok")), json.dumps(min_ok.get("body")))
 
-        print("== 3. Módosítás teljes hozzáférésre ==", flush=True)
+        print("== 3. Changing to full access ==", flush=True)
         access = client_json("access", "full", "60")
         check("access full: 200", bool(access.get("ok")), json.dumps(access.get("body")))
-        check("access full: teljes hozzáférés a grantben",
+        check("access full: full access in the grant",
               access.get("body", {}).get("grant", {}).get("full") is True,
               json.dumps(access.get("body", {}).get("grant")))
         full = client_json("check")
-        check("full: HTTP kimegy", full.get("http_external") is True, json.dumps(full))
-        check("full: HTTPS kimegy", full.get("https") is True)
-        check("full: DNS kimegy", full.get("dns") is True)
-        check("full: ping kimegy", full.get("ping") is True)
-        check("full: host SSH nem nyílt meg", full.get("host_ssh") is False,
+        check("full: HTTP goes out", full.get("http_external") is True, json.dumps(full))
+        check("full: HTTPS goes out", full.get("https") is True)
+        check("full: DNS goes out", full.get("dns") is True)
+        check("full: ping goes out", full.get("ping") is True)
+        check("full: host SSH did not open", full.get("host_ssh") is False,
               json.dumps(full))
         snap = snapshot()["text"]
-        check("nft: allowed_v4 tartalmazza a klienst", set_has(snap, "allowed_v4", CLIENT_IP))
-        # A teljes hozzáférésű szabály az allowed_v4-en keresztül ICMP-t is
-        # enged; külön allowed_icmp elem csak akkor jön létre, ha a szabály
-        # kifejezetten az icmp szolgáltatást is tartalmazza.
+        check("nft: allowed_v4 contains the client", set_has(snap, "allowed_v4", CLIENT_IP))
+        # The full-access rule also allows ICMP through allowed_v4; a separate
+        # allowed_icmp element is only created if the rule explicitly includes
+        # the icmp service too.
         check(
-            "nft: ICMP engedélyezve (allowed_v4 vagy allowed_icmp)",
+            "nft: ICMP allowed (allowed_v4 or allowed_icmp)",
             set_has(snap, "allowed_v4", CLIENT_IP)
             or set_has(snap, "allowed_icmp", CLIENT_IP),
         )
 
-        print("== 3b. Host SSH szabály (22/TCP input) ==", flush=True)
+        print("== 3b. Host SSH rule (22/TCP input) ==", flush=True)
         access = client_json("access", "host-e2e", "60")
         check("access host-e2e: 200", bool(access.get("ok")),
               json.dumps(access.get("body")))
         grant = access.get("body", {}).get("grant", {})
-        check("access host-e2e: input irány, nincs teljes hozzáférés",
+        check("access host-e2e: input direction, no full access",
               grant.get("direction") == "input" and grant.get("full") is False,
               json.dumps(grant))
         admin = client_json("check")
-        check("host-e2e: host SSH megnyílt", admin.get("host_ssh") is True,
+        check("host-e2e: host SSH opened", admin.get("host_ssh") is True,
               json.dumps(admin))
-        check("host-e2e: forward forgalom nem nyílt meg",
+        check("host-e2e: forward traffic did not open",
               admin.get("http_external") is False and admin.get("dns") is False,
               json.dumps(admin))
-        state = nft_state("host-e2e után")
-        check("nft: host SSH a közönséges input TCP halmazban van",
+        state = nft_state("after host-e2e")
+        check("nft: host SSH is in the ordinary input TCP set",
               state["host_ssh"], json.dumps(state))
-        check("nft: nincs külön host SSH halmaz", "host_ssh_v4" not in snap)
+        check("nft: there is no separate host SSH set", "host_ssh_v4" not in snap)
         ssh_entries = nft_json_entries("allowed_input_tcp")
         client_ssh = [
             entry for entry in ssh_entries
             if entry.get("address") == CLIENT_IP and entry.get("port") == 22
         ]
-        check("nft JSON: a host SSH engedély olvasható", bool(client_ssh),
+        check("nft JSON: the host SSH grant is readable", bool(client_ssh),
               json.dumps(ssh_entries))
-        check("nft JSON: a host SSH engedély TTL-je olvasható",
+        check("nft JSON: the host SSH grant's TTL is readable",
               all(isinstance(entry.get("timeout"), int) and entry["timeout"] > 0
                   for entry in client_ssh),
               json.dumps(client_ssh))
 
-        print("== 4. Visszaváltás böngészésre ==", flush=True)
+        print("== 4. Switching back to browse ==", flush=True)
         access = client_json("access", "browse", "60")
-        check("access browse újra: 200", bool(access.get("ok")), json.dumps(access.get("body")))
+        check("access browse again: 200", bool(access.get("ok")), json.dumps(access.get("body")))
         back = client_json("check")
-        check("browse: ping visszavonva", back.get("ping") is False, json.dumps(back))
-        check("browse: host SSH visszavonva", back.get("host_ssh") is False,
+        check("browse: ping revoked", back.get("ping") is False, json.dumps(back))
+        check("browse: host SSH revoked", back.get("host_ssh") is False,
               json.dumps(back))
-        check("browse: HTTP továbbra is kimegy", back.get("http_external") is True)
-        check("browse: DNS továbbra is működik", back.get("dns") is True)
+        check("browse: HTTP still goes out", back.get("http_external") is True)
+        check("browse: DNS still works", back.get("dns") is True)
         snap = snapshot()["text"]
-        check("nft: allowed_v4 kiürült", not set_has(snap, "allowed_v4", CLIENT_IP))
-        check("nft: allowed_icmp kiürült", not set_has(snap, "allowed_icmp", CLIENT_IP))
+        check("nft: allowed_v4 emptied", not set_has(snap, "allowed_v4", CLIENT_IP))
+        check("nft: allowed_icmp emptied", not set_has(snap, "allowed_icmp", CLIENT_IP))
         input_entries = nft_json_entries("allowed_input_tcp")
-        check("nft: host SSH (input TCP 22) kiürült",
+        check("nft: host SSH (input TCP 22) emptied",
               not any(
                   entry.get("address") == CLIENT_IP
                   and entry.get("port") == 22
                   for entry in input_entries
               ), json.dumps(input_entries))
 
-        print("== 5. Kilépés ==", flush=True)
+        print("== 5. Logout ==", flush=True)
         out = client_json("logout")
         logout_done = True
         check("logout: 200", bool(out.get("ok")), json.dumps(out.get("body")))
         after = client_json("check")
-        check("logout: HTTP a portálra terelve", after.get("http_portal") is True, json.dumps(after))
-        check("logout: HTTPS tiltva", after.get("https") is False)
-        check("logout: DNS tiltva", after.get("dns") is False)
-        check("logout: ping tiltva", after.get("ping") is False)
-        check("logout: host SSH tiltva", after.get("host_ssh") is False, json.dumps(after))
-        state = nft_state("logout után")
-        check("logout: minden halmaz üres", not any(state.values()), json.dumps(state))
+        check("logout: HTTP redirected to the portal", after.get("http_portal") is True, json.dumps(after))
+        check("logout: HTTPS blocked", after.get("https") is False)
+        check("logout: DNS blocked", after.get("dns") is False)
+        check("logout: ping blocked", after.get("ping") is False)
+        check("logout: host SSH blocked", after.get("host_ssh") is False, json.dumps(after))
+        state = nft_state("after logout")
+        check("logout: every set is empty", not any(state.values()), json.dumps(state))
 
-        print("== 6. Természetes lejárat ==", flush=True)
+        print("== 6. Natural expiry ==", flush=True)
         login = client_json("login", password=new_password)
-        check("lejárat: új belépés", bool(login.get("ok")))
+        check("expiry: new login", bool(login.get("ok")))
         access = client_json("access", "e2e-combo", "60")
-        check("lejárat: vegyes gyűjtő engedélyezve 60 másodpercre",
+        check("expiry: mixed collection authorized for 60 seconds",
               bool(access.get("ok")),
               json.dumps(access.get("body", {}).get("error")))
         before = client_json("check")
-        check("lejárat előtt: HTTP kimegy", before.get("http_external") is True, json.dumps(before))
-        check("lejárat előtt: DNS működik", before.get("dns") is True, json.dumps(before))
-        check("lejárat előtt: host SSH működik", before.get("host_ssh") is True, json.dumps(before))
-        check("lejárat előtt: ping nem engedélyezett", before.get("ping") is False)
-        state = nft_state("lejárat előtt")
-        check("nft: host SSH input TCP 22 tartalmazza a klienst", state["host_ssh"])
-        print("    várakozás a lejáratig (65 s)...", flush=True)
+        check("before expiry: HTTP goes out", before.get("http_external") is True, json.dumps(before))
+        check("before expiry: DNS works", before.get("dns") is True, json.dumps(before))
+        check("before expiry: host SSH works", before.get("host_ssh") is True, json.dumps(before))
+        check("before expiry: ping not allowed", before.get("ping") is False)
+        state = nft_state("before expiry")
+        check("nft: host SSH input TCP 22 contains the client", state["host_ssh"])
+        print("    waiting for expiry (65 s)...", flush=True)
         time.sleep(65)
         expired = client_json("check")
-        check("lejárat után: DNS tiltva", expired.get("dns") is False, json.dumps(expired))
-        check("lejárat után: host SSH tiltva", expired.get("host_ssh") is False, json.dumps(expired))
-        check("lejárat után: HTTPS tiltva", expired.get("https") is False)
-        check("lejárat után: HTTP a portálra terelve", expired.get("http_portal") is True)
-        state = nft_state("lejárat után")
-        check("lejárat után: minden halmaz üres", not any(state.values()), json.dumps(state))
+        check("after expiry: DNS blocked", expired.get("dns") is False, json.dumps(expired))
+        check("after expiry: host SSH blocked", expired.get("host_ssh") is False, json.dumps(expired))
+        check("after expiry: HTTPS blocked", expired.get("https") is False)
+        check("after expiry: HTTP redirected to the portal", expired.get("http_portal") is True)
+        state = nft_state("after expiry")
+        check("after expiry: every set is empty", not any(state.values()), json.dumps(state))
         status = client_json("status")
-        check("lejárat után: munkamenet megszűnt",
+        check("after expiry: the session is gone",
               not status.get("body", {}).get("authenticated"))
         logout_done = True
 
-        print("== 7. Portál nyilvános elérése ==", flush=True)
+        print("== 7. Public access to the portal ==", flush=True)
         pub = subprocess.run(
             ["curl", "-sS", "-m", "10", "-o", "/dev/null", "-w", "%{http_code}", BASE + "/api/challenge"],
             capture_output=True, text=True,
         )
-        check("portál a kezelői gépről is elérhető", pub.stdout.strip() == "200", pub.stdout.strip())
+        check("the portal is reachable from the operator machine too", pub.stdout.strip() == "200", pub.stdout.strip())
 
-        # ------------------------------------------------ kiterjesztett kör
-        print("== Kiterjesztett forgatókönyvek ==", flush=True)
+        # ------------------------------------------------ extended round
+        print("== Extended scenarios ==", flush=True)
         extended_started = True
-        # Egy megszakadt előző futás tiltása ne zárja ki a klienst.
+        # A ban left from an interrupted previous run must not lock the client out.
         fail2ban_cli("unban", CLIENT_IP)
         admin_ok = ensure_admin(new_password, password)
-        check("kiterjesztett: admin API elérhető loopbackról", admin_ok)
+        check("extended: admin API reachable from loopback", admin_ok)
         passwords_ext = None
         if admin_ok:
-            # A korábbi futás maradékainak eltakarítása; a létrehozók
-            # egyébként is idempotensek, de így nem halmozódnak a blokkok.
+            # Clean up the leftovers of the previous run; the creators are
+            # idempotent anyway, but this way the blocks do not accumulate.
             admin_post("/api/admin/fail2ban", {
                 "action": "unban", "ip": CLIENT_IP,
             })
             host_admin_cleanup()
             passwords_ext = ensure_scenario_resources()
         if passwords_ext and admin_ok:
-            # Sorrend: visszavonás, több szabály, természetes lejárat, blokk,
-            # CLI, majd a legutolsóként az újraindítás (az mindent kiürít).
-            # Egy váratlan kivétel ne akassza meg a többi forgatókönyvet és
-            # a takarítást.
+            # Order: revocation, multiple rules, natural expiry, block, CLI,
+            # and last of all the restart (it flushes everything). An
+            # unexpected exception must not stall the other scenarios and the
+            # cleanup.
             scenarios = (
-                ("K1. Visszavonási utak",
+                ("K1. Revocation paths",
                  scenario_revocation_matrix, (passwords_ext,)),
-                ("K6. Több szabály együttes engedélyezése (HV_E2E_MULTI)",
+                ("K6. Joint authorization of multiple rules (HV_E2E_MULTI)",
                  scenario_multi_access, (passwords_ext,)),
-                ("K2. Természetes lejárat (HV_E2E_LONG)",
+                ("K2. Natural expiry (HV_E2E_LONG)",
                  scenario_natural_expiry,
                  (passwords_ext, int(limits.get("min_ttl", 60)))),
-                ("K3. Blokk elsőbbsége (HV_E2E_PENDING)",
+                ("K3. Block precedence (HV_E2E_PENDING)",
                  scenario_block_precedence, (passwords_ext,)),
-                ("K5. CLI-propagáció (HV_E2E_PENDING)",
+                ("K5. CLI propagation (HV_E2E_PENDING)",
                  scenario_cli_propagation, (passwords_ext,)),
-                ("K4. Újraindítási mátrix (HV_E2E_RESTART)",
+                ("K4. Restart matrix (HV_E2E_RESTART)",
                  scenario_restart_matrix, (passwords_ext,)),
             )
             for scenario_title, scenario_func, scenario_args in scenarios:
@@ -3403,25 +3403,25 @@ def main() -> int:
                     scenario_func(*scenario_args)
                 except Exception as exc:
                     check(
-                        f"{scenario_title}: végrehajtás",
+                        f"{scenario_title}: execution",
                         False,
                         f"{type(exc).__name__}: {exc}"[:300],
                     )
         else:
             for title in (
-                "K1. Visszavonási utak",
-                "K6. Több szabály együttes engedélyezése (HV_E2E_MULTI)",
-                "K2. Természetes lejárat (HV_E2E_LONG)",
-                "K3. Blokk elsőbbsége (HV_E2E_PENDING)",
-                "K5. CLI-propagáció (HV_E2E_PENDING)",
-                "K4. Újraindítási mátrix (HV_E2E_RESTART)",
+                "K1. Revocation paths",
+                "K6. Joint authorization of multiple rules (HV_E2E_MULTI)",
+                "K2. Natural expiry (HV_E2E_LONG)",
+                "K3. Block precedence (HV_E2E_PENDING)",
+                "K5. CLI propagation (HV_E2E_PENDING)",
+                "K4. Restart matrix (HV_E2E_RESTART)",
             ):
-                skip(title, "az admin API vagy a forgatókönyv-erőforrások "
-                            "nem érhetők el")
+                skip(title, "the admin API or the scenario resources "
+                            "are unavailable")
     finally:
-        # Ha az újraindítási forgatókönyv félbeszakadt, a markerrel engedjük
-        # tovább a segédfolyamatot, és várjuk meg a visszaállítást. Ez akkor
-        # is lefut, ha a teszt közben kivétel történt.
+        # If the restart scenario was interrupted, release the helper
+        # process with the marker and wait for the restore. This runs even if
+        # an exception occurred during the test.
         if RESTART_MARKER:
             try:
                 with open(RESTART_MARKER, "w", encoding="utf-8") as fh:
@@ -3433,8 +3433,8 @@ def main() -> int:
                 240, 2.0,
             ):
                 print(
-                    "FIGYELEM: az újraindítási segédfolyamat 240 s alatt nem "
-                    "jelzett visszaállást; ellenőrizd a portál állapotát.",
+                    "WARNING: the restart helper process did not report a "
+                    "restore within 240 s; check the portal state.",
                     flush=True,
                 )
         if not logout_done and not extended_started:
@@ -3443,7 +3443,7 @@ def main() -> int:
             except Exception:
                 pass
         if extended_started:
-            # A fail2ban tiltás a kliens portál-elérését is zárja.
+            # The fail2ban ban also closes the client's portal access.
             try:
                 fail2ban_cli("unban", CLIENT_IP)
             except Exception:
@@ -3453,12 +3453,12 @@ def main() -> int:
         except Exception:
             cleaned = False
         if extended_started and cleaned:
-            # Adminból zárjuk le az esetleg maradt kliens munkamenetet.
+            # Close any remaining client session from admin.
             terminate_client_sessions()
         if not cleaned:
-            # A teszt által létrehozott szabályok eltakarítása. Ha a
-            # jelszócsere már megtörtént, az új jelszóval lehet belépni.
-            # A 429-es belépési korlátot kivárjuk.
+            # Clean up the rules created by the test. If the password change
+            # already happened, one can log in with the new password. We wait
+            # out the 429 login limit.
             for candidate in (new_password, password):
                 relogin = None
                 for attempt in range(3):
@@ -3499,12 +3499,12 @@ def main() -> int:
 
     print()
     print(
-        f"ÖSSZEGZÉS: {passed} PASS, {len(skipped)} SKIP, "
+        f"SUMMARY: {passed} PASS, {len(skipped)} SKIP, "
         f"{len(pending)} PENDING, {len(failures)} FAIL",
         flush=True,
     )
     if pending:
-        print("PENDING (a kapcsoló nincs bekapcsolva, nem hiba):", flush=True)
+        print("PENDING (the switch is not enabled, not an error):", flush=True)
         for item in pending:
             print(f"  - {item}", flush=True)
     if skipped:
@@ -3512,11 +3512,11 @@ def main() -> int:
         for item in skipped:
             print(f"  - {item}", flush=True)
     if failures:
-        print(f"SIKERTELEN: {len(failures)} ellenőrzés bukott:", flush=True)
+        print(f"FAILED: {len(failures)} checks failed:", flush=True)
         for item in failures:
             print(f"  - {item}", flush=True)
         return 1
-    print("MINDEN ELLENŐRZÉS SIKERES", flush=True)
+    print("ALL CHECKS PASSED", flush=True)
     return 0
 
 

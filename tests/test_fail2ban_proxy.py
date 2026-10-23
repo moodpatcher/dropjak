@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""A fail2ban proxy-kategóriája: jogosulatlan (401) domain-proxy kérések.
+"""fail2ban's proxy category: unauthorized (401) domain proxy requests.
 
-* a ``Fail2ban`` számlálása, tiltása, feloldása, mentése és visszatöltése
-  hamis tűzfallal (a proxy-tiltás a ``proxy_banned_v4`` halmazba kerül, a
-  teljes tiltástól függetlenül);
-* a ``/api/proxy/auth`` csak a privát bejegyzés 401-es válaszát számolja,
-  a valódi (XFF) kliens-IP-vel;
-* a sablon a ``proxy_banned_v4`` halmazt és a 80/443 dropot a proxy-
-  elfogadás elé teszi (HV_PROXY=0/1), és ``nft -c`` szerint érvényes.
+* ``Fail2ban``'s counting, banning, release, save and reload with a fake
+  firewall (the proxy ban goes into the ``proxy_banned_v4`` set,
+  independently of the full ban);
+* ``/api/proxy/auth`` counts only the private entry's 401 response, with
+  the real (XFF) client IP;
+* the template puts the ``proxy_banned_v4`` set and the 80/443 drop before
+  proxy acceptance (HV_PROXY=0/1), and it is valid according to ``nft -c``.
 """
 
 from __future__ import annotations
@@ -109,7 +109,7 @@ class ProxyCounterTests(unittest.TestCase):
         self.assertFalse(view["manual"])
         self.assertEqual(view["until"] - view["since"], 900)
         self.assertEqual(self.fw.calls, [("proxy_ban", IP, 900)])
-        # Csak a proxy-halmaz; a teljes tiltás nem jön létre.
+        # Only the proxy set; the full ban is not created.
         self.assertIsNone(manager.banned(IP))
         self.assertIsNotNone(manager.proxy_banned(IP))
         self.assertEqual([row["source"] for row in self.notified], ["proxy"])
@@ -125,7 +125,7 @@ class ProxyCounterTests(unittest.TestCase):
             [("proxy_ban", IP, 900)],
         )
         self.assertEqual(manager.snapshot()["proxy_pending"], 0)
-        # Teljesen tiltott IP sem számít.
+        # A fully banned IP does not count either.
         other = "198.51.100.78"
         manager.ban(other, 600)
         self.assertIsNone(self.hit(manager, 5, other))
@@ -149,7 +149,7 @@ class ProxyCounterTests(unittest.TestCase):
 
     def test_loopback_and_invalid_are_ignored(self) -> None:
         manager = self.make(proxy_max=1)
-        for ip in ("127.0.0.1", "", "nem-ip", "::1"):
+        for ip in ("127.0.0.1", "", "not-ip", "::1"):
             self.assertIsNone(manager.record_proxy_unauthorized(ip))
         self.assertEqual(self.fw.calls, [])
 
@@ -159,14 +159,14 @@ class ProxyCounterTests(unittest.TestCase):
         manager.ban(IP, 600)
         sources = sorted(r["source"] for r in manager.snapshot()["bans"])
         self.assertEqual(sources, ["manual", "proxy"])
-        # A proxy-feloldás a teljes tiltást nem érinti ...
+        # The proxy release does not affect the full ban ...
         self.assertTrue(manager.unban(IP, proxy=True))
         self.assertIsNone(manager.proxy_banned(IP))
         self.assertIsNotNone(manager.banned(IP))
         self.assertEqual(self.fw.calls[-1], ("proxy_unban", IP))
         self.assertIn(IP, self.fw.kernel)
         self.assertFalse(manager.unban(IP, proxy=True))
-        # ... és a teljes tiltás feloldása sem a proxy-tiltást.
+        # ... and releasing the full ban does not affect the proxy ban either.
         manager.unban(IP)
         self.hit(manager, 3)
         manager.ban(IP, 600)
@@ -301,13 +301,13 @@ class ProxyAuthCountingTests(unittest.TestCase):
         owui, pub = tp.host("owui"), tp.host("pub")
         for _ in range(5):
             self.assertEqual(self.auth(owui, self.AUTHORIZED), 200)  # 200
-            self.assertEqual(self.auth(tp.ROOT_DOMAIN, IP), 200)  # gyökér
+            self.assertEqual(self.auth(tp.ROOT_DOMAIN, IP), 200)  # root
             self.assertEqual(self.auth("x." + tp.ROOT_DOMAIN, IP), 404)
             self.assertEqual(self.auth(pub, IP), 200)  # publikus
-            self.assertEqual(self.auth(owui), 401)  # nincs XFF
+            self.assertEqual(self.auth(owui), 401)  # no XFF
         self.assertEqual(self.f2b.snapshot()["proxy_pending"], 0)
         self.assertEqual(self.fw.calls, [])
-        # A privát 401 a XFF-IP-re számít, nem a loopback peerre.
+        # The private 401 counts against the XFF IP, not the loopback peer.
         for _ in range(3):
             self.assertEqual(self.auth(owui, IP), 401)
         self.assertEqual(self.fw.calls, [("proxy_ban", IP, 900)])
@@ -341,16 +341,16 @@ class ProxyBanTemplateTests(unittest.TestCase):
                 chain = rendered[rendered.index("chain input {"):]
                 chain = chain[:chain.index("chain prerouting")]
                 lines = [line.strip() for line in chain.splitlines()]
-                self.assertIn(self.DROP, lines)  # nincs kikommentálva
+                self.assertIn(self.DROP, lines)  # not commented out
                 drop = chain.index(self.DROP)
                 self.assertLess(drop, chain.index("tcp dport { 80, 443 } accept"))
                 self.assertLess(drop, chain.index("ct state established,related accept"))
                 self.assertIn('log prefix "dropjak-drop reason=proxy-ban "', chain)
-                # A portál portja a proxy-drop előtt marad elfogadva.
+                # The portal port remains accepted before the proxy drop.
                 self.assertLess(chain.index('tcp dport 8100 accept'), drop)
 
     @unittest.skipUnless(
-        shutil.which("nft") and shutil.which("unshare"), "nincs nft/unshare"
+        shutil.which("nft") and shutil.which("unshare"), "no nft/unshare"
     )
     def test_nft_check(self) -> None:
         for proxy in ("0", "1"):
@@ -363,7 +363,7 @@ class ProxyBanTemplateTests(unittest.TestCase):
                     capture_output=True, text=True, timeout=20,
                 )
                 if result.returncode != 0 and "Operation not permitted" in result.stderr:
-                    self.skipTest("a user namespace nem elérhető")
+                    self.skipTest("the user namespace is not available")
                 self.assertEqual(result.returncode, 0, result.stderr)
 
 

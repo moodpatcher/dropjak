@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""A fail2ban három figyelt jelzésének független kapcsolása.
+"""Independent switching of fail2ban's three monitored signals.
 
-A tesztek a ``Fail2ban`` osztályt hamis tűzfallal hajtják, így nem nyúlnak
-valódi nftables-hez. A fókusz a ``enabled`` / ``drop_count_enabled`` /
-``drop_ports_enabled`` kapcsolókon, a küszöbök érvényességén és a
-kapcsolókhoz tartozó tiltás-felszabadításon van.
+The tests drive the ``Fail2ban`` class with a fake firewall, so they do not
+touch real nftables. The focus is on the ``enabled`` / ``drop_count_enabled``
+/ ``drop_ports_enabled`` switches, the validity of the thresholds and the ban
+release belonging to the switches.
 """
 
 from __future__ import annotations
@@ -126,8 +126,8 @@ class DropMetricTests(unittest.TestCase):
         })
         manager = self.make_manager()
         snapshot = manager.snapshot()
-        # A 0 küszöb csak az adott mérőszámot kapcsolja ki, és a küszöb
-        # az alapértékre áll vissza; a többi mentett beállítás megmarad.
+        # The 0 threshold switches off only that metric, and the threshold
+        # resets to the default; the other saved settings remain.
         self.assertEqual(snapshot["max_attempts"], 7)
         self.assertEqual(snapshot["window_seconds"], 120)
         self.assertEqual(snapshot["ban_seconds"], 300)
@@ -155,7 +155,7 @@ class DropMetricTests(unittest.TestCase):
         })
         manager = self.make_manager()
         snapshot = manager.snapshot()
-        # Csak a csomagszám-mérőszám kapcsol ki; a portküszöb megmarad.
+        # Only the packet-count metric switches off; the port threshold remains.
         self.assertFalse(snapshot["drop_count_enabled"])
         self.assertEqual(snapshot["drop_max"], fail2ban_mod.DEFAULT_DROP_MAX)
         self.assertTrue(snapshot["drop_ports_enabled"])
@@ -175,7 +175,7 @@ class DropMetricTests(unittest.TestCase):
         })
         manager = self.make_manager()
         snapshot = manager.snapshot()
-        # Csak a portmérőszám kapcsol ki; a csomagszám-küszöb megmarad.
+        # Only the port metric switches off; the packet-count threshold remains.
         self.assertTrue(snapshot["drop_count_enabled"])
         self.assertEqual(snapshot["drop_max"], 7)
         self.assertFalse(snapshot["drop_ports_enabled"])
@@ -203,7 +203,7 @@ class DropMetricTests(unittest.TestCase):
         self.assertFalse(snapshot["drop_enabled"])
         self.assertFalse(snapshot["drop_count_active"])
         self.assertFalse(snapshot["drop_ports_active"])
-        # A küszöbök érvényesek maradtak, nem estek vissza alapértékre.
+        # The thresholds remained valid, they did not fall back to the default.
         self.assertEqual(snapshot["drop_max"], 5)
         self.assertEqual(snapshot["drop_ports"], 4)
 
@@ -216,7 +216,7 @@ class DropMetricTests(unittest.TestCase):
         self.assertFalse(snapshot["drop_count_enabled"])
         self.assertFalse(snapshot["drop_ports_enabled"])
         self.assertFalse(snapshot["drop_enabled"])
-        # A kapu a kapcsolókat zárja, a küszöbök érvényesek maradnak.
+        # The gate closes the switches, the thresholds remain valid.
         self.assertEqual(snapshot["drop_max"], 7)
         self.assertEqual(snapshot["drop_ports"], 9)
         self.assertEqual(snapshot["drop_window_seconds"], 90)
@@ -226,7 +226,7 @@ class DropMetricTests(unittest.TestCase):
         self.assertEqual(self.fw.calls, [])
 
     def test_env_metric_defaults_reach_constructor(self) -> None:
-        """A HV_FAIL2BAN_DROP_* env a konstruktor alapértékeit adja."""
+        """The HV_FAIL2BAN_DROP_* env gives the constructor's defaults."""
         try:
             for variable, attribute, parameter in (
                 (
@@ -250,11 +250,11 @@ class DropMetricTests(unittest.TestCase):
                         self.assertIs(default, False)
                     importlib.reload(fail2ban_mod)
         finally:
-            # Az env nélküli alapértékek visszaállítása a többi teszthez.
+            # Restore the defaults without env for the other tests.
             importlib.reload(fail2ban_mod)
 
     def test_env_drop_master_off_reaches_constructor(self) -> None:
-        """A HV_FAIL2BAN_DROP=0 mindkét metrikát kikapcsolva indul."""
+        """HV_FAIL2BAN_DROP=0 starts with both metrics disabled."""
         try:
             with mock.patch.dict(os.environ, {"HV_FAIL2BAN_DROP": "0"}):
                 module = importlib.reload(fail2ban_mod)
@@ -305,7 +305,7 @@ class DropMetricTests(unittest.TestCase):
         self.assertTrue(snapshot["drop_ports_active"])
         self.assertTrue(snapshot["drop_enabled"])
 
-        # A belépés-figyelés kikapcsolva nem számol és nem tilt.
+        # With login monitoring disabled it neither counts nor bans.
         self.assertIsNone(manager.record_failure("192.0.2.91", "alice"))
 
         ip = "192.0.2.92"
@@ -329,7 +329,7 @@ class DropMetricTests(unittest.TestCase):
         self.assertTrue(snapshot["drop_enabled"])
 
         ip = "192.0.2.120"
-        # A nagyon alacsony drop_max ellenére sem tilt a csomagszám.
+        # Despite the very low drop_max, the packet count does not ban.
         for _ in range(5):
             self.assertIsNone(manager.record_drop(
                 ip, proto="tcp", dport=22, reason="input-wan"
@@ -579,7 +579,7 @@ class DropMetricTests(unittest.TestCase):
         self.assertIsNotNone(manager.banned(manual_ip))
         self.assertEqual(self.unban_calls(), [("unban", login_ip)])
 
-        # A drop-figyelés továbbra is működik a belépés kikapcsolása után.
+        # Drop monitoring keeps working after login is disabled.
         next_ip = "192.0.2.143"
         view = manager.record_drop(
             next_ip, proto="tcp", dport=80, reason="input-wan"
@@ -606,9 +606,9 @@ class DropMetricTests(unittest.TestCase):
         self.assertEqual(manager.snapshot()["drop_pending"], [])
 
     def test_event_cap_accounts_for_large_port_threshold(self) -> None:
-        # Kicsi drop_max mellé 512 feletti drop_ports: a korlátot a nagyobb,
-        # aktív küszöbhöz kell méretezni, különben a portszkennelés nem
-        # érné el a küszöböt.
+        # Small drop_max with drop_ports above 512: the limit must be sized to
+        # the larger active threshold, otherwise port scanning would not
+        # reach the threshold.
         manager = self.make_manager(
             drop_max=1,
             drop_ports=600,
@@ -665,7 +665,7 @@ class DropMetricTests(unittest.TestCase):
         self.assertFalse(snapshot["drop_ports_enabled"])
         self.assertFalse(snapshot["drop_enabled"])
 
-        # A drop_enabled=true nem kapcsol be mérőszámot a háttérben.
+        # drop_enabled=true does not switch on a metric in the background.
         manager.configure({"drop_count_enabled": False, "drop_ports_enabled": False})
         snapshot = manager.configure({
             "drop_enabled": True,

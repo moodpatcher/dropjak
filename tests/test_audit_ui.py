@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Statikus frontend-tesztek az auditnapló megjelenítéséhez.
+"""Static frontend tests for displaying the audit log.
 
-A teszt nem indít böngészőt: az ``index.html`` eseménycímke-térképét és a
-naplószűrő/naplómegjelenítő jelölőit ellenőrzi. A szerveroldali eseménykódokat
-AST-vel gyűjtjük ki, így a több sorra tördelt hívások és a feltételes
-eseménynevek is helyesen számítanak.
+The test does not start a browser: it checks the ``index.html`` event label
+map and the markers of the log filter/log viewer. Server-side event codes are
+collected with AST, so calls split over several lines and conditional event
+names are counted correctly too.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ LABEL_ENTRY_RE = re.compile(
 
 
 def _js_object_body(source: str, declaration: str) -> str:
-    """A ``const NÉV = { ... }`` objektumliterál pontos törzse."""
+    """The exact body of the ``const NAME = { ... }`` object literal."""
     start = source.index(declaration)
     start = source.index("{", start)
     depth = 0
@@ -44,13 +44,13 @@ def _js_object_body(source: str, declaration: str) -> str:
             depth -= 1
             if depth == 0:
                 return source[start + 1:index]
-    raise AssertionError(f"lezáratlan objektumliterál: {declaration}")
+    raise AssertionError(f"unterminated object literal: {declaration}")
 
 
 def _parse_event_labels(source: str) -> dict[str, tuple[str, str, str]]:
     body = _js_object_body(source, "const AUDIT_EVENT_LABELS = {")
-    # A statikus oldal nem tartalmazhatja a szerveroldali "totp_recovery"
-    # mezőnevet, ezért az egyik eseménykulcs két literálból áll össze.
+    # The static page must not contain the server-side "totp_recovery"
+    # field name, so one of the event keys is assembled from two literals.
     body = re.sub(
         r"\[\s*'([^']*)'\s*\+\s*'([^']*)'\s*\]\s*:",
         lambda match: f"{match.group(1)}{match.group(2)}:",
@@ -67,7 +67,7 @@ def _js_function(name: str, source: str) -> str:
         rf"function {re.escape(name)}\([^)]*\) \{{.*?\n\}}", source, re.S
     )
     if match is None:
-        raise AssertionError(f"hiányzó JS függvény: {name}")
+        raise AssertionError(f"missing JS function: {name}")
     return match.group(0)
 
 
@@ -80,7 +80,7 @@ def _constant_strings(node: ast.AST | None) -> list[str]:
 
 
 def _is_audit_receiver(node: ast.AST) -> bool:
-    """``audit.write``, ``self.gw.audit.write`` és ``gateway.AuditLog().write``."""
+    """``audit.write``, ``self.gw.audit.write`` and ``gateway.AuditLog().write``."""
     if isinstance(node, ast.Name):
         return node.id == "audit"
     if isinstance(node, ast.Attribute):
@@ -91,7 +91,7 @@ def _is_audit_receiver(node: ast.AST) -> bool:
 
 
 def _emitted_audit_events() -> set[str]:
-    """A szerveroldalon ténylegesen kibocsátott eseménykódok."""
+    """The event codes actually emitted on the server side."""
     events: set[str] = set()
     for filename in SOURCE_FILES:
         tree = ast.parse(
@@ -123,7 +123,7 @@ def _emitted_audit_events() -> set[str]:
 
 
 class AuditUiStaticTests(unittest.TestCase):
-    """Az audit-események és a naplószűrő statikus frontend-jelölői."""
+    """Static frontend markers of the audit events and the log filter."""
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -132,33 +132,33 @@ class AuditUiStaticTests(unittest.TestCase):
         cls.emitted = _emitted_audit_events()
 
     def test_event_label_map_covers_every_emitted_event(self) -> None:
-        self.assertTrue(self.emitted, "nem található audit-esemény a forrásban")
+        self.assertTrue(self.emitted, "no audit event found in the source")
         missing = sorted(self.emitted - set(self.labels))
         self.assertFalse(
             missing,
-            "hiányzó AUDIT_EVENT_LABELS bejegyzés: " + ", ".join(missing),
+            "missing AUDIT_EVENT_LABELS entry: " + ", ".join(missing),
         )
         for code in sorted(self.emitted):
             row = self.labels[code]
             self.assertEqual(len(row), 3, code)
             for label in row:
-                self.assertTrue(label.strip(), f"üres címke: {code}")
+                self.assertTrue(label.strip(), f"empty label: {code}")
 
     def test_severity_map_events_are_labelled(self) -> None:
-        # A központi súlyossági térkép régi/új eseményei is kapjanak címkét.
+        # Old/new events of the central severity map must also get a label.
         missing = sorted(set(gateway.AUDIT_SEVERITY) - set(self.labels))
         self.assertFalse(
             missing,
-            "hiányzó AUDIT_EVENT_LABELS bejegyzés: " + ", ".join(missing),
+            "missing AUDIT_EVENT_LABELS entry: " + ", ".join(missing),
         )
 
     def test_label_lookup_and_fallback(self) -> None:
         self.assertIn("function auditEventLabel(code)", self.source)
         self.assertIn("const row = AUDIT_EVENT_LABELS[code]", self.source)
-        # Ismeretlen kód esetén a nyers eseménykód marad.
+        # For an unknown code the raw event code remains.
         self.assertIn("if (!row) return code", self.source)
         self.assertIn("row[lang === 'en' ? 1 : lang === 'de' ? 2 : 0]", self.source)
-        # A naplótábla nem a tr() szótárból fordítja az eseményneveket.
+        # The log table does not translate event names from the tr() dictionary.
         self.assertIn("auditEventLabel(entry.event || '—')", self.source)
         self.assertNotIn("tr(entry.event", self.source)
 
@@ -171,7 +171,7 @@ class AuditUiStaticTests(unittest.TestCase):
             ".sev-badge.sev-alert{",
         ):
             self.assertIn(css_class, self.source)
-        # A jelvény szövege és tooltipje is fordul.
+        # Both the badge's text and its tooltip are translated.
         self.assertIn("const SEVERITY_LABELS = {", self.source)
         self.assertIn("title: `${tr('Szint')}: ${severityText}`", self.source)
         self.assertIn("const severitySelect = el('select', {}", self.source)
@@ -201,7 +201,7 @@ class AuditUiStaticTests(unittest.TestCase):
     def test_manual_log_reads_only_for_user_actions(self) -> None:
         self.assertIn("async function loadLogs(manual = false)", self.source)
         self.assertIn("if (manual) query.set('manual', '1')", self.source)
-        # adminSetTab, a Frissítés gomb és a Szűrők törlése küldi a jelzőt.
+        # adminSetTab, the Refresh button and clearing the Filters send the flag.
         self.assertEqual(self.source.count("loadLogs(true)"), 3)
         tab_start = self.source.index("function adminSetTab(name)")
         tab_end = self.source.index("function adminNotice()", tab_start)
@@ -216,8 +216,8 @@ class AuditUiStaticTests(unittest.TestCase):
         self.assertNotIn("loadLogs(true)", schedule)
 
     def test_event_filter_is_select_and_manual_load_repaints(self) -> None:
-        # Az eseményszűrő a címkézett kódokból épül, ismeretlen/legacy
-        # értéket megtartva, és a select értékét használja a szűrés.
+        # The event filter is built from the labelled codes, keeping unknown/legacy
+        # values, and uses the select's value for filtering.
         for token in (
             "const eventSelect = multiSelect({",
             "options: auditEventOptions(logFilter.events)",
@@ -229,7 +229,7 @@ class AuditUiStaticTests(unittest.TestCase):
             "onChange: events => { logFilter.events = events; apply(); }",
             "['Esemény', eventSelect]",
             "for (const node of [userInput, qInput, ipInput])",
-            # IP/CIDR szűrő és a proxy-események kiemelt hostja.
+            # IP/CIDR filter and the highlighted host of proxy events.
             "ip: ipInput.value.trim()",
             "ip: logFilter.ip || ''",
             "['IP-cím / CIDR', ipInput]",
@@ -238,15 +238,15 @@ class AuditUiStaticTests(unittest.TestCase):
         ):
             self.assertIn(token, self.source, token)
         self.assertNotIn("placeholder: tr('esemény')", self.source)
-        # A nyers eseménykód a lokalizált címke után, kicsi muted code-ként
-        # jelenik meg, hogy kereshető és felismerhető legyen.
+        # The raw event code appears after the localized label as a small muted
+        # code, so it stays searchable and recognizable.
         self.assertIn("class: 'log-event-code muted'", self.source)
         self.assertIn("text: entry.event", self.source)
         self.assertIn(
             "auditEventLabel(entry.event || '—')", self.source
         )
-        # Az Enterrel indított kézi betöltés akkor is újrarajzol, ha a
-        # fókusz a szűrőmezőben maradt; az automatikus frissítés nem.
+        # Manual loading triggered with Enter repaints even if the focus stayed
+        # in the filter field; automatic refresh does not.
         logs_start = self.source.index("async function loadLogs")
         logs_end = self.source.index("function scheduleLogs", logs_start)
         logs = self.source[logs_start:logs_end]
@@ -259,10 +259,10 @@ class AuditUiStaticTests(unittest.TestCase):
         self.assertIn("if (manual || !typing)", drops)
 
     def test_pure_helpers_in_node(self) -> None:
-        """hostHref, auditEventGroup és az élő lista új-sor számlálója."""
+        """hostHref, auditEventGroup and the live list's new-row counter."""
         node = shutil.which("node")
         if node is None:
-            self.skipTest("node nem érhető el a JS-helper teszthez")
+            self.skipTest("node is not available for the JS helper test")
         regex = re.search(r"const HOSTNAME_RE = .*;", self.source)
         groups = re.search(
             r"const AUDIT_EVENT_GROUPS = \[.*?\n\];", self.source, re.S
