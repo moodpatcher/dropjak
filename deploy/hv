@@ -15,6 +15,8 @@ Usage: hv <command>
   status            status of the container, portal and nft sets
   logs              follow logs (Ctrl+C to exit)
   restart           restart, re-reading .env
+  start [args]      careful start with preflight and health wait (start.sh)
+  stop [args]       graceful stop; the firewall stays loaded (stop.sh)
   rebuild           rebuild and start (after code / services.json providing the initial rules)
   edit              edit .env
   services          edit services.json (initial rules/migration; then hv rebuild)
@@ -69,6 +71,11 @@ case "${1:-}" in
         ;;
     restart)
         docker compose up -d
+        ;;
+    start|stop)
+        command=$1
+        shift
+        exec "$APP/$command.sh" "$@"
         ;;
     rebuild)
         # The fail-closed forward chain blocks the build container's egress,

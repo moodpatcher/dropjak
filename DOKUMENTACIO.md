@@ -156,7 +156,8 @@ The container does not operate in its own network namespace: it must reach the h
 | `docker/entrypoint.sh` | First start order, env validation, nft loading, flushing dynamic sets, Docker guard, watchdog, the helper's restart loop, privilege dropping. |
 | `install.sh` | Native, systemd-based installation; copying files, filling placeholders, units and drop-in. |
 | `configure.sh` | Interactive `.env` generator for the Docker installation (interfaces, networks, portal exposure, first admin account). |
-| `deploy/hv` | Docker operational helper (status, logs, restart, rebuild, backup, test, e2e). |
+| `start.sh`, `stop.sh`, `restore.sh` | Careful start with preflight and health wait, graceful stop (the firewall stays loaded), restore of the state before an update from its manifest. |
+| `deploy/hv` | Docker operational helper (status, logs, restart, start, stop, rebuild, backup, test, e2e). |
 | `index.html` | Complete single-page portal and admin UI, in three languages. |
 
 #### 3.3. Startup sequence
@@ -913,16 +914,40 @@ resolves to the checkout or a directory below it.
 sudo ./update.sh                    # asks for confirmation (y/N)
 sudo ./update.sh --yes              # no confirmation
 ./update.sh --dry-run               # preview, works without root
+sudo ./update.sh --backup-only      # backup, manifest and image tag; no pull
 HV_BACKUPS=/srv/backups sudo -E ./update.sh
 ```
 
 The configuration backup `dropjak-<timestamp>.tar.gz` contains a copy of
-`.env` as `env`, `secrets/`, and the `dropjak.service.d` systemd drop-in when
+`.env` as `env`, `secrets/`, and the `dropjak.service.d` (as `systemd`) and
+`dropjak-helper.service.d` (as `systemd-helper`) systemd drop-ins when
 present. The state is written as `dropjak-state-<timestamp>.tar.gz` from the
 Docker volume `dropjak-state` and/or `dropjak-state-native-<timestamp>.tar.gz`
 from `/var/lib/hatarvedelem`. If neither state directory exists, the
 configuration backup is still created and a warning is printed. The script
 never prints the contents of `.env` or the secrets.
+
+**Update manifest.** Before the pull, the script writes
+`dropjak-<timestamp>.manifest` (mode 0600) next to the archives. It is plain
+`key=value` text that `restore.sh` parses (it is never sourced) and holds no
+secrets:
+
+| Key | Content |
+|---|---|
+| `format`, `kind` | `1`; `update` for an update, `backup` for `--backup-only` (the safety backup of `restore.sh`). |
+| `timestamp`, `created` | The archive timestamp (`YYYYmmdd-HHMMSS`) and the ISO time. |
+| `style` | `compose` (a checkout with `docker-compose.yml` and `.env`), `native` (`/etc/systemd/system/dropjak.service` installed) or `unknown`. |
+| `checkout`, `commit`, `branch`, `version` | The checkout path, the full commit before the pull (`git rev-parse HEAD`), the branch (empty on a detached HEAD) and `VERSION`. |
+| `compose_image`, `compose_image_id` | The image of the `dropjak` service in `docker-compose.yml` (`dropjak:2`) and its local image ID. |
+| `pre_update_tag` | `dropjak:pre-update-<timestamp>`: the current Compose image is tagged with it, so a rebuild after the pull cannot leave it dangling. Empty when the image does not exist locally. |
+| `config_backup`, `docker_state_backup`, `native_state_backup` | The archive names, relative to the backup directory (empty when not made). |
+
+An update keeps the newest three `dropjak:pre-update-*` tags
+(`HV_PRE_UPDATE_KEEP` changes the number) and removes only older tags of that
+form, with `docker rmi` and never `-f`. `--backup-only` never prunes, so a
+restore cannot remove the image it is about to bring back. Native
+installations record the commit only; `restore.sh` returns the checkout to it
+and prints the `install.sh` command that re-installs the files.
 
 The git step is `git pull --ff-only`; nothing is stashed, reset, checked out
 or discarded, so a dirty checkout or a diverged branch fails cleanly with the
@@ -967,6 +992,131 @@ the `Docker-Content-Digest` response header is the digest. Write it as
 `<image>:<tag>@sha256:<digest>`, rebuild (`deploy/hv rebuild`), run the
 tests, and note the new digests in the changelog. `tests/test_privhelper.py`
 fails if any of these references loses its digest.
+
+#### 10.10. Start and stop
+`stop.sh` and `start.sh` stop and start the portal of either deployment style
+without touching the firewall. The style is detected like in `uninstall.sh`:
+a checkout with `docker-compose.yml` and `.env` is Docker Compose, otherwise
+an installed `/etc/systemd/system/dropjak.service` means native; `--compose`
+or `--native` forces it. The native `install.sh` copies both scripts (and
+`restore.sh`) to `/opt/hatarvedelem` with mode 0755, and `deploy/hv start` /
+`deploy/hv stop` call them from a Compose checkout.
+
+```bash
+sudo ./stop.sh                      # graceful stop; the firewall stays loaded
+sudo ./stop.sh --down               # Compose: also remove the containers (never -v)
+sudo ./start.sh                     # preflight, start, health wait, /api/status
+sudo ./start.sh --build             # host-network image build first
+sudo ./start.sh --rollback-on-fail  # Compose: fall back to the newest pre-update image
+./start.sh --dry-run                # read-only preflight and the commands; no root needed
+```
+
+**stop.sh.** Compose: `docker compose stop caddy` first (only with the
+`proxy` profile), then `docker compose stop`, with a `--profile` for every
+`COMPOSE_PROFILES` entry of `.env`; containers and volumes are kept, and
+`--down` adds `docker compose down --remove-orphans` (never `-v`). Native:
+`systemctl stop dropjak.service`, then `dropjak-helper.service`;
+`dropjak-firewall.service` and `dropjak-firewall-check.timer` keep running.
+The `inet hatarvedelem` table is never flushed or deleted (fail-closed):
+forwarded traffic stays blocked, and the existing grants, the host SSH grant
+included, are not removed but expire on their TTL and cannot be renewed until
+the next start. Over SSH (`SSH_CONNECTION` set) it says so and asks for a
+`y/N` confirmation (`--yes` skips it). In Compose mode it also warns not to
+reboot while stopped: the stopped container does not come back by itself,
+and the boot protection then closes every port, SSH included.
+
+**start.sh preflight.** Every check runs before anything is started; one
+failure aborts with `nothing was started`:
+
+| Style | Check |
+|---|---|
+| Compose | `.env` exists and is not accessible to other users (`chmod 600 .env`). |
+| Compose | `HV_PROXY=1` needs an `HV_PROXY_KEY` of at least 32 characters (the entrypoint would refuse to start and the container would crash-loop). |
+| Compose | `sh -n docker/entrypoint.sh`; `docker compose config -q`. |
+| Compose | The compose image (`dropjak:2`) exists locally; otherwise the host-network build command is printed (`DOCKER_BUILDKIT=0 docker build --network host -t dropjak:2 .`), or `--build` runs it first. |
+| Compose, `proxy` profile | `caddy validate` of `deploy/Caddyfile` in the pinned caddy image (`--network none`, the key passed through the environment, never on the command line); `--skip-caddy-validate` skips it. |
+| Native | `dropjak.service`, `dropjak-helper.service` and `dropjak-firewall.service` are installed; `nft -c -f /etc/nftables/dropjak.nft` when nft is present. |
+
+`--dry-run` runs the read-only checks for real (the Docker ones only when the
+daemon is reachable for the user) and prints `caddy validate`, `nft -c` and
+every start command instead of running them.
+
+**start.sh start.** Compose: `docker compose up -d dropjak`, a wait for the
+container healthcheck (`--timeout`, default 120 s), then `docker compose up
+-d` for the rest (Caddy, which must stay running), then `/api/status` from
+`127.0.0.1:PORT`. Native: `systemctl start dropjak-helper.service`, then
+`dropjak.service`, and a wait for `/api/status`. When the portal is not
+healthy in time it prints the last 50 log lines and the console hint
+(10.6). With `--rollback-on-fail` (Compose only, explicit) it tags the
+failed image as `dropjak:failed-<timestamp>`, retags the newest
+`dropjak:pre-update-*` image as the compose image and starts again; the
+checkout and `.env` stay as they are, so a full rollback is `restore.sh`.
+Exit status: 0 healthy, 1 failed, 2 healthy only after the rollback.
+
+Starting the portal flushes every grant (`HV_FLUSH_ON_START=1`), the one
+carrying a host SSH session included, and the SSH guard then closes that
+session. Over SSH the script warns, asks for confirmation, ignores `SIGHUP`
+and keeps going when the terminal disappears; re-authorize TCP 22 in the
+portal from the same IP right after the start. Running it detached keeps the
+output: `nohup ./start.sh --yes > /root/dropjak-start.log 2>&1 &`.
+
+#### 10.11. Restore after an update
+`restore.sh` returns a checkout to the state recorded in an update manifest
+(10.8): the code, `.env`, `secrets/`, the systemd drop-ins, the runtime state
+and, for Compose, the image. Backups are never deleted.
+
+```bash
+sudo ./restore.sh --list                      # the manifests in the backup directory
+./restore.sh --dry-run                        # preview the newest update; no root needed
+sudo ./restore.sh                             # asks for confirmation (type RESTORE)
+sudo ./restore.sh --backup 20261024-153000    # a chosen backup
+```
+
+By default it picks the newest manifest with `kind=update`; `--backup
+<timestamp>` picks any, including the safety backup of an earlier restore
+(that undoes the restore). It refuses a checkout with local changes to
+tracked files (commit or stash them; it never resets over them), a missing
+commit (a `git fetch` may bring it back) and a missing archive. The steps:
+
+1. A safety backup of the current state with `update.sh --backup-only`; its
+   timestamp is printed.
+2. `stop.sh` (the firewall stays loaded).
+3. Git. On the recorded branch it runs `git reset --keep <commit>`, which
+   moves the branch back so the next `update.sh` fast-forwards to the latest
+   code again; it does so only when the commit is an ancestor of `HEAD` and
+   the branch has no commit missing from its upstream, so no local commit
+   drops off the branch. In every other case (another branch, no upstream,
+   local commits, or `--detach`) it runs `git checkout --detach <commit>`,
+   which leaves all branches untouched; `git checkout <branch>` returns
+   before the next update.
+4. `.env` (mode 0600), `secrets/`, `dropjak.service.d` and
+   `dropjak-helper.service.d` from the configuration archive, followed by
+   `systemctl daemon-reload` when a drop-in was restored. Entries missing from
+   the archive are left as they are.
+5. The state: the archive is unpacked into a staging directory first, then
+   the target is emptied and filled from it. Compose: the `dropjak-state`
+   volume (its mountpoint; the volume is created when missing). Native:
+   `/var/lib/hatarvedelem`, then `chown -R hatarvedelem:hatarvedelem` and
+   mode 0750.
+6. Compose: `docker tag dropjak:pre-update-<timestamp> dropjak:2`; when the
+   tag is gone, the recorded image ID; when that is gone too, a host-network
+   rebuild from the restored checkout. Native: `install.sh` has no unattended
+   upgrade mode, so it prints the command that re-installs the restored code,
+   with the values from the restored drop-in and the installed unit (add
+   `--gateway-ip`, `--no-forward-nets` or `--route-localnet-ifs` if the
+   original installation used them); until then the services run the
+   installed code on the restored state.
+7. `start.sh` (a copy taken before the checkout, so it also works when the
+   restored commit predates it) with its preflight and health wait.
+
+The whole script runs from a function that bash has parsed completely before
+git replaces the file. Restoring a commit from before these scripts existed
+removes them from the checkout; the next update brings them back. Run it from
+the git checkout recorded in the manifest (`/opt/hatarvedelem` of a native
+installation is not a git checkout). As with `start.sh`, the start flushes
+every grant: over SSH, run it detached
+(`nohup ./restore.sh --yes > /root/dropjak-restore.log 2>&1 &`) and
+re-authorize TCP 22 in the portal afterwards.
 
 ### 11. Testing
 #### 11.1. Local unit and API tests
@@ -1104,6 +1254,7 @@ The complete, detailed entries are in the [7. Changelog](#valtozasnaplo) section
 | `services.json` | Service catalog (empty `scenarios` list: no initial rules). |
 | `docker-compose.yml`, `Dockerfile` | Docker host network, state volume, healthcheck, image. |
 | `install.sh`, `.env.example`, `.dockerignore`, `.gitignore` | Native installer, configuration sample, Docker and git exclusions. |
+| `update.sh`, `restore.sh`, `start.sh`, `stop.sh`, `uninstall.sh` | Operator scripts: update with backup and manifest, restore, careful start, graceful stop, removal (10.7–10.11). |
 | `configure.sh` | Interactive `.env` generator (installation mode, interfaces, networks, portal source, access mode, admin account). |
 | `docker/entrypoint.sh` | Env validation, rendering, nft, set flush, boot table, Docker guard, watchdog, helper restart loop, setpriv. |
 | `docker/setup-host.sh` | Boot nft/unit and `ip_forward` on the host. |
@@ -1118,6 +1269,7 @@ The complete, detailed entries are in the [7. Changelog](#valtozasnaplo) section
 | `tests/test_host_service_guard.py`, `tests/test_block_*.py` | Host guard and block/pre-auth. |
 | `tests/test_fail2ban_*.py`, `tests/test_audit_*.py` | fail2ban and audit. |
 | `tests/test_propagation_multi.py`, `tests/test_installer.py`, `tests/e2e_vm.py` | Multiple selection, installer, live E2E. |
+| `tests/test_update.py`, `tests/test_ops_scripts.py`, `tests/test_uninstall.py` | Operator scripts with stub `docker`/`systemctl`: manifest, preflight, stop order, restore selection. |
 | `tests/test_privhelper.py`, `tests/privhelper_netns.py` | Privileged helper: command set, client, restarts, entrypoint, units, digests; real nft in a user namespace. |
 
 The list of open tasks lives not in the repo but in the developer's home
@@ -1135,13 +1287,15 @@ curl -fsS http://127.0.0.1:8100/api/status | python3 -m json.tool
 ./deploy/hv status
 ./deploy/hv logs
 ./deploy/hv restart
+./deploy/hv stop          # stop.sh: graceful stop, the firewall stays loaded
+./deploy/hv start         # start.sh: preflight, start, health wait
 ./deploy/hv backup
 ./deploy/hv test
 ./deploy/hv e2e
 ./deploy/hv where
 ```
 
-The `hv` commands according to the snapshot: `status`, `logs`, `restart`, `rebuild`, `edit`, `services`, `users`, `add`, `passwd`, `del`, `backup`, `test`, `e2e`, `where`.
+The `hv` commands according to the snapshot: `status`, `logs`, `restart`, `start`, `stop`, `rebuild`, `edit`, `services`, `users`, `add`, `passwd`, `del`, `backup`, `test`, `e2e`, `where`.
 
 #### 15.2. Firewall check
 ```bash
@@ -1226,6 +1380,8 @@ The project is here: `/root/hatarvedelem`. Most of the time you need to touch **
 hv status      # is the container running, is the portal up, what is in the nft sets
 hv logs        # logs live (Ctrl+C to exit)
 hv restart     # restart so the new .env values take effect
+hv stop        # graceful stop (stop.sh); the firewall stays loaded
+hv start       # careful start with preflight and health wait (start.sh)
 hv rebuild     # rebuild if the code or services.json changed
 hv where       # this page
 ```
@@ -1420,6 +1576,8 @@ temporarily creates a `claudetest` user, which it deletes at the end.
 3. `hv restart` — re-reading `.env`.
 4. If the code or `services.json` changed: `hv rebuild`.
 5. Restore: unpack the selected archive from `hv backup`, then `hv restart`.
+6. After a failed update: `sudo ./restore.sh --list`, then `sudo ./restore.sh`
+   (the state before the last update; see 10.11 in section 1).
 
 <a id="funkciok"></a>
 
@@ -5247,6 +5405,45 @@ The running version is stored in [`VERSION`](VERSION).
 
 #### Added
 
+- **Start, stop and restore scripts; update manifest.** Three operator
+  scripts next to `update.sh`, for both deployment styles (Compose: a
+  checkout with `docker-compose.yml` and `.env`; native: an installed
+  `dropjak.service`; `--compose`/`--native` force it), each with `--help`,
+  `--dry-run` without root and a root check. `stop.sh` stops Caddy, then the
+  portal (`docker compose stop` with the `COMPOSE_PROFILES` of `.env`;
+  `--down` adds `down` without `-v`), or `dropjak.service`, then
+  `dropjak-helper.service`; it never flushes or deletes the
+  `inet hatarvedelem` table, and it says that forwarded traffic stays blocked
+  and that the grants, host SSH included, expire on their TTL. `start.sh`
+  runs a preflight that aborts before anything starts (`.env` not
+  world-readable, `HV_PROXY_KEY` of at least 32 characters with
+  `HV_PROXY=1`, `sh -n docker/entrypoint.sh`, `docker compose config -q`, the
+  image exists or `--build` builds it on the host network, `caddy validate`
+  with the proxy profile unless `--skip-caddy-validate`; native: units
+  installed and `nft -c -f`), then starts the portal, waits for its
+  healthcheck (`--timeout`, 120 s), starts Caddy and prints `/api/status`;
+  on failure it prints the last log lines, and `--rollback-on-fail` retags
+  the newest `dropjak:pre-update-*` image and starts again. `update.sh` now
+  writes `dropjak-<timestamp>.manifest` before the pull (previous commit,
+  branch, style, compose image and image ID, archive names), tags the
+  current image as `dropjak:pre-update-<timestamp>` (keeps the newest
+  three), also backs up the `dropjak-helper.service.d` drop-in, and gains
+  `--backup-only`. `restore.sh` lists the manifests (`--list`), picks the
+  newest update or `--backup <timestamp>`, refuses a dirty working tree,
+  takes a safety backup, stops, returns git with `git reset --keep` on the
+  recorded branch (or a detached checkout when local commits could be
+  hidden), restores `.env`, `secrets/`, the drop-ins and the state (the
+  `dropjak-state` volume, or `/var/lib/hatarvedelem` owned by
+  `hatarvedelem:hatarvedelem`), retags the pre-update image (falling back to
+  the image ID, then a host-network rebuild), prints the native `install.sh`
+  command, and starts with the health wait; backups are never deleted.
+  `install.sh` copies the three scripts to `/opt/hatarvedelem` (0755), and
+  `deploy/hv start`/`stop` call them. Over SSH every script warns that the
+  start flushes the SSH grant. New `tests/test_ops_scripts.py` and manifest
+  tests in `tests/test_update.py` (stub `docker`/`systemctl`/`id`, dry runs
+  in both styles, dirty-tree refusal, short-key preflight failure, manifest
+  contents, tag pruning, newest/selected backup, no nft flush in
+  `stop.sh`); the measured suite is **1339 tests OK**.
 - **Update script.** `update.sh` backs up the configuration (`.env` as
   `env`, `secrets/`, and the `dropjak.service.d` systemd drop-in) and the
   runtime state (the Docker `dropjak-state` volume and/or
