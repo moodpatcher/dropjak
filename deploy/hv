@@ -3,7 +3,7 @@
 set -euo pipefail
 
 APP=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-BACKUPS=${HV_BACKUPS:-/root/hatarvedelem-backups}
+BACKUPS=${HV_BACKUPS:-/root/dropjak-backups}
 STATE_VOLUME=/var/lib/docker/volumes/dropjak-state/_data
 
 cd "$APP"
@@ -22,7 +22,7 @@ Usage: hv <command>
   add <name> [--no-must-change]   new user (prompts for password interactively)
   passwd <name> [--no-must-change] change password (interactively)
   del <name>        delete user
-  backup            back up to /root/hatarvedelem-backups
+  backup            back up to /root/dropjak-backups
   test              local unit and HTTP tests
   e2e               full test from the hvclient namespace (about 2 minutes)
   where             list important files and locations

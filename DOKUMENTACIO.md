@@ -899,7 +899,7 @@ the script itself; a directory that does not contain a Dropjak marker file
 `--keep-data` preserves the `dropjak-state` Docker volume and
 `/var/lib/hatarvedelem` (and therefore the account that owns the state
 directory); everything else is still removed. Backups in
-`/root/hatarvedelem-backups` are always kept. Missing containers, units,
+`/root/dropjak-backups` are always kept. Missing containers, units,
 tables, files and accounts are skipped with a note, so a repeated run is safe.
 
 #### 10.8. Update
@@ -1380,7 +1380,7 @@ The files have 0600 permissions.
 ### Backup and restore
 
 ```bash
-hv backup          # project + full state to: /root/hatarvedelem-backups
+hv backup          # project + full state to: /root/dropjak-backups
 ```
 
 Two archives are created: the project (`dropjak-*.tar.gz`, together
@@ -1409,7 +1409,7 @@ temporarily creates a `claudetest` user, which it deletes at the end.
 | `/root/hatarvedelem/services.json` | service catalog used for port conversion of old rules (no initial rules: the scenarios list is empty) |
 | `/root/hatarvedelem/README.md` | detailed description, operations, troubleshooting |
 | `/root/hatarvedelem/deploy/dropjak.nft` | the nftables template |
-| `/root/hatarvedelem-backups/` | backups |
+| `/root/dropjak-backups/` | backups |
 | `/etc/systemd/system/dropjak-boot.service` | boot protection (fail-closed startup) |
 | `/var/lib/docker/volumes/dropjak-state/_data/` | users, rules, groups, audit log |
 
@@ -4517,7 +4517,7 @@ Dropjak received a built-in, Caddy-based reverse proxy. It forwards subdomains u
 - Live entries: `teszt1`, `teszt2` and `teszt3` under `<test-domain>`.
 - Domain rule: `teszt-access`, which is also a member of the `mpwerks` collection rule.
 
-#### Backups and restore (VM, `/root/hatarvedelem-backups/`)
+#### Backups and restore (VM, `/root/dropjak-backups/`)
 
 | Before version | Backup | Previous image tag |
 |---|---|---|
@@ -5271,12 +5271,15 @@ The running version is stored in [`VERSION`](VERSION).
   installed files, the `hatarvedelem` user/group and finally the installation
   directory and the script itself. `--dry-run`/`-n` previews without root,
   `--keep-data` preserves `dropjak-state` and `/var/lib/hatarvedelem`, and
-  `/root/hatarvedelem-backups` is always kept. The install directory is
+  `/root/dropjak-backups` is always kept. The install directory is
   refused unless it contains a Dropjak marker file. `install.sh` copies the
   script to `/opt/hatarvedelem/uninstall.sh` with mode 0755. New
   `tests/test_uninstall.py` (syntax, help, both marker layouts in dry-run,
   root requirement, dangerous-directory guard); the measured suite is
   **1145 tests OK**.
+- **One backup directory.** `hv backup`, `update.sh` and `uninstall.sh` all
+  use `/root/dropjak-backups` (`HV_BACKUPS` overrides it in each). Backups
+  already in `/root/hatarvedelem-backups` are not moved or deleted.
 - **No default rules on a fresh installation.** The shipped
   `services.json` has an empty `scenarios` list, so a new installation's
   rules file starts empty instead of being seeded with the four old

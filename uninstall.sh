@@ -20,7 +20,7 @@
 #                root (also: -n)
 #   -h, --help   show this help
 #
-# /root/hatarvedelem-backups is always kept.
+# /root/dropjak-backups is always kept.
 #
 set -euo pipefail
 
@@ -28,7 +28,7 @@ APP_DIR="/opt/hatarvedelem"
 STATE_DIR="/var/lib/hatarvedelem"
 RUNTIME_DIR="/run/dropjak"
 SERVICE_USER="hatarvedelem"
-BACKUP_DIR="/root/hatarvedelem-backups"
+BACKUP_DIR="${HV_BACKUPS:-/root/dropjak-backups}"
 NFT_TABLES=("hatarvedelem" "hatarvedelem_boot")
 SYSTEMD_DIR="/etc/systemd/system"
 SYSTEMD_UNITS=(
@@ -94,7 +94,7 @@ Usage: sudo ./uninstall.sh [--yes] [--keep-data] [--dry-run]
 The script removes the Docker Compose stack, the systemd units, the nftables
 tables, the WireGuard interface, the installed files, the system account and,
 last, the directory it runs from (including this script). Backups in
-/root/hatarvedelem-backups are always kept.
+/root/dropjak-backups are always kept.
 EOF
 }
 
