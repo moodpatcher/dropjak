@@ -81,6 +81,25 @@ DROP_LOG_SYNC_INTERVAL = 1.0
 # One read() scans at most this many lines across all files, newest first,
 # so an admin page refresh stays cheap even when the log is full.
 DROP_LOG_READ_MAX_LINES = 200_000
+# Broadcast noise from the WAN segment. On a flat L2 (the hosting provider's
+# /24) the DHCP DISCOVER/REQUEST of every neighbouring machine and the
+# neighbour-discovery broadcasts reach the interface. These packets have no
+# usable peer (source 0.0.0.0 or destination 255.255.255.255), so they cannot
+# be attributed to a client: the firewall still drops them, the portal just
+# does not record them, and they do not feed the fail2ban counters.
+DROP_LOG_IGNORE_BROADCAST = _env_bool("HV_DROP_LOG_IGNORE_BROADCAST", True)
+BROADCAST_SRC = "0.0.0.0"
+BROADCAST_DST = "255.255.255.255"
+
+
+def is_broadcast_noise(record: dict) -> bool:
+    """True for a drop record that carries no usable peer address."""
+    if not DROP_LOG_IGNORE_BROADCAST:
+        return False
+    return (
+        str(record.get("src") or "") == BROADCAST_SRC
+        or str(record.get("dst") or "") == BROADCAST_DST
+    )
 
 
 def _utc_iso(ts: float) -> str:
@@ -785,6 +804,8 @@ class DropLogListener:
         self._error = ""
         self._received = 0
         self._written = 0
+        # Broadcast packets received but deliberately not recorded.
+        self._broadcast = 0
         self._write_errors = 0
         # Receive-buffer overflows (ENOBUFS: the kernel dropped messages)
         # and automatic restarts after a socket error; shown in status().
@@ -798,6 +819,13 @@ class DropLogListener:
         self.on_drop = callback
 
     def _count_packet(self, record: dict) -> None:
+        if is_broadcast_noise(record):
+            # Counted, not written and not passed to fail2ban: a 0.0.0.0 or
+            # broadcast peer cannot be banned or acted on.
+            with self._lock:
+                self._received += 1
+                self._broadcast += 1
+            return
         with self._lock:
             self._received += 1
         try:
@@ -1070,6 +1098,7 @@ class DropLogListener:
                 "error": self._error,
                 "received": self._received,
                 "written": self._written,
+                "broadcast_ignored": self._broadcast,
                 "errors": self._write_errors,
                 "overruns": self._overruns,
                 "restarts": self._restarts,

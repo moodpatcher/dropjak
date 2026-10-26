@@ -5589,6 +5589,18 @@ The running version is stored in [`VERSION`](VERSION).
 
 #### Fixed
 
+- **DHCP and broadcast noise in the drop log.** On a flat L2 segment (a
+  hosting provider's /24) the DHCP DISCOVER/REQUEST of the neighbouring
+  machines and the neighbour-discovery broadcasts reach the WAN interface,
+  so the log filled up with rows whose source was `0.0.0.0` or whose
+  destination was `255.255.255.255` (36% of a 20,000-row sample on the new
+  test server). Such a packet has no usable peer, so the listener now
+  counts it (`broadcast_ignored` in the drop-log status), writes no row and
+  does not pass it to fail2ban. The firewall behaviour is unchanged — the
+  packets are still dropped, which keeps the host's own DHCP lease renewal
+  working. `HV_DROP_LOG_IGNORE_BROADCAST=0` restores the old logging. New
+  tests in `tests/test_droplog_resilience.py`; the suite is **1341 tests
+  OK**.
 - **Image build on a gateway host.** The fail-closed forward chain also
   drops the build container's traffic, so apt-get had no DNS
   (`Temporary failure resolving 'deb.debian.org'`). Compose cannot request

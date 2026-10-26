@@ -165,6 +165,51 @@ class ListenerTests(unittest.TestCase):
             self.assertEqual(fsync.call_count, 2)
         self.assertEqual(len(self.store.read(limit=100)), 51)
 
+    def test_broadcast_noise_is_counted_but_not_recorded(self) -> None:
+        listener = self.listener
+        drops = []
+        listener.set_on_drop(drops.append)
+        # A DHCP DISCOVER from a neighbouring machine on the provider's flat
+        # L2 and a neighbour-discovery broadcast from the gateway.
+        for record in (
+            {"src": "0.0.0.0", "dst": "255.255.255.255", "proto": "udp",
+             "sport": 68, "dport": 67, "reason": "input-wan"},
+            {"src": "217.144.53.206", "dst": "255.255.255.255",
+             "proto": "udp", "sport": 5678, "dport": 5678,
+             "reason": "input-wan"},
+        ):
+            listener._count_packet(record)
+        listener._count_packet(
+            {"src": "192.0.2.9", "dst": "198.51.100.1", "proto": "tcp",
+             "dport": 443, "reason": "input-wan"}
+        )
+        rows = self.store.read(limit=100)
+        self.assertEqual([row["src"] for row in rows], ["192.0.2.9"])
+        # fail2ban must not see a peer it cannot act on.
+        self.assertEqual([record["src"] for record in drops], ["192.0.2.9"])
+        status = listener.status()
+        self.assertEqual(status["received"], 3)
+        self.assertEqual(status["written"], 1)
+        self.assertEqual(status["broadcast_ignored"], 2)
+
+    def test_broadcast_filter_can_be_turned_off(self) -> None:
+        with mock.patch.object(droplog, "DROP_LOG_IGNORE_BROADCAST", False):
+            self.assertFalse(
+                droplog.is_broadcast_noise(
+                    {"src": "0.0.0.0", "dst": "255.255.255.255"}
+                )
+            )
+        self.assertTrue(
+            droplog.is_broadcast_noise(
+                {"src": "0.0.0.0", "dst": "255.255.255.255"}
+            )
+        )
+        self.assertFalse(
+            droplog.is_broadcast_noise(
+                {"src": "192.0.2.9", "dst": "198.51.100.1"}
+            )
+        )
+
     def test_mode_message_copies_headers_only(self) -> None:
         mode = droplog._mode_message(5, 1)
         copy_range = int.from_bytes(mode[24:28], "big")

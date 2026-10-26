@@ -147,6 +147,9 @@ services:
       HV_DROP_LOG_PATH: ${HV_DROP_LOG_PATH:-/var/lib/hatarvedelem/drops.jsonl}
       HV_DROP_LOG_MAX_BYTES: ${HV_DROP_LOG_MAX_BYTES:-10485760}
       HV_DROP_LOG_KEEP: ${HV_DROP_LOG_KEEP:-5}
+      # 0 keeps the DHCP / broadcast noise of the provider's flat L2 segment
+      # (source 0.0.0.0 or destination 255.255.255.255) in the log.
+      HV_DROP_LOG_IGNORE_BROADCAST: ${HV_DROP_LOG_IGNORE_BROADCAST:-1}
       # The pre-auth/block rules configured in the interface.
       HV_SETTINGS: ${HV_SETTINGS:-/var/lib/hatarvedelem/firewall-settings.json}
       # Fail2ban: counting failed logins and banning the source IP.
