@@ -60,9 +60,15 @@ COPY deploy/dropjak-boot.nft ./deploy/dropjak-boot.nft
 COPY deploy/tunnel-agent ./tunnel-agent
 COPY docker/entrypoint.sh /usr/local/bin/dropjak-entrypoint
 
+# COPY preserves the modes of the build context, so a checkout made with a
+# hardened umask (0600) would leave the application files unreadable for the
+# portal, which runs as UID 999: "python3: can't open file
+# '/opt/hatarvedelem/server.py': [Errno 13] Permission denied". The image
+# must not depend on the build host's umask.
 RUN chmod 0755 /usr/local/bin/dropjak-entrypoint \
-    && chmod 0755 /opt/hatarvedelem/deploy/dropjak.nft \
-    && chown -R root:root /opt/hatarvedelem
+    && chown -R root:root /opt/hatarvedelem \
+    && chmod -R a+rX /opt/hatarvedelem \
+    && chmod 0755 /opt/hatarvedelem/deploy/dropjak.nft
 
 # Port 80 traffic is directed here by the nft redirect; the portal itself does
 # not occupy port 80. PORT=80 works too: the entrypoint then keeps the

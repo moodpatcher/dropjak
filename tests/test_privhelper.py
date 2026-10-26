@@ -995,6 +995,12 @@ class PackagingTests(unittest.TestCase):
             gateway.PRIV_HELPER_DEFAULT_SOCKET, "/run/dropjak/helper.sock"
         )
 
+    def test_image_files_are_readable_for_the_portal_user(self) -> None:
+        # COPY keeps the build context's modes; a checkout made with a
+        # hardened umask (0600) left the portal (UID 999) unable to read
+        # /opt/hatarvedelem/server.py after a rebuild on the host.
+        self.assertIn("chmod -R a+rX /opt/hatarvedelem", DOCKERFILE)
+
     def test_compose_keeps_net_admin_for_the_helper(self) -> None:
         cap_add = re.search(r"cap_add:\n((?:\s+- \w+\n)+)", COMPOSE).group(1)
         for cap in ("NET_ADMIN", "SETPCAP", "SETUID", "SETGID"):

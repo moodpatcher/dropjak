@@ -5589,6 +5589,14 @@ The running version is stored in [`VERSION`](VERSION).
 
 #### Fixed
 
+- **Unreadable application files in a rebuilt image.** `COPY` preserves the
+  modes of the build context, so a checkout made with a hardened umask
+  (0600) produced an image in which the portal, running as UID 999, could
+  not read `/opt/hatarvedelem/server.py` (`[Errno 13] Permission denied`).
+  The container then crash-looped while the entrypoint re-applied the
+  fail-closed firewall on every attempt, so both the portal and host SSH
+  stayed down. The image build now runs `chmod -R a+rX /opt/hatarvedelem`
+  after the `COPY`, and `tests/test_privhelper.py` asserts the line.
 - **DHCP and broadcast noise in the drop log.** On a flat L2 segment (a
   hosting provider's /24) the DHCP DISCOVER/REQUEST of the neighbouring
   machines and the neighbour-discovery broadcasts reach the WAN interface,
