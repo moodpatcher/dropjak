@@ -1879,6 +1879,11 @@ def validate_state(data, warnings: list[str] | None = None) -> dict:
         raise SettingsError(
             "the registration_enabled field must be true/false"
         )
+    multi_session_same_ip = data.get("multi_session_same_ip", False)
+    if not isinstance(multi_session_same_ip, bool):
+        raise SettingsError(
+            "the multi_session_same_ip field must be true/false"
+        )
     # A file without the key (legacy) gets the previous behaviour: ACME on.
     proxy_acme = data.get("proxy_acme", True)
     if not isinstance(proxy_acme, bool):
@@ -1918,6 +1923,7 @@ def validate_state(data, warnings: list[str] | None = None) -> dict:
         "motd_text": _motd_text(data.get("motd_text", "")),
         "motd_expires_at": _motd_expires(data.get("motd_expires_at", "")),
         "registration_enabled": registration_enabled,
+        "multi_session_same_ip": multi_session_same_ip,
         "proxy_domains": domains,
         "proxy_routes": routes,
         "proxy_acme": proxy_acme,
@@ -1984,6 +1990,7 @@ class SettingsStore:
             "motd_text": "",
             "motd_expires_at": "",
             "registration_enabled": False,
+            "multi_session_same_ip": False,
             "proxy_domains": [],
             "proxy_routes": [],
             "proxy_acme": True,
@@ -2199,6 +2206,23 @@ class SettingsStore:
         with self._lock:
             data = self._copy_locked()
         data["registration_enabled"] = enabled
+        return self.commit(data)
+
+    def set_multi_session_same_ip(self, enabled: bool) -> dict:
+        """Allow several simultaneous portal sessions from the same IP.
+
+        With the setting off (the default) a new sign-in replaces every
+        earlier session of the source IP. With it on, the sessions coexist,
+        each with its own expiry and rule selection. Only writes the
+        settings file atomically; does not touch nftables.
+        """
+        if not isinstance(enabled, bool):
+            raise SettingsError(
+                "the multi_session_same_ip field must be true/false"
+            )
+        with self._lock:
+            data = self._copy_locked()
+        data["multi_session_same_ip"] = enabled
         return self.commit(data)
 
     def set_site_name(self, name: str) -> dict:

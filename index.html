@@ -2455,6 +2455,8 @@ const I18N = {
     'Elutasítás': 'Reject',
     'Fiókkérelmek': 'Account requests',
     'Fiókkérelmek engedélyezése': 'Allow account requests',
+    'Több munkamenet engedélyezése ugyanarról az IP-címről': 'Allow multiple sessions from the same IP address',
+    'Ha be van kapcsolva, ugyanarról a nyilvános IP-címről egyszerre több böngésző vagy eszköz is bejelentkezve maradhat, mindegyik a saját lejáratával. Kikapcsolva egy IP-címen egyszerre csak egy munkamenet lehet aktív: az új belépés lezárja a korábbit.': 'When enabled, several browsers or devices behind the same public IP address can stay signed in at the same time, each with its own expiry. When disabled, only one session can be active per IP address: a new sign-in ends the previous one.',
     'Domain beállítások': 'Domain settings',
     'A gyökérdomainek és bejegyzéseik HTTPS-tanúsítványa. A feltöltött tanúsítvány elsőbbséget élvez; ahol nincs, ott a Caddy automatikusan kér egyet, ha engedélyezett. A gyökérdomain HTTPS-portálja ugyanezt a tanúsítványt használja.': 'HTTPS certificates for the root domains and their entries. An uploaded certificate takes precedence; where there is none, Caddy requests one automatically if enabled. The root domain\'s HTTPS portal uses the same certificate.',
     "Automatikus tanúsítvány (Let's Encrypt)": "Automatic certificate (Let's Encrypt)",
@@ -3507,6 +3509,8 @@ const I18N = {
     'Elutasítás': 'Ablehnen',
     'Fiókkérelmek': 'Kontoanfragen',
     'Fiókkérelmek engedélyezése': 'Kontoanfragen erlauben',
+    'Több munkamenet engedélyezése ugyanarról az IP-címről': 'Mehrere Sitzungen von derselben IP-Adresse erlauben',
+    'Ha be van kapcsolva, ugyanarról a nyilvános IP-címről egyszerre több böngésző vagy eszköz is bejelentkezve maradhat, mindegyik a saját lejáratával. Kikapcsolva egy IP-címen egyszerre csak egy munkamenet lehet aktív: az új belépés lezárja a korábbit.': 'Wenn aktiviert, können mehrere Browser oder Geräte hinter derselben öffentlichen IP-Adresse gleichzeitig angemeldet bleiben, jedes mit seinem eigenen Ablauf. Wenn deaktiviert, kann pro IP-Adresse nur eine Sitzung aktiv sein: Eine neue Anmeldung beendet die vorherige.',
     'Domain beállítások': 'Domain-Einstellungen',
     'A gyökérdomainek és bejegyzéseik HTTPS-tanúsítványa. A feltöltött tanúsítvány elsőbbséget élvez; ahol nincs, ott a Caddy automatikusan kér egyet, ha engedélyezett. A gyökérdomain HTTPS-portálja ugyanezt a tanúsítványt használja.': 'HTTPS-Zertifikate der Stammdomains und ihrer Einträge. Ein hochgeladenes Zertifikat hat Vorrang; wo keines vorhanden ist, fordert Caddy automatisch eines an, falls aktiviert. Das HTTPS-Portal der Stammdomain verwendet dasselbe Zertifikat.',
     "Automatikus tanúsítvány (Let's Encrypt)": "Automatisches Zertifikat (Let's Encrypt)",
@@ -10099,6 +10103,35 @@ function renderSettings() {
     }, tr('Mentés'))
   ));
   adminPanel.append(registrationSection);
+
+  const multiSessionSection = el('div', { class: 'admin-form' });
+  multiSessionSection.append(el('h3', { text: tr('Munkamenetek') }));
+  multiSessionSection.append(el('p', {
+    class: 'port-hint',
+    text: tr('Ha be van kapcsolva, ugyanarról a nyilvános IP-címről egyszerre több böngésző vagy eszköz is bejelentkezve maradhat, mindegyik a saját lejáratával. Kikapcsolva egy IP-címen egyszerre csak egy munkamenet lehet aktív: az új belépés lezárja a korábbit.')
+  }));
+  /* Identifier of the settings checkbox: id="multi-session-same-ip" */
+  const multiSessionCheck = el('input', {
+    type: 'checkbox',
+    id: 'multi-session-same-ip',
+    name: 'multi_session_same_ip',
+    checked: !!settings.multi_session_same_ip
+  });
+  multiSessionSection.append(el('div', { class: 'field' },
+    el('label', { for: 'multi-session-same-ip', style: 'display:flex;gap:7px;align-items:center' },
+      multiSessionCheck,
+      tr('Több munkamenet engedélyezése ugyanarról az IP-címről')
+    )
+  ));
+  multiSessionSection.append(el('div', { class: 'form-actions' },
+    el('button', {
+      type: 'button', class: 'small',
+      onclick: () => adminSend('/api/admin/settings', {
+        action: 'multi_session_same_ip', enabled: multiSessionCheck.checked
+      })
+    }, tr('Mentés'))
+  ));
+  adminPanel.append(multiSessionSection);
 
   adminPanel.append(renderMotdSection(settings));
 

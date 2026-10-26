@@ -414,6 +414,7 @@ The validated fields of `firewall-settings.json`:
 | `motd_text` | string, max 2000 | empty = disabled | Post-login notice; only the authorized portal receives it, and only while it is valid. |
 | `motd_expires_at` | ISO-8601 UTC string | empty = permanent | End of the notice's validity; after the expiry time the server does not send it. |
 | `registration_enabled` | boolean | `false` | Public account request switch. |
+| `multi_session_same_ip` | boolean | `false` | Allow several simultaneous portal sessions from the same public IP address; each has its own expiry. Off keeps the one-session-per-IP replacement. |
 | `preauth` | list | empty | Pre-login destinations/ports; the entry's `direction` field is `forward` (default) or `input`. Missing field on load is `forward`; fail-closed fallback on error. An `input` entry has a `scope` field, `lan` (default; a stored entry without it loads as `lan`) or `any`; it is part of the export/import and is set with the **Scope** select of the pre-auth form. |
 | `block` | list | empty | Always-blocked destinations/ports; on error the last good state remains. |
 
@@ -5405,6 +5406,14 @@ The running version is stored in [`VERSION`](VERSION).
 
 #### Added
 
+- **Optional multiple portal sessions per source IP.** New admin setting
+  `multi_session_same_ip` (default `false`, so the one-session-per-IP
+  replacement remains the default). When enabled, several browsers or
+  devices behind the same public IP address keep separate portal sessions,
+  each with its own expiry; logging out one session no longer removes the
+  grants the others still need, and the surviving grants are clamped to the
+  shortest remaining session TTL. Private proxy entries select the session
+  by the browser's bind cookie instead of the first session of the IP.
 - **Start, stop and restore scripts; update manifest.** Three operator
   scripts next to `update.sh`, for both deployment styles (Compose: a
   checkout with `docker-compose.yml` and `.env`; native: an installed

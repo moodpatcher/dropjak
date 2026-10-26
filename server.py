@@ -1473,7 +1473,9 @@ def _config_state_nonempty(gw) -> bool:
     )):
         return True
     return bool(
-        snapshot.get("registration_enabled") or snapshot.get("proxy_acme") is False
+        snapshot.get("registration_enabled")
+        or snapshot.get("multi_session_same_ip")
+        or snapshot.get("proxy_acme") is False
     )
 
 
@@ -2749,20 +2751,33 @@ class Handler(BaseHTTPRequestHandler):
             if target["visibility"] == "public":
                 user = ""
             else:
-                # A private entry needs the IP's authorized session and this
-                # browser's bind cookie naming that same session (DJ-05).
-                sid = self.gw.sessions.domain_session(ip, host)
-                if sid is not None:
+                # A private entry needs one of the IP's authorized sessions,
+                # and this browser's bind cookie must name that session
+                # (DJ-05). With several sessions from the same IP the cookie
+                # selects the session; without one there is at most one.
+                sessions = self.gw.sessions.domain_sessions(ip, host)
+                if sessions:
                     raw_uri = self.headers.get("X-Forwarded-Uri") or "/"
                     if urllib.parse.urlsplit(raw_uri).path == PROXY_BIND_PATH:
                         return self._proxy_bind_finish(
-                            host, ip, sid, raw_uri, login
+                            host, ip, sessions, raw_uri, login
                         )
-                    if not _proxy_bind_valid(
-                        self._cookie(PROXY_BIND_COOKIE), sid, host, time.time()
-                    ):
-                        return self._proxy_bind_required(host, raw_uri, login)
-                    user = self.gw.sessions.domain_user(ip, host)
+                    cookie = self._cookie(PROXY_BIND_COOKIE)
+                    now = time.time()
+                    bound = next(
+                        (
+                            session for session in sessions
+                            if _proxy_bind_valid(
+                                cookie, session.sid, host, now
+                            )
+                        ),
+                        None,
+                    )
+                    if bound is None:
+                        return self._proxy_bind_required(
+                            host, raw_uri, login
+                        )
+                    user = bound.user
         if user is not None:
             # forward_auth allows through only on 2xx, and then we always
             # provide the target: a client-sent header cannot direct it.
@@ -2848,7 +2863,7 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def _proxy_bind_finish(
-        self, host: str, ip: str, sid: str, raw_uri: str, login: str
+        self, host: str, ip: str, sessions, raw_uri: str, login: str
     ) -> None:
         """The entry host's bind hop: trade the ticket for the bind cookie.
 
@@ -2859,14 +2874,20 @@ class Handler(BaseHTTPRequestHandler):
         query = urllib.parse.parse_qs(urllib.parse.urlsplit(raw_uri).query)
         ticket = PROXY_BIND_TICKETS.consume((query.get("t") or [""])[0])
         uri = _proxy_bind_uri((query.get("r") or ["/"])[0])
-        user = self.gw.sessions.domain_user(ip, host) or ""
+        bound = (
+            self.gw.sessions.domain_bind(ip, host, ticket.sid)
+            if ticket is not None else None
+        )
+        user = bound.user if bound is not None else (
+            sessions[0].user if sessions else ""
+        )
         if ticket is None:
             reason = "unknown_ticket"
         elif ticket.host != host:
             reason = "host_mismatch"
         elif ticket.ip != ip:
             reason = "ip_mismatch"
-        elif not hmac.compare_digest(ticket.sid.encode(), sid.encode()):
+        elif bound is None:
             reason = "session_mismatch"
         else:
             reason = ""
@@ -2877,6 +2898,7 @@ class Handler(BaseHTTPRequestHandler):
             )
             return self._proxy_login_page(login)
         lifetime = gateway.MAX_TTL
+        sid = bound.sid
         value = _proxy_bind_value(sid, host, int(time.time()) + lifetime)
         self._audit(
             "proxy_bind_completed", ip=ip, user=user, host=host, sid=sid
@@ -2917,9 +2939,9 @@ class Handler(BaseHTTPRequestHandler):
             reason = "banned"
         elif session is None:
             reason = "no_session"
-        elif not session.sid or self.gw.sessions.domain_session(
-            ip, host
-        ) != session.sid:
+        elif not session.sid or self.gw.sessions.domain_bind(
+            ip, host, session.sid
+        ) is None:
             reason = "not_authorized"
         else:
             reason = ""
@@ -4642,6 +4664,36 @@ class Handler(BaseHTTPRequestHandler):
                 )
             payload = self._admin_state()
             payload["message"] = "The account request setting was saved."
+            self._json(200, payload)
+            return
+        if action == "multi_session_same_ip":
+            # Portal setting like registration_enabled: no nftables
+            # preparation, only the validated settings file changes.
+            value = data.get("enabled", data.get("multi_session_same_ip"))
+            if not isinstance(value, bool):
+                self._admin_request_rejected(
+                    "invalid_multi_session_flag", user=session.user
+                )
+                self._json(
+                    400,
+                    {
+                        "ok": False,
+                        "error": "the multi_session_same_ip field must be "
+                                 "a true/false value",
+                    },
+                )
+                return
+            with self.gw.admin_lock:
+                self.gw.settings.set_multi_session_same_ip(value)
+                self._audit(
+                    "admin_settings_changed",
+                    user=session.user,
+                    action="multi_session_same_ip",
+                    target="multi_session_same_ip",
+                    multi_session_same_ip=value,
+                )
+            payload = self._admin_state()
+            payload["message"] = "The session setting was saved."
             self._json(200, payload)
             return
         if action == "site_name":

@@ -8888,6 +8888,7 @@ class SessionManager:
         rule_check=None,
         guard_check=None,
         state_check=None,
+        multi_session_check=None,
     ) -> None:
         self.firewall = firewall
         self.ttl = max(MIN_TTL, min(int(ttl), MAX_TTL))
@@ -8907,6 +8908,12 @@ class SessionManager:
         # false, no grant is issued: a reloaded bare table would let a new
         # grant bypass the admin's block entries.
         self.state_check = state_check
+        # Callback: whether several portal sessions may live simultaneously
+        # from the same source IP. With None (or a false return) login()
+        # keeps the original one-session-per-IP behaviour and replaces the
+        # earlier sessions. Evaluated once per sign-in, before taking the
+        # session lock, so the settings lock is never held under it.
+        self.multi_session_check = multi_session_check
         self._lock = threading.Lock()
         self._sessions: dict[str, Session] = {}
         # IP -> (timestamp, reason): the explanation of the most recently
@@ -9004,19 +9011,47 @@ class SessionManager:
             session = self._domain_session_locked(ip, name)
             return session.sid if session is not None else None
 
+    def domain_sessions(self, ip: str, name: str) -> list[Session]:
+        """Every session of the IP that may open the proxy entry.
+
+        Several sessions may belong to the same source IP when the
+        ``multi_session_same_ip`` setting is on. The private proxy entry
+        selects between them with the browser's bind cookie, not by the
+        source IP alone.
+        """
+        with self._lock:
+            return self._domain_sessions_locked(ip, name)
+
+    def domain_bind(
+        self, ip: str, name: str, sid: str
+    ) -> Session | None:
+        """The session whose sid matches the bind cookie (or None).
+
+        Only a session that is still live and may open the entry qualifies;
+        a stale cookie of an ended session therefore grants nothing.
+        """
+        if not sid:
+            return None
+        with self._lock:
+            for session in self._domain_sessions_locked(ip, name):
+                if session.sid and hmac.compare_digest(session.sid, sid):
+                    return session
+        return None
+
     def _domain_session_locked(self, ip: str, name: str) -> Session | None:
+        sessions = self._domain_sessions_locked(ip, name)
+        return sessions[0] if sessions else None
+
+    def _domain_sessions_locked(self, ip: str, name: str) -> list[Session]:
         now = time.time()
-        return next(
-            (
-                session for session in self._sessions.values()
-                if session.ip == ip and session.authorized
-                and session.expires > now
-                and any(
-                    name in part.domains for part in session.selections()
-                )
-            ),
-            None,
-        )
+        return [
+            session for session in self._sessions.values()
+            if session.ip == ip and session.authorized
+            and session.expires > now
+            and any(
+                name in part.domains for part in session.selections()
+            )
+        ]
 
     def _active_authorized_ips_locked(self) -> set[str]:
         return {
@@ -9302,8 +9337,14 @@ class SessionManager:
         revocation, we delete only those parts of the old grants that the
         active session does not need (``_subtract_grants``). With such a
         partial deletion we do not flush conntrack, because that would also
-        break the active session's live connections. If the remaining
-        session covers every element, no firewall call is made at all.
+        break the active session's live connections.
+
+        After the deletion (or when the remaining session covers every
+        element) we re-issue the remaining grants with the shortest
+        remaining session TTL. With several sessions from the same IP an
+        element may still carry the departing, longer session's timeout; it
+        must not outlive the session that still needs it. When no session
+        remains, the original full-revocation path is unchanged.
 
         Locking invariant: ``self._lock`` -> firewall -> ``_pending_lock``
         (leaf lock); the reverse order is forbidden.
@@ -9311,25 +9352,57 @@ class SessionManager:
         if now is None:
             now = time.time()
         grants = self._grant_tuple(grants)
-        active_grants = tuple(
-            part
+        remaining_sessions = [
+            session
             for session in self._sessions.values()
             if session.ip == ip
             and session.authorized
             and session.expires > now
-            for part in session.grants
+            and session.grants
+        ]
+        active_grants = tuple(
+            part for session in remaining_sessions for part in session.grants
         )
         if active_grants:
             remainder = self._subtract_grants(grants, active_grants)
-            if not remainder:
-                # The remaining session needs every affected element; there
-                # is nothing to delete, and conntrack must not be touched
-                # either.
-                return True
-            # Exact element-level deletion: the full (allowed_v4) and ICMP
-            # elements also disappear if the departing grant contained them,
-            # while the remaining port grants stay untouched.
-            return self._revoke_access(ip, remainder, exact=True)
+            if remainder:
+                # Exact element-level deletion: the full (allowed_v4) and
+                # ICMP elements also disappear if the departing grant
+                # contained them, while the remaining port grants stay
+                # untouched.
+                if not self._revoke_access(ip, remainder, exact=True):
+                    return False
+            if grants:
+                # Clamp the surviving elements to the session that still
+                # needs them. A departing session with a longer TTL may
+                # otherwise leave access in the kernel past the remaining
+                # session's expiry.
+                remaining_ttl = max(
+                    1,
+                    int(
+                        min(
+                            session.expires
+                            for session in remaining_sessions
+                        ) - now
+                    ),
+                )
+                try:
+                    self.firewall.grant_all(
+                        ip, active_grants, remaining_ttl
+                    )
+                except FirewallError as exc:
+                    log(
+                        f"[firewall] refreshing the grants of {ip} after "
+                        f"a session end failed: {exc}"
+                    )
+                    self._write_audit(
+                        "firewall_error",
+                        ip=ip,
+                        operation="revoke_timeout_clamp",
+                        reason=str(exc),
+                    )
+                    return False
+            return True
         return self._revoke_access(ip, grants)
 
     def _remove_selections_locked(
@@ -9622,33 +9695,42 @@ class SessionManager:
             role = ROLE_USER
         now = time.time()
         revoked_access = False
+        multi_session = (
+            self.multi_session_check is not None
+            and bool(self.multi_session_check())
+        )
         with self._lock:
-            previous = [
-                session
-                for session in self._sessions.values()
-                if session.ip == ip
-            ]
-            previous_grants = [
-                part
-                for session in previous
-                if session.authorized
-                for part in session.grants
-            ]
-            if previous_grants:
-                # We revoke the old access first. If this fails, the
-                # revocation may run later from the queue, therefore the old
-                # session must not remain referring to a grant: we drop it,
-                # and the new sign-in is not created either (fail-closed).
-                if not self._revoke_access(ip, previous_grants):
-                    self._drop_ip_locked(ip, "revoke_failed")
-                    raise FirewallError(
-                        "revoking the previous access failed; "
-                        "sign in again"
-                    )
-                revoked_access = True
-            # There should be one session per IP. We remember the previous
-            # session's termination reason for the UI.
-            dropped = self._drop_ip_locked(ip, "replaced")
+            previous: list[Session] = []
+            previous_grants = []
+            dropped: list[Session] = []
+            if not multi_session:
+                previous = [
+                    session
+                    for session in self._sessions.values()
+                    if session.ip == ip
+                ]
+                previous_grants = [
+                    part
+                    for session in previous
+                    if session.authorized
+                    for part in session.grants
+                ]
+                if previous_grants:
+                    # We revoke the old access first. If this fails, the
+                    # revocation may run later from the queue, therefore the
+                    # old session must not remain referring to a grant: we
+                    # drop it, and the new sign-in is not created either
+                    # (fail-closed).
+                    if not self._revoke_access(ip, previous_grants):
+                        self._drop_ip_locked(ip, "revoke_failed")
+                        raise FirewallError(
+                            "revoking the previous access failed; "
+                            "sign in again"
+                        )
+                    revoked_access = True
+                # There should be one session per IP. We remember the
+                # previous session's termination reason for the UI.
+                dropped = self._drop_ip_locked(ip, "replaced")
             session = Session(
                 token=secrets.token_urlsafe(32),
                 user=user,
@@ -10633,6 +10715,7 @@ class Gateway:
                 rule_check=self._rule_available,
                 guard_check=self._host_ports_healthy,
                 state_check=self._firewall_in_sync,
+                multi_session_check=self._multi_session_enabled,
             )
         )
         if self.sessions.audit is None:
@@ -10784,6 +10867,12 @@ class Gateway:
             current.grants == rule.grants
             and current.session_domains == rule.session_domains
         )
+
+    def _multi_session_enabled(self) -> bool:
+        """The setting value, safe for test doubles without snapshot."""
+        snapshot = getattr(self.settings, "snapshot", None)
+        data = snapshot() if callable(snapshot) else {}
+        return bool(data.get("multi_session_same_ip", False))
 
     def _firewall_in_sync(self) -> bool:
         """Whether the live table is the one prepare()/the last resync filled.

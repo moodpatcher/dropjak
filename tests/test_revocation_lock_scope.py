@@ -78,6 +78,7 @@ class RecordingFirewall:
         self.manager: gateway.SessionManager | None = None
         self.expected_thread = threading.get_ident()
         self.calls: list[tuple[str, tuple[gateway.Ports, ...], bool, bool]] = []
+        self.grant_calls: list[tuple[str, tuple[gateway.Ports, ...], int]] = []
         self.lock_states: list[bool] = []
         self.thread_ids: list[int] = []
         self.fail_next = False
@@ -108,7 +109,11 @@ class RecordingFirewall:
             raise gateway.FirewallError("simulated nft error")
 
     def grant_all(self, ip: str, grants, ttl: int) -> None:
-        raise AssertionError("the test does not expect a grant_all call")
+        if self.manager is not None and not self.manager._lock.locked():
+            raise AssertionError(
+                "firewall.grant_all did not run under SessionManager._lock"
+            )
+        self.grant_calls.append((ip, tuple(grants), ttl))
 
 
 class LockScopeTestBase(unittest.TestCase):
@@ -218,10 +223,12 @@ class PartialGrantTests(LockScopeTestBase):
         self.assertIsNotNone(self.manager.validate(second.token, IP))
         self.assertIsNone(self.manager.validate(first.token, IP))
 
-    def test_logout_skips_firewall_when_remaining_session_covers_all(self) -> None:
+    def test_logout_clamps_remaining_grants_when_covers_all(self) -> None:
         # The first session got only 80, the second 80 and 443: the remaining
-        # session covers every element, so there is no firewall call and no
-        # conntrack flush either.
+        # session covers every element, so nothing is deleted and conntrack
+        # is not flushed. The surviving elements are re-issued with the
+        # remaining session's TTL, because the departing session may have
+        # granted a longer timeout.
         first = make_session("token-covered-first", tcp=(80,))
         second = make_session("token-covered-second", tcp=(80, 443))
         self.insert_session(first)
@@ -230,6 +237,14 @@ class PartialGrantTests(LockScopeTestBase):
         self.assertIs(self.manager.logout(first.token, IP), first)
 
         self.assertEqual(self.firewall.calls, [])
+        self.assertEqual(len(self.firewall.grant_calls), 1)
+        ip, grants, ttl = self.firewall.grant_calls[0]
+        self.assertEqual(ip, IP)
+        self.assertEqual(
+            grants, (forward_ports(80, 443),)
+        )
+        self.assertGreaterEqual(ttl, 1)
+        self.assertLessEqual(ttl, 600)
         self.assertEqual(self.flush_calls, [])
         self.assertIsNotNone(self.manager.validate(second.token, IP))
 
@@ -251,6 +266,7 @@ class PartialGrantTests(LockScopeTestBase):
         self.assertEqual(entry.grants, (forward_ports(8080),))
         self.assertFalse(entry.discover)
         self.assertEqual(self.manager.pending_count(), 1)
+        self.assertEqual(self.firewall.grant_calls, [])
         self.assertIsNotNone(self.manager.validate(second.token, IP))
 
 
