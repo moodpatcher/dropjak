@@ -767,7 +767,13 @@ docker buildx build --allow=network.host --network=host -t dropjak:2 --load .
 docker compose up -d
 ```
 
-`--build` should intentionally be omitted if the image is already built. It is worth running the command from a detached script, because the recreate can interrupt SSH. The backups used for the 3.3.0 installation are listed in point 2.2.
+`--build` should intentionally be omitted if the image is already built. The
+recreate flushes the dynamic nftables sets (`allowed_input_tcp` included), so
+it closes host SSH in the middle of the command: start it from the provider
+console, not from an SSH session that dies with the connection and can leave
+the stack half-recreated while the fail-closed table is loaded. Afterwards
+sign in on the portal and re-authorize SSH. The backups used for the 3.3.0
+installation are listed in point 2.2.
 
 #### 10.3. Native installation
 ```bash
@@ -810,13 +816,17 @@ The `dropjak-firewall.service` has `DefaultDependencies=no`, `Before=network-pre
 The `deploy/hv` helper is **not** installed by `install.sh`; it is made for Docker Compose and operates on the checkout it lives in (it changes into its parent directory). Run it as `./deploy/hv <command>` from the checkout.
 
 #### 10.4. Upgrade
-For Docker:
+For Docker, from the checkout (equivalent to `sudo ./deploy/hv rebuild`):
 
 ```bash
 git pull
 DOCKER_BUILDKIT=0 docker build --network host -t dropjak:2 .
 docker compose up -d --force-recreate
 ```
+
+From a released version the whole step is `sudo ./update.sh --yes` (backup and
+pull, no deployment), then `sudo ./deploy/hv rebuild` from the provider
+console: the recreate closes host SSH, see section 10.2.
 
 Migrating from the old resource names: the image was `hatarvedelem:2`, the
 volume `hatarvedelem-state`, and the container, unit and file names started
@@ -5941,6 +5951,16 @@ still holds the old operational details.
   log listening through the passed socket, a CLI ban through the helper,
   and a killed helper restarted within a second while the portal refused
   grants and then resumed. Still to check under real Docker on the host.
+
+#### Documentation
+
+- **Upgrade steps and the recreate lockout in `README.md`.** The README now
+  has an *Updating* section: `sudo ./update.sh --yes` (backup and pull only)
+  followed by `sudo ./deploy/hv rebuild`, with the warning that the recreate
+  flushes `allowed_input_tcp` and therefore closes host SSH, so the rebuild
+  belongs on the provider console, not in an SSH session, and SSH must be
+  re-authorized on the portal afterwards. Section 10.2 no longer recommends
+  starting the build from a detached script for this reason.
 
 ### [3.24.0] - 2026-10-22
 

@@ -95,5 +95,30 @@ Compose v2, one LAN-facing and one WAN-facing interface, and
 Optional HTTPS proxy: set `HV_PROXY=1` and `COMPOSE_PROFILES=proxy`, then run
 `docker compose up -d` and add the domain under **Admin → Domains**.
 
+## Updating
+
+In the checkout, in two steps:
+
+```bash
+sudo ./update.sh --yes      # backup, then git pull --ff-only
+sudo ./deploy/hv rebuild    # rebuild the image and recreate the containers
+```
+
+`update.sh` deliberately does not deploy: it only makes a backup and pulls the
+code. `deploy/hv rebuild` is the step that applies it (it runs
+`DOCKER_BUILDKIT=0 docker build --network host -t dropjak:2 .` and
+`docker compose up -d --force-recreate`).
+
+> **Run the rebuild from the provider console, not over SSH.** The recreate
+> flushes the dynamic nftables sets, `allowed_input_tcp` included, so host SSH
+> closes in the middle of the command. A rebuild started from an SSH session
+> dies with the connection and can leave the stack half-recreated while the
+> fail-closed table is still loaded. After the rebuild, sign in on the portal
+> and re-authorize SSH (an explicit TCP 22 host rule is still required).
+
+To go back, `./restore.sh` lists the backups (`.manifest` files in
+`/root/dropjak-backups`) and returns the checkout, the state and the previous
+image to the chosen point.
+
 Configuration reference, operations, security notes and the changelog live in
 [DOKUMENTACIO.md](DOKUMENTACIO.md).
