@@ -5605,6 +5605,9 @@ The running version is stored in [`VERSION`](VERSION).
   management defaults (for example the fail2ban exemptions) and does not
   narrow the portal or allow SSH. Set `HV_PORTAL_NET` to a CIDR to keep the
   portal off the WAN.
+- **Access screen on phones.** The select-all control moved next to the Max
+  button in the duration row, and the signed-in selection screen stacks its
+  footer and tightens the rule cards on phones.
 
 #### Fixed
 

@@ -455,7 +455,7 @@
   .access-foot{flex:0 0 auto;display:flex;align-items:flex-end;gap:14px;padding-top:10px;border-top:1px solid var(--line)}
   .ttl-box{display:flex;flex-direction:column;gap:3px}
   .ttl-box label{margin:0;font-size:12px;font-weight:600;color:#666}
-  .ttl-row{display:flex;align-items:center;gap:7px}
+  .ttl-row{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
   .ttl-row input{width:100px;margin:0;padding:8px 9px;font-size:15px;font-variant-numeric:tabular-nums}
   .ttl-unit{font-size:12px;font-weight:600;color:#666;white-space:nowrap;user-select:none}
   .ttl-hint{font-size:12px;color:var(--muted)}
@@ -883,11 +883,21 @@
     .topbar > button.logout{margin-left:0;order:4}
     .main-tabs{margin-left:auto}
     .access-layout{padding:12px 12px 10px}
-    .access-head{flex-wrap:wrap}
-    .access-head .status-pill{margin-left:0}
+    .access-head{flex-wrap:wrap;align-items:center;row-gap:6px}
+    .access-head > div{flex:1 1 auto;min-width:0}
+    .access-head h2{overflow-wrap:anywhere}
+    .access-head .status-pill{margin-left:0;flex:0 0 auto;max-width:100%}
     .rules-grid{grid-template-columns:1fr}
+    .rules-scroll{-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
+    .rule-card{padding:10px 11px;min-height:78px}
     .access-foot{flex-wrap:wrap;align-items:stretch}
+    .ttl-box{width:100%}
+    .ttl-row{width:100%;flex-wrap:wrap;gap:8px}
+    .ttl-row #rules-select-all{flex:1 1 100%;min-height:40px}
     .foot-actions{margin-left:0;width:100%;justify-content:flex-end;flex-wrap:wrap}
+    .foot-actions #grant{flex:1 1 100%;min-height:44px}
+    .foot-actions #access-logout,
+    .foot-actions #access-back{flex:0 1 auto;min-width:96px;min-height:40px}
     .stat-row{flex-direction:column;width:100%;max-width:280px}
     .password-layout{padding:12px;align-items:flex-start}
     .password-card{padding:15px 14px}
@@ -929,6 +939,12 @@
     .msel-panel{width:100%}
   }
 
+  /* Narrow phones: keep the duration input, its unit and Max on one line. */
+  @media (max-width:400px){
+    .ttl-row{gap:6px}
+    .ttl-row input{width:84px}
+  }
+
   /* Landscape phone: vertical space is scarce, so the access selector
      and the active session scroll in the full view instead of being
      squeezed into a thin strip. */
@@ -941,7 +957,8 @@
     .access-layout{flex:0 0 auto;height:auto;min-height:0;padding:10px 12px;gap:8px}
     .access-head h2{font-size:16px}
     .rules-scroll{flex:0 0 auto;min-height:0;overflow:visible;padding:0;margin:0}
-    .access-foot{padding-top:8px;gap:8px}
+    .access-foot{flex-wrap:wrap;align-items:stretch;padding-top:8px;gap:8px}
+    .foot-actions{margin-left:0;width:100%;justify-content:flex-end;flex-wrap:wrap}
     .session-layout{justify-content:flex-start;overflow:auto;padding:12px}
   }
 
@@ -1327,7 +1344,6 @@
         <div>
           <h2 id="access-title" data-i18n="Válassz hozzáférési szabályt">Válassz hozzáférési szabályt</h2>
         </div>
-        <button id="rules-select-all" class="ghost small" type="button" data-i18n="Mind kijelölése">Mind kijelölése</button>
         <span class="status-pill pending" id="access-pill"><span class="dot"></span><span id="access-pill-text" data-i18n="Válassz hozzáférést">Válassz hozzáférést</span></span>
       </div>
 
@@ -1346,6 +1362,7 @@
             <input id="ttl" type="number" inputmode="numeric" min="1" max="720" step="1" value="1" required>
             <span class="ttl-unit" data-i18n="óra">óra</span>
             <button id="ttl-max" class="ghost small" type="button" data-i18n="Max" data-i18n-aria-label="Maximális időtartam beállítása">Max</button>
+            <button id="rules-select-all" class="ghost small" type="button" data-i18n="Mind kijelölése">Mind kijelölése</button>
           </div>
           <span class="ttl-hint" id="ttl-hint" data-i18n="Beállítható időtartam">Beállítható időtartam</span>
         </div>

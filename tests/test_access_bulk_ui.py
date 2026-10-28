@@ -46,17 +46,39 @@ class AccessBulkUiMarkupTests(unittest.TestCase):
             'data-i18n="Max" data-i18n-aria-label="Maximális időtartam beállítása">Max</button>',
             self.source,
         )
-        # The select-all button is in the rule list header, Max next to the TTL field.
+        # The select-all shortcut sits next to Max in the duration row of the
+        # footer; the rule list header holds only the title and the status.
         head = self.source.index('class="access-head"')
         rules = self.source.index('id="rules"', head)
-        self.assertLess(self.source.index('id="rules-select-all"'), rules)
+        self.assertLess(self.source.index('id="access-pill"'), rules)
+        self.assertGreater(
+            self.source.index('id="rules-select-all"'), rules
+        )
         ttl_row = self.source.index('class="ttl-row"')
         self.assertLess(ttl_row, self.source.index('id="ttl-max"'))
         self.assertLess(
-            self.source.index('id="ttl-max"'), self.source.index("</div>", ttl_row)
+            self.source.index('id="ttl-max"'),
+            self.source.index('id="rules-select-all"'),
+        )
+        self.assertLess(
+            self.source.index('id="rules-select-all"'),
+            self.source.index("</div>", ttl_row),
         )
         # The field's own bounds are whole hours.
         self.assertIn('min="1" max="720" step="1"', self.source)
+
+    def test_phone_layout_stacks_the_access_footer(self) -> None:
+        # On phones the duration row wraps, the select-all control gets its
+        # own full-width line and the primary button spans the footer.
+        for needle in (
+            ".ttl-row{width:100%;flex-wrap:wrap;gap:8px}",
+            ".ttl-row #rules-select-all{flex:1 1 100%;min-height:40px}",
+            ".foot-actions #grant{flex:1 1 100%;min-height:44px}",
+            ".rules-scroll{-webkit-overflow-scrolling:touch;"
+            "overscroll-behavior:contain}",
+            "@media (max-width:400px){",
+        ):
+            self.assertIn(needle, self.source)
 
     def test_new_strings_are_translated(self) -> None:
         for needle in (
