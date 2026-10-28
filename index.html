@@ -892,12 +892,17 @@
     .rule-card{padding:10px 11px;min-height:78px}
     .access-foot{flex-wrap:wrap;align-items:stretch}
     .ttl-box{width:100%}
+    /* The duration row keeps input, unit, Max and select-all on one line; at
+       very narrow widths the select-all wraps to the right of the next line. */
     .ttl-row{width:100%;flex-wrap:wrap;gap:8px}
-    .ttl-row #rules-select-all{flex:1 1 100%;min-height:40px}
-    .foot-actions{margin-left:0;width:100%;justify-content:flex-end;flex-wrap:wrap}
-    .foot-actions #grant{flex:1 1 100%;min-height:44px}
+    .ttl-row input{flex:0 0 auto}
+    .ttl-row #rules-select-all{flex:0 1 auto;min-height:40px;margin-left:auto}
+    /* Kilépés and Engedélyezés share one row: the secondary button keeps its
+       width and the primary action fills the rest. */
+    .foot-actions{margin-left:0;width:100%;justify-content:flex-end;flex-wrap:nowrap;gap:8px}
     .foot-actions #access-logout,
-    .foot-actions #access-back{flex:0 1 auto;min-width:96px;min-height:40px}
+    .foot-actions #access-back{flex:0 0 auto;min-height:44px}
+    .foot-actions #grant{flex:1 1 auto;min-height:44px}
     .stat-row{flex-direction:column;width:100%;max-width:280px}
     .password-layout{padding:12px;align-items:flex-start}
     .password-card{padding:15px 14px}

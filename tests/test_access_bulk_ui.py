@@ -67,13 +67,17 @@ class AccessBulkUiMarkupTests(unittest.TestCase):
         # The field's own bounds are whole hours.
         self.assertIn('min="1" max="720" step="1"', self.source)
 
-    def test_phone_layout_stacks_the_access_footer(self) -> None:
-        # On phones the duration row wraps, the select-all control gets its
-        # own full-width line and the primary button spans the footer.
+    def test_phone_layout_keeps_the_footer_in_two_rows(self) -> None:
+        # On phones the duration row keeps input, unit, Max and the select-all
+        # control on one line (the select-all right-aligned), and the two
+        # footer actions share a second row instead of stacking as bars.
         for needle in (
             ".ttl-row{width:100%;flex-wrap:wrap;gap:8px}",
-            ".ttl-row #rules-select-all{flex:1 1 100%;min-height:40px}",
-            ".foot-actions #grant{flex:1 1 100%;min-height:44px}",
+            ".ttl-row #rules-select-all{flex:0 1 auto;min-height:40px;"
+            "margin-left:auto}",
+            ".foot-actions{margin-left:0;width:100%;"
+            "justify-content:flex-end;flex-wrap:nowrap;gap:8px}",
+            ".foot-actions #grant{flex:1 1 auto;min-height:44px}",
             ".rules-scroll{-webkit-overflow-scrolling:touch;"
             "overscroll-behavior:contain}",
             "@media (max-width:400px){",
